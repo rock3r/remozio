@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "experiment": "macos-xpc-identifiers",
-  "recordedAt": "2026-09-30T21:59:31.914989+00:00",
+  "recordedAt": "2026-09-30T22:05:20.410830+00:00",
   "status": "passed",
   "cases": [
     {
@@ -61,6 +61,7 @@
     "deploymentTarget": "arm64-apple-macosx26.0",
     "signing": "ad-hoc identifiers only; not Developer ID or Team ID validation"
   },
+  "temporaryService": "gui/501/dev.remozio.experiments.279417db98f241e8978f0c92dc87f26a",
   "cleanup": {
     "bootoutExitCode": 0,
     "serviceAbsent": true

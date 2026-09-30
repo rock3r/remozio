@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "local_gate": "./scripts/check.sh",
+  "required_checks": [
+    "Python checks",
+    "Mac build"
+  ],
+  "retry_eligible_workflow_keywords": [],
+  "codex": {
+    "enabled": true,
+    "required": true,
+    "idle_wait_minutes": 10
+  },
+  "sync": {
+    "keep": [
+      "LICENSE"
+    ]
+  }
+}

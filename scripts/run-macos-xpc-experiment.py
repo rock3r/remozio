@@ -14,6 +14,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "experiments" / "macos"
@@ -27,6 +28,36 @@ def command(args, *, timeout=120):
 
 def interrupted(signum, frame):
     raise KeyboardInterrupt
+
+
+@contextmanager
+def registered_service(domain, service, plist, report):
+    # Record the name before bootstrap: interruption can occur after registration.
+    report["temporaryService"] = f"{domain}/{service}"
+    try:
+        command(["/bin/launchctl", "bootstrap", domain, str(plist)])
+        yield
+    finally:
+        result = subprocess.run(["/bin/launchctl", "bootout", f"{domain}/{service}"],
+                                capture_output=True, text=True, timeout=15)
+        absent = False
+        for _ in range(50):
+            probe = subprocess.run(["/bin/launchctl", "print", f"{domain}/{service}"],
+                                   capture_output=True, text=True, timeout=15)
+            absent = probe.returncode == 113 and "Could not find service" in probe.stderr
+            if absent:
+                break
+            time.sleep(0.1)
+        report["cleanup"] = {"bootoutExitCode": result.returncode, "serviceAbsent": absent}
+        if not absent:
+            raise RuntimeError(f"Could not confirm removal of temporary service {service}")
+
+
+def case_matches(name, result, expected_code, reached):
+    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server")
+    return (result.returncode == expected_code
+            and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
+            and reached == expected_reached)
 
 
 def experiment(report):
@@ -69,10 +100,7 @@ def experiment(report):
             "StandardOutPath": str(log),
             "StandardErrorPath": str(directory / "server-error.log"),
         }))
-        bootstrapped = False
-        try:
-            command(["/bin/launchctl", "bootstrap", domain, str(plist)])
-            bootstrapped = True
+        with registered_service(domain, service, plist, report):
             cases = [
                 ("matching-peers", "ping", trusted, TRUSTED, 0),
                 ("wrong-client-identifier", "ping", other, TRUSTED, 3),
@@ -86,34 +114,12 @@ def experiment(report):
                 result = subprocess.run([str(binary), mode, service, expected_peer, nonce],
                                         capture_output=True, text=True, timeout=15)
                 reached = log.exists() and nonce in log.read_text()
-                matched = result.returncode == expected_code
-                if expected_code == 3:
-                    matched = matched and result.stdout.strip().startswith("rejected:")
-                # Rejecting an untrusted caller must prevent the exported method from running.
-                if name in ("wrong-client-identifier", "guarded-wrong-server"):
-                    matched = matched and not reached
-                if expected_code == 0:
-                    matched = matched and reached
+                matched = case_matches(name, result, expected_code, reached)
                 report["cases"].append({"name": name, "exitCode": result.returncode,
                     "result": result.stdout.strip(), "stderr": result.stderr.strip(), "requestReachedService": reached,
                     "passed": matched})
             if not all(case["passed"] for case in report["cases"]):
                 raise RuntimeError("One or more cases did not meet the expected result")
-        finally:
-            if bootstrapped:
-                result = subprocess.run(["/bin/launchctl", "bootout", f"{domain}/{service}"],
-                                        capture_output=True, text=True, timeout=15)
-                # Never erase evidence of a cleanup failure.
-                absent = False
-                for _ in range(50):
-                    absent = subprocess.run(["/bin/launchctl", "print", f"{domain}/{service}"],
-                                            capture_output=True, timeout=15).returncode != 0
-                    if absent:
-                        break
-                    time.sleep(0.1)
-                report["cleanup"] = {"bootoutExitCode": result.returncode, "serviceAbsent": absent}
-                if result.returncode != 0 or not absent:
-                    raise RuntimeError(f"Could not remove temporary service {service}")
 
 
 

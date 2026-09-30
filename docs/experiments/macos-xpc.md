@@ -24,6 +24,8 @@ The output must name a new file. The runner builds for macOS 26, copies and ad-h
 | Matching peers, with a handshake first | Accepted | Yes |
 | Matching peers after rejection cases | Accepted | Yes |
 
+The unguarded wrong-server case checks the recorded dispatch behavior explicitly. A platform that blocks it before dispatch changes this baseline and requires a new documented result. This does not imply weaker security on that platform.
+
 All six expected outcomes passed. The temporary service was removed.
 
 ## Implementation consequence

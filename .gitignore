@@ -16,3 +16,6 @@ experiment-results/
 /restructure-spec.py
 /reviews/
 /site/
+
+__pycache__/
+*.pyc
