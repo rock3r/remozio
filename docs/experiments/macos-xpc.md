@@ -1,0 +1,45 @@
+# Mac XPC boundary experiment
+
+The probe tests two processes with NSXPCConnection on an Apple Silicon Mac. It sends synthetic nonces, not commands or credentials.
+
+Run from the repository root in a logged-in GUI session:
+
+```sh
+mkdir -p experiment-results
+python3 scripts/run-macos-xpc-experiment.py --output experiment-results/xpc.json
+```
+
+The output must name a new file. The runner builds for macOS 26, copies and ad-hoc signs two executables, and registers a temporary per-user LaunchAgent. It checks removal before deleting the temporary files. It does not use sudo, install a login item, alter permissions, or access application dialogs. An interrupted run attempts the same cleanup. SIGKILL cannot run cleanup; any cleanup failure identifies the temporary service in the report. Remove that service with `launchctl bootout gui/$(id -u)/<reported-service>` before rerunning.
+
+## Measured result
+
+[Recorded evidence](evidence/2026-09-30-xpc.json): macOS 27.0, Xcode 27.0, Swift 6.4, arm64. The binary deployment target is macOS 26. This is not a runtime test on macOS 26.
+
+| Case | Observed result | Payload method ran |
+| --- | --- | --- |
+| Matching identifiers | Accepted | Yes |
+| Wrong client identifier | Rejected, error 4097 | No |
+| Client expects a different server identifier | Rejected, error 4102 | **Yes** |
+| Wrong server, with a handshake first | Rejected, error 4102 | No |
+| Matching peers, with a handshake first | Accepted | Yes |
+| Matching peers after rejection cases | Accepted | Yes |
+
+All six expected outcomes passed. The temporary service was removed.
+
+## Implementation consequence
+
+A client code requirement does not establish that the first outgoing method is safe to invoke. On this host, the method ran before the client rejected the reply. Use a harmless, payload-free handshake on the same connection before sending sensitive data or invoking a state-changing method. Repeat the handshake after every new connection. Never treat the connection constructor or activation as authentication success.
+
+The listener applies its client requirement before accepting messages. The client applies its server requirement before activation. This experiment only validates an identifier requirement. Anyone who can ad-hoc sign a binary can copy that identifier. Production requires the specified Apple trust chain, Team ID, component identifier, role, account, session, and build checks.
+
+The first harness run trapped in its error callback because Swift inferred main-actor isolation. Explicit Sendable callbacks fixed the harness. The runner also waits for launchd removal because bootout completion can precede disappearance from the service listing. Neither issue is counted as an OS security result.
+
+## Still unproven
+
+- Runtime behavior on macOS 26.
+- Developer ID, Team ID, hardened runtime, and release build-floor enforcement.
+- SMAppService installation and protected executable placement.
+- Root service behavior, lock/logout, reboot, FileVault boundaries, and service updates.
+- Credential custody, authority rollback protection, real approval actions, and Android interoperability.
+
+The probe is experiment code, not the production IPC layer. Its hello method has no side effects, and its only payload method echoes a synthetic nonce. Timeouts and crashes fail the experiment; they are not counted as expected rejections.
