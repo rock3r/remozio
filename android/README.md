@@ -26,7 +26,7 @@ References: [Android 17 setup](https://developer.android.com/about/versions/17/s
 
 ## Command inspection
 
-The debug build has a **Preview a sample command** entry. It opens an invented, read-only capture in a bottom sheet below 600 dp window width, or a bounded dialog on wider windows. The sample is labelled and has no approval controls. Its fixture and entry are absent from the release source set.
+The debug build has a **Preview a sample command** entry and five static status scenes. It opens an invented, read-only capture in a bottom sheet below 600 dp window width, or a bounded dialog on wider windows. The sample is labelled and has no approval controls. Its fixture and entry are absent from the release source set.
 
 The reusable inspection component renders the complete typed command capture. Invocation, target credentials, environment provenance, input, requester signing status, ancestry limits, and caller explanation have separate sections. Labels come from application resources. Request values cannot introduce UI labels or clickable links.
 
@@ -39,3 +39,17 @@ Five local JVM tests cover empty values, escaped syntax, controls, bidi, malform
 The layout uses native Material 3 components and their standard motion. There are no custom animations. Its breakpoint follows [window information](https://developer.android.com/reference/kotlin/androidx/compose/ui/platform/WindowInfo); the sheet uses [ModalBottomSheet](https://developer.android.com/develop/ui/compose/quick-guides/content/create-bottom-sheet).
 
 The [status tracker](status-tracking.md) verifies signed updates against retained request bindings and preserves revision, outcome, and timing continuity. It remains separate from live transport and decision controls.
+
+## Status presentation
+
+The inspector can show request age, authorization time remaining, an optional target lifetime estimate, clock uncertainty, and an accepted phone decision. Status labels distinguish actual target timeout, Remozio expiry, disappearance with an unknown reason, and uncertain execution outcomes. An elapsed estimate never selects a terminal headline.
+
+Only the outcome heading uses a polite accessibility live region. Timing text sits outside that node, so countdown updates do not request repeated announcements. Age rounds down and remaining time rounds up without unsigned overflow. The status uses native Material components and no custom animation.
+
+A terminal status hides the capture and its byte toggle. The caller still owns capture disposal; hiding a view is not secure erasure or a history implementation. Pending views without a capture show that details are unavailable. Request identity keeps the sheet state stable across status revisions.
+
+Six debug scenes cover a pending command, an elapsed target estimate, expired authorization, target disappearance, an unknown outcome, and clock uncertainty. They are explicitly labelled static previews. Generic status scenes do not load the command fixture. They do not enter a verifier or transport, grant authority, or infer a result from a timer. The release source set keeps its no-op development entry.
+
+Five presentation tests cover the important outcome distinctions and duration rounding. Real clock integration, live transport, notifications, capture disposal by the request owner, and interactive TalkBack/layout checks remain outstanding. No device was contacted by this change.
+
+The announcement boundary follows [Compose accessibility semantics](https://developer.android.com/develop/ui/compose/accessibility/semantics): live regions should not wrap frequent countdown updates.
