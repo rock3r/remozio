@@ -11,6 +11,8 @@ dependencies {
 tasks.test {
     useJUnit()
     val vectors = rootProject.layout.projectDirectory.file("protocol/vectors/cbor-subset-v1.json")
-    inputs.file(vectors)
+    val actionVectors = rootProject.layout.projectDirectory.file("protocol/vectors/action-policy-v1.json")
+    inputs.files(vectors, actionVectors)
+    systemProperty("remozio.actionVectors", actionVectors.asFile.absolutePath)
     systemProperty("remozio.vectors", vectors.asFile.absolutePath)
 }
