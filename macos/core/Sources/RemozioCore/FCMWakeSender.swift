@@ -1,6 +1,10 @@
 import Foundation
 
-public enum FCMError: Error, Equatable { case invalidConfiguration, invalidToken, invalidWake, responseTooLarge, invalidResponse, network }
+public enum FCMError: Error, Equatable {
+    case invalidConfiguration, invalidToken, invalidWake, responseTooLarge, invalidResponse, network
+    case invalidCredentials, invalidTime, signingFailed, tokenExpired
+    case oauthRejected(httpStatus: Int)
+}
 
 /// Delivery credentials only. This token confers no Remozio approval authority.
 public struct FCMAccessToken: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
