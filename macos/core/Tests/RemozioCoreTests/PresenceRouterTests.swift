@@ -89,6 +89,16 @@ final class PresenceRouterTests: XCTestCase {
         XCTAssertEqual(router.evaluate(mode: .automatic, snapshot: .init(), now: moment(11_000)).destination, .localMac)
     }
 
+    func testDelayedEvaluationCannotRenewExpiredObservationGrace() throws {
+        var router = try router()
+        _ = router.evaluate(mode: .automatic, snapshot: snapshot(0), now: moment(9_999))
+        XCTAssertEqual(router.evaluate(mode: .automatic, snapshot: .init(), now: moment(14_999)).destination, .localMac)
+        XCTAssertEqual(router.evaluate(mode: .automatic, snapshot: .init(), now: moment(15_000)).destination, .phones)
+        var delayed = try self.router()
+        _ = delayed.evaluate(mode: .automatic, snapshot: snapshot(0), now: moment(0))
+        XCTAssertEqual(delayed.evaluate(mode: .automatic, snapshot: .init(), now: moment(60_000)).destination, .phones)
+    }
+
     func testUnknownAtStartupAndZeroGraceUsePhones() throws {
         var startup = try router()
         XCTAssertEqual(startup.evaluate(mode: .automatic, snapshot: .init(), now: moment(0)).destination, .phones)

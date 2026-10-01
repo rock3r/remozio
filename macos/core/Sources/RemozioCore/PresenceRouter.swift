@@ -81,6 +81,7 @@ public struct PresenceRouter: Sendable {
     private var lastMoment: PresenceMoment?
     private var lastDestination: RequestDestination?
     private var unavailableSince: UInt64?
+    private var lastEvidenceExpiry: UInt64?
 
     public init(configuration: PresenceConfiguration) { self.configuration = configuration }
 
@@ -89,6 +90,7 @@ public struct PresenceRouter: Sendable {
         if lastMoment?.epoch != now.epoch || regressed {
             lastDestination = nil
             unavailableSince = nil
+            lastEvidenceExpiry = nil
         }
         lastMoment = now
         switch mode {
@@ -99,13 +101,13 @@ public struct PresenceRouter: Sendable {
         guard !regressed else { return unavailable(now: now) }
         let remote = fresh(snapshot.remoteWorkspace, now: now)
         let limited = remote == nil || remote == .unsupported
-        if remote == .usable { return known(.localMac, .remoteDesktop, limited: false) }
+        if remote == .usable { return known(.localMac, .remoteDesktop, limited: false, evidenceAt: snapshot.remoteWorkspace?.observedAt.milliseconds) }
         let locked = fresh(snapshot.locked, now: now)
-        if locked == true { return known(.phones, .locked, limited: limited) }
+        if locked == true { return known(.phones, .locked, limited: limited, evidenceAt: snapshot.locked?.observedAt.milliseconds) }
         let workspace = displayState(fresh(snapshot.displays, now: now))
         switch workspace {
-        case .off: return known(.phones, .displaysOff, limited: limited)
-        case .dark: return known(.phones, .displaysDark, limited: limited)
+        case .off: return known(.phones, .displaysOff, limited: limited, evidenceAt: snapshot.displays?.observedAt.milliseconds)
+        case .dark: return known(.phones, .displaysDark, limited: limited, evidenceAt: snapshot.displays?.observedAt.milliseconds)
         case .usable, .unknown: break
         }
         guard locked == false, workspace == .usable,
@@ -113,10 +115,12 @@ public struct PresenceRouter: Sendable {
               let lastInput = fresh(input, now: now), lastInput <= input.observedAt.milliseconds else {
             return unavailable(now: now)
         }
+        let oldestEvidence = [snapshot.locked?.observedAt.milliseconds, snapshot.displays?.observedAt.milliseconds,
+                              input.observedAt.milliseconds].compactMap { $0 }.min()
         if now.milliseconds - lastInput >= configuration.idleMilliseconds {
-            return known(.phones, .idle, limited: limited)
+            return known(.phones, .idle, limited: limited, evidenceAt: oldestEvidence)
         }
-        return known(.localMac, .active, limited: limited)
+        return known(.localMac, .active, limited: limited, evidenceAt: oldestEvidence)
     }
 
     private func fresh<T: Sendable>(_ observation: PresenceObservation<T>?, now: PresenceMoment) -> T? {
@@ -144,15 +148,20 @@ public struct PresenceRouter: Sendable {
         return hasDark ? .dark : .off
     }
 
-    private mutating func known(_ destination: RequestDestination, _ reason: PresenceReason, limited: Bool) -> PresenceRouting {
+    private mutating func known(_ destination: RequestDestination, _ reason: PresenceReason, limited: Bool, evidenceAt: UInt64? = nil) -> PresenceRouting {
         unavailableSince = nil
         lastDestination = destination
+        lastEvidenceExpiry = evidenceAt.flatMap {
+            let expiry = $0.addingReportingOverflow(configuration.observationLifetimeMilliseconds)
+            return expiry.overflow ? nil : expiry.partialValue
+        }
         return PresenceRouting(destination: destination, reason: reason, detectionLimited: limited)
     }
 
     private mutating func unavailable(now: PresenceMoment) -> PresenceRouting {
-        if unavailableSince == nil { unavailableSince = now.milliseconds }
-        let inGrace = now.milliseconds - unavailableSince! < configuration.unavailableGraceMilliseconds
+        let since = unavailableSince ?? min(now.milliseconds, lastEvidenceExpiry ?? now.milliseconds)
+        unavailableSince = since
+        let inGrace = now.milliseconds - since < configuration.unavailableGraceMilliseconds
         let destination = inGrace ? (lastDestination ?? .phones) : .phones
         return PresenceRouting(destination: destination, reason: .detectorUnavailable, detectionLimited: true)
     }
