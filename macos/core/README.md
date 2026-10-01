@@ -44,3 +44,5 @@ The [audit storage tables](audit-storage.md) share the authority's SQLite transa
 The [protected journal lease](journal-lease.md) validates the existing root-owned storage path and holds its writer lock. Provisioning and authority recovery remain separate.
 
 The [owned journal connection](journal-database.md) combines that lease with a scoped SQLite connection and expiring transaction access. The [consumption journal](consumption-journal.md) records a verified winner and its audit event together. Its [durable outcomes](consumption-outcomes.md) retain later observations without changing the winner. Checkpoint and admission integration remain separate.
+
+The dedicated push service can use the [native OAuth client](fcm-oauth.md), [token owner](fcm-token-source.md), and [opaque wake sender](fcm-delivery.md). These provider clients do not establish recipient authority or install a service. Gateway control and app/service wiring remain pending.

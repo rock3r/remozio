@@ -41,7 +41,7 @@ A successful response must contain a bounded token, the `Bearer` type, and an in
 
 Eleven tests cover exact JWT claims, native signature verification and tamper rejection, concurrent signing, credential bounds, weak or wrong keys, token response validation, conservative expiry, redirects, response limits, cancellation, and redaction. The test harness generates disposable keys with the system OpenSSL binary. Production code does not invoke it. HTTP fixtures intercept every URL, including redirect targets. No live Google request, real credential, or keychain write is involved.
 
-Protected provisioning, token caching and renewal, retry scheduling, gateway recipient controls, and app/service wiring remain implementation work. Provider permission checks and real FCM delivery remain live-test gates. Neither this client nor provider acceptance proves phone delivery.
+The [token owner](fcm-token-source.md) adds bounded shared refresh, process-local caching, and credential-generation checks. Protected provisioning, retry scheduling, gateway recipient controls, and app/service wiring remain implementation work. Provider permission checks and real FCM delivery remain live-test gates. Neither this client nor provider acceptance proves phone delivery.
 
 ## References
 
