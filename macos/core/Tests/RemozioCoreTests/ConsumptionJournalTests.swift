@@ -67,6 +67,28 @@ final class ConsumptionJournalTests: XCTestCase {
             writer: writer, expectedHead: head, requestLimits: bounds, signingLimits: bounds)
     }
 
+    func testSignedPageContainsOnlyCommittedConsumptionAndOutcomeEvents() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        let receipt = try database.write { try consume($0, writer, request: request()) }
+        XCTAssertThrowsError(try database.write {
+            _ = try transition($0, writer)
+            throw Failure.injected
+        })
+        let outcome = try database.write { try transition($0, writer, event: .loseOutcome) }
+        let replies = try AuditReplyBuilder(macID: id(1), accountID: id(2), authorityPublicKey: key.publicKey.x963Representation,
+            limits: AuditReplyLimits(batch: bounds, record: bounds, history: bounds, descriptor: bounds,
+                signing: bounds, maximumRecords: 10)) { try self.key.signature(for: $0).rawRepresentation }
+        let query = try AuditPageRequest(nonce: id(9, count: 32), epoch: id(3), generation: 7, after: 0)
+        let reply = try replies.page(query, journal: database)
+        XCTAssertTrue(try AuditBatchSignature.verify(signature: reply.signature, publicKey: key.publicKey.x963Representation,
+            wireVersion: 1, canonicalPayload: reply.canonicalBody, payloadLimits: bounds, inputLimits: bounds))
+        let batch = try AuditBatch.decode(reply.canonicalBody, batchLimits: bounds, recordLimits: bounds, maximumRecords: 10)
+        XCTAssertEqual(batch.records, [receipt.event, outcome.event])
+        XCTAssertEqual(batch.records.map(\.kind), [.consumed, .unknownOutcome])
+        XCTAssertEqual(batch.head, 2)
+    }
+
     func testFirstVerifiedPhoneWinsAndReopenCannotChangeItsDecision() throws {
         for firstDeclines in [false, true] {
             let fixture = try Fixture(), database = try open(fixture, initialize: true), request = try request()

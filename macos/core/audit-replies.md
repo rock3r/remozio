@@ -5,15 +5,24 @@
 ```mermaid
 flowchart LR
     A[Authorize enrolled phone and account] --> R[Read bounded journal data in one transaction]
-    R --> V[Validate scope, continuity and resource bounds]
+    R --> E[Close transaction and validate storage lease]
+    E --> V[Validate scope, continuity and resource bounds]
     V --> S[Sign fixed audit context]
     S --> C[Verify signer output against authority public key]
     C --> D[Return canonical reply]
 ```
 
-The caller performs the first two steps. This builder has no channel, enrollment database, journal reader or authority-recovery policy. A signature cannot replace those checks.
+The caller authorizes the phone and serializes this operation with trust and epoch changes. The journal-backed overloads perform the coherent read. This builder has no channel, enrollment database or authority-recovery policy. A signature cannot replace those checks.
 
-## Read and build
+## Read from the journal
+
+Use `history(query, journal: database, currentEpoch: epoch)` or `page(query, journal: database)` with the account’s `JournalDatabase`. Each method obtains the required data in one read transaction. It signs only after the transaction closes and the storage lease checks pass. A later write cannot mix new boundaries into that captured reply.
+
+The owner supplies its current epoch from established authority state. The reader does not choose an epoch from wall-clock timestamps or sequence numbers. Missing current state fails. An absent requested old epoch is reported as unavailable. A failed read, corrupt retained page, invalid lease or closed database never becomes a signed empty result.
+
+Page reads bound both candidate record count and total record bytes. The builder selects the largest nonempty prefix that fits the complete body and signing envelope. This includes CBOR framing and item limits. It signs once. If even the first retained record cannot fit, it fails explicitly; it never skips that record or reports an empty page with more data pending.
+
+## Build from supplied reads
 
 Obtain all `AuditEpochRead` values and canonical records for a reply from one coherent journal transaction. A read contains the immutable epoch descriptor, retained boundary and head. These are descriptive history fields; they do not establish current authority or policy.
 
@@ -31,4 +40,6 @@ The builder verifies the returned signature under the expected authority public 
 
 Nine native tests cover scope confusion, inconsistent reads, record gaps, duplicate IDs, retention, maximum sequence values, resource bounds and signer errors. They also reproduce every shared valid page and history payload and its signing input exactly. The fixtures are independently consumed by the Kotlin protocol tests.
 
-A production journal reader, authenticated transport, revocation checks and device integration remain pending. This component neither writes the consumption ledger nor certifies its crash or rollback behavior.
+Nine additional journal tests cover committed consumption and outcomes, rollback exclusion, snapshot boundaries, pagination, retention gaps, missing epochs, storage failures and signer errors. They use protected normal-user fixtures and disposable keys. Signing callbacks deliberately write to the journal to verify that the read transaction has already closed.
+
+Authenticated transport, revocation checks, selection of recovered authority state, hardware-key wiring and device integration remain pending. This component neither writes the consumption ledger nor certifies its crash or rollback behavior.
