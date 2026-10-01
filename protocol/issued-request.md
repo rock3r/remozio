@@ -61,7 +61,7 @@ The immutable capture bytes survive parsing and encoding without normalization. 
 
 Creation must precede expiry in the transmitted information. These wall-clock values are informative. The Mac retains a separate, trusted monotonic deadline that includes sleep; phone time or clock skew cannot extend authority. No codec method decides whether a request is currently valid.
 
-Creation is not the target dialog's first-seen time. The per-kind capture and authenticated timing updates still need target age, observed deadline, default effects, and uncertainty. Refreshing a request must preserve those target facts.
+Creation is not the target dialog's first-seen time. The per-kind capture and authenticated timing updates still need target age, observed deadline, default effects, and uncertainty. Refreshing a request must preserve those target facts. Each new authorization, including refresh, has a fresh request ID and challenge. Re-delivery retains the exact issued body. A conflicting body under the same Mac/account/request identity is a protocol error; it cannot reset a phone session.
 
 Before accepting a decision, verify current authority and enrollment, negotiated support and security floors, the retained full request digest, challenge, selected choice, key purpose, revocation, monotonic expiry, target validity, and atomic consumption. This wrapper replaces none of those checks.
 

@@ -6,6 +6,7 @@ import dev.remozio.phone.requests.ElapsedInstant
 
 import android.os.SystemClock
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
@@ -13,6 +14,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -35,7 +37,8 @@ internal fun CommandRequestInspection(
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 try {
                     launch {
-                        session.revisions.collect { value = session.snapshot(RequestElapsedClock.now()) }
+                        combine(session.revisions, session.closed) { _, _ -> session.snapshot(RequestElapsedClock.now()) }
+                            .collect { value = it }
                     }
                     while (isActive) {
                         value = session.snapshot(RequestElapsedClock.now())
@@ -48,6 +51,10 @@ internal fun CommandRequestInspection(
             }
         }
         snapshot?.let {
+            if (it.closed) {
+                LaunchedEffect(session) { onDismiss() }
+                return@let
+            }
             CommandInspection(it.capture, macName, accountName, onDismiss, status = it.status, requestKey = session)
         }
     }

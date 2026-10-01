@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class CommandSessionRejection { INVALID_SIGNATURE, WRONG_AUTHORITY }
+enum class CommandSessionRejection { INVALID_SIGNATURE, WRONG_AUTHORITY, CLOSED }
 class CommandSessionException(val reason: CommandSessionRejection) : IllegalArgumentException(reason.name)
 
 data class RequestLimits(
@@ -15,23 +15,36 @@ data class RequestLimits(
     val signing: CborLimits,
 )
 
-data class CommandRequestSnapshot(val capture: CommandCapture?, val status: TrackedRequestStatus?)
+data class CommandRequestSnapshot(val capture: CommandCapture?, val status: TrackedRequestStatus?, val closed: Boolean = false)
+
+/** Opaque identities use content equality and defensive copies. Display names are never keys. */
+@ConsistentCopyVisibility
+data class CommandRequestIdentity internal constructor(
+    val macID: CborValue.Bytes,
+    val accountID: CborValue.Bytes,
+    val requestID: CborValue.Bytes,
+)
 
 /**
  * Owns one authenticated command capture in memory. A signature establishes origin, not current validity.
- * The enrollment owner must discard this session when its trusted authority changes.
+ * The enrollment owner must close this session when its trusted authority changes.
  */
 class CommandRequestSession private constructor(
     capture: CommandCapture,
     private val tracker: RequestStatusTracker,
-) {
+    val identity: CommandRequestIdentity,
+    internal val requestDigest: CborValue.Bytes,
+) : AutoCloseable {
     private var capture: CommandCapture? = capture
+    private val closure = MutableStateFlow(false)
+    val closed: StateFlow<Boolean> = closure.asStateFlow()
     private val revision = MutableStateFlow(0uL)
     val revisions: StateFlow<ULong> = revision.asStateFlow()
 
     /** Removes the owned capture before notifying observers of a terminal update. */
     @Synchronized
     fun observe(body: ByteArray, signature: ByteArray, receivedAt: ElapsedInstant): StatusAcceptance {
+        if (closure.value) throw CommandSessionException(CommandSessionRejection.CLOSED)
         val result = tracker.observe(body, signature, receivedAt)
         if (result == StatusAcceptance.APPLIED) {
             val status = checkNotNull(tracker.snapshot(receivedAt)).status
@@ -43,7 +56,15 @@ class CommandRequestSession private constructor(
 
     /** Callers must replace old snapshots; clearing this owner cannot erase references held elsewhere. */
     @Synchronized
-    fun snapshot(now: ElapsedInstant) = CommandRequestSnapshot(capture, tracker.snapshot(now))
+    fun snapshot(now: ElapsedInstant) = if (closure.value) CommandRequestSnapshot(null, null, closed = true)
+        else CommandRequestSnapshot(capture, tracker.snapshot(now))
+
+    /** Local invalidation is not an authority-signed terminal result. Old UI handles must stop displaying it. */
+    @Synchronized
+    override fun close() {
+        capture = null
+        closure.value = true
+    }
 
     companion object {
         private val capabilities = ContractCapabilities(mapOf(RequestContract(RequestKind.COMMAND, 1u, 1u) to emptySet()))
@@ -72,7 +93,10 @@ class CommandRequestSession private constructor(
             }
             val capture = CommandCapture(request.canonicalCapture, limits.capture)
             return CommandRequestSession(capture,
-                RequestStatusTracker(request, key, limits.status, limits.signing, limits.body))
+                RequestStatusTracker(request, key, limits.status, limits.signing, limits.body),
+                CommandRequestIdentity(CborValue.Bytes(request.macID), CborValue.Bytes(request.accountID),
+                    CborValue.Bytes(request.requestID)),
+                CborValue.Bytes(request.requestDigest(limits.body, limits.signing)))
         }
     }
 }
