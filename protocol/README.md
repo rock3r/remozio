@@ -59,3 +59,5 @@ The [native signature verifiers](approval-signatures.md) implement the P-256/SHA
 The [decision payload](decision-payload.md) defines strict typed decision claims. Parsing remains separate from authority validation and consumption.
 
 The [issued-request wrapper](issued-request.md) binds capture bytes and metadata, verifies capture digests, and requires explicit local contract support.
+
+The [request status contract](request-status.md) separates signed lifecycle claims from request age and target lifetime estimates. Its Swift and Kotlin codecs do not establish freshness or transition authority.
