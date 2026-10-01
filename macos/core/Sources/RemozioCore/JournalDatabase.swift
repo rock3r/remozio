@@ -21,21 +21,22 @@ public final class JournalDatabase {
     /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
     public static func open(directoryPath: String, macID: Data, accountID: Data,
                             recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion1: Bool = false) throws -> JournalDatabase {
+                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil) throws -> JournalDatabase {
         try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
                             recordLimits: recordLimits, descriptorLimits: descriptorLimits, decisionLimits: decisionLimits,
                             maximumConsumptions: maximumConsumptions, busyMilliseconds: busyMilliseconds,
-                            initialize: initialize, migrateFromVersion1: migrateFromVersion1)
+                            initialize: initialize, migrateFromVersion: migrateFromVersion)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion1: Bool = false) throws {
+         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil) throws {
         self.lease = lease
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
-                  maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion1),
+                  maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -53,7 +54,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion1 ? 1 : 2) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 3) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -67,7 +68,7 @@ public final class JournalDatabase {
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
             if initialize { try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption) }
-            else if migrateFromVersion1 { try migrate(macID: macID, accountID: accountID, consumption: consumption) }
+            else if let migrateFromVersion { try migrate(macID: macID, accountID: accountID, consumption: consumption, from: migrateFromVersion) }
             try validateIdentity(macID: macID, accountID: accountID)
             try lease.validate()
         } catch {
@@ -144,19 +145,21 @@ public final class JournalDatabase {
             }
             try tables.createSchema()
             try consumption.createSchema()
+            try consumption.createOutcomeSchema()
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=2")
+            try exec("PRAGMA user_version=3")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
     }
 
-    private func migrate(macID: Data, accountID: Data, consumption: ConsumptionJournal) throws {
+    private func migrate(macID: Data, accountID: Data, consumption: ConsumptionJournal, from version: Int64) throws {
         try exec("BEGIN IMMEDIATE")
         do {
-            try validateIdentity(macID: macID, accountID: accountID, version: 1)
-            try consumption.createSchema()
-            try exec("PRAGMA user_version=2")
+            try validateIdentity(macID: macID, accountID: accountID, version: version)
+            if version == 1 { try consumption.createSchema() }
+            try consumption.createOutcomeSchema()
+            try exec("PRAGMA user_version=3")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -169,7 +172,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 2) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 3) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -184,7 +187,8 @@ public final class JournalDatabase {
         }
         var queries = ["SELECT mac,account,epoch,descriptor,head,retained FROM main.audit_epochs_v1 LIMIT 0",
                        "SELECT mac,account,epoch,sequence,event,body FROM main.audit_records_v1 LIMIT 0"]
-        if version == 2 { queries.append("SELECT mac,account,request,decision,event FROM main.consumptions_v1 LIMIT 0") }
+        if version >= 2 { queries.append("SELECT mac,account,request,decision,event FROM main.consumptions_v1 LIMIT 0") }
+        if version == 3 { queries.append("SELECT mac,account,request,revision,event FROM main.consumption_outcomes_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -270,6 +274,21 @@ public final class JournalTransaction {
     public func consumption(requestID: Data) throws -> ConsumptionReceipt? {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.ledger(token).receipt(requestID: requestID)
+    }
+
+    /// Record a controller-verified observation. No transition grants permission to execute or retry an action.
+    public func transitionConsumption(requestID: Data, expectedRevision: UInt64, event: RequestEvent, eventID: Data,
+                                      receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedHead: UInt64) throws -> ConsumptionOutcome {
+        try mutate { audit in
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try owner.ledger(token).transition(requestID: requestID, expectedRevision: expectedRevision, event: event,
+                eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedHead: expectedHead, audit: audit)
+        }
+    }
+
+    public func consumptionOutcome(requestID: Data) throws -> ConsumptionOutcome? {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.ledger(token).outcome(requestID: requestID)
     }
 
     public func createEpoch(_ descriptor: AuditEpochDescriptor) throws -> AuditEpochWriter {
