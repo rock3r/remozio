@@ -2,7 +2,7 @@
 
 `FCMWakeSender` makes one authenticated HTTPS attempt to Firebase for one registered Android app instance. Each Mac can use this client independently. It has no central service dependency beyond Firebase itself.
 
-The data payload has one field: `wake_v1`, a base64-encoded, opaque 32-byte identifier supplied by the delivery owner. Never derive it from command text or other sensitive content. The message contains no request details, account names, credentials or approval decisions. The phone must resolve the wake and fetch authoritative state over its separately authenticated channel.
+The data payload has two fields: `wake_v1` and `enrollment_v1`. Each is a base64-encoded, opaque 32-byte identifier supplied by the delivery owner. The enrollment tag selects one pinned Mac/account enrollment on a phone shared by several Macs. Allocate it randomly during authenticated enrollment and reject duplicate tags there. It is only a routing hint; the phone must ignore unknown or retired tags and never follow a push-supplied endpoint. Never derive it from command text or other sensitive content. The message contains no request details, account names, credentials or approval decisions. The phone must resolve the wake and fetch authoritative state over its separately authenticated channel.
 
 ```mermaid
 flowchart LR
@@ -16,7 +16,7 @@ flowchart LR
 
 ## Configuration and ownership
 
-Host this client in the dedicated unprivileged transport service. Supply the Firebase project, Android package name, token, wake identifier, TTL and priority. TTL is explicit and must fit Firebase's supported range. It is the provider storage lifetime, not the request's authorization deadline. Select it from the currently queued work. An old wake never authorizes an action.
+Host this client in the dedicated unprivileged push service. Supply the Firebase project, Android package name, token, wake identifier, enrollment tag, TTL and priority. TTL is explicit and must fit Firebase's supported range. It is the provider storage lifetime, not the request's authorization deadline. Select it from the currently queued work. An old wake never authorizes an action.
 
 High priority is for time-sensitive, user-visible notifications. The Android receiver must show an appropriate notification promptly, then fetch private content separately. Background audit refresh can use normal priority. No collapse key, notification text, or untested direct-boot setting is inserted by this client.
 
@@ -34,7 +34,7 @@ For retryable status codes, the result supplies a minimum delay. Quota errors ha
 
 ## Evidence and remaining gates
 
-Ten native tests use a URLProtocol fixture that intercepts every URL. They cover the exact payload, validation mode, typed errors, retry floors, body limits, redirects, cancellation and diagnostic redaction. No Google endpoint, provider credential or physical device is used. These fixtures test Foundation's client path on the current host; they do not prove delivery through Firebase.
+Eleven native tests use a URLProtocol fixture that intercepts every URL. They cover the exact payload, distinct routes sharing one registration, validation mode, typed errors, retry floors, body limits, redirects, cancellation and diagnostic redaction. No Google endpoint, provider credential or physical device is used. These fixtures test Foundation's client path on the current host; they do not prove delivery through Firebase.
 
 Pending work includes protected provider credentials, OAuth acquisition, registration and rotation, bounded scheduling, Android reception, notification permissions, and the encrypted fetch channel. Live configuration and Pixel tests must cover Doze, force-stop, offline TTL, LAN/mobile transitions, and stale notifications.
 

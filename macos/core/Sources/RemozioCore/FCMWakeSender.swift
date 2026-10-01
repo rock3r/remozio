@@ -17,17 +17,18 @@ public struct FCMAccessToken: Sendable, CustomStringConvertible, CustomDebugStri
 
 public enum FCMPriority: String, Sendable { case normal = "NORMAL", high = "HIGH" }
 
-/// The caller supplies an opaque random delivery identifier, never a request body or credential.
+/// The caller supplies opaque random delivery and enrollment identifiers, never request details or credentials.
 public struct FCMWake: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     fileprivate let registrationToken: String
     public let identifier: Data
+    public let enrollmentTag: Data
     public let ttlSeconds: UInt32
     public let priority: FCMPriority
-    public init(registrationToken: String, identifier: Data, ttlSeconds: UInt32, priority: FCMPriority) throws {
+    public init(registrationToken: String, identifier: Data, enrollmentTag: Data, ttlSeconds: UInt32, priority: FCMPriority) throws {
         guard !registrationToken.isEmpty, registrationToken.utf8.count <= 16384,
-              registrationToken.utf8.allSatisfy({ (33...126).contains($0) }), identifier.count == 32,
+              registrationToken.utf8.allSatisfy({ (33...126).contains($0) }), identifier.count == 32, enrollmentTag.count == 32,
               ttlSeconds <= 2_419_200 else { throw FCMError.invalidWake }
-        self.registrationToken = registrationToken; self.identifier = identifier
+        self.registrationToken = registrationToken; self.identifier = identifier; self.enrollmentTag = enrollmentTag
         self.ttlSeconds = ttlSeconds; self.priority = priority
     }
     public var description: String { "FCMWake(redacted)" }
@@ -78,7 +79,7 @@ public struct FCMWakeSender: Sendable {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "validate_only": validateOnly,
             "message": ["token": wake.registrationToken,
-                "data": ["wake_v1": wake.identifier.base64EncodedString()],
+                "data": ["wake_v1": wake.identifier.base64EncodedString(), "enrollment_v1": wake.enrollmentTag.base64EncodedString()],
                 "android": ["priority": wake.priority.rawValue, "ttl": "\(wake.ttlSeconds)s", "restricted_package_name": packageName]],
         ], options: [.sortedKeys])
         return request

@@ -8,7 +8,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
             transport: FCMHTTPTransport(timeoutSeconds: 5, protocolClasses: [FCMFixtureProtocol.self]))
     }
     private func wake(ttl: UInt32 = 300, priority: FCMPriority = .high) throws -> FCMWake {
-        try FCMWake(registrationToken: "synthetic-registration", identifier: Data(repeating: 7, count: 32), ttlSeconds: ttl, priority: priority)
+        try FCMWake(registrationToken: "synthetic-registration", identifier: Data(repeating: 7, count: 32), enrollmentTag: Data(repeating: 9, count: 32), ttlSeconds: ttl, priority: priority)
     }
     private func token() throws -> FCMAccessToken { try FCMAccessToken("synthetic-oauth-token") }
     private func body(_ request: URLRequest) throws -> [String: Any] {
@@ -31,7 +31,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(Set(root.keys), ["message", "validate_only"])
         XCTAssertEqual(Set(message.keys), ["token", "data", "android"])
         XCTAssertEqual(message["token"] as? String, "synthetic-registration")
-        XCTAssertEqual(message["data"] as? [String: String], ["wake_v1": Data(repeating: 7, count: 32).base64EncodedString()])
+        XCTAssertEqual(message["data"] as? [String: String], ["wake_v1": Data(repeating: 7, count: 32).base64EncodedString(), "enrollment_v1": Data(repeating: 9, count: 32).base64EncodedString()])
         XCTAssertEqual(message["android"] as? [String: String], ["ttl": "300s", "priority": "HIGH", "restricted_package_name": "dev.remozio.android"])
         let normal = try body(sender().request(wake(ttl: 0, priority: .normal), accessToken: token(), validateOnly: true))
         XCTAssertEqual(normal["validate_only"] as? Bool, true)
@@ -39,6 +39,20 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(android?["ttl"], "0s"); XCTAssertEqual(android?["priority"], "NORMAL")
         XCTAssertFalse(String(describing: try token()).contains("synthetic"))
         XCTAssertFalse(String(reflecting: try wake()).contains("synthetic"))
+    }
+
+    func testSharedRegistrationPreservesDistinctEnrollmentRoutes() throws {
+        let first = try wake()
+        let second = try FCMWake(registrationToken: "synthetic-registration", identifier: first.identifier,
+            enrollmentTag: Data(repeating: 10, count: 32), ttlSeconds: 300, priority: .high)
+        let one = try XCTUnwrap(body(sender().request(first, accessToken: token(), validateOnly: false))["message"] as? [String: Any])
+        let two = try XCTUnwrap(body(sender().request(second, accessToken: token(), validateOnly: false))["message"] as? [String: Any])
+        XCTAssertEqual(one["token"] as? String, two["token"] as? String)
+        let dataOne = try XCTUnwrap(one["data"] as? [String: String])
+        let dataTwo = try XCTUnwrap(two["data"] as? [String: String])
+        XCTAssertEqual(dataOne["wake_v1"], dataTwo["wake_v1"])
+        XCTAssertNotEqual(dataOne["enrollment_v1"], dataTwo["enrollment_v1"])
+        XCTAssertEqual(dataTwo["enrollment_v1"], second.enrollmentTag.base64EncodedString())
     }
 
     func testRejectsInvalidConfigurationTokensAndWakeBounds() throws {
@@ -51,9 +65,13 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try FCMWakeSender(project: "fixture", packageName: "bad\npackage"))
         for text in ["", "token\r\nInjected: x", "space token", String(repeating: "x", count: 16385)] {
             XCTAssertThrowsError(try FCMAccessToken(text))
-            XCTAssertThrowsError(try FCMWake(registrationToken: text, identifier: Data(repeating: 0, count: 32), ttlSeconds: 1, priority: .normal))
+            XCTAssertThrowsError(try FCMWake(registrationToken: text, identifier: Data(repeating: 0, count: 32), enrollmentTag: Data(repeating: 9, count: 32), ttlSeconds: 1, priority: .normal))
         }
-        XCTAssertThrowsError(try FCMWake(registrationToken: "test", identifier: Data(), ttlSeconds: 1, priority: .normal))
+        XCTAssertThrowsError(try FCMWake(registrationToken: "test", identifier: Data(), enrollmentTag: Data(repeating: 9, count: 32), ttlSeconds: 1, priority: .normal))
+        for count in [0, 31, 33] {
+            XCTAssertThrowsError(try FCMWake(registrationToken: "test", identifier: Data(repeating: 7, count: 32),
+                enrollmentTag: Data(repeating: 9, count: count), ttlSeconds: 1, priority: .normal))
+        }
         XCTAssertThrowsError(try wake(ttl: 2_419_201))
         XCTAssertNoThrow(try wake(ttl: 2_419_200))
     }
