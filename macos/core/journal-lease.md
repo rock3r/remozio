@@ -38,7 +38,7 @@ A retired lease is not itself a persisted recovery marker. The authority owner m
 
 Protected ancestors prevent an unprivileged interactive account from replacing entries between checks. The checks do not defend against a malicious root process or a maintenance process that ignores the lock. They also do not authenticate database content, detect whole-backup rollback, validate a checkpoint, reserve storage, or grant an action permit.
 
-Eleven tests exercise normal-user temporary fixtures through an internal fixture initializer. They cover a separate competing process, release, root-only public entry, unsafe paths, modes, symlinks, hard links, FIFOs, ACL grants, live replacement, permanent invalidation, and lock cleanup after failed acquisition. Content changes deliberately remain the journal validator's responsibility.
+Twelve tests exercise normal-user temporary fixtures through an internal fixture initializer. They cover a separate competing process, release, root-only public entry, unsafe paths, modes, symlinks, hard links, FIFOs, ACL grants including unsafe later entries, live replacement, permanent invalidation, and lock cleanup after failed acquisition. Content changes deliberately remain the journal validator's responsibility.
 
 These tests do not certify root installation, actual service lifecycle, remote filesystems, or physical durability. The production initializer was not run as root. No system permissions or services were changed.
 

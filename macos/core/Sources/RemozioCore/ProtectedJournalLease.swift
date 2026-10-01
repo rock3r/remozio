@@ -139,7 +139,8 @@ public final class ProtectedJournalLease {
         let mutationMask = mutationPermissions.reduce(UInt64(0)) { $0 | UInt64($1.rawValue) }
         for index in 0...Int(ACL_MAX_ENTRIES) {
             var entry: acl_entry_t?
-            let rc = acl_get_entry(acl, Int32(index), &entry)
+            let selector = index == 0 ? ACL_FIRST_ENTRY : ACL_NEXT_ENTRY
+            let rc = acl_get_entry(acl, selector.rawValue, &entry)
             if rc != 0 {
                 guard errno == EINVAL else { throw JournalLeaseError.system(errno) }
                 return // Darwin reports the end of a valid ACL as EINVAL, not the POSIX zero return.

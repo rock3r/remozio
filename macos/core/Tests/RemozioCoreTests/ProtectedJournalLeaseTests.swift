@@ -91,6 +91,19 @@ final class ProtectedJournalLeaseTests: XCTestCase {
         XCTAssertThrowsError(try fixture.acquire()) { XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata) }
     }
 
+    func testUnsafeSecondACLEntryCannotHideBehindAHarmlessFirstEntry() throws {
+        for relative in ["parent", "parent/store/journal.sqlite"] {
+            let fixture = try Fixture(), path = fixture.root.appendingPathComponent(relative).path
+            defer { _ = try? run("/bin/chmod", ["-N", path]) }
+            XCTAssertEqual(try run("/bin/chmod", ["+a#", "0", "everyone deny delete", path]), 0)
+            let initiallySafe = try fixture.acquire()
+            initiallySafe.close()
+            let grant = relative == "parent" ? "everyone allow write" : "everyone allow read"
+            XCTAssertEqual(try run("/bin/chmod", ["+a#", "1", grant, path]), 0)
+            XCTAssertThrowsError(try fixture.acquire()) { XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata) }
+        }
+    }
+
     func testReplacementRetiresTheLeaseEvenIfTheOriginalIsRestored() throws {
         for relative in ["parent", "parent/store", "parent/store/writer.lock", "parent/store/journal.sqlite"] {
             let fixture = try Fixture(), lease = try fixture.acquire()
