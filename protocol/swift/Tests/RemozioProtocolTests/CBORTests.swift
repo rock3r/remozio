@@ -28,6 +28,8 @@ final class CBORTests: XCTestCase {
             ("1bffffffffffffffff", .unsigned(UInt64.max)),
             ("4300ff80", .bytes(Data([0, 255, 128]))),
             ("64f09f9982", .text("🙂")),
+            ("63efbbbf", .text("\u{FEFF}")),
+            ("64efbbbf61", .text("\u{FEFF}a")),
             ("83001818f6", .array([.unsigned(0), .unsigned(24), .null])),
             ("a300f401f518186178", .map([24: .text("x"), 1: .boolean(true), 0: .boolean(false)])),
             ("a1008200a10142ff00", .map([0: .array([.unsigned(0), .map([1: .bytes(Data([255, 0]))])])])),

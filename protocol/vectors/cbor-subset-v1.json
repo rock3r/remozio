@@ -373,5 +373,20 @@
     "name": "trailing-byte",
     "hex": "f6ff",
     "valid": false
+  },
+  {
+    "name": "leading-bom",
+    "hex": "63efbbbf",
+    "valid": true
+  },
+  {
+    "name": "leading-bom-text",
+    "hex": "64efbbbf61",
+    "valid": true
+  },
+  {
+    "name": "embedded-bom",
+    "hex": "6461efbbbf",
+    "valid": true
   }
 ]

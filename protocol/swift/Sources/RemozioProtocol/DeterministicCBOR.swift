@@ -181,7 +181,7 @@ private struct Reader {
             let bytes = input[offset..<(offset + count)]
             offset += count
             if major == 2 { return .bytes(Data(bytes)) }
-            guard let text = String(bytes: bytes, encoding: .utf8) else { throw CBORError.invalidUTF8 }
+            guard let text = String(validating: bytes, as: UTF8.self) else { throw CBORError.invalidUTF8 }
             return .text(text)
         case 4:
             guard count <= limits.maxItems - items else { throw CBORError.limitExceeded(.items) }
