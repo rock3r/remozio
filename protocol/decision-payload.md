@@ -35,7 +35,7 @@ The IDs are opaque installation, enrollment, or request identifiers. They are no
 
 The request digest is SHA-256 of the complete canonical **issued-request signing input**, including its domain, wire version, type, purpose, and original request body. It is not merely the digest of command text or the action payload. It excludes the request signature itself. The request body must bind its action schema, required features, immutable payload, permitted choices, and expiry. This avoids a self-reference: an inner payload digest and the complete request digest are different values.
 
-Request construction and digest calculation remain separate work. The Mac must recompute this digest from its retained original request. The phone must first authenticate and parse that complete request before it can construct a decision.
+The [issued-request wrapper](issued-request.md) provides common construction and digest calculation. Per-kind capture validation and trusted issuance remain separate work. The Mac must recompute this digest from its retained original request. The phone must first authenticate and parse that complete request before it can construct a decision.
 
 ## Action map
 

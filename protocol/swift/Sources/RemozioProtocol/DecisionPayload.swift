@@ -34,7 +34,7 @@ public struct DecisionPayload: Equatable, Sendable {
         try DeterministicCBOR.encode(.map([
             0: .unsigned(1), 1: .bytes(macID), 2: .bytes(accountID), 3: .bytes(requestID),
             4: .bytes(requestDigest), 5: .bytes(challenge), 6: .bytes(phoneID), 7: .bytes(keyID),
-            8: Self.encodeAction(action),
+            8: ActionWire.encode(action),
         ]), limits: limits)
     }
 
@@ -51,39 +51,8 @@ public struct DecisionPayload: Equatable, Sendable {
             action: decodeAction(fields[8]!))
     }
 
-    private static let choices: [UInt64: ActionChoice] = [
-        0: .decline, 1: .cancelTarget, 2: .execute, 3: .approveAccess, 4: .unlockVault,
-        5: .allowOnce, 6: .denyOnce, 7: .allowRule, 8: .denyRule, 9: .removeRule,
-    ]
-
-    private static func encodeAction(_ action: CapturedAction) -> CBORValue {
-        let choice = choices.first { $0.value == action.choice }!.key
-        var fields: [UInt64: CBORValue] = [0: .unsigned(choice)]
-        switch action.scope {
-        case .currentRequest: fields[1] = .unsigned(0)
-        case .session: fields[1] = .unsigned(1)
-        case let .timed(seconds): fields[1] = .unsigned(2); fields[2] = .unsigned(seconds)
-        case .forever: fields[1] = .unsigned(3)
-        }
-        return .map(fields)
-    }
-
     private static func decodeAction(_ value: CBORValue) throws -> CapturedAction {
-        guard case let .map(fields) = value,
-              case let .unsigned(choiceTag) = fields[0], let choice = choices[choiceTag],
-              case let .unsigned(scopeTag) = fields[1] else { throw DecisionPayloadError.invalidAction }
-        let scope: ActionScope
-        switch scopeTag {
-        case 0: scope = .currentRequest
-        case 1: scope = .session
-        case 2:
-            guard case let .unsigned(seconds) = fields[2], seconds > 0 else { throw DecisionPayloadError.invalidAction }
-            scope = .timed(seconds: seconds)
-        case 3: scope = .forever
-        default: throw DecisionPayloadError.invalidAction
-        }
-        let expected: Set<UInt64> = scopeTag == 2 ? [0, 1, 2] : [0, 1]
-        guard Set(fields.keys) == expected else { throw DecisionPayloadError.invalidAction }
-        return CapturedAction(choice: choice, scope: scope)
+        do { return try ActionWire.decode(value) }
+        catch { throw DecisionPayloadError.invalidAction }
     }
 }
