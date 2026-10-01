@@ -12,11 +12,11 @@ final class ConsumptionJournalTests: XCTestCase {
     private let key = P256.Signing.PrivateKey()
     private func id(_ n: UInt8, count: Int = 16) -> Data { Data(repeating: n, count: count) }
     private var bounds: CBORLimits { get throws { try CBORLimits(maxBytes: 16384, maxDepth: 12, maxItems: 512) } }
-    private func open(_ fixture: Fixture, initialize: Bool = false, migrate: Bool = false, maximum: Int = 10,
+    private func open(_ fixture: Fixture, initialize: Bool = false, migrate: Int64? = nil, maximum: Int = 10,
                       account: UInt8 = 2) throws -> JournalDatabase {
         try JournalDatabase(lease: fixture.lease(), macID: id(1), accountID: id(account), recordLimits: bounds,
             descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: maximum, busyMilliseconds: 100,
-            initialize: initialize, migrateFromVersion1: migrate)
+            initialize: initialize, migrateFromVersion: migrate)
     }
     private func descriptor(_ epoch: UInt8 = 3) throws -> AuditEpochDescriptor {
         try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
@@ -241,17 +241,17 @@ final class ConsumptionJournalTests: XCTestCase {
         let prior = try database.write { try consume($0, writer, request: request()) }
         try database.close()
         // Recreate the pre-consumption v1 layout. This is a fixture, never a recovery operation.
-        try fixture.sql("DROP TABLE consumptions_v1; PRAGMA user_version=1")
+        try fixture.sql("DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1; PRAGMA user_version=1")
         XCTAssertThrowsError(try open(fixture))
-        XCTAssertThrowsError(try open(fixture, migrate: true, account: 9))
+        XCTAssertThrowsError(try open(fixture, migrate: 1, account: 9))
         XCTAssertEqual(try fixture.version(), 1)
-        let migrated = try open(fixture, migrate: true)
+        let migrated = try open(fixture, migrate: 1)
         XCTAssertEqual(try migrated.read { try $0.page(epoch: id(3), after: 0, maximumRecords: 1, maximumBytes: 16384).canonicalRecords },
                        try [prior.event.encode(limits: bounds)])
         XCTAssertNil(try migrated.read { try $0.consumption(requestID: id(4)) }) // Audit history never recreates authority state.
         try migrated.close()
-        XCTAssertEqual(try fixture.version(), 2)
-        XCTAssertThrowsError(try open(fixture, migrate: true))
+        XCTAssertEqual(try fixture.version(), 3)
+        XCTAssertThrowsError(try open(fixture, migrate: 1))
         let reopened = try open(fixture)
         try reopened.close()
     }
@@ -260,12 +260,12 @@ final class ConsumptionJournalTests: XCTestCase {
         let fixture = try Fixture(), database = try open(fixture, initialize: true)
         try database.close()
         try fixture.sql("PRAGMA user_version=1") // Deliberate conflicting table.
-        XCTAssertThrowsError(try open(fixture, migrate: true))
+        XCTAssertThrowsError(try open(fixture, migrate: 1))
         XCTAssertEqual(try fixture.version(), 1)
-        try fixture.sql("PRAGMA user_version=2; DROP TABLE consumptions_v1")
+        try fixture.sql("PRAGMA user_version=3; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1")
         XCTAssertThrowsError(try open(fixture))
         XCTAssertThrowsError(try open(fixture, initialize: true))
-        XCTAssertEqual(try fixture.version(), 2)
+        XCTAssertEqual(try fixture.version(), 3)
     }
 
     func testMalformedAndInconsistentReceiptsFailBoundedReads() throws {
@@ -277,6 +277,247 @@ final class ConsumptionJournalTests: XCTestCase {
             try fixture.sql(mutation)
             let queryID = mutation.contains("request=") ? id(0) : id(4)
             XCTAssertThrowsError(try database.read { try $0.consumption(requestID: queryID) })
+        }
+    }
+
+    private func transition(_ transaction: JournalTransaction, _ writer: AuditEpochWriter, request: UInt8 = 4,
+                            revision: UInt64 = 0, event: RequestEvent = .beginDispatch, eventID: UInt8 = 11,
+                            head: UInt64 = 1) throws -> ConsumptionOutcome {
+        try transaction.transitionConsumption(requestID: id(request), expectedRevision: revision, event: event,
+            eventID: id(eventID), receiptTimeMs: 12400, writer: writer, expectedHead: head)
+    }
+
+    func testDurableVerifiedOutcomesKeepTheWinnerAcrossReopen() throws {
+        for (event, phase) in [(RequestEvent.verifySuccess, RequestPhase.succeeded), (.verifyFailure, .failed)] {
+            let fixture = try Fixture(), database = try open(fixture, initialize: true)
+            let writer = try database.write { try $0.createEpoch(descriptor()) }
+            let receipt = try database.write { try consume($0, writer, request: request()) }
+            let initial = try XCTUnwrap(database.read { try $0.consumptionOutcome(requestID: id(4)) })
+            XCTAssertEqual(initial.revision, 0); XCTAssertEqual(initial.phase, .authorized)
+            let attempted = try database.write { try transition($0, writer) }
+            XCTAssertEqual(attempted.revision, 1); XCTAssertEqual(attempted.phase, .executing)
+            let result = try database.write { try transition($0, writer, revision: 1, event: event, eventID: 12, head: 2) }
+            XCTAssertEqual(result.phase, phase); XCTAssertEqual(result.revision, 2)
+            XCTAssertEqual(result.receipt, receipt)
+            XCTAssertEqual(result.event.authentication, .system)
+            for late in [RequestEvent.beginDispatch, .verifySuccess, .verifyFailure, .loseOutcome] {
+                XCTAssertThrowsError(try database.write { try transition($0, writer, revision: 2, event: late, eventID: 13, head: 3) }) {
+                    XCTAssertEqual($0 as? LifecycleError, .terminal)
+                }
+            }
+            XCTAssertEqual(try database.read { try $0.page(epoch: id(3), after: 0, maximumRecords: 3, maximumBytes: 16384).canonicalRecords },
+                           try [receipt.event, attempted.event, result.event].map { try $0.encode(limits: bounds) })
+            try database.close()
+            let reopened = try open(fixture)
+            XCTAssertEqual(try reopened.read { try $0.consumptionOutcome(requestID: id(4)) }, result)
+            XCTAssertEqual(try reopened.read { try $0.consumption(requestID: id(4)) }, receipt)
+        }
+    }
+
+    func testUnknownIsTerminalBeforeAndAfterDispatchAttempt() throws {
+        for attempted in [false, true] {
+            let fixture = try Fixture(), database = try open(fixture, initialize: true)
+            let writer = try database.write { try $0.createEpoch(descriptor()) }
+            _ = try database.write { try consume($0, writer, request: request()) }
+            if attempted { _ = try database.write { try transition($0, writer) } }
+            let unknown = try database.write { try transition($0, writer, revision: attempted ? 1 : 0, event: .loseOutcome,
+                                                              eventID: 12, head: attempted ? 2 : 1) }
+            XCTAssertEqual(unknown.phase, .unknown)
+            for event in [RequestEvent.beginDispatch, .verifySuccess, .proveNoDispatch, .restartAuthority] {
+                XCTAssertThrowsError(try database.write { try transition($0, writer, revision: unknown.revision, event: event,
+                                                                          eventID: 13, head: attempted ? 3 : 2) }) {
+                    XCTAssertEqual($0 as? LifecycleError, .terminal)
+                }
+            }
+            XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4)) }, unknown)
+        }
+    }
+
+    func testStaleAndInvalidOutcomeTransitionsLeaveHistoryUnchanged() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request()) }
+        for event in [RequestEvent.verifySuccess, .verifyFailure, .present, .authorize, .expire, .cancel] {
+            XCTAssertThrowsError(try database.write { try transition($0, writer, event: event) }) {
+                XCTAssertEqual($0 as? LifecycleError, .invalidTransition)
+            }
+        }
+        XCTAssertThrowsError(try database.write { try transition($0, writer, revision: 1) }) {
+            XCTAssertEqual($0 as? ConsumptionOutcomeError, .staleRevision)
+        }
+        XCTAssertThrowsError(try database.write { try transition($0, writer, request: 20) }) {
+            XCTAssertEqual($0 as? ConsumptionOutcomeError, .missingConsumption)
+        }
+        let attempted = try database.write { try transition($0, writer) }
+        XCTAssertThrowsError(try database.write { try transition($0, writer, event: .loseOutcome, eventID: 12, head: 2) }) {
+            XCTAssertEqual($0 as? ConsumptionOutcomeError, .staleRevision)
+        }
+        XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4)) }, attempted)
+        XCTAssertEqual(try database.read { try $0.epoch(id(3))?.head }, 2)
+    }
+
+    func testDeclineCannotDispatchAndNoDispatchProofRequiresThePreDispatchPhase() throws {
+        for declined in [false, true] {
+            let fixture = try Fixture(), database = try open(fixture, initialize: true)
+            let writer = try database.write { try $0.createEpoch(descriptor()) }
+            _ = try database.write { try consume($0, writer, request: request(), action: declined ? .init(choice: .decline, scope: .currentRequest) : nil) }
+            if declined {
+                XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4))?.phase }, .declined)
+                XCTAssertThrowsError(try database.write { try transition($0, writer) }) { XCTAssertEqual($0 as? LifecycleError, .terminal) }
+            } else {
+                let result = try database.write { try transition($0, writer, event: .proveNoDispatch) }
+                XCTAssertEqual(result.phase, .cancelled); XCTAssertEqual(result.event.outcome, .noDispatch)
+                XCTAssertThrowsError(try database.write { try transition($0, writer, revision: 1, head: 2) }) {
+                    XCTAssertEqual($0 as? LifecycleError, .terminal)
+                }
+            }
+        }
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request()) }
+        _ = try database.write { try transition($0, writer) }
+        XCTAssertThrowsError(try database.write { try transition($0, writer, revision: 1, event: .proveNoDispatch, eventID: 12, head: 2) }) {
+            XCTAssertEqual($0 as? LifecycleError, .invalidTransition)
+        }
+    }
+
+    func testRestartObservationUsesFreshEpochWithoutReconsumingOldRequest() throws {
+        for attempted in [false, true] {
+            let fixture = try Fixture(), database = try open(fixture, initialize: true)
+            let writer = try database.write { try $0.createEpoch(descriptor()) }
+            let receipt = try database.write { try consume($0, writer, request: request()) }
+            if attempted { _ = try database.write { try transition($0, writer) } }
+            try database.close()
+            let reopened = try open(fixture), fresh = try reopened.write { try $0.createEpoch(descriptor(12)) }
+            let outcome = try reopened.write { try transition($0, fresh, revision: attempted ? 1 : 0,
+                                                              event: .restartAuthority, eventID: 13, head: 0) }
+            XCTAssertEqual(outcome.phase, .unknown); XCTAssertEqual(outcome.event.reason, .authorityRestarted)
+            XCTAssertEqual(outcome.event.journalEpoch, id(12)); XCTAssertEqual(outcome.receipt, receipt)
+            XCTAssertEqual(try reopened.read { try $0.consumptionOutcome(requestID: id(4)) }, outcome)
+            XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, attempted ? 2 : 1)
+            XCTAssertThrowsError(try reopened.write { try consume($0, fresh, request: request(), head: 1) }) {
+                XCTAssertEqual($0 as? ConsumptionJournalError, .alreadyConsumed)
+            }
+        }
+    }
+
+    func testOutcomeAndAuditRollbackTogetherOnInsertUpdateAndCaughtFailures() throws {
+        for updating in [false, true] {
+            for table in ["consumption_outcomes_v1", "audit_records_v1"] {
+                let fixture = try Fixture(), database = try open(fixture, initialize: true)
+                let writer = try database.write { try $0.createEpoch(descriptor()) }
+                _ = try database.write { try consume($0, writer, request: request()) }
+                if updating { _ = try database.write { try transition($0, writer) } }
+                let before = try database.read { try $0.consumptionOutcome(requestID: id(4)) }
+                let operation = updating && table == "consumption_outcomes_v1" ? "UPDATE" : "INSERT"
+                try fixture.sql("CREATE TRIGGER fail_outcome BEFORE \(operation) ON \(table) BEGIN SELECT RAISE(ABORT,'injected'); END")
+                XCTAssertThrowsError(try database.write { transaction in
+                    XCTAssertThrowsError(try transition(transaction, writer, revision: updating ? 1 : 0,
+                        event: .loseOutcome, eventID: 12, head: updating ? 2 : 1))
+                }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+                XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4)) }, before)
+                XCTAssertEqual(try database.read { try $0.epoch(id(3))?.head }, updating ? 2 : 1)
+            }
+        }
+    }
+
+    func testOutcomeAutomaticRollbackAndHeadMismatchRetireOwnerWithoutPhantomResult() throws {
+        for automatic in [false, true] {
+            let fixture = try Fixture(), database = try open(fixture, initialize: true)
+            let writer = try database.write { try $0.createEpoch(descriptor()) }
+            _ = try database.write { try consume($0, writer, request: request()) }
+            let before = try database.write { try transition($0, writer) }
+            if automatic { try fixture.sql("CREATE TRIGGER fail_outcome BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ROLLBACK,'injected'); END") }
+            XCTAssertThrowsError(try database.write { try transition($0, writer, revision: 1, event: .verifySuccess,
+                                                                      eventID: 12, head: automatic ? 2 : 1) })
+            XCTAssertThrowsError(try database.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+            try database.close()
+            let reopened = try open(fixture)
+            XCTAssertEqual(try reopened.read { try $0.consumptionOutcome(requestID: id(4)) }, before)
+            XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 2)
+        }
+    }
+
+    func testOutcomeCallbackRollbackAndDuplicateEventPreservePreviousState() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request()) }
+        XCTAssertThrowsError(try database.write {
+            _ = try transition($0, writer)
+            throw Failure.injected
+        })
+        XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4))?.revision }, 0)
+        _ = try database.write { try transition($0, writer) }
+        XCTAssertThrowsError(try database.write { try transition($0, writer, revision: 1, event: .verifyFailure, eventID: 11, head: 2) })
+        XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4))?.phase }, .executing)
+        XCTAssertEqual(try database.read { try $0.epoch(id(3))?.head }, 2)
+    }
+
+    func testOutcomesRemainAvailableAtLedgerCapacityAndAfterAuditPruning() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true, maximum: 1)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        let receipt = try database.write { try consume($0, writer, request: request()) }
+        XCTAssertThrowsError(try database.write { try consume($0, writer, request: request(20), head: 1, event: 20) })
+        _ = try database.write { try transition($0, writer) }
+        let outcome = try database.write { try transition($0, writer, revision: 1, event: .verifySuccess, eventID: 12, head: 2) }
+        try database.write { try $0.prune(epoch: id(3), through: 3, expectedHead: 3) }
+        XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4)) }, outcome)
+        XCTAssertEqual(try database.read { try $0.consumption(requestID: id(4)) }, receipt)
+    }
+
+    func testOutcomeTransactionLifetimeAndAccountIsolation() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request()) }
+        XCTAssertThrowsError(try database.read { try transition($0, writer) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
+        let escaped = try database.write { $0 }
+        XCTAssertThrowsError(try transition(escaped, writer))
+        XCTAssertThrowsError(try escaped.consumptionOutcome(requestID: id(4)))
+        let otherFixture = try Fixture(), other = try open(otherFixture, initialize: true, account: 9)
+        XCTAssertNil(try other.read { try $0.consumptionOutcome(requestID: id(4)) })
+        XCTAssertThrowsError(try other.write { try transition($0, writer) }) {
+            XCTAssertEqual($0 as? ConsumptionOutcomeError, .missingConsumption)
+        }
+    }
+
+    func testVersionTwoMigrationKeepsReceiptsAndCreatesNoOutcomeClaims() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        let receipt = try database.write { try consume($0, writer, request: request()) }
+        try database.close()
+        try fixture.sql("DROP TABLE consumption_outcomes_v1; PRAGMA user_version=2")
+        XCTAssertThrowsError(try open(fixture))
+        XCTAssertThrowsError(try open(fixture, migrate: 2, account: 9))
+        let migrated = try open(fixture, migrate: 2)
+        let outcome = try XCTUnwrap(migrated.read { try $0.consumptionOutcome(requestID: id(4)) })
+        XCTAssertEqual(outcome.receipt, receipt); XCTAssertEqual(outcome.revision, 0)
+        XCTAssertEqual(outcome.phase, .authorized) // Stored receipt only; startup recovery must reconcile this.
+        try migrated.close()
+        XCTAssertEqual(try fixture.version(), 3)
+        for version: Int64 in [0, 1, 2, 3, 99] { XCTAssertThrowsError(try open(fixture, migrate: version)) }
+    }
+
+    func testFailedOutcomeMigrationRollsBackTheNewConsumptionTable() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        try database.close()
+        try fixture.sql("DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1; PRAGMA user_version=1; CREATE TABLE consumption_outcomes_v1(conflict INTEGER)")
+        XCTAssertThrowsError(try open(fixture, migrate: 1))
+        XCTAssertEqual(try fixture.version(), 1)
+        XCTAssertNoThrow(try fixture.sql("CREATE TABLE consumptions_v1(probe INTEGER)"))
+    }
+
+    func testMalformedAndImpossibleOutcomeRowsFailBoundedReads() throws {
+        for mutation in ["UPDATE consumption_outcomes_v1 SET event=x'01'",
+                         "UPDATE consumption_outcomes_v1 SET event=zeroblob(17000)",
+                         "PRAGMA ignore_check_constraints=ON; UPDATE consumption_outcomes_v1 SET revision=0",
+                         "UPDATE consumption_outcomes_v1 SET revision=2",
+                         "UPDATE consumption_outcomes_v1 SET event=(SELECT event FROM consumptions_v1)"] {
+            let fixture = try Fixture(), database = try open(fixture, initialize: true)
+            let writer = try database.write { try $0.createEpoch(descriptor()) }
+            _ = try database.write { try consume($0, writer, request: request()) }
+            _ = try database.write { try transition($0, writer) }
+            try fixture.sql(mutation)
+            XCTAssertThrowsError(try database.read { try $0.consumptionOutcome(requestID: id(4)) })
         }
     }
 

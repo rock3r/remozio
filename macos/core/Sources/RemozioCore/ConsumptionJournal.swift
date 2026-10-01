@@ -128,3 +128,53 @@ final class ConsumptionJournal {
         return Data(bytes: pointer, count: count)
     }
 }
+
+extension ConsumptionJournal {
+    func createOutcomeSchema() throws {
+        try execute("""
+            CREATE TABLE main.consumption_outcomes_v1 (
+                mac BLOB NOT NULL, account BLOB NOT NULL, request BLOB NOT NULL,
+                revision INTEGER NOT NULL CHECK(revision IN (1,2)), event BLOB NOT NULL,
+                PRIMARY KEY(mac,account,request),
+                FOREIGN KEY(mac,account,request) REFERENCES consumptions_v1(mac,account,request)
+            ) STRICT, WITHOUT ROWID
+            """)
+    }
+
+    func outcome(requestID: Data) throws -> ConsumptionOutcome? {
+        guard let receipt = try receipt(requestID: requestID) else { return nil }
+        return try statement("SELECT revision,event FROM main.consumption_outcomes_v1 WHERE mac=? AND account=? AND request=?", [macID, accountID, requestID]) {
+            let rc = sqlite3_step($0)
+            if rc == SQLITE_DONE { return ConsumptionOutcome(receipt: receipt) }
+            guard rc == SQLITE_ROW else { throw JournalDatabaseError.storage(rc) }
+            let revision = sqlite3_column_int64($0, 0)
+            guard sqlite3_column_type($0, 0) == SQLITE_INTEGER, (1...2).contains(revision) else { throw ConsumptionOutcomeError.corruptData }
+            let event = try AuditEventMetadata.decode(blob($0, 1, maximum: recordLimits.maxBytes), limits: recordLimits)
+            return try ConsumptionOutcome(receipt: receipt, revision: UInt64(revision), event: event)
+        }
+    }
+
+    func transition(requestID: Data, expectedRevision: UInt64, event: RequestEvent, eventID: Data,
+                    receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedHead: UInt64,
+                    audit: AuditJournalTables) throws -> ConsumptionOutcome {
+        guard let current = try outcome(requestID: requestID) else { throw ConsumptionOutcomeError.missingConsumption }
+        guard current.revision == expectedRevision else { throw ConsumptionOutcomeError.staleRevision }
+        guard expectedHead < UInt64.max else { throw AuditJournalError.headMismatch }
+        let next = try current.next(event, eventID: eventID, receiptTimeMs: receiptTimeMs, epoch: writer.epoch, sequence: expectedHead + 1)
+        let body = try next.event.encode(limits: recordLimits)
+        if current.revision == 0 {
+            try statement("INSERT INTO main.consumption_outcomes_v1 VALUES(?,?,?,1,?)", [macID, accountID, requestID, body]) {
+                let rc = sqlite3_step($0)
+                guard rc == SQLITE_DONE else { throw JournalDatabaseError.storage(rc) }
+            }
+        } else {
+            try statement("UPDATE main.consumption_outcomes_v1 SET event=?,revision=2 WHERE mac=? AND account=? AND request=? AND revision=1", [body, macID, accountID, requestID]) {
+                let rc = sqlite3_step($0)
+                guard rc == SQLITE_DONE else { throw JournalDatabaseError.storage(rc) }
+                guard sqlite3_changes(db) == 1 else { throw ConsumptionOutcomeError.staleRevision }
+            }
+        }
+        try audit.append(body, writer: writer, expectedHead: expectedHead)
+        return next
+    }
+}
