@@ -20,7 +20,7 @@ Host this client in the dedicated unprivileged push service. Supply the Firebase
 
 High priority is for time-sensitive, user-visible notifications. The Android receiver must show an appropriate notification promptly, then fetch private content separately. Background audit refresh can use normal priority. No collapse key, notification text, or untested direct-boot setting is inserted by this client.
 
-The owner must verify current enrollment, presence routing, registration version, token expiry and request lifetime before every attempt. This component does not acquire OAuth credentials, refresh them, schedule retries, persist registrations, or revoke keys. These remain integration work. The app does not invoke the sender yet.
+The owner must verify current enrollment, presence routing, registration version, token expiry and request lifetime before every attempt. Use the separate [native OAuth client](fcm-oauth.md) to acquire a token. This sender does not refresh credentials, schedule retries, persist registrations, or revoke keys. These remain integration work. The app does not invoke the sender yet.
 
 ## Transport and results
 
@@ -36,7 +36,7 @@ For retryable status codes, the result supplies a minimum delay. Quota errors ha
 
 Eleven native tests use a URLProtocol fixture that intercepts every URL. They cover the exact payload, distinct routes sharing one registration, validation mode, typed errors, retry floors, body limits, redirects, cancellation and diagnostic redaction. No Google endpoint, provider credential or physical device is used. These fixtures test Foundation's client path on the current host; they do not prove delivery through Firebase.
 
-Pending work includes protected provider credentials, OAuth acquisition, registration and rotation, bounded scheduling, Android reception, notification permissions, and the encrypted fetch channel. Live configuration and Pixel tests must cover Doze, force-stop, offline TTL, LAN/mobile transitions, and stale notifications.
+Pending work includes protected provider credentials, OAuth integration and renewal, registration and rotation, bounded scheduling, Android reception, notification permissions, and the encrypted fetch channel. Live configuration and Pixel tests must cover Doze, force-stop, offline TTL, LAN/mobile transitions, and stale notifications.
 
 ## Provider references
 
