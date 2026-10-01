@@ -18,7 +18,7 @@ Sign the deterministic CBOR map below. The payload is the original canonical bat
 | 3 | Purpose `1`: history page |
 | 4 | Canonical batch payload bytes |
 
-`AuditBatchSigningInput` constructs this context. `AuditBatchSignature` verifies it. These APIs cannot select the approval domain. Unsupported versions fail. Future audit message types need their own defined context; no transition purpose exists yet.
+`AuditBatchSigningInput` constructs this context. `AuditBatchSignature` verifies it. These APIs cannot select the approval domain. Unsupported versions fail. [History status](audit-history-status.md) uses a separate type and purpose for discovery and epoch reconciliation.
 
 ## Payload
 
@@ -45,7 +45,7 @@ The next cursor is `pageAfter + count`. A page has more records when that cursor
 
 The exclusive retained boundary supports a fully pruned epoch even at the maximum sequence value. A cursor below that boundary produces an explicit retention gap. This contract does not select a retention policy or permit pruning.
 
-An ahead-of-head cursor fails this page contract. Unavailable epochs and conflicting cursors need a separate authenticated reconciliation response. They must never select records from another epoch. This PR does not implement that response or epoch transitions.
+An ahead-of-head cursor fails this page contract. Unavailable epochs and conflicting cursors need a separate authenticated reconciliation response. They must never select records from another epoch. The [history status contract](audit-history-status.md) defines that response and authenticates epoch descriptors.
 
 ## Receiver obligations
 

@@ -13,6 +13,9 @@ dependencies {
 val capture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")
 tasks.withType<Test>().configureEach {
     useJUnit()
+    val historyVectors = rootProject.layout.projectDirectory.file("protocol/vectors/audit-history-status-v1.json")
+    inputs.file(historyVectors)
+    systemProperty("remozio.test.auditHistoryVectors", historyVectors.asFile.absolutePath)
     inputs.file(capture)
     systemProperty("remozio.test.commandCapture", capture.asFile.absolutePath)
 }
