@@ -10,6 +10,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    val auditVectors = rootProject.layout.projectDirectory.file("protocol/vectors/audit-metadata-v1.json")
+    inputs.file(auditVectors)
+    systemProperty("remozio.auditVectors", auditVectors.asFile.absolutePath)
     val vectors = rootProject.layout.projectDirectory.file("protocol/vectors/cbor-subset-v1.json")
     val actionVectors = rootProject.layout.projectDirectory.file("protocol/vectors/action-policy-v1.json")
     val lifecycleVectors = rootProject.layout.projectDirectory.file("protocol/vectors/lifecycle-v1.json")
