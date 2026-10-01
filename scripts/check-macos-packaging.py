@@ -7,8 +7,9 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
-import subprocess
 import tempfile
+
+from macos_build_checks import require, run, verify_executable
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / '.build' / 'packaging'
@@ -16,30 +17,6 @@ ROLES = {
     'session': ('LaunchAgents', 'RemozioSessionProbe'),
     'authority': ('LaunchDaemons', 'RemozioAuthorityProbe'),
 }
-
-
-def run(*args, check=True):
-    result = subprocess.run(args, text=True, capture_output=True)
-    if check and result.returncode != 0:
-        raise RuntimeError(f"{args[0]} exited {result.returncode}: {result.stderr.strip()}")
-    return result
-
-
-def require(condition, message):
-    if not condition:
-        raise RuntimeError(message)
-
-
-def verify_executable(path, identity):
-    require(run('lipo', '-archs', str(path)).stdout.strip() == 'arm64', f'{path.name}: unexpected architecture')
-    load_commands = run('xcrun', 'vtool', '-show-build', str(path)).stdout
-    require(re.search(r'\bminos\s+26\.0(?:\.0)?\s', load_commands), f'{path.name}: deployment target is not macOS 26')
-    run('codesign', '--verify', '--strict', '-R', f'=identifier "{identity}"', str(path))
-    details = run('codesign', '--display', '--verbose=4', str(path)).stderr
-    require('runtime)' in details, f'{path.name}: hardened runtime is absent')
-    entitlements = run('codesign', '--display', '--entitlements', '-', '--xml', str(path)).stdout
-    values = plistlib.loads(entitlements.encode()) if entitlements.strip() else {}
-    require(values in ({}, {'com.apple.application-identifier': identity}), f'{path.name}: unexpected entitlements')
 
 
 def check():
