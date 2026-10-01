@@ -69,3 +69,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Audit history status](audit-history-status.md) authenticates epoch discovery, prior boundaries, unavailable history and ahead-of-head cursors.
 
 [Gateway token registration](gateway-token-registration.md) defines candidate probes, bound phone receipts, and the separate gateway signature domain.
+
+[Gateway recipient controls](gateway-recipient-controls.md) define separate signed activation and phone-epoch revocation claims.

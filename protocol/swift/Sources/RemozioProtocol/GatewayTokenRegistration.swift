@@ -28,8 +28,8 @@ public struct GatewayTokenBinding: Equatable, Sendable, CustomStringConvertible,
     }
     public var description: String { "GatewayTokenBinding(redacted)" }
     public var debugDescription: String { description }
-    fileprivate var value: CBORValue { .map(Dictionary(uniqueKeysWithValues: values.enumerated().map { (UInt64($0.offset), .bytes($0.element)) })) }
-    fileprivate static func decode(_ value: CBORValue) throws -> GatewayTokenBinding {
+    var value: CBORValue { .map(Dictionary(uniqueKeysWithValues: values.enumerated().map { (UInt64($0.offset), .bytes($0.element)) })) }
+    static func decode(_ value: CBORValue) throws -> GatewayTokenBinding {
         guard case let .map(fields) = value, Set(fields.keys) == Set(0...UInt64(10)) else { throw GatewayTokenError.invalidFields }
         func bytes(_ key: UInt64) throws -> Data {
             guard case let .bytes(value) = fields[key] else { throw GatewayTokenError.invalidBytes }
