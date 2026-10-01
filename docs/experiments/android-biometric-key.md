@@ -46,7 +46,7 @@ Use a Pixel with Android 17 or later. Install the debug APK during the agreed in
 6. Change biometric enrollment through Android Settings. Inspect and sign again. Record retention or invalidation without assuming the requested policy guarantees retention.
 7. Delete the probe key. Inspection and signing must fail until explicit creation. Create again and confirm a new fingerprint.
 
-Do not change device credentials or biometrics automatically. Do not treat a provider error as a successful no-prompt denial: only `UserNotAuthenticatedException` earns that result. Other errors need diagnosis.
+Do not change device credentials or biometrics automatically. Do not treat a provider error as a successful no-prompt denial: only a typed `UserNotAuthenticatedException` or Android `KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED` in the bounded cause chain earns that result. Signature providers can wrap these failures. Other errors need diagnosis.
 
 ## Validation boundaries
 

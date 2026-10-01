@@ -12,3 +12,16 @@ internal class ProbeOperation {
         return true
     }
 }
+
+/** Providers may wrap an authentication failure during update or sign. Never match error text. */
+internal fun hasAuthenticationCause(error: Throwable, matches: (Throwable) -> Boolean): Boolean {
+    val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+    var current: Throwable? = error
+    repeat(16) {
+        val cause = current ?: return false
+        if (!seen.add(cause)) return false
+        if (matches(cause)) return true
+        current = cause.cause
+    }
+    return false
+}

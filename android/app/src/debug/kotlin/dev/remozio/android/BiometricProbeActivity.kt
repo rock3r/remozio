@@ -4,6 +4,7 @@ import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.security.KeyStoreException
 import android.security.keystore.UserNotAuthenticatedException
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -114,7 +115,12 @@ class BiometricProbeActivity : ComponentActivity() {
         try {
             BiometricProbeKey.signature().apply { update(challenge()) }.sign()
             getString(R.string.probe_unprotected)
-        } catch (_: UserNotAuthenticatedException) {
+        } catch (error: Exception) {
+            if (!hasAuthenticationCause(error) { cause ->
+                cause is UserNotAuthenticatedException ||
+                    (cause is KeyStoreException && cause.numericErrorCode ==
+                        KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED)
+            }) throw error
             getString(R.string.probe_denied)
         }
     }
