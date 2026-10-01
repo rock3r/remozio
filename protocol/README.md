@@ -55,3 +55,5 @@ The [request lifecycle](lifecycle.md) defines consumption, expiry, and terminal 
 The [signing input](signing-input.md) separates approval messages by protocol, wire version, type, and purpose.
 
 The [native signature verifiers](approval-signatures.md) implement the P-256/SHA-256 wire representation.
+
+The [decision payload](decision-payload.md) defines strict typed decision claims. Parsing remains separate from authority validation and consumption.
