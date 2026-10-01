@@ -1,0 +1,21 @@
+[
+  ["queued", "present", "presented"],
+  ["queued", "authorize", "authorized"],
+  ["presented", "authorize", "authorized"],
+  ["queued", "decline", "declined"],
+  ["presented", "decline", "declined"],
+  ["queued", "cancel", "cancelled"],
+  ["presented", "cancel", "cancelled"],
+  ["queued", "expire", "expired"],
+  ["presented", "expire", "expired"],
+  ["authorized", "beginDispatch", "executing"],
+  ["authorized", "proveNoDispatch", "cancelled"],
+  ["executing", "verifySuccess", "succeeded"],
+  ["executing", "verifyFailure", "failed"],
+  ["authorized", "loseOutcome", "unknown"],
+  ["executing", "loseOutcome", "unknown"],
+  ["queued", "restartAuthority", "cancelled"],
+  ["presented", "restartAuthority", "cancelled"],
+  ["authorized", "restartAuthority", "unknown"],
+  ["executing", "restartAuthority", "unknown"]
+]
