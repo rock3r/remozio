@@ -69,3 +69,32 @@ Unambiguous signed predecessor links form chains. Each list chain runs newest fi
 Conflicting proofs remain quarantined. The first accepted record is retained evidence, not a resolution of the conflict. Every group carries conflict classes and the number of conflicting proofs. Typed signed history reports retain their own conflict classes, including unavailable and cursor-ahead responses. Their arrival order does not select the current epoch or establish a current sync result.
 
 All output collections are immutable. This model contains retained metadata only. UI navigation, enrollment labels, online state, last-sync state and the sync coordinator remain separate integration work.
+
+## Serialized synchronization
+
+`AuditSyncSession` takes exclusive ownership of an open encrypted cache. The caller must not append to or close that cache separately. Calls perform blocking verification and storage work off the main thread. Its read-only state flow retains history even after the session closes.
+
+The enrollment transport calls `start`, obtains one query with `next`, then returns its signed response through `accept`. Only the current query object can advance the session. A late response or transport error cannot cancel a replacement query. The session verifies the response, commits encrypted evidence, then advances its plan. A storage failure requires closing the session and reopening the cache; an uncertain write never continues from stale memory.
+
+```mermaid
+stateDiagram-v2
+    IDLE --> SYNCING: start and discover
+    SYNCING --> SYNCING: verify, persist, advance
+    SYNCING --> PAUSED: response budget exhausted
+    PAUSED --> SYNCING: resume same plan
+    SYNCING --> COMPLETE: observed bounds reached
+    SYNCING --> FAILED: response, transport, conflict or storage error
+    SYNCING --> CANCELLED: cancel
+    PAUSED --> CANCELLED: cancel
+    FAILED --> SYNCING: start after non-storage failure
+    COMPLETE --> SYNCING: start fresh discovery
+    CANCELLED --> SYNCING: start fresh discovery
+```
+
+Discovery prioritizes the reported current epoch. Cached old epochs receive explicit cursor checks. Ahead or unavailable old history remains visible while the new epoch can progress. A cached cursor above the reported current head also gets an explicit reconciliation query. Existing records never disappear because a restored Mac reports a lower head.
+
+Each epoch fetch stops at the head observed when that epoch entered the round. Later growth remains a visible gap for the next round. The positive response budget pauses work without discarding the plan; `resume` continues it with fresh query nonces. Pagination fills the earliest available hole and skips already cached records. A head that falls during its own page fetch fails the round, preserving evidence for fresh discovery and reconciliation.
+
+`COMPLETE` means this round reached its observed boundaries. It does not mean history has no gaps, outcomes are known, or the Mac is still online. Retention gaps, quarantined conflicts and signed history reports remain in the snapshot. Last-successful-sync advances only after the whole plan finishes. Failed or cancelled rounds retain its old value. Epoch observations carry their own receipt times; later page receipts do not refresh them. Reopening a cache restores evidence, never current-epoch or last-sync claims.
+
+The caller must report transport failures, cancel abandoned work, and close the session on revocation or authority replacement. The channel still has to authenticate the phone, enforce revocation and negotiate protocol compatibility. This session supplies no channel, push service or enrollment. Those integrations and device lifecycle tests remain pending.
