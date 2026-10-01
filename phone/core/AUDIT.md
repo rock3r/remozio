@@ -36,4 +36,22 @@ Snapshots show missing sequence intervals, split at the highest observed retenti
 
 All configured capacities are hard resource bounds. At capacity, ingestion fails atomically and preserves prior evidence. The caller must surface that failure and stop ingestion until storage is available. No record is evicted. Duplicate proofs still verify their signatures before deduplication. Re-signing the same canonical payload does not create another proof.
 
-Snapshots and proof bytes are immutable. The store does not select a globally current epoch, order different Macs by wall clock, persist plaintext, authorize actions or implement retention policy. Encrypted Android persistence and history UI remain pending. A future sync coordinator must choose current-epoch and last-sync state after reconciliation.
+Snapshots and proof bytes are immutable. The store does not select a globally current epoch, order different Macs by wall clock, persist plaintext, authorize actions or implement retention policy. The encrypted Android adapter is described below; history UI remains pending. A future sync coordinator must choose current-epoch and last-sync state after reconciliation.
+
+## Encrypted persistence
+
+`EncryptedAuditCache` serializes signed proofs in their original acceptance order and encrypts the archive with AES-256-GCM when supplied the Android adapter's key. The envelope has an eight-byte `RMZAUD01` header, a 12-byte provider-generated IV, and ciphertext with a 128-bit tag. Associated data binds the cache domain, schema, Mac/account and pinned authority key. Decryption under another enrollment fails.
+
+The plaintext archive is canonical CBOR: schema 1 at key 0 and an ordered proof array at key 1. Each proof has kind 1 (page) or 2 (history status) at key 0, canonical signed bytes at key 1 and the raw signature at key 2. Unknown fields, schemas and kinds fail. Restoring re-verifies every signature into a new bounded evidence store before publishing it. Conflicting proofs remain in their original order, so quarantine decisions survive reload. Duplicate archive entries fail instead of hiding corrupt structure.
+
+Writes build a candidate store, encode and encrypt it, replace ciphertext, then publish the candidate in memory. A failed write blocks further writes until the cache is reopened and verified. This handles uncertain commit outcomes without overwriting newly persisted evidence from an older in-memory snapshot. Encoding or encryption failures before storage leave the current store unchanged.
+
+`AuditCiphertextStorage` accepts ciphertext only. It must enforce exclusive access, bounded reads and atomic replacement. No load error resets a cache. The storage owner closes a failed open; it must preserve the file for diagnosis or recovery. An encrypted file alone cannot prove that no older complete snapshot was restored.
+
+The Android adapter stores files in `noBackupFilesDir`, with one lifetime OS file lock per Mac/account cache. It uses `AtomicFile`, checks the write and reads back ciphertext before reporting success. Operations block and must run off the main thread. The adapter never creates an approval key or changes enrollment.
+
+Each cache has its own Android Keystore AES-256 key. Generation prefers StrongBox and falls back to a hardware TEE only when StrongBox is unavailable. Existing keys must pass the expected policy checks; they are never silently replaced. A missing key with an existing archive fails without resetting the archive. Reading history requires no extra biometric prompt. The key also permits background metadata sync after the Android user has unlocked credential-encrypted storage.
+
+Host tests use disposable software AES keys only. They test randomized encryption, enrollment binding, tampering, invalid archives, conflict restoration, capacity and failures before or after replacement. The Android adapter is build-checked; hardware key behavior, file recovery and device lifecycle tests remain deferred. History UI, enrollment ownership and the sync coordinator still need integration.
+
+Platform references: [Keystore AES example](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec), [key policy](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder), [AtomicFile ownership and writes](https://developer.android.com/reference/android/util/AtomicFile), and [private backup-excluded storage](https://developer.android.com/reference/android/content/ContextWrapper).
