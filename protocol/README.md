@@ -67,3 +67,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Audit batches](audit-batches.md) define bounded epoch-scoped pages and a signing domain separate from approvals.
 
 [Audit history status](audit-history-status.md) authenticates epoch discovery, prior boundaries, unavailable history and ahead-of-head cursors.
+
+[Gateway token registration](gateway-token-registration.md) defines candidate probes, bound phone receipts, and the separate gateway signature domain.

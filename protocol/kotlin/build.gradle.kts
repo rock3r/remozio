@@ -10,6 +10,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    val gatewayTokenVectors = rootProject.layout.projectDirectory.file("protocol/vectors/gateway-token-v1.json")
+    inputs.file(gatewayTokenVectors)
+    systemProperty("remozio.gatewayTokenVectors", gatewayTokenVectors.asFile.absolutePath)
     val auditHistoryVectors = rootProject.layout.projectDirectory.file("protocol/vectors/audit-history-status-v1.json")
     inputs.file(auditHistoryVectors)
     systemProperty("remozio.auditHistoryVectors", auditHistoryVectors.asFile.absolutePath)
