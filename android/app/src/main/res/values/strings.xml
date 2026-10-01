@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Remozio</string>
+    <string name="your_macs">Your Macs</string>
+    <string name="no_macs_paired">No Macs paired</string>
+    <string name="pairing_empty_description">Pair a Mac to see its requests and connection status here.</string>
+</resources>
