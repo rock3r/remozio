@@ -1,6 +1,6 @@
 # Mac core
 
-This package contains Mac policies without platform observers or external side effects. `PresenceRouter` implements the delivery rules from design section 14. [Decision verification](decision-verification.md) binds signed phone decisions to retained requests and current trusted enrollment before durable consumption.
+This package contains Mac policies without platform observers or external side effects. `PresenceRouter` implements the delivery rules from design section 14. [Decision verification](decision-verification.md) binds signed phone decisions to retained requests and current trusted enrollment before durable consumption. [Audit replies](audit-replies.md) build bounded signed history responses for an already authorized Mac/account scope.
 
 ```mermaid
 flowchart TD
