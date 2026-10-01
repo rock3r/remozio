@@ -42,3 +42,5 @@ Local command approval, live provider detection, authority persistence integrati
 The [audit storage tables](audit-storage.md) share the authority's SQLite transaction and provide bounded, coherent history reads. They do not replace authority recovery or grant dispatch permission.
 
 The [protected journal lease](journal-lease.md) validates the existing root-owned storage path and holds its writer lock. Provisioning and authority recovery remain separate.
+
+The [owned journal connection](journal-database.md) combines that lease with a scoped SQLite connection and expiring transaction access. Consumption and checkpoint integration remain separate.
