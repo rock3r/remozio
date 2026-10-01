@@ -1,6 +1,6 @@
 # Mac core
 
-This package contains Mac policies without platform observers or external side effects. `PresenceRouter` implements the delivery rules from design section 14. [Decision verification](decision-verification.md) binds signed phone decisions to retained requests and current trusted enrollment before durable consumption. [Audit replies](audit-replies.md) build bounded signed history responses for an already authorized Mac/account scope.
+This package contains Mac policies, audit storage primitives, and the authority storage lease. It has no presence observers or action executor. `PresenceRouter` implements the delivery rules from design section 14. [Decision verification](decision-verification.md) binds signed phone decisions to retained requests and current trusted enrollment before durable consumption. [Audit replies](audit-replies.md) build bounded signed history responses for an already authorized Mac/account scope.
 
 ```mermaid
 flowchart TD
@@ -37,6 +37,8 @@ The Android status view must show Offline when the Mac is unreachable. A cached 
 
 Presence changes delivery only. The integration must preserve request identity, first-seen age, expiry, and already-delivered actions. It must not cancel a biometric operation when the Mac becomes present. Recheck pending request validity before handoff and suppress duplicate notifications during noisy routing changes.
 
-Local command approval, live provider detection, persistence, and device status synchronization remain implementation gates. These unit tests do not certify remote desktop detection or activity-aware routing end to end.
+Local command approval, live provider detection, authority persistence integration, and device status synchronization remain implementation gates. These unit tests do not certify remote desktop detection or activity-aware routing end to end.
 
 The [audit storage tables](audit-storage.md) share the authority's SQLite transaction and provide bounded, coherent history reads. They do not replace authority recovery or grant dispatch permission.
+
+The [protected journal lease](journal-lease.md) validates the existing root-owned storage path and holds its writer lock. Provisioning and authority recovery remain separate.
