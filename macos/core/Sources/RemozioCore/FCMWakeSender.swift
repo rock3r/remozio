@@ -55,7 +55,7 @@ public struct FCMWakeSender: Sendable {
     init(project: String, packageName: String, transport: FCMHTTPTransport) throws {
         let pathCharacters = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:".utf8)
         let packageCharacters = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.".utf8)
-        guard !project.isEmpty, project.utf8.count <= 128, project.utf8.allSatisfy(pathCharacters.contains),
+        guard !project.isEmpty, project != ".", project != "..", project.utf8.count <= 128, project.utf8.allSatisfy(pathCharacters.contains),
               !packageName.isEmpty, packageName.utf8.count <= 255, packageName.utf8.allSatisfy(packageCharacters.contains) else {
             throw FCMError.invalidConfiguration
         }

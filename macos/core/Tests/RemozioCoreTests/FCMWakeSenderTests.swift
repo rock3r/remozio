@@ -42,7 +42,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
     }
 
     func testRejectsInvalidConfigurationTokensAndWakeBounds() throws {
-        for project in ["", "a/b", "../outside", "evil?key=1", "evil#fragment", "https://evil.test", String(repeating: "a", count: 129)] {
+        for project in ["", ".", "..", "a/b", "../outside", "evil?key=1", "evil#fragment", "https://evil.test", String(repeating: "a", count: 129)] {
             XCTAssertThrowsError(try sender(project))
         }
         for timeout in [0.0, -1, .infinity, .nan, 121] {
