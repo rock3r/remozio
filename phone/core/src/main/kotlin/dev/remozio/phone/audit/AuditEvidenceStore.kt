@@ -20,6 +20,7 @@ class StoredAuditProof internal constructor(
     val canonicalBody: CborValue.Bytes,
     val signature: CborValue.Bytes,
     conflicts: Set<AuditEvidenceConflict>,
+    val historyStatus: AuditHistoryStatus? = null,
 ) {
     val conflicts: Set<AuditEvidenceConflict> = Collections.unmodifiableSet(LinkedHashSet(conflicts))
 }
@@ -38,7 +39,7 @@ class AuditEpochEvidence internal constructor(
     val records: List<AuditEventMetadata> = Collections.unmodifiableList(ArrayList(records))
     val gaps: List<AuditHistoryGap> = Collections.unmodifiableList(ArrayList(gaps))
 }
-class AuditEvidenceSnapshot internal constructor(epochs: List<AuditEpochEvidence>, proofs: List<StoredAuditProof>, val storedBytes: Long) {
+class AuditEvidenceSnapshot internal constructor(val scope: AuditHistoryScope, epochs: List<AuditEpochEvidence>, proofs: List<StoredAuditProof>, val storedBytes: Long) {
     val epochs: List<AuditEpochEvidence> = Collections.unmodifiableList(ArrayList(epochs))
     val proofs: List<StoredAuditProof> = Collections.unmodifiableList(ArrayList(proofs))
 }
@@ -113,6 +114,7 @@ class AuditEvidenceStore(
             entry.retainedAfter = maxOf(entry.retainedAfter, retained)
             return entry
         }
+        var historyStatus: AuditHistoryStatus? = null
         when (kind) {
             AuditEvidenceKind.PAGE -> {
                 val batch = AuditBatch.decode(body, bodyLimits, protocolLimits.record, protocolLimits.maximumRecords)
@@ -131,6 +133,7 @@ class AuditEvidenceStore(
             }
             AuditEvidenceKind.HISTORY_STATUS -> {
                 val status = AuditHistoryStatus.decode(body, bodyLimits, protocolLimits.descriptor)
+                historyStatus = status
                 scoped(status.macID, status.accountID)
                 epoch(status.current.epoch, status.current.generation, status.currentHead, status.currentRetainedAfter, status.current)
                 status.queried?.let {
@@ -143,7 +146,7 @@ class AuditEvidenceStore(
         if (proofs.size >= capacity.maximumProofs || proofBytes > capacity.maximumBytes - storedBytes ||
             (conflicts.isEmpty() && (candidate.size > capacity.maximumEpochs ||
                 candidate.values.sumOf { it.records.size.toLong() } > capacity.maximumRecords))) reject(AuditEvidenceRejection.CAPACITY)
-        proofs[proofID] = StoredAuditProof(kind, CborValue.Bytes(body), CborValue.Bytes(signed), conflicts)
+        proofs[proofID] = StoredAuditProof(kind, CborValue.Bytes(body), CborValue.Bytes(signed), conflicts, historyStatus)
         storedBytes += proofBytes
         if (conflicts.isNotEmpty()) return AuditEvidenceAcceptance.CONFLICT
         epochs = candidate
@@ -173,7 +176,7 @@ class AuditEvidenceStore(
     }
 
     @Synchronized
-    fun snapshot(): AuditEvidenceSnapshot = AuditEvidenceSnapshot(epochs.map { (id, entry) ->
+    fun snapshot(): AuditEvidenceSnapshot = AuditEvidenceSnapshot(AuditHistoryScope(mac, account), epochs.map { (id, entry) ->
         val ordered = entry.records.toSortedMap()
         val gaps = ArrayList<AuditHistoryGap>()
         fun gap(after: ULong, through: ULong) {
