@@ -37,3 +37,5 @@ Inspection state stays in composition memory and is not saved across process dea
 Five local JVM tests cover empty values, escaped syntax, controls, bidi, malformed UTF-8, Unicode spelling, full-byte round trips, and long values. Android unit tests now run in CI and the local PR gate. Build/lint checks do not establish layout, TalkBack reading order, large-font behavior, or sheet/dialog usability; those remain for the interactive Pixel session.
 
 The layout uses native Material 3 components and their standard motion. There are no custom animations. Its breakpoint follows [window information](https://developer.android.com/reference/kotlin/androidx/compose/ui/platform/WindowInfo); the sheet uses [ModalBottomSheet](https://developer.android.com/develop/ui/compose/quick-guides/content/create-bottom-sheet).
+
+The [status tracker](status-tracking.md) verifies signed updates against retained request bindings and preserves revision, outcome, and timing continuity. It remains separate from live transport and decision controls.
