@@ -7,7 +7,7 @@ The native app targets Android 17 (API 37) and later. Supported-device validatio
 Use JDK 21 and an Android SDK with `platforms;android-37.0` and `build-tools;37.0.0`. Set `ANDROID_HOME` to that SDK, then run:
 
 ```sh
-./gradlew :android-app:assembleDebug :android-app:lintDebug
+./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
 ```
 
 The debug APK is `android/app/build/outputs/apk/debug/android-app-debug.apk`. Its package ID is `dev.remozio.android.debug`. Production uses `dev.remozio.android` and needs a separately provisioned signing identity. This change does not configure production signing or update distribution.
@@ -23,3 +23,17 @@ The app requests no device permissions. Backup is disabled. Explicit rules exclu
 Build and lint checks do not prove device behavior. Installation, accessibility, launch appearance, animation settings, biometrics, and background behavior need the planned Pixel test session. No device is installed or contacted by these build tasks.
 
 References: [Android 17 setup](https://developer.android.com/about/versions/17/setup-sdk), [AGP 9.3](https://developer.android.com/build/releases/agp-9-3-0-release-notes), [Material 3 releases](https://developer.android.com/jetpack/androidx/releases/compose-material3), and [Android UX motion guidance](https://github.com/rock3r/android-ux-skills).
+
+## Command inspection
+
+The debug build has a **Preview a sample command** entry. It opens an invented, read-only capture in a bottom sheet below 600 dp window width, or a bounded dialog on wider windows. The sample is labelled and has no approval controls. Its fixture and entry are absent from the release source set.
+
+The reusable inspection component renders the complete typed command capture. Invocation, target credentials, environment provenance, input, requester signing status, ancestry limits, and caller explanation have separate sections. Labels come from application resources. Request values cannot introduce UI labels or clickable links.
+
+Values use quoted display notation, not shell syntax. Control and format characters, bidi controls, line separators, and non-ASCII spaces are escaped. Malformed UTF-8 becomes explicit byte escapes instead of replacement characters. A toggle shows every original byte in hex, including empty values and distinct Unicode spellings. Neither view truncates values. Ordinary Unicode remains readable; this does not eliminate Unicode glyph confusables.
+
+Inspection state stays in composition memory and is not saved across process death. Closing details does not imply denial or cancellation. Live Mac/account identity, request age and expiry, authenticated state, and bound decision controls still need integration. The component alone establishes no trust in a capture.
+
+Five local JVM tests cover empty values, escaped syntax, controls, bidi, malformed UTF-8, Unicode spelling, full-byte round trips, and long values. Android unit tests now run in CI and the local PR gate. Build/lint checks do not establish layout, TalkBack reading order, large-font behavior, or sheet/dialog usability; those remain for the interactive Pixel session.
+
+The layout uses native Material 3 components and their standard motion. There are no custom animations. Its breakpoint follows [window information](https://developer.android.com/reference/kotlin/androidx/compose/ui/platform/WindowInfo); the sheet uses [ModalBottomSheet](https://developer.android.com/develop/ui/compose/quick-guides/content/create-bottom-sheet).

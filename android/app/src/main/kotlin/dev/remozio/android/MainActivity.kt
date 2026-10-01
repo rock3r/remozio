@@ -74,6 +74,7 @@ private fun EmptyMacsScreen() {
                         Text(stringResource(R.string.pairing_empty_description), style = MaterialTheme.typography.bodyLarge)
                     }
                 }
+                DevelopmentTools()
             }
         }
     }
