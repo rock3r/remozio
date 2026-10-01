@@ -34,7 +34,7 @@ Values use quoted display notation, not shell syntax. Control and format charact
 
 Inspection state stays in composition memory and is not saved across process death. Closing details does not imply denial or cancellation. The authenticated session adapter supplies status and timing. Live enrollment identity, transport, and bound decision controls still need integration. The component alone establishes no trust in a capture.
 
-Five local JVM tests cover empty values, escaped syntax, controls, bidi, malformed UTF-8, Unicode spelling, full-byte round trips, and long values. Android unit tests now run in CI and the local PR gate. Build/lint checks do not establish layout, TalkBack reading order, large-font behavior, or sheet/dialog usability; those remain for the interactive Pixel session.
+Five Android-module JVM tests cover empty values, escaped syntax, controls, bidi, malformed UTF-8, Unicode spelling, full-byte round trips, and long values. Android unit tests now run in CI and the local PR gate. Build/lint checks do not establish layout, TalkBack reading order, large-font behavior, or sheet/dialog usability; those remain for the interactive Pixel session.
 
 The layout uses native Material 3 components and their standard motion. There are no custom animations. Its breakpoint follows [window information](https://developer.android.com/reference/kotlin/androidx/compose/ui/platform/WindowInfo); the sheet uses [ModalBottomSheet](https://developer.android.com/develop/ui/compose/quick-guides/content/create-bottom-sheet).
 
@@ -62,6 +62,8 @@ A valid terminal status clears the owned capture before publishing its revision.
 
 `CommandRequestInspection` connects that owner to the inspector. It samples `SystemClock.elapsedRealtime`, which includes deep sleep, once per second while the host lifecycle is started. Accepted status updates trigger an immediate refresh. The lifecycle cancels the timer and clears its UI snapshot when the host stops. The session remains in memory for the caller to own. Its identity keeps the sheet stable when the first status arrives.
 
-The epoch is process-local, like the session. Neither survives process death. The future enrollment owner must discard sessions when keys or enrollment change. The adapter is not yet connected to the launcher or a transport; the debug scenes remain static. Seven JVM tests cover signed input, enrollment binding, capability checks, capture cleanup, and replay behavior. Device lifecycle, sleep, and layout checks remain deferred.
+The epoch is process-local, like the session. Neither survives process death. The future enrollment owner must discard sessions when keys or enrollment change. The adapter is not yet connected to the launcher or a transport; the debug scenes remain static. Seven phone-core JVM tests cover signed input, enrollment binding, capability checks, capture cleanup, and replay behavior. Device lifecycle, sleep, and layout checks remain deferred.
 
 Clock and lifecycle behavior follow the [SystemClock contract](https://developer.android.com/reference/android/os/SystemClock) and [lifecycle coroutine guidance](https://developer.android.com/topic/libraries/architecture/coroutines).
+
+The platform-independent request owner and tracker live in [phone-core](../phone/core/README.md). Android supplies lifecycle and elapsed-clock integration. Its shared core also runs against the native Swift peer in the device-free [approval-flow experiment](../docs/experiments/approval-flow.md).

@@ -1,5 +1,8 @@
 package dev.remozio.android
 
+import dev.remozio.phone.requests.RequestTiming
+import dev.remozio.phone.requests.TrackedRequestStatus
+
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -11,8 +14,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import dev.remozio.android.requests.CommandInspection
-import dev.remozio.android.requests.RequestTiming
-import dev.remozio.android.requests.TrackedRequestStatus
 import dev.remozio.protocol.CborLimits
 import dev.remozio.protocol.CommandCapture
 import dev.remozio.protocol.RequestPhase

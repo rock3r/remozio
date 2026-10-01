@@ -1,5 +1,7 @@
 package dev.remozio.android.requests
 
+import dev.remozio.phone.requests.TrackedRequestStatus
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
