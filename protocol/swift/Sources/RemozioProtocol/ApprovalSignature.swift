@@ -15,9 +15,6 @@ public enum ApprovalSignature {
     ) throws -> Bool {
         let input = try SigningInput.make(wireVersion: wireVersion, messageType: messageType, purpose: purpose,
             canonicalPayload: canonicalPayload, payloadLimits: payloadLimits, inputLimits: inputLimits)
-        guard signature.count == 64, publicKey.count == 65, publicKey.first == 4 else { return false }
-        guard let key = try? P256.Signing.PublicKey(x963Representation: publicKey),
-              let value = try? P256.Signing.ECDSASignature(rawRepresentation: signature) else { return false }
-        return key.isValidSignature(value, for: input)
+        return P256Verification.verify(signature: signature, publicKey: publicKey, input: input)
     }
 }

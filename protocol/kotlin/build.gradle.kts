@@ -10,6 +10,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    val auditBatchVectors = rootProject.layout.projectDirectory.file("protocol/vectors/audit-batches-v1.json")
+    inputs.file(auditBatchVectors)
+    systemProperty("remozio.auditBatchVectors", auditBatchVectors.asFile.absolutePath)
     val auditVectors = rootProject.layout.projectDirectory.file("protocol/vectors/audit-metadata-v1.json")
     inputs.file(auditVectors)
     systemProperty("remozio.auditVectors", auditVectors.asFile.absolutePath)
