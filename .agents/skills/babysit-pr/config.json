@@ -1,9 +1,10 @@
 {
   "version": 1,
-  "local_gate": "./scripts/check.sh",
+  "local_gate": "./scripts/check.sh && ./gradlew :protocol-kotlin:test",
   "required_checks": [
     "Python checks",
-    "Mac build"
+    "Mac build",
+    "Kotlin protocol"
   ],
   "retry_eligible_workflow_keywords": [],
   "codex": {

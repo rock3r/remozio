@@ -1,6 +1,6 @@
 # Protocol foundations
 
-This directory contains the deterministic encoding subset and shared conformance vectors. The Swift library is the first implementation. Kotlin conformance, signed schemas, negotiation, action policy, and durable consumption are separate deliverables. A parsed value does not authorize an action.
+This directory contains the deterministic encoding subset and shared conformance vectors. Swift and Kotlin implementations use the same vectors. Signed schemas, negotiation, action policy, and durable consumption are separate deliverables. A parsed value does not authorize an action.
 
 ## Deterministic CBOR subset 1
 
@@ -35,10 +35,17 @@ The test harness uses 1 MiB, depth 32, and 65,536 items. These are test budgets 
 
 ```sh
 swift test --package-path protocol/swift --triple arm64-apple-macosx26.0
+./gradlew :protocol-kotlin:test
 ```
 
-The macOS local gate and CI run these tests. The encoding subset number is not an authenticated wire version. Release compatibility claims wait for the signed contract and cross-language conformance.
+The macOS gate runs the Swift tests. The Kotlin Gradle task and its required CI job run the Kotlin tests on JDK 21. The Kotlin module has no Android device or UI dependency. Its value objects copy mutable input collections and byte arrays. Its encoder rejects unpaired UTF-16 surrogates instead of replacing them. The encoding subset number is not an authenticated wire version. Both codecs currently pass the same byte fixtures. Release compatibility claims still wait for the signed contract and authenticated negotiation.
 
 ## Next security layers
 
 Message schemas must reject unknown critical fields, enums, purposes, and versions. Declared optional fields must remain in the signed bytes. Verifiers must bind both the immutable request and the exact action contract, with separate signature domains and enrolled key purposes. Encoding success alone must never select a key class, infer consent, or permit dispatch.
+
+## Kotlin build inputs
+
+The build pins Kotlin 2.4.20 and Gradle 9.7.0, within the [documented compatibility range](https://kotlinlang.org/docs/gradle-configure-project.html). Install JDK 21 before running the wrapper. JSON support is a test-only dependency for reading the shared fixtures; production CBOR has no serialization dependency.
+
+The wrapper scripts and JAR come from the Gradle `v9.7.0` tag. The JAR matches the [published wrapper checksum](https://services.gradle.org/distributions/gradle-9.7.0-wrapper.jar.sha256): `7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d`. CI checks this before executing it. The wrapper properties also pin the distribution checksum. Update these values together when upgrading Gradle.
