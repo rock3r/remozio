@@ -28,12 +28,10 @@ class DecisionPayload(
     val phoneID: ByteArray get() = bytes[5].copyBytes()
     val keyID: ByteArray get() = bytes[6].copyBytes()
 
-
-
     fun encode(limits: CborLimits): ByteArray {
         val fields = mutableMapOf<ULong, CborValue>(0uL to CborValue.Unsigned(1u))
         bytes.forEachIndexed { index, value -> fields[(index + 1).toULong()] = value }
-        fields[8u] = encodeAction(action)
+        fields[8u] = ActionWire.encode(action)
         return DeterministicCbor.encode(CborValue.Fields(fields), limits)
     }
 
@@ -49,42 +47,10 @@ class DecisionPayload(
                 decodeAction(fields.getValue(8u)))
         }
 
-        private val choices = mapOf(
-            0uL to ActionChoice.DECLINE, 1uL to ActionChoice.CANCEL_TARGET, 2uL to ActionChoice.EXECUTE,
-            3uL to ActionChoice.APPROVE_ACCESS, 4uL to ActionChoice.UNLOCK_VAULT,
-            5uL to ActionChoice.ALLOW_ONCE, 6uL to ActionChoice.DENY_ONCE,
-            7uL to ActionChoice.ALLOW_RULE, 8uL to ActionChoice.DENY_RULE, 9uL to ActionChoice.REMOVE_RULE,
-        )
-
-        private fun encodeAction(action: CapturedAction): CborValue {
-            val fields = mutableMapOf<ULong, CborValue>(0uL to CborValue.Unsigned(choices.entries.single { it.value == action.choice }.key))
-            val tag = when (val scope = action.scope) {
-                ActionScope.CurrentRequest -> 0uL
-                ActionScope.Session -> 1uL
-                is ActionScope.Timed -> { fields[2u] = CborValue.Unsigned(scope.seconds); 2uL }
-                ActionScope.Forever -> 3uL
-            }
-            fields[1u] = CborValue.Unsigned(tag)
-            return CborValue.Fields(fields)
-        }
-
-        private fun decodeAction(value: CborValue): CapturedAction {
-            val fields = (value as? CborValue.Fields)?.values ?: fail(DecisionPayloadFailure.INVALID_ACTION)
-            val choice = choices[(fields[0u] as? CborValue.Unsigned)?.value] ?: fail(DecisionPayloadFailure.INVALID_ACTION)
-            val tag = (fields[1u] as? CborValue.Unsigned)?.value ?: fail(DecisionPayloadFailure.INVALID_ACTION)
-            val scope = when (tag) {
-                0uL -> ActionScope.CurrentRequest
-                1uL -> ActionScope.Session
-                2uL -> {
-                    val seconds = (fields[2u] as? CborValue.Unsigned)?.value ?: fail(DecisionPayloadFailure.INVALID_ACTION)
-                    ensure(seconds > 0uL, DecisionPayloadFailure.INVALID_ACTION)
-                    ActionScope.Timed(seconds)
-                }
-                3uL -> ActionScope.Forever
-                else -> fail(DecisionPayloadFailure.INVALID_ACTION)
-            }
-            ensure(fields.keys == if (tag == 2uL) setOf(0uL, 1uL, 2uL) else setOf(0uL, 1uL), DecisionPayloadFailure.INVALID_ACTION)
-            return CapturedAction(choice, scope)
+        private fun decodeAction(value: CborValue): CapturedAction = try {
+            ActionWire.decode(value)
+        } catch (_: ActionWireException) {
+            fail(DecisionPayloadFailure.INVALID_ACTION)
         }
 
         private fun ensure(condition: Boolean, reason: DecisionPayloadFailure) { if (!condition) fail(reason) }

@@ -1,6 +1,6 @@
 # Protocol foundations
 
-This directory contains the deterministic encoding subset and shared conformance vectors. Swift and Kotlin implementations use the same vectors. The [action policy](action-policy.md) and [compatibility policy](compatibility-policy.md) also have Swift and Kotlin implementations. Signed schemas, authenticated negotiation, and durable consumption are separate deliverables. A parsed value does not authorize an action.
+This directory contains the deterministic encoding subset and shared conformance vectors. Swift and Kotlin implementations use the same vectors. The [action policy](action-policy.md) and [compatibility policy](compatibility-policy.md) also have Swift and Kotlin implementations. Per-kind capture schemas, authenticated negotiation, and durable consumption are separate deliverables. A parsed value does not authorize an action.
 
 ## Deterministic CBOR subset 1
 
@@ -57,3 +57,5 @@ The [signing input](signing-input.md) separates approval messages by protocol, w
 The [native signature verifiers](approval-signatures.md) implement the P-256/SHA-256 wire representation.
 
 The [decision payload](decision-payload.md) defines strict typed decision claims. Parsing remains separate from authority validation and consumption.
+
+The [issued-request wrapper](issued-request.md) binds capture bytes and metadata, verifies capture digests, and requires explicit local contract support.
