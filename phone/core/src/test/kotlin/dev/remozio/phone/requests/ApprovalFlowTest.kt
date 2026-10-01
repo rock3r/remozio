@@ -2,6 +2,9 @@ package dev.remozio.phone.requests
 
 import dev.remozio.protocol.*
 import java.io.Closeable
+import java.io.EOFException
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
 import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -43,6 +46,9 @@ class ApprovalFlowTest {
             }
             peer.send(peer.decision(first))
             assertEquals("unavailableRequest", peer.receive().text("rejection"))
+            val committed = peer.snapshot()
+            assertEquals("1", committed.text("head"))
+            assertContentEquals(id(first), committed.bytes("winner"))
             peer.send(mapOf("command" to "loseOutcome"))
             val terminal = peer.receive()
             for (session in listOf(a, b)) {
@@ -104,16 +110,157 @@ class ApprovalFlowTest {
         assertEquals(RequestPhase.AUTHORIZED, session.snapshot(instant()).status!!.status.phase)
     }
 
+    @Test fun rolledBackConsumptionNeverPublishesAcceptedAndAnotherPhoneCanWin() = withPeer { peer ->
+        val session = peer.session()
+        peer.apply(session, peer.initial)
+        peer.send(mapOf("command" to "failNextConsumption"))
+        assertEquals("consumptionFailureArmed", peer.receive().text("control"))
+        peer.send(peer.decision(5))
+        val failure = peer.receive()
+        assertEquals("injectedPrecommitFailure", failure.text("rejection"))
+        assertFalse("status" in failure || "decision" in failure)
+        val rolledBack = peer.snapshot()
+        assertEquals("false", rolledBack.text("consumed"))
+        assertEquals("0", rolledBack.text("head"))
+        assertEquals("true", rolledBack.text("retainedCapture"))
+        assertEquals(RequestPhase.PRESENTED, session.snapshot(instant()).status!!.status.phase)
+        peer.send(peer.decision(6))
+        val accepted = peer.receive()
+        assertEquals("accepted", accepted.text("decision"))
+        peer.apply(session, accepted, 110u)
+        assertContentEquals(id(6), session.snapshot(instant(110u)).status!!.status.decisionPhoneID)
+        val committed = peer.snapshot()
+        assertEquals("1", committed.text("head"))
+        val event = AuditEventMetadata.decode(committed.bytes("consumptionEvent"), limits)
+        assertEquals(AuditEventKind.CONSUMED, event.kind)
+        assertEquals(AuditOutcome.ACCEPTED, event.outcome)
+        assertContentEquals(id(6), event.decisionPhoneID)
+    }
+
+    @Test fun rolledBackOutcomeNeverPublishesUnknownOrClearsTheCapture() = withPeer { peer ->
+        val session = peer.session()
+        peer.apply(session, peer.initial)
+        peer.send(peer.decision(5))
+        peer.apply(session, peer.receive(), 110u)
+        peer.send(mapOf("command" to "failNextOutcome"))
+        assertEquals("outcomeFailureArmed", peer.receive().text("control"))
+        peer.send(mapOf("command" to "loseOutcome"))
+        val failure = peer.receive()
+        assertEquals("injectedPrecommitFailure", failure.text("rejection"))
+        assertFalse("status" in failure)
+        val before = peer.snapshot()
+        assertEquals("authorized", before.text("phase"))
+        assertEquals("0", before.text("outcomeRevision"))
+        assertEquals("1", before.text("head"))
+        assertEquals("true", before.text("retainedCapture"))
+        assertNotNull(session.snapshot(instant(110u)).capture)
+        peer.send(mapOf("command" to "loseOutcome"))
+        peer.apply(session, peer.receive(), 120u)
+        val after = peer.snapshot()
+        assertEquals("unknown", after.text("phase"))
+        assertEquals("2", after.text("head"))
+        assertEquals("false", after.text("retainedCapture"))
+        assertNull(session.snapshot(instant(120u)).capture)
+    }
+
+    @Test fun reopenedJournalPreservesWinnerAndReportsUnknownInAFreshEpoch() {
+        for (attempted in listOf(false, true)) withPeer { peer ->
+            val session = peer.session()
+            peer.apply(session, peer.initial)
+            peer.send(peer.decision(6))
+            val accepted = peer.receive()
+            peer.apply(session, accepted, 110u)
+            if (attempted) {
+                peer.send(mapOf("command" to "beginDispatch"))
+                peer.apply(session, peer.receive(), 120u)
+            }
+            val before = peer.snapshot()
+            peer.send(mapOf("command" to "reopenJournal"))
+            peer.apply(session, peer.receive(), 130u)
+            val status = session.snapshot(instant(130u)).status!!.status
+            assertEquals(RequestPhase.UNKNOWN, status.phase)
+            assertEquals(RequestStatusReason.AUTHORITY_RESTARTED, status.reason)
+            assertContentEquals(id(6), status.decisionPhoneID)
+            assertNull(session.snapshot(instant(130u)).capture)
+            val after = peer.snapshot()
+            assertNotEquals(before.text("epoch"), after.text("epoch"))
+            assertEquals("1", after.text("head"))
+            assertEquals(if (attempted) "2" else "1", after.text("outcomeRevision"))
+            assertEquals(before.text("consumptionEvent"), after.text("consumptionEvent"))
+            assertEquals("false", after.text("retainedCapture"))
+            val event = AuditEventMetadata.decode(after.bytes("outcomeEvent"), limits)
+            assertEquals(AuditEventKind.UNKNOWN_OUTCOME, event.kind)
+            assertEquals(AuditReason.AUTHORITY_RESTARTED, event.reason)
+            assertContentEquals(after.bytes("epoch"), event.journalEpoch)
+            peer.send(peer.decision(5))
+            assertEquals("unavailableRequest", peer.receive().text("rejection"))
+            assertEquals(StatusAcceptance.OLDER, peer.apply(session, accepted, 140u))
+            peer.send(mapOf("command" to "reopenJournal"))
+            peer.apply(session, peer.receive(), 150u)
+            val again = peer.snapshot()
+            assertEquals(after.text("outcomeEvent"), again.text("outcomeEvent"))
+            assertEquals("0", again.text("head"))
+            assertNull(session.snapshot(instant(150u)).capture)
+        }
+    }
+
+    @Test fun reopeningPendingJournalCancelsRatherThanResurrectsTheCapture() = withPeer { peer ->
+        val session = peer.session()
+        peer.apply(session, peer.initial)
+        peer.send(mapOf("command" to "reopenJournal"))
+        peer.apply(session, peer.receive(), 110u)
+        val status = session.snapshot(instant(110u)).status!!.status
+        assertEquals(RequestPhase.CANCELLED, status.phase)
+        assertEquals(RequestStatusReason.AUTHORITY_RESTARTED, status.reason)
+        assertNull(status.decisionPhoneID)
+        assertNull(session.snapshot(instant(110u)).capture)
+        val snapshot = peer.snapshot()
+        assertEquals("false", snapshot.text("consumed"))
+        assertEquals("false", snapshot.text("retainedCapture"))
+        assertEquals("0", snapshot.text("head"))
+        peer.send(peer.decision(5))
+        assertEquals("unavailableRequest", peer.receive().text("rejection"))
+    }
+
+    @Test fun verifiedSyntheticOutcomeSurvivesReopenWithoutDowngradingToUnknown() = withPeer { peer ->
+        val session = peer.session()
+        peer.apply(session, peer.initial)
+        peer.send(peer.decision(5))
+        peer.apply(session, peer.receive(), 110u)
+        peer.send(mapOf("command" to "beginDispatch"))
+        peer.apply(session, peer.receive(), 120u)
+        assertEquals(RequestPhase.EXECUTING, session.snapshot(instant(120u)).status!!.status.phase)
+        peer.send(mapOf("command" to "verifySuccess"))
+        peer.apply(session, peer.receive(), 130u)
+        assertEquals(RequestPhase.SUCCEEDED, session.snapshot(instant(130u)).status!!.status.phase)
+        assertNull(session.snapshot(instant(130u)).capture)
+        val before = peer.snapshot()
+        assertEquals("3", before.text("head"))
+        peer.send(mapOf("command" to "reopenJournal"))
+        peer.apply(session, peer.receive(), 140u)
+        val after = peer.snapshot()
+        assertEquals("succeeded", after.text("phase"))
+        assertEquals(before.text("outcomeEvent"), after.text("outcomeEvent"))
+        assertEquals("false", after.text("retainedCapture"))
+        assertEquals("0", after.text("head"))
+        assertEquals(RequestPhase.SUCCEEDED, session.snapshot(instant(140u)).status!!.status.phase)
+    }
+
     private fun withPeer(block: (Peer) -> Unit) = Peer().use { peer -> peer.start(); block(peer) }
 
     private inner class Peer : Closeable {
         private val mac = newKey()
         private val a = newKey()
         private val b = newKey()
-        private val process = ProcessBuilder(
+        private val directory = Files.createTempDirectory("remozio-approval-flow-",
+            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        private val process = try { ProcessBuilder(
             checkNotNull(System.getProperty("remozio.test.swiftPeer")),
-            checkNotNull(System.getProperty("remozio.test.commandCapture")),
-        ).redirectErrorStream(true).start()
+            checkNotNull(System.getProperty("remozio.test.commandCapture")), directory.toString(),
+        ).redirectErrorStream(true).start() } catch (failure: Throwable) {
+            try { Files.deleteIfExists(directory) } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
         private val input = process.outputStream.bufferedWriter()
         private val output = process.inputStream.bufferedReader()
         private val reader = Executors.newSingleThreadExecutor()
@@ -156,10 +303,22 @@ class ApprovalFlowTest {
             input.flush()
         }
 
+        private fun readFrame(): String {
+            val frame = StringBuilder()
+            while (true) {
+                val char = output.read()
+                if (char < 0) throw EOFException("Synthetic approval peer closed its output")
+                if (char == 10) return frame.toString()
+                check(frame.length < 140_000) { "Synthetic approval response exceeded its bound" }
+                frame.append(char.toChar())
+            }
+        }
+
+        fun snapshot(): JsonObject { send(mapOf("command" to "journalSnapshot")); return receive() }
+
         fun receive(): JsonObject {
-            val line = try { reader.submit<String> { output.readLine() }.get(10, TimeUnit.SECONDS) }
+            val line = try { reader.submit<String> { readFrame() }.get(10, TimeUnit.SECONDS) }
                 catch (failure: Exception) { process.destroyForcibly(); throw failure }
-            check(line != null && line.length <= 140_000) { "Synthetic peer returned no bounded response" }
             return Json.parseToJsonElement(line).jsonObject
         }
 
@@ -169,9 +328,16 @@ class ApprovalFlowTest {
                 input.close()
                 if (process.waitFor(3, TimeUnit.SECONDS)) exitStatus = process.exitValue()
             } finally {
-                process.destroyForcibly().waitFor(3, TimeUnit.SECONDS)
-                reader.shutdownNow()
-                output.close()
+                try {
+                    check(process.destroyForcibly().waitFor(3, TimeUnit.SECONDS)) { "Synthetic peer remains alive; fixture retained at $directory" }
+                } finally {
+                    reader.shutdownNow()
+                    try { output.close() } finally {
+                        if (!process.isAlive) Files.walk(directory).use { paths ->
+                            paths.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+                        }
+                    }
+                }
             }
             check(exitStatus == 0) { "Synthetic peer did not exit cleanly" }
         }
