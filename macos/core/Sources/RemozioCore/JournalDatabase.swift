@@ -1,0 +1,239 @@
+import Foundation
+import RemozioProtocol
+import SQLite3
+
+public enum JournalDatabaseError: Error, Equatable {
+    case invalidConfiguration, incompatibleStore, wrongScope, closed, unavailable, transactionActive, expiredTransaction, readOnly, transactionFailed
+    case storage(Int32)
+}
+
+/// One Mac/account's journal connection. The root authority owns this object and serializes its calls.
+/// This storage layer has no admission, consumption, checkpoint or dispatch authority.
+public final class JournalDatabase {
+    private static let applicationID: Int64 = 0x524D5A4F
+    private let lease: ProtectedJournalLease
+    private var db: OpaquePointer?
+    private var tables: AuditJournalTables?
+    private var active: UUID?
+    private var unavailable = false
+
+    /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
+    public static func open(directoryPath: String, macID: Data, accountID: Data,
+                            recordLimits: CBORLimits, descriptorLimits: CBORLimits,
+                            busyMilliseconds: UInt32, initialize: Bool = false) throws -> JournalDatabase {
+        try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
+                            recordLimits: recordLimits, descriptorLimits: descriptorLimits,
+                            busyMilliseconds: busyMilliseconds, initialize: initialize)
+    }
+
+    /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
+    init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
+         recordLimits: CBORLimits, descriptorLimits: CBORLimits, busyMilliseconds: UInt32, initialize: Bool) throws {
+        self.lease = lease
+        do {
+            guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
+                  max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096 else {
+                throw JournalDatabaseError.invalidConfiguration
+            }
+            try lease.validate()
+            var connection: OpaquePointer?
+            let rc = sqlite3_open_v2(lease.databasePath, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+            db = connection
+            guard rc == SQLITE_OK, let connection else { throw JournalDatabaseError.storage(rc) }
+            try lease.validate()
+            guard sqlite3_busy_timeout(connection, Int32(busyMilliseconds)) == SQLITE_OK,
+                  sqlite3_compileoption_used("OMIT_LOAD_EXTENSION") == 1 else { throw JournalDatabaseError.invalidConfiguration }
+            _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
+            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(recordLimits.maxBytes, descriptorLimits.maxBytes) + 4096))
+            try exec("PRAGMA trusted_schema=OFF")
+            try exec("PRAGMA foreign_keys=ON")
+            if initialize { try requireEmptyStore() }
+            else { try validateIdentity(macID: macID, accountID: accountID) }
+            try exec("PRAGMA journal_mode=DELETE")
+            try exec("PRAGMA synchronous=EXTRA")
+            try exec("PRAGMA fullfsync=ON")
+            guard try text("PRAGMA journal_mode") == "delete", try integer("PRAGMA synchronous") == 3,
+                  try integer("PRAGMA fullfsync") == 1, try integer("PRAGMA foreign_keys") == 1,
+                  try integer("PRAGMA trusted_schema") == 0 else { throw JournalDatabaseError.invalidConfiguration }
+            let tables = try AuditJournalTables(connection: connection, macID: macID, accountID: accountID,
+                                                 recordLimits: recordLimits, descriptorLimits: descriptorLimits)
+            self.tables = tables
+            if initialize { try create(macID: macID, accountID: accountID, tables: tables) }
+            try validateIdentity(macID: macID, accountID: accountID)
+            try lease.validate()
+        } catch {
+            shutdown()
+            throw error
+        }
+    }
+
+    deinit { shutdown() }
+
+    public func read<T>(_ body: (JournalTransaction) throws -> T) throws -> T { try transaction(write: false, body) }
+    public func write<T>(_ body: (JournalTransaction) throws -> T) throws -> T { try transaction(write: true, body) }
+
+    public func close() throws {
+        guard active == nil else { throw JournalDatabaseError.transactionActive }
+        shutdown()
+    }
+
+    private func transaction<T>(write: Bool, _ body: (JournalTransaction) throws -> T) throws -> T {
+        guard db != nil else { throw JournalDatabaseError.closed }
+        guard !unavailable else { throw JournalDatabaseError.unavailable }
+        guard active == nil else { throw JournalDatabaseError.transactionActive }
+        try validateLease()
+        try exec(write ? "BEGIN IMMEDIATE" : "BEGIN")
+        let token = UUID()
+        active = token
+        defer { active = nil }
+        let scope = JournalTransaction(owner: self, token: token, writable: write)
+        do {
+            let value = try body(scope)
+            guard !scope.failed else { throw JournalDatabaseError.transactionFailed }
+            try validateLease()
+            do { try exec("COMMIT") }
+            catch { unavailable = true; throw error }
+            try validateLease()
+            return value
+        } catch {
+            if scope.createdEpoch || scope.headMismatch { unavailable = true }
+            if let db, sqlite3_get_autocommit(db) == 0 {
+                if sqlite3_exec(db, "ROLLBACK", nil, nil, nil) != SQLITE_OK { unavailable = true }
+            } else if write { unavailable = true }
+            throw error
+        }
+    }
+
+    fileprivate func access(_ token: UUID) throws -> AuditJournalTables {
+        guard db != nil, active == token, !unavailable, let tables else { throw JournalDatabaseError.expiredTransaction }
+        try validateLease()
+        return tables
+    }
+
+    private func validateLease() throws {
+        do { try lease.validate() }
+        catch { unavailable = true; throw error }
+    }
+
+    private func create(macID: Data, accountID: Data, tables: AuditJournalTables) throws {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            try requireEmptyStore()
+            try exec("CREATE TABLE main.journal_identity_v1(id INTEGER PRIMARY KEY CHECK(id=1), mac BLOB NOT NULL CHECK(length(mac)=16), account BLOB NOT NULL CHECK(length(account)=16)) STRICT")
+            try statement("INSERT INTO main.journal_identity_v1 VALUES(1,?,?)") { stmt in
+                for (index, value) in [macID, accountID].enumerated() {
+                    let rc = value.withUnsafeBytes { sqlite3_bind_blob(stmt, Int32(index + 1), $0.baseAddress, Int32($0.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+                    guard rc == SQLITE_OK else { throw JournalDatabaseError.storage(rc) }
+                }
+                guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) }
+            }
+            try tables.createSchema()
+            try exec("PRAGMA application_id=\(Self.applicationID)")
+            try exec("PRAGMA user_version=1")
+            try lease.validate()
+            try exec("COMMIT")
+        } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
+    }
+
+    private func requireEmptyStore() throws {
+        guard try integer("PRAGMA application_id") == 0, try integer("PRAGMA user_version") == 0,
+              try integer("SELECT count(*) FROM main.sqlite_schema WHERE name NOT LIKE 'sqlite_%'") == 0 else {
+            throw JournalDatabaseError.incompatibleStore
+        }
+    }
+
+    private func validateIdentity(macID: Data, accountID: Data) throws {
+        guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == 1 else {
+            throw JournalDatabaseError.incompatibleStore
+        }
+        try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
+            guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_int64(stmt, 0) == 1 else { throw JournalDatabaseError.incompatibleStore }
+            for (column, value) in [(Int32(1), macID), (Int32(2), accountID)] {
+                guard sqlite3_column_type(stmt, column) == SQLITE_BLOB, sqlite3_column_bytes(stmt, column) == 16,
+                      let pointer = sqlite3_column_blob(stmt, column) else { throw JournalDatabaseError.incompatibleStore }
+                guard Data(bytes: pointer, count: 16) == value else { throw JournalDatabaseError.wrongScope }
+            }
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore }
+        }
+        for query in ["SELECT mac,account,epoch,descriptor,head,retained FROM main.audit_epochs_v1 LIMIT 0",
+                      "SELECT mac,account,epoch,sequence,event,body FROM main.audit_records_v1 LIMIT 0"] {
+            try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
+        }
+    }
+
+    private func shutdown() {
+        tables = nil
+        if let db {
+            // No statement, blob handle or raw connection can escape this owner.
+            precondition(sqlite3_close(db) == SQLITE_OK, "Journal connection retained a private SQLite resource")
+            self.db = nil
+        }
+        lease.close()
+    }
+    private func exec(_ sql: String) throws {
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        guard rc == SQLITE_OK else { throw JournalDatabaseError.storage(rc) }
+    }
+    private func statement<T>(_ sql: String, _ body: (OpaquePointer) throws -> T) throws -> T {
+        var value: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &value, nil)
+        guard rc == SQLITE_OK, let value else { throw JournalDatabaseError.storage(rc) }
+        defer { sqlite3_finalize(value) }
+        return try body(value)
+    }
+    private func integer(_ sql: String) throws -> Int64 {
+        try statement(sql) {
+            guard sqlite3_step($0) == SQLITE_ROW else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) }
+            return sqlite3_column_int64($0, 0)
+        }
+    }
+    private func text(_ sql: String) throws -> String {
+        try statement(sql) {
+            guard sqlite3_step($0) == SQLITE_ROW, let text = sqlite3_column_text($0, 0) else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) }
+            return String(cString: text)
+        }
+    }
+}
+
+/// Valid only inside its owner's synchronous callback. Escaping this object does not retain connection access.
+public final class JournalTransaction {
+    private weak var owner: JournalDatabase?
+    private let token: UUID
+    private let writable: Bool
+    fileprivate var failed = false
+    fileprivate var headMismatch = false
+    fileprivate var createdEpoch = false
+    fileprivate init(owner: JournalDatabase, token: UUID, writable: Bool) {
+        self.owner = owner; self.token = token; self.writable = writable
+    }
+    private func tables(write: Bool = false) throws -> AuditJournalTables {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        guard !write || writable else { throw JournalDatabaseError.readOnly }
+        return try owner.access(token)
+    }
+    public func epoch(_ id: Data) throws -> AuditEpochRead? { try tables().epoch(id) }
+    public func page(epoch: Data, after: UInt64, maximumRecords: Int, maximumBytes: Int) throws -> AuditJournalPage {
+        try tables().page(epoch: epoch, after: after, maximumRecords: maximumRecords, maximumBytes: maximumBytes)
+    }
+    private func mutate<T>(_ body: (AuditJournalTables) throws -> T) throws -> T {
+        do { return try body(tables(write: true)) }
+        catch {
+            failed = true
+            if error as? AuditJournalError == .headMismatch { headMismatch = true }
+            throw error
+        }
+    }
+    public func createEpoch(_ descriptor: AuditEpochDescriptor) throws -> AuditEpochWriter {
+        try mutate {
+            let writer = try $0.createEpoch(descriptor)
+            createdEpoch = true
+            return writer
+        }
+    }
+    public func append(_ canonicalRecord: Data, writer: AuditEpochWriter, expectedHead: UInt64) throws {
+        try mutate { try $0.append(canonicalRecord, writer: writer, expectedHead: expectedHead) }
+    }
+    public func prune(epoch: Data, through: UInt64, expectedHead: UInt64) throws {
+        try mutate { try $0.prune(epoch: epoch, through: through, expectedHead: expectedHead) }
+    }
+}
