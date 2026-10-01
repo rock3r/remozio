@@ -23,3 +23,17 @@ Tests use disposable software keys and an injected elapsed clock. They cover alt
 `ReceivedAuditHistory` preserves the signed response. Its current descriptor is authenticated under the pinned authority key, but it cannot replace conflicting cached evidence. Compare descriptors and prior boundaries with the cache before adopting the result. A current descriptor does not prove an uninterrupted chain through unavailable epochs.
 
 An unavailable epoch or an ahead-of-head cursor returns explicit reconciliation data. Preserve the old cursor and evidence. A new page query must explicitly name the selected epoch and its retained boundary. Receipt never rewrites a cursor or starts an approval.
+
+## Evidence store
+
+`AuditEvidenceStore` holds bounded metadata and signed proofs for one trusted Mac/account/key. It re-verifies each imported proof under its own pinned key and fixed purpose, including imports from encrypted offline storage. Import grants no freshness and does not advance a last-sync timestamp.
+
+Pages merge by epoch and sequence. Exact records deduplicate. A changed record, reused event ID, changed generation or descriptor, conflicting prior digest, or epoch cycle quarantines the whole incoming update. Its signed proof remains available, while accepted records stay unchanged. A later consumer must show conflicts rather than presenting the first accepted version as resolved truth.
+
+Prior digests are checked when either the descriptor or its referenced record arrives. Missing prior records remain unknown. A verified prior boundary does not prove that no later records existed. Old and new epochs retain separate records and gaps.
+
+Snapshots show missing sequence intervals, split at the highest observed retention boundary. A delayed lower-head response never lowers the known head or deletes records. Retention reports do not authorize pruning cached history. Explicit unavailable/cursor-ahead responses remain in the signed proofs for reconciliation; arrival order alone is not proof of rollback.
+
+All configured capacities are hard resource bounds. At capacity, ingestion fails atomically and preserves prior evidence. The caller must surface that failure and stop ingestion until storage is available. No record is evicted. Duplicate proofs still verify their signatures before deduplication. Re-signing the same canonical payload does not create another proof.
+
+Snapshots and proof bytes are immutable. The store does not select a globally current epoch, order different Macs by wall clock, persist plaintext, authorize actions or implement retention policy. Encrypted Android persistence and history UI remain pending. A future sync coordinator must choose current-epoch and last-sync state after reconciliation.
