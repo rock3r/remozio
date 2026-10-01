@@ -2,4 +2,9 @@
     <string name="open_sample_command">Preview a sample command</string>
     <string name="sample_mac">Example Mac</string>
     <string name="sample_account">example</string>
+    <string name="open_sample_estimate">Preview an elapsed estimate</string>
+    <string name="open_sample_expired">Preview expired authorization</string>
+    <string name="open_sample_disappeared">Preview a disappeared target</string>
+    <string name="open_sample_unknown">Preview an unknown outcome</string>
+    <string name="open_sample_clock">Preview uncertain timing</string>
 </resources>
