@@ -12,6 +12,10 @@ struct Input: Decodable {
     let phoneB: String?
     let body: String?
     let signature: String?
+    let nonce: String?
+    let epoch: String?
+    let generation: String?
+    let after: String?
 }
 
 enum HarnessError: Error { case invalidInput, invalidState, injectedPrecommitFailure }
@@ -26,6 +30,11 @@ func bytes(_ hex: String?) throws -> Data {
         output.append(byte)
     }
     return output
+}
+func number(_ text: String?) throws -> UInt64 {
+    guard let text, !text.isEmpty, text.utf8.count <= 20,
+          text.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }), let value = UInt64(text) else { throw HarnessError.invalidInput }
+    return value
 }
 func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
 func id(_ value: UInt8, count: Int = 16) -> Data { Data(repeating: value, count: count) }
@@ -153,6 +162,22 @@ final class FakeAuthority {
         revision += 1
     }
 
+    func auditReply(_ input: Input) throws {
+        let builder = try AuditReplyBuilder(macID: id(1), accountID: id(2), authorityPublicKey: authority.publicKey.x963Representation,
+            limits: AuditReplyLimits(batch: limits, record: limits, history: limits, descriptor: limits,
+                signing: limits, maximumRecords: 2)) { try self.authority.signature(for: $0).rawRepresentation }
+        let reply: SignedAuditReply
+        if input.command == "auditHistory" {
+            reply = try builder.history(AuditHistoryRequest(nonce: bytes(input.nonce), epoch: input.epoch.map { try bytes($0) },
+                after: input.after.map { try number($0) }), journal: journal.database, currentEpoch: journal.writer.epoch)
+        } else {
+            reply = try builder.page(AuditPageRequest(nonce: bytes(input.nonce), epoch: bytes(input.epoch),
+                generation: number(input.generation), after: number(input.after)), journal: journal.database)
+        }
+        try emit(["kind": reply.kind == .page ? "page" : "history", "wireVersion": String(reply.wireVersion),
+            "body": hex(reply.canonicalBody), "signature": hex(reply.signature)])
+    }
+
     func handle(_ input: Input) throws {
         switch input.command {
         case "revokeA": activeA = false; try emit(["control": "revokedA"])
@@ -185,6 +210,7 @@ final class FakeAuthority {
             }
         case "failNextConsumption": failNextConsumption = true; try emit(["control": "consumptionFailureArmed"])
         case "failNextOutcome": failNextOutcome = true; try emit(["control": "outcomeFailureArmed"])
+        case "auditHistory", "auditPage": try auditReply(input)
         case "journalSnapshot":
             var snapshot = try journal.snapshot()
             snapshot["retainedCapture"] = request == nil ? "false" : "true"
