@@ -31,15 +31,10 @@ object ApprovalSignature {
         if (pointBytes[0] != 4.toByte()) return false
         val parameters = AlgorithmParameters.getInstance("EC").apply { init(ECGenParameterSpec("secp256r1")) }
             .getParameterSpec(ECParameterSpec::class.java)
-        val r = BigInteger(1, rawSignature.copyOfRange(0, 32))
-        val s = BigInteger(1, rawSignature.copyOfRange(32, 64))
-        if (r.signum() == 0 || s.signum() == 0 || r >= parameters.order || s >= parameters.order) return false
+        val der = try { P256SignatureEncoding.toDer(rawSignature) }
+            catch (_: P256SignatureEncodingException) { return false }
         val x = BigInteger(1, pointBytes.copyOfRange(1, 33))
         val y = BigInteger(1, pointBytes.copyOfRange(33, 65))
-        val derR = r.toByteArray()
-        val derS = s.toByteArray()
-        val der = byteArrayOf(0x30, (4 + derR.size + derS.size).toByte(), 0x02, derR.size.toByte()) +
-            derR + byteArrayOf(0x02, derS.size.toByte()) + derS
         return try {
             val key = KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(ECPoint(x, y), parameters))
             Signature.getInstance("SHA256withECDSA").run {

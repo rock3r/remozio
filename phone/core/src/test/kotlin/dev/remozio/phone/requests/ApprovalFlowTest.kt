@@ -142,12 +142,12 @@ class ApprovalFlowTest {
             val payload = DecisionPayload(request.macID, request.accountID, request.requestID, digest,
                 request.challenge, id(phone), id(if (phone == 5) 11 else 12),
                 CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)).encode(limits)
-            val signature = Signature.getInstance("SHA256withECDSAinP1363Format").run {
+            val signature = Signature.getInstance("SHA256withECDSA").run {
                 initSign((if (phone == 5) a else b).private)
                 update(SigningInput.make(1u, ApprovalMessageType.DECISION, purpose, payload, limits, limits))
                 sign()
             }
-            return mapOf("command" to "decision", "body" to payload.hex(), "signature" to signature.hex())
+            return mapOf("command" to "decision", "body" to payload.hex(), "signature" to P256SignatureEncoding.fromDer(signature).hex())
         }
 
         fun send(fields: Map<String, String>) {

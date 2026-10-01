@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import RemozioProtocol
@@ -9,6 +10,7 @@ final class ApprovalSignatureTests: XCTestCase {
         let payload: String
         let publicKey: String
         let signature: String
+        let derSignature: String
         let producer: String
     }
 
@@ -32,7 +34,10 @@ final class ApprovalSignatureTests: XCTestCase {
         XCTAssertEqual(rows.count, 20)
         XCTAssertEqual(Set(rows.map(\.producer)), ["CryptoKit", "Java 21 SunEC"])
         for row in rows {
-            XCTAssertTrue(try verify(row), row.producer)
+            let der = try P256.Signing.ECDSASignature(derRepresentation: hex(row.derSignature))
+            XCTAssertEqual(der.rawRepresentation, hex(row.signature))
+            XCTAssertEqual(der.derRepresentation, hex(row.derSignature))
+            XCTAssertTrue(try verify(row, signature: der.rawRepresentation), row.producer)
             XCTAssertFalse(try verify(row, payload: hex("a10002")))
             let alteredType: ApprovalMessageType = row.type == 3 ? .request : .status
             let alteredPurpose: SigningPurpose = row.type == 3 ? .issuedRequest : .status

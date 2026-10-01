@@ -59,3 +59,5 @@ Six integration tests cover:
 - A narrow decision key cannot authorize a command, and tampered Mac status cannot replace verified phone state.
 
 Transport authentication, encrypted channels, fresh reconnect synchronization, persistent trust, durable atomic admission, real device keys, and target execution remain outside this experiment. The harness establishes interoperability of the current production codecs and verifiers, not completion of the full approval product.
+
+The Kotlin peer signs with standard `SHA256withECDSA` DER output. The shared strict P-256 converter produces the 64-byte wire signature consumed by the Swift verifier. This exercises the format conversion needed by Android Keystore without claiming hardware-backed signing on the host JVM.
