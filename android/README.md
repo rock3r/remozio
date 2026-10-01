@@ -32,7 +32,7 @@ The reusable inspection component renders the complete typed command capture. In
 
 Values use quoted display notation, not shell syntax. Control and format characters, bidi controls, line separators, and non-ASCII spaces are escaped. Malformed UTF-8 becomes explicit byte escapes instead of replacement characters. A toggle shows every original byte in hex, including empty values and distinct Unicode spellings. Neither view truncates values. Ordinary Unicode remains readable; this does not eliminate Unicode glyph confusables.
 
-Inspection state stays in composition memory and is not saved across process death. Closing details does not imply denial or cancellation. Live Mac/account identity, request age and expiry, authenticated state, and bound decision controls still need integration. The component alone establishes no trust in a capture.
+Inspection state stays in composition memory and is not saved across process death. Closing details does not imply denial or cancellation. The authenticated session adapter supplies status and timing. Live enrollment identity, transport, and bound decision controls still need integration. The component alone establishes no trust in a capture.
 
 Five local JVM tests cover empty values, escaped syntax, controls, bidi, malformed UTF-8, Unicode spelling, full-byte round trips, and long values. Android unit tests now run in CI and the local PR gate. Build/lint checks do not establish layout, TalkBack reading order, large-font behavior, or sheet/dialog usability; those remain for the interactive Pixel session.
 
@@ -50,6 +50,18 @@ A terminal status hides the capture and its byte toggle. The caller still owns c
 
 Six debug scenes cover a pending command, an elapsed target estimate, expired authorization, target disappearance, an unknown outcome, and clock uncertainty. They are explicitly labelled static previews. Generic status scenes do not load the command fixture. They do not enter a verifier or transport, grant authority, or infer a result from a timer. The release source set keeps its no-op development entry.
 
-Five presentation tests cover the important outcome distinctions and duration rounding. Real clock integration, live transport, notifications, capture disposal by the request owner, and interactive TalkBack/layout checks remain outstanding. No device was contacted by this change.
+Five presentation tests cover the important outcome distinctions and duration rounding. Live transport, notifications, and interactive TalkBack/layout checks remain outstanding. No device was contacted by this change.
 
 The announcement boundary follows [Compose accessibility semantics](https://developer.android.com/develop/ui/compose/accessibility/semantics): live regions should not wrap frequent countdown updates.
+
+## Authenticated command session
+
+`CommandRequestSession.open` verifies the issued-request signature with a key supplied by a trusted enrollment. It then checks the expected Mac/account, supported command contract, and capture semantics. The owner retains the typed capture and status tracker, without retaining the issued body. This signature check proves origin only. It does not establish freshness, current enrollment, or permission to execute.
+
+A valid terminal status clears the owned capture before publishing its revision. Invalid signatures, conflicting revisions, and old updates cannot purge pending details or restore terminal details. An elapsed countdown alone does not clear the capture. The revision flow carries no capture data. Callers must replace old snapshots; managed memory does not provide a secure-erasure guarantee.
+
+`CommandRequestInspection` connects that owner to the inspector. It samples `SystemClock.elapsedRealtime`, which includes deep sleep, once per second while the host lifecycle is started. Accepted status updates trigger an immediate refresh. The lifecycle cancels the timer and clears its UI snapshot when the host stops. The session remains in memory for the caller to own. Its identity keeps the sheet stable when the first status arrives.
+
+The epoch is process-local, like the session. Neither survives process death. The future enrollment owner must discard sessions when keys or enrollment change. The adapter is not yet connected to the launcher or a transport; the debug scenes remain static. Seven JVM tests cover signed input, enrollment binding, capability checks, capture cleanup, and replay behavior. Device lifecycle, sleep, and layout checks remain deferred.
+
+Clock and lifecycle behavior follow the [SystemClock contract](https://developer.android.com/reference/android/os/SystemClock) and [lifecycle coroutine guidance](https://developer.android.com/topic/libraries/architecture/coroutines).

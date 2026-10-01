@@ -38,7 +38,7 @@ All checks and state replacement run under one monitor. Invalid, conflicting, an
 
 ## Timing bounds
 
-The caller supplies elapsed milliseconds from a monotonic clock that includes sleep, plus an epoch that changes when the clock origin changes. Android integration will use the platform elapsed clock; this change does not read a device clock.
+The caller supplies elapsed milliseconds from a monotonic clock that includes sleep, plus an epoch that changes when the clock origin changes. The command inspector adapter supplies the platform elapsed clock while visible. The tracker itself does not read a device clock.
 
 The sampled Mac age plus elapsed time since receipt is a lower bound on current age. Unknown delivery time can only make the request older. The authorization time remaining is an upper bound; it never increases when a delayed update arrives.
 
@@ -54,4 +54,4 @@ Eleven JVM tests use native JCA P-256 signing and the production verifier. They 
 
 The signing helper is test-only and uses the host JDK provider. This is not evidence for Android Keystore or device cryptography.
 
-The tracker is not yet connected to transport, an inbox, notifications, or the command inspector. Persistent trust and replay metadata, fresh synchronization, pending-capture cleanup, and UI timing remain separate integration work. It does not write an audit record or store a secret.
+The command session connects the tracker to a read-only inspector and clears its owned capture on a terminal update. Transport, an inbox, notifications, persistent trust and replay metadata, and fresh synchronization remain separate integration work. It does not write an audit record or store a secret.
