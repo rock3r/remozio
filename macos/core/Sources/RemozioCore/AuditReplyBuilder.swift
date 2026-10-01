@@ -65,7 +65,7 @@ public struct SignedAuditReply: Sendable {
 }
 
 /// Builds bounded, audit-only replies after the service authorizes the enrolled phone and account.
-/// It does not establish channel authorization, read a journal, select current trust or write history.
+/// It does not establish channel authorization, select current trust or write history.
 public struct AuditReplyBuilder {
     private let macID: Data
     private let accountID: Data
@@ -86,13 +86,62 @@ public struct AuditReplyBuilder {
         self.limits = limits; self.signer = signer
     }
 
+    /// Read both epoch descriptions in one snapshot. The owner supplies its current epoch after startup recovery.
+    /// Authorize the enrolled caller first and serialize this call with trust and epoch changes.
+    public func history(_ query: AuditHistoryRequest, journal: JournalDatabase, currentEpoch: Data) throws -> SignedAuditReply {
+        let reads = try journal.read { transaction in
+            guard let current = try transaction.epoch(currentEpoch) else { throw AuditJournalError.unavailableEpoch }
+            let queried = try query.epoch.flatMap { try transaction.epoch($0) }
+            return (current, queried)
+        }
+        return try history(query, current: reads.0, queried: reads.1)
+    }
+
+    /// Read a bounded page, then sign after the transaction closes. No storage failure becomes an empty success.
+    public func page(_ query: AuditPageRequest, journal: JournalDatabase) throws -> SignedAuditReply {
+        let read = try journal.read { transaction in
+            guard let epoch = try transaction.epoch(query.epoch) else { throw AuditJournalError.unavailableEpoch }
+            try checkPageQuery(query, epoch: epoch)
+            return try transaction.page(epoch: query.epoch, after: query.after,
+                maximumRecords: min(limits.maximumRecords, Int(Int32.max)), maximumBytes: limits.batch.maxBytes)
+        }
+        if read.canonicalRecords.isEmpty { return try page(query, epoch: read.epoch, canonicalRecords: []) }
+        // Find a nonempty prefix that fits the complete body and signing envelope, including CBOR framing.
+        var lower = 1, upper = read.canonicalRecords.count
+        var fitted: Data?
+        var lastLimit: Error = AuditReplyError.invalidBounds
+        while lower <= upper {
+            let count = lower + (upper - lower) / 2
+            do {
+                let body = try pageBody(query, epoch: read.epoch, canonicalRecords: Array(read.canonicalRecords.prefix(count)))
+                _ = try signingInput(body, kind: .page)
+                fitted = body
+                lower = count + 1
+            } catch CBORError.limitExceeded(let limit) where limit == .bytes || limit == .items {
+                lastLimit = CBORError.limitExceeded(limit); upper = count - 1
+            } catch AuditReplyError.invalidBounds {
+                lastLimit = AuditReplyError.invalidBounds; upper = count - 1
+            }
+        }
+        guard let fitted else { throw lastLimit }
+        return try sign(fitted, kind: .page)
+    }
+
     /// Records are one bounded contiguous page, never an entire journal loaded for pagination.
     public func page(_ query: AuditPageRequest, epoch: AuditEpochRead, canonicalRecords: [Data]) throws -> SignedAuditReply {
+        try sign(pageBody(query, epoch: epoch, canonicalRecords: canonicalRecords), kind: .page)
+    }
+
+    private func checkPageQuery(_ query: AuditPageRequest, epoch: AuditEpochRead) throws {
         try checkScope(epoch)
         guard query.epoch == epoch.descriptor.epoch, query.generation == epoch.descriptor.generation else {
             throw AuditReplyError.epochMismatch
         }
         guard query.after <= epoch.head else { throw AuditReplyError.reconciliationRequired }
+    }
+
+    private func pageBody(_ query: AuditPageRequest, epoch: AuditEpochRead, canonicalRecords: [Data]) throws -> Data {
+        try checkPageQuery(query, epoch: epoch)
         guard canonicalRecords.count <= limits.maximumRecords else { throw AuditReplyError.invalidBounds }
         var recordBytes = 0
         for record in canonicalRecords {
@@ -107,7 +156,7 @@ public struct AuditReplyBuilder {
             7: .unsigned(epoch.head), 8: .bytes(query.nonce), 9: .array(canonicalRecords.map(CBORValue.bytes)),
         ]), limits: limits.batch)
         _ = try AuditBatch.decode(body, batchLimits: limits.batch, recordLimits: limits.record, maximumRecords: limits.maximumRecords)
-        return try sign(body, kind: .page)
+        return body
     }
 
     /// A nil queried read means an old epoch is unavailable. The current epoch always uses its current read.
@@ -151,15 +200,17 @@ public struct AuditReplyBuilder {
         guard epoch.descriptor.macID == macID, epoch.descriptor.accountID == accountID else { throw AuditReplyError.scopeMismatch }
     }
 
-    private func sign(_ body: Data, kind: AuditReplyKind) throws -> SignedAuditReply {
-        let input: Data
+    private func signingInput(_ body: Data, kind: AuditReplyKind) throws -> Data {
         switch kind {
-        case .page: input = try AuditBatchSigningInput.make(wireVersion: 1, canonicalPayload: body,
+        case .page: return try AuditBatchSigningInput.make(wireVersion: 1, canonicalPayload: body,
             payloadLimits: limits.batch, inputLimits: limits.signing)
-        case .history: input = try AuditHistoryStatusSigningInput.make(wireVersion: 1, canonicalPayload: body,
+        case .history: return try AuditHistoryStatusSigningInput.make(wireVersion: 1, canonicalPayload: body,
             payloadLimits: limits.history, inputLimits: limits.signing)
         }
-        let signature = try signer(input)
+    }
+
+    private func sign(_ body: Data, kind: AuditReplyKind) throws -> SignedAuditReply {
+        let signature = try signer(signingInput(body, kind: kind))
         let valid: Bool
         switch kind {
         case .page: valid = try AuditBatchSignature.verify(signature: signature, publicKey: authorityPublicKey, wireVersion: 1,
