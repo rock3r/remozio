@@ -1,10 +1,11 @@
 {
   "version": 1,
-  "local_gate": "./scripts/check.sh && ./gradlew :protocol-kotlin:test",
+  "local_gate": "./scripts/check.sh && ./gradlew :protocol-kotlin:test :android-app:assembleDebug :android-app:lintDebug",
   "required_checks": [
     "Python checks",
     "Mac build",
-    "Kotlin protocol"
+    "Kotlin protocol",
+    "Android build"
   ],
   "retry_eligible_workflow_keywords": [],
   "codex": {
