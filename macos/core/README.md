@@ -38,3 +38,5 @@ The Android status view must show Offline when the Mac is unreachable. A cached 
 Presence changes delivery only. The integration must preserve request identity, first-seen age, expiry, and already-delivered actions. It must not cancel a biometric operation when the Mac becomes present. Recheck pending request validity before handoff and suppress duplicate notifications during noisy routing changes.
 
 Local command approval, live provider detection, persistence, and device status synchronization remain implementation gates. These unit tests do not certify remote desktop detection or activity-aware routing end to end.
+
+The [audit storage tables](audit-storage.md) share the authority's SQLite transaction and provide bounded, coherent history reads. They do not replace authority recovery or grant dispatch permission.
