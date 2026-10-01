@@ -5,7 +5,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Work | Status | Next evidence |
 | --- | --- | --- |
 | Swift build and XPC identity checks | [Measured with ad-hoc signing](macos-xpc.md) | macOS 26 and Developer ID repeats |
-| Single app and background services | Pending | SMAppService, protected placement, update replacement |
+| Single app and background services | [Bundle build and seals checked](macos-packaging.md) | SMAppService registration, protected placement, update replacement |
 | Keys and durable authority | Pending | Key availability, non-exportability, crash and rollback cases |
 | UI adapters and presence | Needs interactive session | Authorized dialog fixtures and remote desktop states |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |

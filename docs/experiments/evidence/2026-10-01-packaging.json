@@ -1,0 +1,23 @@
+{
+  "recorded_at": "2026-10-01T08:45:59.735269+00:00",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+  "xcode": "Xcode 27.0\nBuild version 27A266a",
+  "architecture": "arm64",
+  "deployment_target": "26.0",
+  "signing": "ad-hoc",
+  "checks": [
+    "bundle layout",
+    "probe identities",
+    "hardened runtime",
+    "no privilege or debugging entitlements",
+    "probe descriptions",
+    "default refusal",
+    "nested-code tamper",
+    "resource tamper"
+  ],
+  "services_registered": false,
+  "privileged_install_tested": false,
+  "notarization_tested": false,
+  "update_replacement_tested": false,
+  "status": "passed"
+}
