@@ -20,17 +20,23 @@ tasks.withType<Test>().configureEach {
     systemProperty("remozio.test.commandCapture", capture.asFile.absolutePath)
 }
 
-tasks.test { exclude("**/ApprovalFlowTest.class") }
+tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class") }
 
 tasks.register<Test>("approvalFlowTest") {
-    description = "Runs synthetic Swift and Kotlin approval peers on a Mac."
+    description = "Runs synthetic Swift and Kotlin approval and audit peers on a Mac."
     group = "verification"
     dependsOn(tasks.testClasses)
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath
-    filter { includeTestsMatching("dev.remozio.phone.requests.ApprovalFlowTest") }
+    filter {
+        includeTestsMatching("dev.remozio.phone.requests.ApprovalFlowTest")
+        includeTestsMatching("dev.remozio.phone.audit.AuditFlowTest")
+    }
     val peer = rootProject.layout.projectDirectory.file(
         ".build/approval-flow/ApprovalFlowPeer")
     inputs.file(peer)
     systemProperty("remozio.test.swiftPeer", peer.asFile.absolutePath)
+    val auditPeer = rootProject.layout.projectDirectory.file(".build/approval-flow/AuditFlowPeer")
+    inputs.file(auditPeer)
+    systemProperty("remozio.test.auditPeer", auditPeer.asFile.absolutePath)
 }

@@ -8,5 +8,8 @@ let package = Package(
     targets: [.executableTarget(name: "ApprovalFlowPeer", dependencies: [
         .product(name: "RemozioProtocol", package: "swift"),
         .product(name: "RemozioCore", package: "core"),
+    ]), .executableTarget(name: "AuditFlowPeer", dependencies: [
+        .product(name: "RemozioProtocol", package: "swift"),
+        .product(name: "RemozioCore", package: "core"),
     ])]
 )
