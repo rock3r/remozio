@@ -43,4 +43,4 @@ The [audit storage tables](audit-storage.md) share the authority's SQLite transa
 
 The [protected journal lease](journal-lease.md) validates the existing root-owned storage path and holds its writer lock. Provisioning and authority recovery remain separate.
 
-The [owned journal connection](journal-database.md) combines that lease with a scoped SQLite connection and expiring transaction access. Consumption and checkpoint integration remain separate.
+The [owned journal connection](journal-database.md) combines that lease with a scoped SQLite connection and expiring transaction access. The [consumption journal](consumption-journal.md) records a verified winner and its audit event together. Checkpoint and admission integration remain separate.
