@@ -48,3 +48,5 @@ The [owned journal connection](journal-database.md) combines that lease with a s
 The dedicated push service can use the [native OAuth client](fcm-oauth.md), [token owner](fcm-token-source.md), and [opaque wake sender](fcm-delivery.md). These provider clients do not establish recipient authority or install a service. Gateway control and app/service wiring remain pending.
 
 [Gateway candidate verification](gateway-candidate-verification.md) binds signed token probes to trusted setup and current enrollment before durable admission.
+
+The [gateway storage lease](gateway-storage-lease.md) protects the dedicated push service files with separate ownership rules from the root authority journal.
