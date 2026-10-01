@@ -1,0 +1,392 @@
+[
+  {
+    "name": "zero",
+    "hex": "00",
+    "valid": true
+  },
+  {
+    "name": "small-unsigned",
+    "hex": "17",
+    "valid": true
+  },
+  {
+    "name": "uint8-start",
+    "hex": "1818",
+    "valid": true
+  },
+  {
+    "name": "uint8-end",
+    "hex": "18ff",
+    "valid": true
+  },
+  {
+    "name": "uint16-start",
+    "hex": "190100",
+    "valid": true
+  },
+  {
+    "name": "uint16-end",
+    "hex": "19ffff",
+    "valid": true
+  },
+  {
+    "name": "uint32-start",
+    "hex": "1a00010000",
+    "valid": true
+  },
+  {
+    "name": "uint32-end",
+    "hex": "1affffffff",
+    "valid": true
+  },
+  {
+    "name": "uint64-start",
+    "hex": "1b0000000100000000",
+    "valid": true
+  },
+  {
+    "name": "uint64-end",
+    "hex": "1bffffffffffffffff",
+    "valid": true
+  },
+  {
+    "name": "empty-bytes",
+    "hex": "40",
+    "valid": true
+  },
+  {
+    "name": "arbitrary-bytes",
+    "hex": "4300ff80",
+    "valid": true
+  },
+  {
+    "name": "empty-text",
+    "hex": "60",
+    "valid": true
+  },
+  {
+    "name": "ascii",
+    "hex": "63616263",
+    "valid": true
+  },
+  {
+    "name": "unicode-nfc",
+    "hex": "62c3a9",
+    "valid": true
+  },
+  {
+    "name": "unicode-decomposed",
+    "hex": "6365cc81",
+    "valid": true
+  },
+  {
+    "name": "emoji",
+    "hex": "64f09f9982",
+    "valid": true
+  },
+  {
+    "name": "text-nul",
+    "hex": "6100",
+    "valid": true
+  },
+  {
+    "name": "empty-array",
+    "hex": "80",
+    "valid": true
+  },
+  {
+    "name": "array",
+    "hex": "83001818f6",
+    "valid": true
+  },
+  {
+    "name": "empty-map",
+    "hex": "a0",
+    "valid": true
+  },
+  {
+    "name": "map",
+    "hex": "a300f401f518186178",
+    "valid": true
+  },
+  {
+    "name": "nested",
+    "hex": "a1008200a10142ff00",
+    "valid": true
+  },
+  {
+    "name": "false",
+    "hex": "f4",
+    "valid": true
+  },
+  {
+    "name": "true",
+    "hex": "f5",
+    "valid": true
+  },
+  {
+    "name": "null",
+    "hex": "f6",
+    "valid": true
+  },
+  {
+    "name": "empty",
+    "hex": "",
+    "valid": false
+  },
+  {
+    "name": "truncated-uint8",
+    "hex": "18",
+    "valid": false
+  },
+  {
+    "name": "truncated-uint16",
+    "hex": "1901",
+    "valid": false
+  },
+  {
+    "name": "truncated-uint32",
+    "hex": "1a000000",
+    "valid": false
+  },
+  {
+    "name": "truncated-uint64",
+    "hex": "1b00000000000000",
+    "valid": false
+  },
+  {
+    "name": "overlong-uint8",
+    "hex": "1800",
+    "valid": false
+  },
+  {
+    "name": "overlong-uint16",
+    "hex": "1900ff",
+    "valid": false
+  },
+  {
+    "name": "overlong-uint32",
+    "hex": "1a0000ffff",
+    "valid": false
+  },
+  {
+    "name": "overlong-uint64",
+    "hex": "1b00000000ffffffff",
+    "valid": false
+  },
+  {
+    "name": "overlong-bytes",
+    "hex": "5800",
+    "valid": false
+  },
+  {
+    "name": "overlong-text",
+    "hex": "7800",
+    "valid": false
+  },
+  {
+    "name": "overlong-array",
+    "hex": "9800",
+    "valid": false
+  },
+  {
+    "name": "overlong-map",
+    "hex": "b800",
+    "valid": false
+  },
+  {
+    "name": "negative",
+    "hex": "20",
+    "valid": false
+  },
+  {
+    "name": "tag",
+    "hex": "c000",
+    "valid": false
+  },
+  {
+    "name": "float16",
+    "hex": "f90000",
+    "valid": false
+  },
+  {
+    "name": "float32",
+    "hex": "fa00000000",
+    "valid": false
+  },
+  {
+    "name": "float64",
+    "hex": "fb0000000000000000",
+    "valid": false
+  },
+  {
+    "name": "undefined",
+    "hex": "f7",
+    "valid": false
+  },
+  {
+    "name": "simple-value",
+    "hex": "e0",
+    "valid": false
+  },
+  {
+    "name": "overlong-false",
+    "hex": "f814",
+    "valid": false
+  },
+  {
+    "name": "indefinite-bytes",
+    "hex": "5fff",
+    "valid": false
+  },
+  {
+    "name": "indefinite-text",
+    "hex": "7fff",
+    "valid": false
+  },
+  {
+    "name": "indefinite-array",
+    "hex": "9fff",
+    "valid": false
+  },
+  {
+    "name": "indefinite-map",
+    "hex": "bfff",
+    "valid": false
+  },
+  {
+    "name": "break",
+    "hex": "ff",
+    "valid": false
+  },
+  {
+    "name": "reserved-28",
+    "hex": "1c",
+    "valid": false
+  },
+  {
+    "name": "reserved-29",
+    "hex": "1d",
+    "valid": false
+  },
+  {
+    "name": "reserved-30",
+    "hex": "1e",
+    "valid": false
+  },
+  {
+    "name": "reserved-31",
+    "hex": "1f",
+    "valid": false
+  },
+  {
+    "name": "duplicate-map-key",
+    "hex": "a200000001",
+    "valid": false
+  },
+  {
+    "name": "unsorted-map",
+    "hex": "a201000000",
+    "valid": false
+  },
+  {
+    "name": "text-map-key",
+    "hex": "a16000",
+    "valid": false
+  },
+  {
+    "name": "negative-map-key",
+    "hex": "a12000",
+    "valid": false
+  },
+  {
+    "name": "array-map-key",
+    "hex": "a18000",
+    "valid": false
+  },
+  {
+    "name": "missing-map-value",
+    "hex": "a100",
+    "valid": false
+  },
+  {
+    "name": "missing-array-item",
+    "hex": "8200",
+    "valid": false
+  },
+  {
+    "name": "truncated-bytes",
+    "hex": "4200",
+    "valid": false
+  },
+  {
+    "name": "truncated-text",
+    "hex": "6261",
+    "valid": false
+  },
+  {
+    "name": "huge-bytes-length",
+    "hex": "5bffffffffffffffff",
+    "valid": false
+  },
+  {
+    "name": "huge-array-count",
+    "hex": "9bffffffffffffffff",
+    "valid": false
+  },
+  {
+    "name": "huge-map-count",
+    "hex": "bbffffffffffffffff",
+    "valid": false
+  },
+  {
+    "name": "invalid-utf8-continuation",
+    "hex": "6180",
+    "valid": false
+  },
+  {
+    "name": "invalid-utf8-overlong",
+    "hex": "62c0af",
+    "valid": false
+  },
+  {
+    "name": "invalid-utf8-surrogate",
+    "hex": "63eda080",
+    "valid": false
+  },
+  {
+    "name": "invalid-utf8-range",
+    "hex": "64f4908080",
+    "valid": false
+  },
+  {
+    "name": "utf8-truncated",
+    "hex": "62e282",
+    "valid": false
+  },
+  {
+    "name": "trailing-value",
+    "hex": "0000",
+    "valid": false
+  },
+  {
+    "name": "trailing-byte",
+    "hex": "f6ff",
+    "valid": false
+  },
+  {
+    "name": "leading-bom",
+    "hex": "63efbbbf",
+    "valid": true
+  },
+  {
+    "name": "leading-bom-text",
+    "hex": "64efbbbf61",
+    "valid": true
+  },
+  {
+    "name": "embedded-bom",
+    "hex": "6461efbbbf",
+    "valid": true
+  }
+]
