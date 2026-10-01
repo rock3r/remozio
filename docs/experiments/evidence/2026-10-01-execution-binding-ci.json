@@ -1,0 +1,61 @@
+{
+  "experiment": "execution-binding-v1",
+  "host": {
+    "os": "26.6.2",
+    "build": "25G83",
+    "architecture": "arm64",
+    "xcode": "Xcode 26.6\nBuild version 17F113",
+    "sdk": "26.5",
+    "deploymentTarget": "26.0"
+  },
+  "measuredAtUTC": "2026-10-01T10:57:47.649404+00:00",
+  "sameIdentityAtFinalCheck": true,
+  "publicHeaderDeclaresFexecve": false,
+  "observations": [
+    {
+      "case": "path-before",
+      "exit": 0,
+      "stdout": "marker=original\nargv0=<fixture>/program\nexecutable=<fixture>/program\n",
+      "stderr": ""
+    },
+    {
+      "case": "descriptor-before",
+      "launchErrno": 13
+    },
+    {
+      "case": "path-after-replacement",
+      "exit": 0,
+      "stdout": "marker=replacement\nargv0=<fixture>/program\nexecutable=<fixture>/program\n",
+      "stderr": ""
+    },
+    {
+      "case": "descriptor-after-replacement",
+      "launchErrno": 13
+    },
+    {
+      "case": "script-descriptor-before",
+      "launchErrno": 13
+    },
+    {
+      "case": "explicit-interpreter-before",
+      "exit": 0,
+      "stdout": "original-script:/dev/fd/<retained>\n",
+      "stderr": ""
+    },
+    {
+      "case": "script-descriptor-after-inplace-write",
+      "launchErrno": 13
+    },
+    {
+      "case": "explicit-interpreter-after-inplace-write",
+      "exit": 0,
+      "stdout": "changed-script:/dev/fd/<retained>\n",
+      "stderr": ""
+    }
+  ],
+  "source": {
+    "provider": "GitHub Actions",
+    "headSHA": "522a9018cc840e4c28dc200124388c13093b1f58",
+    "jobURL": "https://github.com/rock3r/remozio/actions/runs/36852278022/job/110336482544"
+  }
+}

@@ -18,6 +18,8 @@ It neither elevates privileges nor contacts an app, device, network, or approval
 
 The [retained local report](evidence/2026-10-01-execution-binding.json) used macOS 27.0 build 26A428, Xcode 27.0, SDK 27.0, and an arm64 macOS 26 deployment target. A deployment target is not a test on macOS 26.
 
+The [retained CI report](evidence/2026-10-01-execution-binding-ci.json) separately repeats every observation on macOS 26.6.2 build 25G83, arm64, Xcode 26.6, and SDK 26.5. Its source job and tested commit are recorded in the report. The two hosts produced the same results below. This does not cover every macOS 26 release or launch configuration.
+
 | Probe | Observed result | Meaning |
 | --- | --- | --- |
 | Execute original pathname | Original marker | The fixture works normally |
