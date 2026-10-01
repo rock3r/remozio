@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the synthetic authority peer. This does not start it or install anything."""
+"""Build the synthetic authority peers. This does not start them or install anything."""
 from pathlib import Path
 import shutil
 
@@ -13,7 +13,8 @@ arguments = ('swift', 'build', '--package-path', str(ROOT / 'experiments/approva
 result = run(*arguments, check=False)
 log = BUILD / 'swift-build.log'
 log.write_text(result.stdout + result.stderr)
-require(result.returncode == 0, f'Approval peer build failed; see {log}')
+require(result.returncode == 0, f'Synthetic peer build failed; see {log}')
 binary_directory = Path(run(*arguments, '--show-bin-path').stdout.strip())
-shutil.copy2(binary_directory / 'ApprovalFlowPeer', BUILD / 'ApprovalFlowPeer')
-print('Synthetic approval peer built. No requests executed.')
+for peer in ('ApprovalFlowPeer', 'AuditFlowPeer'):
+    shutil.copy2(binary_directory / peer, BUILD / peer)
+print('Synthetic approval and audit peers built. No requests executed.')
