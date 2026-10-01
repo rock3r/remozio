@@ -44,13 +44,13 @@ The sampled Mac age plus elapsed time since receipt is a lower bound on current 
 
 A duplicate never replaces the timing anchor. A newer delayed sample preserves the largest known age and smallest known authorization time. Arithmetic saturates at the unsigned maximum and floors countdowns at zero.
 
-If the clock goes backwards or its epoch differs, retain those bounds and report clock uncertainty. A status received during a regression cannot turn the backwards jump into extra elapsed time. A later valid receipt establishes a new anchor. A new epoch requires a new status before timing resumes.
+If the clock goes backwards or its epoch differs, retain those bounds and report clock uncertainty. A status received during a regression cannot turn the backwards jump into extra elapsed time. Uncertainty remains latched even if the old clock readings return. Only a newer signed status with a valid receipt establishes a new anchor; duplicates cannot clear it. A new epoch requires a new status before timing resumes.
 
 An elapsed target estimate remains an estimate. Neither it nor a zero authorization countdown changes the authoritative phase. The final Mac deadline still governs admission.
 
 ## Evidence and remaining integration
 
-Ten JVM tests use native JCA P-256 signing and the production verifier. They cover wrong keys/domains/bindings, malformed signatures, revision replay, byte isolation, timing continuity, sleep, clock changes, overflow, coalesced transitions, competing-phone metadata, and immutable terminal outcomes.
+Eleven JVM tests use native JCA P-256 signing and the production verifier. They cover wrong keys/domains/bindings, malformed signatures, revision replay, byte isolation, timing continuity, sleep, clock changes, overflow, coalesced transitions, competing-phone metadata, and immutable terminal outcomes.
 
 The signing helper is test-only and uses the host JDK provider. This is not evidence for Android Keystore or device cryptography.
 

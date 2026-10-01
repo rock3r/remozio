@@ -90,11 +90,29 @@ class RequestStatusTrackerTest {
         assertTrue(regressed.clockUncertain)
         assertEquals(before.ageLowerBoundMs, regressed.ageLowerBoundMs)
         assertEquals(before.authorizationRemainingUpperBoundMs, regressed.authorizationRemainingUpperBoundMs)
+        assertTrue(tracker.snapshot(time(1100u))!!.timing.clockUncertain)
+        assertEquals(StatusAcceptance.DUPLICATE, observe(tracker, status(), at = 1200u))
+        assertTrue(tracker.snapshot(time(1200u))!!.timing.clockUncertain)
         assertTrue(tracker.snapshot(time(10u, 2))!!.timing.clockUncertain)
+        assertTrue(tracker.snapshot(time(5000u))!!.timing.clockUncertain)
+        assertEquals(before.ageLowerBoundMs, tracker.snapshot(time(5000u))!!.timing.ageLowerBoundMs)
         observe(tracker, status(revision = 2u, age = 1500u), at = 10u, epoch = 2)
         val resumed = tracker.snapshot(time(1010u, 2))!!.timing
         assertFalse(resumed.clockUncertain)
         assertEquals(3000uL, resumed.ageLowerBoundMs)
+    }
+
+    @Test fun epochMismatchCannotRecoverByReturningToTheOldEpoch() {
+        val tracker = tracker()
+        observe(tracker, status())
+        assertTrue(tracker.snapshot(time(10u, 2))!!.timing.clockUncertain)
+        val oldEpoch = tracker.snapshot(time(5100u))!!.timing
+        assertTrue(oldEpoch.clockUncertain)
+        assertEquals(1000uL, oldEpoch.ageLowerBoundMs)
+        observe(tracker, status(revision = 2u, age = 6000u, remaining = 4000u), at = 5100u)
+        val resumed = tracker.snapshot(time(6100u))!!.timing
+        assertFalse(resumed.clockUncertain)
+        assertEquals(7000uL, resumed.ageLowerBoundMs)
     }
 
     @Test fun regressedReceiptCannotDoubleCountElapsedTime() {

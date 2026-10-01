@@ -107,7 +107,7 @@ internal class RequestStatusTracker(
         val status = current ?: return null
         val start = checkNotNull(anchor)
         val clockUsable = anchorClockValid && now.epoch == start.epoch && now.milliseconds >= lastElapsed
-        if (clockUsable) lastElapsed = now.milliseconds
+        if (clockUsable) lastElapsed = now.milliseconds else anchorClockValid = false
         val elapsed = if (clockUsable) now.milliseconds - start.milliseconds else 0uL
         ageFloor = maxOf(ageFloor, addSaturated(anchorAge, elapsed))
         val remaining = anchorRemaining?.let { subtractFloored(it, elapsed) }
