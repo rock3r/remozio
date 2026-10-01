@@ -24,7 +24,7 @@ final class JournalDatabaseTests: XCTestCase {
     private func open(_ fixture: Fixture, initialize: Bool = false, mac: UInt8 = 1, account: UInt8 = 2,
                       busy: UInt32 = 100) throws -> JournalDatabase {
         try JournalDatabase(lease: fixture.lease(), macID: id(mac), accountID: id(account),
-                            recordLimits: bounds, descriptorLimits: bounds, busyMilliseconds: busy, initialize: initialize)
+                            recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize)
     }
 
     func testExplicitSetupPersistenceAndWriterRetirementAcrossReopen() throws {
@@ -55,7 +55,7 @@ final class JournalDatabaseTests: XCTestCase {
         }
         try fixture.sql("PRAGMA user_version=99")
         XCTAssertThrowsError(try open(fixture))
-        try fixture.sql("PRAGMA user_version=1")
+        try fixture.sql("PRAGMA user_version=2")
         let reopened = try open(fixture)
         XCTAssertNotNil(try reopened.read { try $0.epoch(id(3)) })
         try reopened.close()
@@ -190,7 +190,7 @@ final class JournalDatabaseTests: XCTestCase {
         try next.close()
         if geteuid() != 0 {
             XCTAssertThrowsError(try JournalDatabase.open(directoryPath: fixture.directory, macID: id(1), accountID: id(2),
-                recordLimits: bounds, descriptorLimits: bounds, busyMilliseconds: 100)) {
+                recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: 100)) {
                 XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
             }
         }

@@ -8,31 +8,36 @@ public enum JournalDatabaseError: Error, Equatable {
 }
 
 /// One Mac/account's journal connection. The root authority owns this object and serializes its calls.
-/// This storage layer has no admission, consumption, checkpoint or dispatch authority.
+/// This storage layer has no admission, checkpoint or dispatch authority.
 public final class JournalDatabase {
     private static let applicationID: Int64 = 0x524D5A4F
     private let lease: ProtectedJournalLease
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?
+    private var consumption: ConsumptionJournal?
     private var active: UUID?
     private var unavailable = false
 
     /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
     public static func open(directoryPath: String, macID: Data, accountID: Data,
-                            recordLimits: CBORLimits, descriptorLimits: CBORLimits,
-                            busyMilliseconds: UInt32, initialize: Bool = false) throws -> JournalDatabase {
+                            recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
+                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion1: Bool = false) throws -> JournalDatabase {
         try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
-                            recordLimits: recordLimits, descriptorLimits: descriptorLimits,
-                            busyMilliseconds: busyMilliseconds, initialize: initialize)
+                            recordLimits: recordLimits, descriptorLimits: descriptorLimits, decisionLimits: decisionLimits,
+                            maximumConsumptions: maximumConsumptions, busyMilliseconds: busyMilliseconds,
+                            initialize: initialize, migrateFromVersion1: migrateFromVersion1)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
-         recordLimits: CBORLimits, descriptorLimits: CBORLimits, busyMilliseconds: UInt32, initialize: Bool) throws {
+         recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
+         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion1: Bool = false) throws {
         self.lease = lease
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
-                  max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096 else {
+                  maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion1),
+                  max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
+                  decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
             }
             try lease.validate()
@@ -44,11 +49,11 @@ public final class JournalDatabase {
             guard sqlite3_busy_timeout(connection, Int32(busyMilliseconds)) == SQLITE_OK,
                   sqlite3_compileoption_used("OMIT_LOAD_EXTENSION") == 1 else { throw JournalDatabaseError.invalidConfiguration }
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
-            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(recordLimits.maxBytes, descriptorLimits.maxBytes) + 4096))
+            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096))
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion1 ? 1 : 2) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -58,7 +63,11 @@ public final class JournalDatabase {
             let tables = try AuditJournalTables(connection: connection, macID: macID, accountID: accountID,
                                                  recordLimits: recordLimits, descriptorLimits: descriptorLimits)
             self.tables = tables
-            if initialize { try create(macID: macID, accountID: accountID, tables: tables) }
+            let consumption = ConsumptionJournal(connection: connection, macID: macID, accountID: accountID,
+                decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
+            self.consumption = consumption
+            if initialize { try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption) }
+            else if migrateFromVersion1 { try migrate(macID: macID, accountID: accountID, consumption: consumption) }
             try validateIdentity(macID: macID, accountID: accountID)
             try lease.validate()
         } catch {
@@ -110,12 +119,18 @@ public final class JournalDatabase {
         return tables
     }
 
+    fileprivate func ledger(_ token: UUID) throws -> ConsumptionJournal {
+        _ = try access(token)
+        guard let consumption else { throw JournalDatabaseError.expiredTransaction }
+        return consumption
+    }
+
     private func validateLease() throws {
         do { try lease.validate() }
         catch { unavailable = true; throw error }
     }
 
-    private func create(macID: Data, accountID: Data, tables: AuditJournalTables) throws {
+    private func create(macID: Data, accountID: Data, tables: AuditJournalTables, consumption: ConsumptionJournal) throws {
         try exec("BEGIN IMMEDIATE")
         do {
             try requireEmptyStore()
@@ -128,8 +143,20 @@ public final class JournalDatabase {
                 guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.storage(sqlite3_errcode(db)) }
             }
             try tables.createSchema()
+            try consumption.createSchema()
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=1")
+            try exec("PRAGMA user_version=2")
+            try lease.validate()
+            try exec("COMMIT")
+        } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
+    }
+
+    private func migrate(macID: Data, accountID: Data, consumption: ConsumptionJournal) throws {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            try validateIdentity(macID: macID, accountID: accountID, version: 1)
+            try consumption.createSchema()
+            try exec("PRAGMA user_version=2")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -142,8 +169,8 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data) throws {
-        guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == 1 else {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 2) throws {
+        guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
@@ -155,14 +182,17 @@ public final class JournalDatabase {
             }
             guard sqlite3_step(stmt) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore }
         }
-        for query in ["SELECT mac,account,epoch,descriptor,head,retained FROM main.audit_epochs_v1 LIMIT 0",
-                      "SELECT mac,account,epoch,sequence,event,body FROM main.audit_records_v1 LIMIT 0"] {
+        var queries = ["SELECT mac,account,epoch,descriptor,head,retained FROM main.audit_epochs_v1 LIMIT 0",
+                       "SELECT mac,account,epoch,sequence,event,body FROM main.audit_records_v1 LIMIT 0"]
+        if version == 2 { queries.append("SELECT mac,account,request,decision,event FROM main.consumptions_v1 LIMIT 0") }
+        for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
     }
 
     private func shutdown() {
         tables = nil
+        consumption = nil
         if let db {
             // No statement, blob handle or raw connection can escape this owner.
             precondition(sqlite3_close(db) == SQLITE_OK, "Journal connection retained a private SQLite resource")
@@ -223,6 +253,25 @@ public final class JournalTransaction {
             throw error
         }
     }
+    /// Verify against the caller's current retained request and trust snapshot, then write both records.
+    /// The authority must serialize lifecycle and trust changes with this call. The result is never a dispatch permit.
+    public func consume(canonicalDecision: Data, signature: Data, retained: RetainedApprovalRequest,
+                        trust: ApprovalTrustSnapshot, now: AuthorityMoment, eventID: Data, receiptTimeMs: UInt64?,
+                        writer: AuditEpochWriter, expectedHead: UInt64, requestLimits: CBORLimits,
+                        signingLimits: CBORLimits) throws -> ConsumptionReceipt {
+        try mutate { audit in
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try owner.ledger(token).consume(canonicalDecision: canonicalDecision, signature: signature,
+                retained: retained, trust: trust, now: now, eventID: eventID, receiptTimeMs: receiptTimeMs,
+                writer: writer, expectedHead: expectedHead, audit: audit, requestLimits: requestLimits, signingLimits: signingLimits)
+        }
+    }
+
+    public func consumption(requestID: Data) throws -> ConsumptionReceipt? {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.ledger(token).receipt(requestID: requestID)
+    }
+
     public func createEpoch(_ descriptor: AuditEpochDescriptor) throws -> AuditEpochWriter {
         try mutate {
             let writer = try $0.createEpoch(descriptor)

@@ -21,9 +21,9 @@ flowchart TD
 
 ## Startup and scope
 
-The public factory requires the existing root-owned layout described in [the lease contract](journal-lease.md). It does not provision files or install a service. Existing stores require application ID `0x524D5A4F`, schema version 1, one matching Mac/account identity, and the required audit columns. These checks precede changes to persistent journal mode.
+The public factory requires the existing root-owned layout described in [the lease contract](journal-lease.md). It does not provision files or install a service. Existing stores require application ID `0x524D5A4F`, schema version 2, one matching Mac/account identity, and the required audit and consumption columns. These checks precede changes to persistent journal mode.
 
-Explicit `initialize: true` is setup only. It requires an empty preprovisioned file, checks that condition again within a write transaction, then creates the identity and audit tables atomically. Wrong scope, an unknown version, a missing table, or a malformed database fails. None invokes reset or migration.
+Explicit `initialize: true` is setup only. It requires an empty preprovisioned file, checks that condition again within a write transaction, then creates the identity, audit and consumption tables atomically. Wrong scope, an unknown version, a missing table, or a malformed database fails. None invokes reset or automatic migration. Explicit `migrateFromVersion1: true` adds only the consumption table and advances the version in one transaction. It preserves existing audit data and never derives consumption authority from that history. Setup and migration cannot be combined. A version 2 store rejects the version 1 migration option.
 
 The connection uses the system SQLite with extension loading omitted. It disables attached databases and trusted schema, enables foreign keys, bounds SQLite values from the supplied CBOR limits, and verifies DELETE journal mode, EXTRA synchronization and fullfsync. The caller supplies a busy timeout of at most 60 seconds. No product timeout default is selected.
 
@@ -37,7 +37,7 @@ Every operation revalidates the lease. The owner also checks it before and after
 
 A failed commit, failed rollback, SQLite automatic write rollback, lease failure, or epoch/head mismatch retires the connection. A rolled-back epoch creation also retires it, because the in-memory writer capability must not survive creation failure. Reopening creates a different table owner; old epoch writers cannot append through it. The higher authority must preserve and resolve any recovery requirement before reopening.
 
-A successful callback return means only that SQLite committed and the lease checks passed. It grants no action permit. The future consumption ledger must share this transaction, and the authority must complete its checkpoint protocol before dispatch. A failure after commit can leave committed data and must never be retried as an action.
+A successful callback return means only that SQLite committed and the lease checks passed. It grants no action permit. The [consumption operation](consumption-journal.md) shares this transaction, and the authority must complete its checkpoint protocol before dispatch. A failure after commit can leave committed data and must never be retried as an action.
 
 ## Evidence and remaining gates
 
