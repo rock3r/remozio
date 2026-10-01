@@ -1,0 +1,40 @@
+# Mac core
+
+This package contains Mac policies without platform observers or external side effects. `PresenceRouter` implements the delivery rules from design section 14.
+
+```mermaid
+flowchart TD
+    M{Manual mode?} -->|Present| L[Keep requests local]
+    M -->|Away| P[Route to phones]
+    M -->|Automatic| R{Fresh usable remote desktop?}
+    R -->|Yes| L
+    R -->|No| D{Known locked, off, or dark?}
+    D -->|Yes| P
+    D -->|No| A{Usable workspace and fresh activity data?}
+    A -->|Yes, active| L
+    A -->|Yes, idle| P
+    A -->|No| G[Unknown: retain prior destination briefly]
+    G -->|Grace elapsed or no prior destination| P
+```
+
+Use one router per Mac/account and serialize evaluations. Supply observations from that account's detectors. A remote session counts only when it can show that account's desktop; a listener, running process, lock screen, or SSH session does not qualify.
+
+Every observation carries an epoch and a sleep-inclusive monotonic timestamp. Reject future timestamps, expired observations, and observations from another epoch. A changed epoch or clock regression clears the cached destination. A regression also makes the current automatic evaluation Unknown. Do not reuse this state across reboot or detector-clock replacement.
+
+The idle default is 120 seconds. Observation lifetime and detector-unavailable grace must be provided explicitly; their product values remain feasibility decisions. No hidden grace default is selected here. Repeated Unknown evaluations do not renew the grace period. Manual modes have no timeout.
+
+Display observations cover the account's usable displays. One readable external display keeps the workspace usable when the internal display is dark or asleep. Unknown brightness on an awake display does not mean zero brightness. An unknown display prevents a claim that all displays are off or dark. An empty, successfully observed display list means no usable display is awake; a failed query must instead produce a missing/unknown observation.
+
+Qualifying input includes remote keyboard/pointer input and excludes Remozio automation. The timestamp must come from the same clock epoch and cannot be later than its observation. The policy does not record input content or collect activity traces.
+
+## Integration boundaries
+
+This package does not detect Chrome Remote Desktop, Screen Sharing, brightness, lock state, or human input. Those observers require platform evidence. Missing or unsupported remote detection sets a limitation flag while valid local observations can still determine routing.
+
+The controller must persist manual mode, expose settings, and apply authenticated routing changes atomically. Phone controls permit Away only. This pure policy cannot authenticate a phone or modify stored settings.
+
+The Android status view must show Offline when the Mac is unreachable. A cached routing result is last-known information, never proof of current presence. Do not queue a routing change or acknowledge success without the Mac.
+
+Presence changes delivery only. The integration must preserve request identity, first-seen age, expiry, and already-delivered actions. It must not cancel a biometric operation when the Mac becomes present. Recheck pending request validity before handoff and suppress duplicate notifications during noisy routing changes.
+
+Local command approval, live provider detection, persistence, and device status synchronization remain implementation gates. These unit tests do not certify remote desktop detection or activity-aware routing end to end.
