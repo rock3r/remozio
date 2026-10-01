@@ -61,5 +61,5 @@ jobs:
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
       - name: Install Android SDK packages
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"'
       - run: ./gradlew :android-app:assembleDebug :android-app:lintDebug
