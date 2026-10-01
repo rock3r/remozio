@@ -13,7 +13,7 @@ import kotlin.test.*
 
 class AuditPageReceiverTest {
     private val bound = CborLimits(8192, 8, 256)
-    private val limits = AuditPageLimits(bound, bound, bound, 4)
+    private val limits = AuditPageLimits(bound, bound, bound, 4, bound, bound)
     private fun id(n: Int) = ByteArray(16) { n.toByte() }
     private inner class Fixture {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
@@ -137,7 +137,7 @@ class AuditPageReceiverTest {
         val malformed = f.body(q, mapOf(10uL to CborValue.Unsigned(0u)))
         assertFailsWith<AuditBatchException> { f.receiver.receive(q, malformed, f.sign(malformed)) }
         f.receive(q)
-        assertFailsWith<IllegalArgumentException> { AuditPageLimits(bound, bound, bound, 0) }
+        assertFailsWith<IllegalArgumentException> { AuditPageLimits(bound, bound, bound, 0, bound, bound) }
         assertFailsWith<IllegalArgumentException> { AuditPageReceiver(id(1), id(2), f.key, limits, 0, 1u) { f.now } }
         assertFailsWith<IllegalArgumentException> { AuditPageReceiver(id(1), id(2), f.key, limits, 1, 0u) { f.now } }
         assertFailsWith<IllegalArgumentException> { f.receiver.begin(ByteArray(15), 7u, 0u) }

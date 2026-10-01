@@ -65,3 +65,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Audit event metadata](audit-metadata.md) defines the closed, payload-free record contract for future journal storage and phone history.
 
 [Audit batches](audit-batches.md) define bounded epoch-scoped pages and a signing domain separate from approvals.
+
+[Audit history status](audit-history-status.md) authenticates epoch discovery, prior boundaries, unavailable history and ahead-of-head cursors.
