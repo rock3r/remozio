@@ -1,0 +1,410 @@
+[
+  {
+    "name": "command-decline-currentRequest",
+    "kind": "command",
+    "choice": "decline",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "cancellation",
+    "effect": "resolveRequest"
+  },
+  {
+    "name": "onePasswordAccess-decline-currentRequest",
+    "kind": "onePasswordAccess",
+    "choice": "decline",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "cancellation",
+    "effect": "resolveRequest"
+  },
+  {
+    "name": "onePasswordUnlock-decline-currentRequest",
+    "kind": "onePasswordUnlock",
+    "choice": "decline",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "cancellation",
+    "effect": "resolveRequest"
+  },
+  {
+    "name": "littleSnitch-decline-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "decline",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "cancellation",
+    "effect": "resolveRequest"
+  },
+  {
+    "name": "onePasswordAccess-cancelTarget-currentRequest",
+    "kind": "onePasswordAccess",
+    "choice": "cancelTarget",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "oneTimeUI",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "onePasswordUnlock-cancelTarget-currentRequest",
+    "kind": "onePasswordUnlock",
+    "choice": "cancelTarget",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "oneTimeUI",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-cancelTarget-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "cancelTarget",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "oneTimeUI",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "command-execute-currentRequest",
+    "kind": "command",
+    "choice": "execute",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "onePasswordAccess-approveAccess-currentRequest",
+    "kind": "onePasswordAccess",
+    "choice": "approveAccess",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "onePasswordUnlock-unlockVault-currentRequest",
+    "kind": "onePasswordUnlock",
+    "choice": "unlockVault",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-allowOnce-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "allowOnce",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "oneTimeUI",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-denyOnce-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "denyOnce",
+    "scope": "currentRequest",
+    "permitted": true,
+    "key": "decision",
+    "purpose": "oneTimeUI",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-allowRule-session",
+    "kind": "littleSnitch",
+    "choice": "allowRule",
+    "scope": "session",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-allowRule-timed-60",
+    "kind": "littleSnitch",
+    "choice": "allowRule",
+    "scope": "timed",
+    "permitted": true,
+    "seconds": "60",
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-allowRule-forever",
+    "kind": "littleSnitch",
+    "choice": "allowRule",
+    "scope": "forever",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-denyRule-session",
+    "kind": "littleSnitch",
+    "choice": "denyRule",
+    "scope": "session",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-denyRule-timed-60",
+    "kind": "littleSnitch",
+    "choice": "denyRule",
+    "scope": "timed",
+    "permitted": true,
+    "seconds": "60",
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-denyRule-forever",
+    "kind": "littleSnitch",
+    "choice": "denyRule",
+    "scope": "forever",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-removeRule-session",
+    "kind": "littleSnitch",
+    "choice": "removeRule",
+    "scope": "session",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-removeRule-timed-60",
+    "kind": "littleSnitch",
+    "choice": "removeRule",
+    "scope": "timed",
+    "permitted": true,
+    "seconds": "60",
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "littleSnitch-removeRule-forever",
+    "kind": "littleSnitch",
+    "choice": "removeRule",
+    "scope": "forever",
+    "permitted": true,
+    "key": "biometric",
+    "purpose": "biometricAuthorization",
+    "effect": "dispatchTarget"
+  },
+  {
+    "name": "command-cancelTarget-currentRequest",
+    "kind": "command",
+    "choice": "cancelTarget",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "command-allowOnce-currentRequest",
+    "kind": "command",
+    "choice": "allowOnce",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "onePasswordAccess-allowOnce-currentRequest",
+    "kind": "onePasswordAccess",
+    "choice": "allowOnce",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "onePasswordUnlock-denyOnce-currentRequest",
+    "kind": "onePasswordUnlock",
+    "choice": "denyOnce",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "littleSnitch-execute-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "execute",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "command-approveAccess-currentRequest",
+    "kind": "command",
+    "choice": "approveAccess",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "onePasswordAccess-unlockVault-currentRequest",
+    "kind": "onePasswordAccess",
+    "choice": "unlockVault",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "onePasswordUnlock-approveAccess-currentRequest",
+    "kind": "onePasswordUnlock",
+    "choice": "approveAccess",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "incompatibleAction"
+  },
+  {
+    "name": "command-execute-session",
+    "kind": "command",
+    "choice": "execute",
+    "scope": "session",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "onePasswordUnlock-unlockVault-forever",
+    "kind": "onePasswordUnlock",
+    "choice": "unlockVault",
+    "scope": "forever",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "onePasswordAccess-approveAccess-session",
+    "kind": "onePasswordAccess",
+    "choice": "approveAccess",
+    "scope": "session",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-allowOnce-forever",
+    "kind": "littleSnitch",
+    "choice": "allowOnce",
+    "scope": "forever",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-denyOnce-session",
+    "kind": "littleSnitch",
+    "choice": "denyOnce",
+    "scope": "session",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "command-decline-forever",
+    "kind": "command",
+    "choice": "decline",
+    "scope": "forever",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-cancelTarget-session",
+    "kind": "littleSnitch",
+    "choice": "cancelTarget",
+    "scope": "session",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-allowRule-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "allowRule",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-allowRule-timed-0",
+    "kind": "littleSnitch",
+    "choice": "allowRule",
+    "scope": "timed",
+    "permitted": true,
+    "seconds": "0",
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-denyRule-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "denyRule",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-denyRule-timed-0",
+    "kind": "littleSnitch",
+    "choice": "denyRule",
+    "scope": "timed",
+    "permitted": true,
+    "seconds": "0",
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-removeRule-currentRequest",
+    "kind": "littleSnitch",
+    "choice": "removeRule",
+    "scope": "currentRequest",
+    "permitted": true,
+    "error": "invalidScope"
+  },
+  {
+    "name": "littleSnitch-removeRule-timed-0",
+    "kind": "littleSnitch",
+    "choice": "removeRule",
+    "scope": "timed",
+    "permitted": true,
+    "seconds": "0",
+    "error": "invalidScope"
+  },
+  {
+    "name": "command-execute-currentRequest-not-permitted",
+    "kind": "command",
+    "choice": "execute",
+    "scope": "currentRequest",
+    "permitted": false,
+    "error": "notPermitted"
+  },
+  {
+    "name": "littleSnitch-allowOnce-currentRequest-not-permitted",
+    "kind": "littleSnitch",
+    "choice": "allowOnce",
+    "scope": "currentRequest",
+    "permitted": false,
+    "error": "notPermitted"
+  },
+  {
+    "name": "littleSnitch-allowRule-forever-not-permitted",
+    "kind": "littleSnitch",
+    "choice": "allowRule",
+    "scope": "forever",
+    "permitted": false,
+    "error": "notPermitted"
+  }
+]
