@@ -53,3 +53,5 @@ The wrapper scripts and JAR come from the Gradle `v9.7.0` tag. The JAR matches t
 The [request lifecycle](lifecycle.md) defines consumption, expiry, and terminal outcomes in both languages.
 
 The [signing input](signing-input.md) separates approval messages by protocol, wire version, type, and purpose.
+
+The [native signature verifiers](approval-signatures.md) implement the P-256/SHA-256 wire representation.
