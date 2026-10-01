@@ -50,3 +50,5 @@ The dedicated push service can use the [native OAuth client](fcm-oauth.md), [tok
 [Gateway candidate verification](gateway-candidate-verification.md) binds signed token probes to trusted setup and current enrollment before durable admission.
 
 The [gateway storage lease](gateway-storage-lease.md) protects the dedicated push service files with separate ownership rules from the root authority journal.
+
+The [gateway database](gateway-database.md) commits candidate records and control revisions together, retains signed retry receipts, and clears pending tokens after restart.
