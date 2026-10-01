@@ -63,3 +63,5 @@ The [issued-request wrapper](issued-request.md) binds capture bytes and metadata
 The [request status contract](request-status.md) separates signed lifecycle claims from request age and target lifetime estimates. Its Swift and Kotlin codecs do not establish freshness or transition authority.
 
 [Audit event metadata](audit-metadata.md) defines the closed, payload-free record contract for future journal storage and phone history.
+
+[Audit batches](audit-batches.md) define bounded epoch-scoped pages and a signing domain separate from approvals.
