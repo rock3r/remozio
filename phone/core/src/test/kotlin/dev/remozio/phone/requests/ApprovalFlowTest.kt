@@ -1,5 +1,6 @@
 package dev.remozio.phone.requests
 
+import dev.remozio.phone.audit.*
 import dev.remozio.protocol.*
 import java.io.Closeable
 import java.io.EOFException
@@ -246,10 +247,96 @@ class ApprovalFlowTest {
         assertEquals(RequestPhase.SUCCEEDED, session.snapshot(instant(140u)).status!!.status.phase)
     }
 
+    @Test fun committedDecisionsAndOutcomesReachEncryptedPhoneHistory() = withPeer { peer ->
+        peer.send(peer.decision(5))
+        assertEquals("accepted", peer.receive().text("decision"))
+        peer.send(peer.decision(6))
+        assertEquals("unavailableRequest", peer.receive().text("rejection"))
+        peer.send(mapOf("command" to "beginDispatch")); peer.receive()
+        peer.send(mapOf("command" to "verifySuccess")); peer.receive()
+        val stored = peer.snapshot()
+        val disk = CommittedAuditDisk()
+        CommittedAuditPhone(peer.authorityKey, disk).use { phone ->
+            phone.sync(peer::exchange)
+            val state = phone.session.state.value
+            assertEquals(AuditSyncPhase.COMPLETE, state.phase)
+            val records = state.history.epochs.single().records
+            assertEquals(listOf(AuditEventKind.CONSUMED, AuditEventKind.DISPATCHED, AuditEventKind.VERIFIED_RESULT), records.map { it.kind })
+            assertEquals(listOf(1uL, 2uL, 3uL), records.map { it.sequence })
+            assertContentEquals(stored.bytes("consumptionEvent"), records.first().encode(limits))
+            assertContentEquals(stored.bytes("outcomeEvent"), records.last().encode(limits))
+            records.forEach { assertContentEquals(id(5), it.decisionPhoneID) }
+            assertTrue(state.history.epochs.single().gaps.isEmpty())
+            assertNotNull(state.lastCompletedAt)
+            val encrypted = assertNotNull(disk.ciphertext)
+            val plain = AuditArchiveCipher(disk.key, limits.maxBytes).decrypt(encrypted, phone.binding)
+            assertFalse(encrypted.contentEquals(plain))
+        }
+        CommittedAuditPhone(peer.authorityKey, disk).use { restored ->
+            val offline = restored.session.state.value
+            assertEquals(AuditSyncPhase.IDLE, offline.phase)
+            assertEquals(3, offline.history.epochs.single().records.size)
+            assertNull(offline.lastCompletedAt); assertNull(offline.currentObservation)
+            restored.sync(peer::exchange)
+            assertEquals(3, restored.session.state.value.history.epochs.single().records.size)
+            assertNotNull(restored.session.state.value.lastCompletedAt)
+        }
+    }
+
+    @Test fun rolledBackEventsStayAbsentAndReopenedJournalSyncKeepsTheWinner() = withPeer { peer ->
+        val request = peer.session()
+        peer.apply(request, peer.initial)
+        CommittedAuditPhone(peer.authorityKey, CommittedAuditDisk()).use { phone ->
+            peer.send(mapOf("command" to "failNextConsumption")); peer.receive()
+            peer.send(peer.decision(5))
+            assertEquals("injectedPrecommitFailure", peer.receive().text("rejection"))
+            phone.sync(peer::exchange)
+            assertTrue(phone.session.state.value.history.epochs.single().records.isEmpty())
+            peer.send(peer.decision(6))
+            peer.apply(request, peer.receive(), 110u)
+            phone.sync(peer::exchange)
+            val consumed = phone.session.state.value.history.epochs.single().records.single()
+            assertEquals(AuditEventKind.CONSUMED, consumed.kind)
+            assertContentEquals(id(6), consumed.decisionPhoneID)
+            peer.send(mapOf("command" to "failNextOutcome")); peer.receive()
+            peer.send(mapOf("command" to "loseOutcome"))
+            assertEquals("injectedPrecommitFailure", peer.receive().text("rejection"))
+            phone.sync(peer::exchange)
+            assertContentEquals(consumed.encode(limits), phone.session.state.value.history.epochs.single().records.single().encode(limits))
+            assertNotNull(request.snapshot(instant(110u)).capture)
+            peer.send(mapOf("command" to "reopenJournal"))
+            peer.apply(request, peer.receive(), 120u)
+            assertNull(request.snapshot(instant(120u)).capture)
+            val stored = peer.snapshot()
+            phone.sync(peer::exchange)
+            val linked = phone.session.state.value.history
+            assertEquals(2, linked.epochs.size)
+            assertEquals(1, AuditHistory.list(listOf(linked)).single().chains.size)
+            val records = linked.epochs.flatMap { it.records }
+            assertEquals(2, records.size)
+            val unknown = records.single { it.kind == AuditEventKind.UNKNOWN_OUTCOME }
+            assertEquals(AuditReason.AUTHORITY_RESTARTED, unknown.reason)
+            assertContentEquals(stored.bytes("outcomeEvent"), unknown.encode(limits))
+            records.forEach { assertContentEquals(id(6), it.decisionPhoneID) }
+            assertTrue(linked.proofs.all { it.conflicts.isEmpty() })
+            phone.sync(peer::exchange)
+            assertEquals(2, phone.session.state.value.history.epochs.sumOf { it.records.size })
+            peer.send(mapOf("command" to "reopenJournal"))
+            peer.apply(request, peer.receive(), 130u)
+            phone.sync(peer::exchange)
+            assertEquals(3, phone.session.state.value.history.epochs.size)
+            assertEquals(2, phone.session.state.value.history.epochs.sumOf { it.records.size })
+            assertNull(request.snapshot(instant(130u)).capture)
+            peer.send(peer.decision(5))
+            assertEquals("unavailableRequest", peer.receive().text("rejection"))
+        }
+    }
+
     private fun withPeer(block: (Peer) -> Unit) = Peer().use { peer -> peer.start(); block(peer) }
 
     private inner class Peer : Closeable {
         private val mac = newKey()
+        val authorityKey: ByteArray get() = publicKey(mac)
         private val a = newKey()
         private val b = newKey()
         private val directory = Files.createTempDirectory("remozio-approval-flow-",
@@ -313,6 +400,8 @@ class ApprovalFlowTest {
                 frame.append(char.toChar())
             }
         }
+
+        fun exchange(fields: Map<String, String>): JsonObject { send(fields); return receive() }
 
         fun snapshot(): JsonObject { send(mapOf("command" to "journalSnapshot")); return receive() }
 

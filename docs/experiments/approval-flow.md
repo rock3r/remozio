@@ -58,7 +58,7 @@ Unknown comes from an explicit outcome-loss or authority-restart observation. It
 
 ## Cases
 
-Eleven integration tests cover:
+Thirteen integration tests cover:
 
 - Either phone wins when its valid decision arrives first; a competing decision and a replay cannot win again.
 - Both phone sessions accept the same signed status, retain the winning phone, and clear captures on Unknown. Replayed pending status cannot restore details.
@@ -73,6 +73,27 @@ Eleven integration tests cover:
 - Reopening a pending request clears its capture and publishes Cancelled without consuming it.
 - A verified synthetic success survives reopening without becoming Unknown or creating another outcome event.
 
-Transport authentication, encrypted channels, fresh reconnect synchronization, persistent trust, durable admission coordination, checkpoint and rollback witnesses, real device keys, and target execution remain outside this experiment. The harness establishes interoperability of the current production codecs and verifiers, not completion of the full approval product.
+- Signed journal replies carry the committed winner and outcomes through phone sync into encrypted cache. Offline reload retains evidence without fresh-sync claims.
+- Rolled-back events remain absent from phone history. Reopening adds a linked Unknown outcome, retains the winner, and does not duplicate records on repeated sync.
+
+## Committed audit history
+
+The same peer also serves `auditHistory` and `auditPage` controls through the journal-backed `AuditReplyBuilder`. These controls use the disposable authority key already pinned by the test controller. They read actual committed events, with two records per page. They do not add a production endpoint or authorize a phone to read history.
+
+```mermaid
+flowchart LR
+    J[Committed consumption and outcome events] --> R[Coherent journal read]
+    R --> S[Signed audit reply]
+    S --> P[Phone verifies key, nonce and scope]
+    P --> C[Encrypt cache before publication]
+    C --> H[Phone history]
+    C --> O[Offline reload: retained evidence, no fresh observation]
+```
+
+The phone fixture uses the real `AuditSyncSession` and `EncryptedAuditCache`, a disposable AES key, and an in-memory ciphertext store. It pauses and resumes a bounded sync with a one-response budget. This proves codec and cache integration on the JVM. It does not prove Android Keystore custody, Android file durability, or background delivery.
+
+The separate [audit peer](audit-flow.md) retains synthetic restoration and unavailable-history cases. Those cases still use invented history and are not production recovery evidence.
+
+Transport authentication, encrypted channels, fresh request synchronization after reconnect, persistent trust, durable admission coordination, checkpoint and rollback witnesses, real device keys, and target execution remain outside this experiment. The harness establishes interoperability of the current production codecs and verifiers, not completion of the full approval product.
 
 The Kotlin peer signs with standard `SHA256withECDSA` DER output. The shared strict P-256 converter produces the 64-byte wire signature consumed by the Swift verifier. This exercises the format conversion needed by Android Keystore without claiming hardware-backed signing on the host JVM.
