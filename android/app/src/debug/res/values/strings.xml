@@ -1,0 +1,5 @@
+<resources>
+    <string name="open_sample_command">Preview a sample command</string>
+    <string name="sample_mac">Example Mac</string>
+    <string name="sample_account">example</string>
+</resources>
