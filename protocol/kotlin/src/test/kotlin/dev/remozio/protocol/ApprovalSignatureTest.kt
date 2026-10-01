@@ -12,14 +12,14 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ApprovalSignatureTest {
     private data class Vector(val type: ApprovalMessageType, val purpose: SigningPurpose, val payload: ByteArray,
-                              val publicKey: ByteArray, val signature: ByteArray, val producer: String)
+                              val publicKey: ByteArray, val signature: ByteArray, val derSignature: ByteArray, val producer: String)
 
     private fun vectors() = Json.parseToJsonElement(File(checkNotNull(System.getProperty("remozio.signatureVectors"))).readText()).jsonArray.map {
         val row = it.jsonObject
         fun text(key: String) = row.getValue(key).jsonPrimitive.content
         Vector(ApprovalMessageType.entries.single { type -> type.tag == text("type").toULong() },
             SigningPurpose.entries.single { purpose -> purpose.tag == text("purpose").toULong() },
-            hex(text("payload")), hex(text("publicKey")), hex(text("signature")), text("producer"))
+            hex(text("payload")), hex(text("publicKey")), hex(text("signature")), hex(text("derSignature")), text("producer"))
     }
 
     private fun verify(row: Vector, signature: ByteArray = row.signature, key: ByteArray = row.publicKey,
@@ -34,6 +34,8 @@ class ApprovalSignatureTest {
         assertEquals(20, rows.size)
         assertEquals(setOf("CryptoKit", "Java 21 SunEC"), rows.map { it.producer }.toSet())
         for (row in rows) {
+            kotlin.test.assertContentEquals(row.signature, P256SignatureEncoding.fromDer(row.derSignature))
+            kotlin.test.assertContentEquals(row.derSignature, P256SignatureEncoding.toDer(row.signature))
             assertTrue(verify(row), row.producer)
             assertFalse(verify(row, payload = hex("a10002")))
             val type = if (row.type == ApprovalMessageType.STATUS) ApprovalMessageType.REQUEST else ApprovalMessageType.STATUS
