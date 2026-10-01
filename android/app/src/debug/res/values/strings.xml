@@ -7,4 +7,25 @@
     <string name="open_sample_disappeared">Preview a disappeared target</string>
     <string name="open_sample_unknown">Preview an unknown outcome</string>
     <string name="open_sample_clock">Preview uncertain timing</string>
+    <string name="probe_title">Biometric key experiment</string>
+    <string name="probe_description">Debug only. Uses a disposable key and random test data. Creates no pairing and approves nothing. The key stays across restarts until you delete it. Enrollment retention is experimental.</string>
+    <string name="probe_initial">Create or inspect the probe key to begin.</string>
+    <string name="probe_create">Create key (keep existing)</string>
+    <string name="probe_inspect">Inspect key</string>
+    <string name="probe_sign">Sign test data with biometrics</string>
+    <string name="probe_without">Try a new signature without a prompt</string>
+    <string name="probe_delete">Delete probe key</string>
+    <string name="probe_close">Close experiment</string>
+    <string name="probe_deleted">Probe key deleted.</string>
+    <string name="probe_stopped">Screen stopped. Any pending authentication was cancelled. Key operations may have completed; inspect the key.</string>
+    <string name="probe_working">Working…</string>
+    <string name="probe_error">Experiment failed: %1$s. Inspect the key or delete and recreate it.</string>
+    <string name="probe_unprotected">FAIL: A new signature succeeded without authentication. Do not use this key for approvals.</string>
+    <string name="probe_denied">PASS: The new signature required authentication.</string>
+    <string name="probe_prompt_title">Sign disposable test data</string>
+    <string name="probe_prompt_subtitle">Remozio debug experiment. No real approval.</string>
+    <string name="probe_cancel">Cancel</string>
+    <string name="probe_cancelled">Authentication cancelled.</string>
+    <string name="probe_signed">Test signature verified (%1$d DER bytes). No real approval was sent.</string>
+    <string name="probe_auth_error">Authentication ended (code %1$d). No test signature was accepted.</string>
 </resources>
