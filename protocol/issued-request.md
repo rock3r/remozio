@@ -37,7 +37,7 @@ All fields are required. Reject unknown fields, unsupported wrapper versions, in
 
 Kind tags are command `0`, 1Password access `1`, 1Password unlock `2`, and Little Snitch `3`. Unknown tags fail. The IDs use the same opaque representation as the [decision payload](decision-payload.md). Creation requires a fresh random challenge from the authority; this codec only checks its length.
 
-The action map uses the decision contract's explicit choice/scope tags. Choices must be nonempty, distinct, and individually valid under the action policy for the request kind. Preserve their supplied order. Do not reinterpret the first choice as the default: the per-kind capture must bind and validate any observed default separately.
+The action map uses the decision contract's explicit choice/scope tags. The list must be nonempty. Each complete `(choice, scope)` pair must be distinct and valid under the action policy for the request kind. The same choice tag can appear with different scopes: Allow for this session and Allow forever are separate offered actions. Preserve their supplied order. Do not reinterpret the first choice as the default: the per-kind capture must bind and validate any observed default separately.
 
 Feature tags describe a set. Construction sorts them; parsing rejects duplicates or an unsorted array. Choices remain an ordered list and are never sorted.
 
