@@ -62,8 +62,8 @@ class AuditArchiveCipher(private val key: SecretKey, val maximumPlaintextBytes: 
 class EncryptedAuditCache private constructor(
     private val storage: AuditCiphertextStorage,
     private val cipher: AuditArchiveCipher,
-    private val binding: AuditCacheBinding,
-    private val protocolLimits: AuditPageLimits,
+    internal val binding: AuditCacheBinding,
+    internal val protocolLimits: AuditPageLimits,
     private val capacity: AuditEvidenceLimits,
     private val archiveLimits: CborLimits,
     private var evidence: AuditEvidenceStore,
