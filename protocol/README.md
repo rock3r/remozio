@@ -51,3 +51,5 @@ The build pins Kotlin 2.4.20 and Gradle 9.7.0, within the [documented compatibil
 The wrapper scripts and JAR come from the Gradle `v9.7.0` tag. The JAR matches the [published wrapper checksum](https://services.gradle.org/distributions/gradle-9.7.0-wrapper.jar.sha256): `7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d`. CI checks this before executing it. The wrapper properties also pin the distribution checksum. Update these values together when upgrading Gradle.
 
 The [request lifecycle](lifecycle.md) defines consumption, expiry, and terminal outcomes in both languages.
+
+The [signing input](signing-input.md) separates approval messages by protocol, wire version, type, and purpose.
