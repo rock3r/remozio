@@ -1,0 +1,14 @@
+{
+  "accessibility" : "after-first-unlock-this-device-only",
+  "authenticationUIAllowed" : false,
+  "experiment" : "secure-enclave-signing",
+  "originalSignatureValid" : true,
+  "osVersion" : "Version 27.0 (Build 26A428)",
+  "restoredKeyMatches" : true,
+  "restoredSignatureValid" : true,
+  "schemaVersion" : 1,
+  "secureEnclaveAvailable" : true,
+  "stage" : "complete",
+  "status" : "passed",
+  "tamperedRepresentationRejected" : true
+}
