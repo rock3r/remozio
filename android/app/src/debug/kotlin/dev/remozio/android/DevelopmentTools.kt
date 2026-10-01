@@ -1,5 +1,7 @@
 package dev.remozio.android
 
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
 import dev.remozio.phone.requests.RequestTiming
 import dev.remozio.phone.requests.TrackedRequestStatus
 
@@ -32,7 +34,11 @@ private enum class SampleScene(val label: Int) {
 @Composable
 internal fun DevelopmentTools() {
     var scene by remember { mutableStateOf<SampleScene?>(null) }
+    val context = LocalContext.current
     Column {
+        OutlinedButton(onClick = { context.startActivity(Intent(context, BiometricProbeActivity::class.java)) }) {
+            Text(stringResource(R.string.probe_title))
+        }
         SampleScene.entries.forEach { sample ->
             OutlinedButton(onClick = { scene = sample }) { Text(stringResource(sample.label)) }
         }

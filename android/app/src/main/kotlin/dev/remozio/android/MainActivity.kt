@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun RemozioTheme(content: @Composable () -> Unit) {
+internal fun RemozioTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val colors = if (isSystemInDarkTheme()) {
         dynamicDarkColorScheme(context)
