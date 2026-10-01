@@ -1,0 +1,56 @@
+{
+  "experiment": "execution-binding-v1",
+  "host": {
+    "os": "27.0",
+    "build": "26A428",
+    "architecture": "arm64",
+    "xcode": "Xcode 27.0\nBuild version 27A266a",
+    "sdk": "27.0",
+    "deploymentTarget": "26.0"
+  },
+  "measuredAtUTC": "2026-10-01T10:54:22.502769+00:00",
+  "sameIdentityAtFinalCheck": true,
+  "publicHeaderDeclaresFexecve": false,
+  "observations": [
+    {
+      "case": "path-before",
+      "exit": 0,
+      "stdout": "marker=original\nargv0=<fixture>/program\nexecutable=<fixture>/program\n",
+      "stderr": ""
+    },
+    {
+      "case": "descriptor-before",
+      "launchErrno": 13
+    },
+    {
+      "case": "path-after-replacement",
+      "exit": 0,
+      "stdout": "marker=replacement\nargv0=<fixture>/program\nexecutable=<fixture>/program\n",
+      "stderr": ""
+    },
+    {
+      "case": "descriptor-after-replacement",
+      "launchErrno": 13
+    },
+    {
+      "case": "script-descriptor-before",
+      "launchErrno": 13
+    },
+    {
+      "case": "explicit-interpreter-before",
+      "exit": 0,
+      "stdout": "original-script:/dev/fd/<retained>\n",
+      "stderr": ""
+    },
+    {
+      "case": "script-descriptor-after-inplace-write",
+      "launchErrno": 13
+    },
+    {
+      "case": "explicit-interpreter-after-inplace-write",
+      "exit": 0,
+      "stdout": "changed-script:/dev/fd/<retained>\n",
+      "stderr": ""
+    }
+  ]
+}
