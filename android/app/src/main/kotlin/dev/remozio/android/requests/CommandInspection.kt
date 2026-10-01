@@ -58,12 +58,13 @@ internal fun CommandInspection(
     onDismiss: () -> Unit,
     sample: Boolean = false,
     status: TrackedRequestStatus? = null,
+    requestKey: Any? = null,
 ) {
     val pixels = LocalWindowInfo.current.containerSize
     val window = with(LocalDensity.current) { pixels.width.toDp() to pixels.height.toDp() }
     val identity = status?.status?.let { listOf(it.macID, it.accountID, it.requestID, it.requestDigest, it.challenge).map(CborValue::Bytes) }
     val visibleCapture = if (status?.status?.phase?.isTerminal == true) null else capture
-    key(identity ?: capture) {
+    key(requestKey ?: identity ?: capture) {
         if (window.first < 600.dp) {
             ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberBottomSheetState(
                 initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
