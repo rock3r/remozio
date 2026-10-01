@@ -24,6 +24,17 @@ final class PresenceRouterTests: XCTestCase {
         }
     }
 
+    func testManualModeDoesNotSupplyAutomaticGraceEvidence() throws {
+        for mode in [RoutingMode.present, .away] {
+            var router = try router()
+            _ = router.evaluate(mode: .automatic, snapshot: snapshot(0), now: moment(0))
+            _ = router.evaluate(mode: mode, snapshot: .init(), now: moment(1))
+            let result = router.evaluate(mode: .automatic, snapshot: .init(), now: moment(2))
+            XCTAssertEqual(result.destination, .phones)
+            XCTAssertEqual(result.reason, .detectorUnavailable)
+        }
+    }
+
     func testUsableRemoteSessionWinsOverLockDarkAndIdle() throws {
         var router = try router()
         var sample = snapshot(200_000, input: 0)

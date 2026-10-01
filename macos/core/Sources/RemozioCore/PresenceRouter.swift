@@ -94,8 +94,8 @@ public struct PresenceRouter: Sendable {
         }
         lastMoment = now
         switch mode {
-        case .present: return known(.localMac, .manualPresent, limited: false)
-        case .away: return known(.phones, .manualAway, limited: false)
+        case .present: return manual(.localMac, .manualPresent)
+        case .away: return manual(.phones, .manualAway)
         case .automatic: break
         }
         guard !regressed else { return unavailable(now: now) }
@@ -146,6 +146,13 @@ public struct PresenceRouter: Sendable {
         }
         if hasUnknown { return .unknown }
         return hasDark ? .dark : .off
+    }
+
+    private mutating func manual(_ destination: RequestDestination, _ reason: PresenceReason) -> PresenceRouting {
+        lastDestination = nil
+        lastEvidenceExpiry = nil
+        unavailableSince = nil
+        return PresenceRouting(destination: destination, reason: reason, detectionLimited: false)
     }
 
     private mutating func known(_ destination: RequestDestination, _ reason: PresenceReason, limited: Bool, evidenceAt: UInt64? = nil) -> PresenceRouting {
