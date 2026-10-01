@@ -100,7 +100,7 @@ Authenticate the current channel and authority, then match all five request bind
 
 The phone retains the highest accepted revision within that complete binding. Reject older snapshots; equal revisions must have identical bytes and cannot restart a countdown. Newer snapshots must pass transition checks, including immutable terminal results and nondecreasing observed age. Coalesced updates may skip intermediate phases; they cannot contradict an already known result.
 
-A signed revision is not proof of freshness on a new connection or after process death. Reconnect must use the authenticated synchronization protocol and its freshness evidence before presenting actionable controls. These codecs do not implement that protocol, revision retention, or the Android reducer.
+A signed revision is not proof of freshness on a new connection or after process death. Reconnect must use the authenticated synchronization protocol and its freshness evidence before presenting actionable controls. These codecs do not implement that synchronization protocol. The shared phone core implements in-memory revision tracking and the Android reducer.
 
 Terminal status removes controls on all receiving phones. An in-flight decision can still reach the Mac before dismissal; only serialized Mac admission and durable consumption choose the winner. A phone UI or this codec cannot arbitrate that race.
 

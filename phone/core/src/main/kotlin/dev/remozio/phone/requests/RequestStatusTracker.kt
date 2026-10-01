@@ -1,4 +1,4 @@
-package dev.remozio.android.requests
+package dev.remozio.phone.requests
 
 import dev.remozio.protocol.ApprovalMessageType
 import dev.remozio.protocol.ApprovalSignature
@@ -13,16 +13,16 @@ import dev.remozio.protocol.RequestStatusReason
 import dev.remozio.protocol.SigningPurpose
 
 /** The caller supplies an elapsed clock that includes sleep and a new epoch whenever its origin changes. */
-internal data class ElapsedInstant(val epoch: Long, val milliseconds: ULong)
+data class ElapsedInstant(val epoch: Long, val milliseconds: ULong)
 
-internal enum class StatusRejection {
+enum class StatusRejection {
     INVALID_SIGNATURE, WRONG_REQUEST, REVISION_CONFLICT, INVALID_TRANSITION,
     CHANGED_OBSERVATION, REGRESSING_AGE, CHANGED_TIMING, CHANGED_DECIDING_PHONE,
 }
-internal class StatusTrackingException(val reason: StatusRejection) : IllegalArgumentException(reason.name)
-internal enum class StatusAcceptance { APPLIED, DUPLICATE, OLDER }
+class StatusTrackingException(val reason: StatusRejection) : IllegalArgumentException(reason.name)
+enum class StatusAcceptance { APPLIED, DUPLICATE, OLDER }
 
-internal data class RequestTiming(
+data class RequestTiming(
     val ageLowerBoundMs: ULong,
     val authorizationRemainingUpperBoundMs: ULong?,
     val estimatedTargetRemainingMs: ULong?,
@@ -32,7 +32,7 @@ internal data class RequestTiming(
     val deliveryDelayUnknown: Boolean get() = true
 }
 
-internal data class TrackedRequestStatus(val status: RequestStatusPayload, val timing: RequestTiming)
+data class TrackedRequestStatus(val status: RequestStatusPayload, val timing: RequestTiming)
 
 /**
  * Tracks signed status for an already authenticated issued request. It grants no action authority or freshness.

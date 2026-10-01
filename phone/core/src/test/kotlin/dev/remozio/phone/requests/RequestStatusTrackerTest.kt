@@ -1,4 +1,4 @@
-package dev.remozio.android.requests
+package dev.remozio.phone.requests
 
 import dev.remozio.protocol.*
 import java.security.KeyPair

@@ -1,27 +1,27 @@
-package dev.remozio.android.requests
+package dev.remozio.phone.requests
 
 import dev.remozio.protocol.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-internal enum class CommandSessionRejection { INVALID_SIGNATURE, WRONG_AUTHORITY }
-internal class CommandSessionException(val reason: CommandSessionRejection) : IllegalArgumentException(reason.name)
+enum class CommandSessionRejection { INVALID_SIGNATURE, WRONG_AUTHORITY }
+class CommandSessionException(val reason: CommandSessionRejection) : IllegalArgumentException(reason.name)
 
-internal data class RequestLimits(
+data class RequestLimits(
     val body: CborLimits,
     val capture: CborLimits,
     val status: CborLimits,
     val signing: CborLimits,
 )
 
-internal data class CommandRequestSnapshot(val capture: CommandCapture?, val status: TrackedRequestStatus?)
+data class CommandRequestSnapshot(val capture: CommandCapture?, val status: TrackedRequestStatus?)
 
 /**
  * Owns one authenticated command capture in memory. A signature establishes origin, not current validity.
  * The enrollment owner must discard this session when its trusted authority changes.
  */
-internal class CommandRequestSession private constructor(
+class CommandRequestSession private constructor(
     capture: CommandCapture,
     private val tracker: RequestStatusTracker,
 ) {
