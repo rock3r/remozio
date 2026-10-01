@@ -70,7 +70,8 @@ The caller supplies the root key pinned during authenticated gateway setup. A ke
 Approval signatures and other gateway purposes cannot substitute for this signature.
 
 A valid candidate control permits only its bounded probe. It does not authorize recipient activation, enrollment, revocation reversal, or an approval.
-Future mapping, acknowledgement, and revocation controls need distinct closed message types and purposes.
+[Recipient controls](gateway-recipient-controls.md) use distinct types and purposes for mapping activation and phone revocation.
+Acknowledgement and reconciliation controls remain separate work.
 
 ## Phone proof
 
