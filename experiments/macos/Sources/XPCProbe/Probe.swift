@@ -1,0 +1,115 @@
+import Foundation
+
+@objc protocol ProbeProtocol {
+    func hello(reply: @escaping (Bool) -> Void)
+    func ping(_ nonce: String, reply: @escaping (String) -> Void)
+}
+
+final class ProbeService: NSObject, ProbeProtocol {
+    func hello(reply: @escaping (Bool) -> Void) { reply(true) }
+
+    func ping(_ nonce: String, reply: @escaping (String) -> Void) {
+        // These are synthetic test nonces, never request or credential data.
+        print("PING_RECEIVED \(nonce)")
+        fflush(stdout)
+        reply(nonce)
+    }
+}
+
+final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        connection.exportedInterface = NSXPCInterface(with: ProbeProtocol.self)
+        connection.exportedObject = ProbeService()
+        connection.activate()
+        return true
+    }
+}
+
+// XPC callbacks can arrive on a different queue. The lock owns all result state.
+final class Completion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: String?
+    let signal = DispatchSemaphore(value: 0)
+
+    func finish(_ value: String) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        lock.unlock()
+        signal.signal()
+    }
+
+    func value() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return result ?? "missing-result"
+    }
+}
+
+@main enum Probe {
+    static func main() {
+        let args = Array(CommandLine.arguments.dropFirst())
+        guard args.count >= 3, args[1].hasPrefix("dev.remozio.experiments.") else {
+            print("Usage: remozio-xpc-probe serve|ping|guarded-ping service-name peer-identifier [nonce]")
+            exit(2)
+        }
+        let peer = args[2]
+        guard peer.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }) else {
+            exit(2)
+        }
+        let requirement = "identifier \"\(peer)\""
+        switch args[0] {
+        case "serve":
+            guard args.count == 3 else { exit(2) }
+            let delegate = ListenerDelegate()
+            let listener = NSXPCListener(machServiceName: args[1])
+            listener.setConnectionCodeSigningRequirement(requirement)
+            listener.delegate = delegate
+            listener.activate()
+            withExtendedLifetime((listener, delegate)) { RunLoop.current.run() }
+        case "ping", "guarded-ping":
+            guard args.count == 4 else { exit(2) }
+            let nonce = args[3]
+            let completion = Completion()
+            let connection = NSXPCConnection(machServiceName: args[1])
+            connection.remoteObjectInterface = NSXPCInterface(with: ProbeProtocol.self)
+            connection.setCodeSigningRequirement(requirement)
+            connection.activate()
+            defer { connection.invalidate() }
+            if args[0] == "guarded-ping" {
+                let handshake = Completion()
+                guard let helloProxy = connection.remoteObjectProxyWithErrorHandler({ @Sendable error in
+                    let error = error as NSError
+                    handshake.finish("rejected:\(error.domain):\(error.code)")
+                }) as? ProbeProtocol else { exit(2) }
+                helloProxy.hello { @Sendable accepted in
+                    handshake.finish(accepted ? "accepted" : "wrong-reply")
+                }
+                guard handshake.signal.wait(timeout: .now() + 10) == .success else {
+                    print("timeout")
+                    exit(4)
+                }
+                guard handshake.value() == "accepted" else {
+                    print(handshake.value())
+                    exit(3)
+                }
+            }
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ @Sendable error in
+                let error = error as NSError
+                completion.finish("rejected:\(error.domain):\(error.code)")
+            }) as? ProbeProtocol else { exit(2) }
+            proxy.ping(nonce) { @Sendable returned in
+                completion.finish(returned == nonce ? "accepted" : "wrong-reply")
+            }
+            guard completion.signal.wait(timeout: .now() + 10) == .success else {
+                print("timeout")
+                exit(4)
+            }
+            let result = completion.value()
+            print(result)
+            exit(result == "accepted" ? 0 : (result.hasPrefix("rejected:") ? 3 : 5))
+        default:
+            exit(2)
+        }
+    }
+}

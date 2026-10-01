@@ -1,0 +1,21 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+experiment-results/
+
+# Local specification workspace and its separate publication repository.
+/DIAGRAMS.html
+/EDITORIAL-CHECK.json
+/IMPLEMENTATION-PLAN.md
+/LATEST-REVIEW.html
+/MOCKUPS-SECTION.html
+/PRIVATE-SITE.md
+/draw-spec.py
+/render-site.mjs
+/restructure-spec.py
+/reviews/
+/site/
+
+__pycache__/
+*.pyc

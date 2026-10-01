@@ -4,4 +4,8 @@ Approve requests from your Macs through one Android app. The idea covers privile
 
 Read the [Remozio specification](https://remozio-plan.seebrock3r.chatgpt.site/) for the proposed architecture, app experience, and open questions.
 
-Remozio is currently a design proposal. This repository has no implementation yet.
+Remozio is in the experiment phase. There is no production approval implementation yet.
+
+See the [experiment sequence](docs/experiments/README.md) and the [Mac XPC experiment](docs/experiments/macos-xpc.md) for measured results and reproducible checks.
+
+Run `./scripts/check.sh` for the local gate. Pull requests use the repository’s [babysit skill](.agents/skills/babysit-pr/SKILL.md), with Python checks, the Mac build, and Codex review required.

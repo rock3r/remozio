@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "experiment": "macos-xpc-identifiers",
+  "recordedAt": "2026-09-30T22:05:20.410830+00:00",
+  "status": "passed",
+  "cases": [
+    {
+      "name": "matching-peers",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "wrong-client-identifier",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "wrong-server-requirement",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "guarded-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "guarded-matching-peers",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "matching-peers-after-rejections",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    }
+  ],
+  "environment": {
+    "macOS": "27.0",
+    "architecture": "arm64",
+    "xcode": "Xcode 27.0\nBuild version 27A266a",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx27.0.0",
+    "deploymentTarget": "arm64-apple-macosx26.0",
+    "signing": "ad-hoc identifiers only; not Developer ID or Team ID validation"
+  },
+  "temporaryService": "gui/501/dev.remozio.experiments.279417db98f241e8978f0c92dc87f26a",
+  "cleanup": {
+    "bootoutExitCode": 0,
+    "serviceAbsent": true
+  }
+}
