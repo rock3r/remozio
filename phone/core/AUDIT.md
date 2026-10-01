@@ -55,3 +55,17 @@ Each cache has its own Android Keystore AES-256 key. Generation prefers StrongBo
 Host tests use disposable software AES keys only. They test randomized encryption, enrollment binding, tampering, invalid archives, conflict restoration, capacity and failures before or after replacement. The Android adapter is build-checked; hardware key behavior, file recovery and device lifecycle tests remain deferred. History UI, enrollment ownership and the sync coordinator still need integration.
 
 Platform references: [Keystore AES example](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec), [key policy](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder), [AtomicFile ownership and writes](https://developer.android.com/reference/android/util/AtomicFile), and [private backup-excluded storage](https://developer.android.com/reference/android/content/ContextWrapper).
+
+## History presentation model
+
+`AuditHistory.list` returns separate Mac/account groups. Snapshot scope comes from the evidence store, including when the store is empty. Duplicate scopes are rejected instead of merging possibly different owners. Device names remain editable UI labels; this model uses stable identities.
+
+Mac, category and outcome filters select records. They never remove gaps, epoch boundaries, conflict warnings or retained reconciliation reports. Null means all values; an empty filter set means none. Each epoch reports its total retained record count separately from the filtered list.
+
+Within an epoch, the list uses descending sequence order. A request timeline uses ascending sequence order and ignores list filters. Timestamps, missing timestamps and unknown outcomes remain unchanged. No method infers a final outcome or offers an action.
+
+Unambiguous signed predecessor links form chains. Each list chain runs newest first; each timeline chain runs oldest first. Missing predecessors and unknown descriptors remain explicit. Forks split into separate chains because sibling chronology is unknown. Mac/account groups and independent chains use stable identity order only; the UI must not present that order as chronology. A linked prior boundary does not prove that later records were never lost.
+
+Conflicting proofs remain quarantined. The first accepted record is retained evidence, not a resolution of the conflict. Every group carries conflict classes and the number of conflicting proofs. Typed signed history reports retain their own conflict classes, including unavailable and cursor-ahead responses. Their arrival order does not select the current epoch or establish a current sync result.
+
+All output collections are immutable. This model contains retained metadata only. UI navigation, enrollment labels, online state, last-sync state and the sync coordinator remain separate integration work.

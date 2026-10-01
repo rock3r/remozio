@@ -95,7 +95,9 @@ class AuditEvidenceStoreTest {
             assertEquals(AuditReason.NONE, epoch.records.single().reason)
         }
         f.add(history(header()), AuditEvidenceKind.HISTORY_STATUS)
+        assertEquals(AuditEpochCause.RESTART, f.store.snapshot().proofs.last().historyStatus?.current?.cause)
         assertEquals(AuditEvidenceAcceptance.CONFLICT, f.add(history(header(cause = AuditEpochCause.RESTORATION)), AuditEvidenceKind.HISTORY_STATUS))
+        assertEquals(AuditEpochCause.RESTORATION, f.store.snapshot().proofs.last().historyStatus?.current?.cause)
         assertEquals(AuditEpochCause.RESTART, f.store.snapshot().epochs.single().descriptor?.cause)
         assertTrue(AuditEvidenceConflict.DESCRIPTOR in f.store.snapshot().proofs.last().conflicts)
     }
@@ -139,7 +141,9 @@ class AuditEvidenceStoreTest {
         val f = Fixture(); val body = page(0u, 1u, listOf(event(1u))); val sig = f.sign(body, AuditEvidenceKind.PAGE)
         f.store.importEvidence(AuditEvidenceKind.PAGE, body, sig)
         body.fill(0); sig.fill(0)
+        assertEquals(AuditHistoryScope(CborValue.Bytes(id(1)), CborValue.Bytes(id(2))), f.store.snapshot().scope)
         val proof = f.store.snapshot().proofs.single()
+        assertNull(proof.historyStatus)
         proof.canonicalBody.copyBytes().fill(0); proof.signature.copyBytes().fill(0)
         val restored = f.store()
         assertEquals(AuditEvidenceAcceptance.ADDED, restored.importEvidence(proof.kind, proof.canonicalBody.copyBytes(), proof.signature.copyBytes()))
