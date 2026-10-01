@@ -1,0 +1,126 @@
+{
+  "experiment": "authority-journal-process-crash-v1",
+  "measuredAt": "2026-10-01T11:53:28.095231+00:00",
+  "host": {
+    "os": "27.0",
+    "build": "26A428",
+    "architecture": "arm64",
+    "sdk": "27.0",
+    "sqlite": "3.54.0",
+    "deploymentTarget": "26.0"
+  },
+  "observations": [
+    {
+      "case": "crash-before-intent",
+      "outcomes": [],
+      "sequence": 0
+    },
+    {
+      "case": "crash-after-intent",
+      "outcomes": [],
+      "sequence": 0
+    },
+    {
+      "case": "crash-after-audit-insert",
+      "outcomes": [],
+      "sequence": 0
+    },
+    {
+      "case": "crash-before-database-commit",
+      "outcomes": [],
+      "sequence": 0
+    },
+    {
+      "case": "crash-after-database-commit",
+      "outcomes": [
+        "noDispatch"
+      ],
+      "sequence": 2
+    },
+    {
+      "case": "crash-after-checkpoint",
+      "outcomes": [
+        "unknown"
+      ],
+      "sequence": 2
+    },
+    {
+      "case": "crash-before-simulated-dispatch",
+      "outcomes": [
+        "unknown"
+      ],
+      "sequence": 2
+    },
+    {
+      "case": "recovery-crash-before-intent",
+      "outcome": "noDispatch"
+    },
+    {
+      "case": "recovery-crash-after-intent",
+      "outcome": "noDispatch"
+    },
+    {
+      "case": "recovery-crash-after-audit-insert",
+      "outcome": "noDispatch"
+    },
+    {
+      "case": "recovery-crash-before-database-commit",
+      "outcome": "noDispatch"
+    },
+    {
+      "case": "recovery-crash-after-database-commit",
+      "outcome": "noDispatch"
+    },
+    {
+      "case": "recovery-crash-after-checkpoint",
+      "outcome": "noDispatch"
+    },
+    {
+      "case": "competing-writers-and-replay",
+      "winners": 1
+    },
+    {
+      "case": "live-replacement-writer.lock",
+      "admission": "closed"
+    },
+    {
+      "case": "live-replacement-journal.sqlite",
+      "admission": "closed"
+    },
+    {
+      "case": "live-content-replacement",
+      "admission": "closed"
+    },
+    {
+      "case": "ledger-row",
+      "admission": "closed"
+    },
+    {
+      "case": "audit-row",
+      "admission": "closed"
+    },
+    {
+      "case": "old-checkpoint",
+      "admission": "closed"
+    },
+    {
+      "case": "malformed-checkpoint",
+      "admission": "closed"
+    },
+    {
+      "case": "missing-checkpoint",
+      "admission": "closed"
+    },
+    {
+      "case": "whole-backup-rollback",
+      "detected": false,
+      "gate": "independent-witness-required"
+    }
+  ],
+  "limitations": [
+    "Synthetic metadata only; no real dispatch",
+    "Process exits are not physical power loss",
+    "No protected root installation or independent rollback witness",
+    "No production admission or target validation"
+  ]
+}
