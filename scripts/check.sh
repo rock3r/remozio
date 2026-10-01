@@ -8,6 +8,7 @@ if [ "$(uname -s)" = Darwin ]; then
     swift build --package-path experiments/key-custody --triple arm64-apple-macosx26.0
     python3 scripts/check-macos-packaging.py
     python3 scripts/run-macos-execution-experiment.py
+    python3 scripts/run-macos-journal-experiment.py
     swift test --package-path protocol/swift --triple arm64-apple-macosx26.0
     swift test --package-path macos/core --triple arm64-apple-macosx26.0
 fi
