@@ -19,3 +19,8 @@ experiment-results/
 
 __pycache__/
 *.pyc
+
+.gradle/
+.kotlin/
+build/
+local.properties
