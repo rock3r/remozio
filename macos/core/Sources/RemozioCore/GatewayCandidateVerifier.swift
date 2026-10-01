@@ -73,26 +73,9 @@ public enum GatewayCandidateVerifier {
                               nowUnixMillis: UInt64, now: AuthorityMoment, maximumLifetimeMillis: UInt64,
                               payloadLimits: CBORLimits, signingLimits: CBORLimits) throws -> VerifiedGatewayCandidate {
         guard maximumLifetimeMillis > 0 else { throw GatewayCandidateVerificationError.invalidPolicy }
-        let candidate = try GatewayTokenCandidate.decode(canonicalCandidate, limits: payloadLimits)
-        guard trust.active else { throw GatewayCandidateVerificationError.unavailableGateway }
-        let binding = candidate.binding
-        guard binding.ownerID == trust.ownerID, binding.macID == trust.macID, binding.accountID == trust.accountID,
-              binding.gatewayID == trust.gatewayID, binding.lifecycleEpoch == trust.lifecycleEpoch else {
-            throw GatewayCandidateVerificationError.wrongGateway
-        }
-        let enrollment = trust.enrollment
-        guard enrollment.active, binding.phoneID == enrollment.phoneID, binding.enrollmentEpoch == enrollment.epoch,
-              binding.enrollmentTag == enrollment.tag else { throw GatewayCandidateVerificationError.unavailableEnrollment }
+        let candidate = try authenticate(canonicalCandidate: canonicalCandidate, signature: signature, wireVersion: wireVersion,
+            registrationToken: registrationToken, trust: trust, payloadLimits: payloadLimits, signingLimits: signingLimits)
         guard candidate.revision > trust.appliedControlRevision else { throw GatewayCandidateVerificationError.staleRevision }
-        guard try GatewayTokenCandidateSignature.verify(signature: signature, publicKey: trust.rootPublicKey,
-            wireVersion: wireVersion, canonicalPayload: canonicalCandidate, payloadLimits: payloadLimits, inputLimits: signingLimits) else {
-            throw GatewayCandidateVerificationError.invalidSignature
-        }
-        guard !registrationToken.isEmpty, registrationToken.utf8.count <= 16384,
-              registrationToken.utf8.allSatisfy({ (33...126).contains($0) }) else { throw GatewayCandidateVerificationError.invalidToken }
-        guard Data(SHA256.hash(data: Data(registrationToken.utf8))) == binding.tokenDigest else {
-            throw GatewayCandidateVerificationError.wrongToken
-        }
         guard candidate.issuedAtUnixMillis <= nowUnixMillis else { throw GatewayCandidateVerificationError.futureIssue }
         guard nowUnixMillis < candidate.expiresAtUnixMillis else { throw GatewayCandidateVerificationError.expired }
         guard candidate.expiresAtUnixMillis - candidate.issuedAtUnixMillis <= maximumLifetimeMillis else {
@@ -103,4 +86,31 @@ public enum GatewayCandidateVerifier {
         return VerifiedGatewayCandidate(candidate: candidate, payloadDigest: Data(SHA256.hash(data: canonicalCandidate)),
             trust: trust, admittedAt: now, deadlineMilliseconds: deadline, registrationToken: registrationToken)
     }
+
+    /// Internal historical-retry check. It deliberately grants no freshness, revision or dispatch authority.
+    static func authenticate(canonicalCandidate: Data, signature: Data, wireVersion: UInt64,
+                             registrationToken: String, trust: GatewayCandidateTrust,
+                             payloadLimits: CBORLimits, signingLimits: CBORLimits) throws -> GatewayTokenCandidate {
+        let candidate = try GatewayTokenCandidate.decode(canonicalCandidate, limits: payloadLimits)
+        guard trust.active else { throw GatewayCandidateVerificationError.unavailableGateway }
+        let binding = candidate.binding
+        guard binding.ownerID == trust.ownerID, binding.macID == trust.macID, binding.accountID == trust.accountID,
+              binding.gatewayID == trust.gatewayID, binding.lifecycleEpoch == trust.lifecycleEpoch else {
+            throw GatewayCandidateVerificationError.wrongGateway
+        }
+        let enrollment = trust.enrollment
+        guard enrollment.active, binding.phoneID == enrollment.phoneID, binding.enrollmentEpoch == enrollment.epoch,
+              binding.enrollmentTag == enrollment.tag else { throw GatewayCandidateVerificationError.unavailableEnrollment }
+        guard try GatewayTokenCandidateSignature.verify(signature: signature, publicKey: trust.rootPublicKey,
+            wireVersion: wireVersion, canonicalPayload: canonicalCandidate, payloadLimits: payloadLimits, inputLimits: signingLimits) else {
+            throw GatewayCandidateVerificationError.invalidSignature
+        }
+        guard !registrationToken.isEmpty, registrationToken.utf8.count <= 16384,
+              registrationToken.utf8.allSatisfy({ (33...126).contains($0) }) else { throw GatewayCandidateVerificationError.invalidToken }
+        guard Data(SHA256.hash(data: Data(registrationToken.utf8))) == binding.tokenDigest else {
+            throw GatewayCandidateVerificationError.wrongToken
+        }
+        return candidate
+    }
+
 }
