@@ -61,8 +61,8 @@ Only acknowledge success after the durable change commits. Synchronize the resul
 An unreachable Mac remains offline or unknown. Do not queue a routing change or show optimistic success.
 Manual modes persist until explicitly changed. Conflict recovery shows current state instead of silently overwriting it.
 
-This PR supplies the shared payload and signature contract. It does not yet issue challenges, store routing state, authenticate a channel, or expose UI.
-Those authority and application integrations remain required before Set Away becomes available.
+The [Mac routing journal](../macos/core/routing-journal.md) now issues retained challenges and commits routing changes against current enrollment.
+Authenticated channels, continuity checks, status synchronization, and UI remain required before Set Away becomes available.
 
 ## Validation
 

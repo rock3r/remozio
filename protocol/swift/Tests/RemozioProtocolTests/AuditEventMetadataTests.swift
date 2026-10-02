@@ -18,7 +18,7 @@ final class AuditEventMetadataTests: XCTestCase {
 
     func testSharedMetadataVectorsRoundTripWithoutTextOrNestedPayloads() throws {
         let rows = try vectors().valid
-        XCTAssertEqual(rows.count, 85)
+        XCTAssertEqual(rows.count, 87)
         for row in rows {
             let bytes = hex(row.hex)
             let event = try AuditEventMetadata.decode(bytes, limits: limits)

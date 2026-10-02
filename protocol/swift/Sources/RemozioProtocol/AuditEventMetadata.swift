@@ -6,7 +6,7 @@ public enum AuditEventKind: UInt64, CaseIterable, Sendable {
     case expired = 8, cancelled = 9, unknownOutcome = 10, enrollmentAdded = 11
     case enrollmentRevoked = 12, recovery = 13, updateScheduled = 14, updateActivated = 15
     case updateInterrupted = 16, bridgeStarted = 17, bridgeStopped = 18, dismissed = 19
-    case biometricCancelled = 20, aggregatedRejections = 21
+    case biometricCancelled = 20, aggregatedRejections = 21, routingChanged = 22
 }
 
 public enum AuditCategory: UInt64, CaseIterable, Sendable {
@@ -32,7 +32,7 @@ public enum AuditTargetScope: UInt64, CaseIterable, Sendable {
 
 public enum AuditAuthentication: UInt64, CaseIterable, Sendable {
     case unknown = 0, unverified = 1, decisionKey = 2, biometricKey = 3
-    case localAdministrator = 4, system = 5
+    case localAdministrator = 4, system = 5, localUser = 6
 }
 
 public enum AuditOutcome: UInt64, CaseIterable, Sendable {

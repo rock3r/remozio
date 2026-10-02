@@ -11,7 +11,7 @@ class AuditEventMetadataTest {
 
     @Test fun sharedMetadataVectorsRoundTripWithoutTextOrNestedPayloads() {
         val rows = vectors().getValue("valid").jsonArray
-        assertEquals(85, rows.size)
+        assertEquals(87, rows.size)
         for (row in rows) {
             val name = row.jsonObject.getValue("name").jsonPrimitive.content
             val body = hex(row.jsonObject.getValue("hex").jsonPrimitive.content)

@@ -55,7 +55,8 @@ Event time is the authority's wall-clock observation of the event. Receipt time 
 Order within an epoch by its sequence. Epoch IDs do not establish epoch order; authenticated epoch headers and explicit discontinuities must do that. Never infer a global ordering across Macs from wall clocks. A valid record alone proves none of these relationships.
 
 ## Tag assignments
-**AuditEventKind**: `0` unknown, `1` requestCreated, `2` phoneDecision, `3` decisionAccepted, `4` decisionRejected, `5` consumed, `6` dispatched, `7` verifiedResult, `8` expired, `9` cancelled, `10` unknownOutcome, `11` enrollmentAdded, `12` enrollmentRevoked, `13` recovery, `14` updateScheduled, `15` updateActivated, `16` updateInterrupted, `17` bridgeStarted, `18` bridgeStopped, `19` dismissed, `20` biometricCancelled, `21` aggregatedRejections
+
+**AuditEventKind**: `0` unknown, `1` requestCreated, `2` phoneDecision, `3` decisionAccepted, `4` decisionRejected, `5` consumed, `6` dispatched, `7` verifiedResult, `8` expired, `9` cancelled, `10` unknownOutcome, `11` enrollmentAdded, `12` enrollmentRevoked, `13` recovery, `14` updateScheduled, `15` updateActivated, `16` updateInterrupted, `17` bridgeStarted, `18` bridgeStopped, `19` dismissed, `20` biometricCancelled, `21` aggregatedRejections, `22` routingChanged
 
 **AuditCategory**: `0` unknown, `1` command, `2` onePasswordAccess, `3` onePasswordUnlock, `4` littleSnitch, `5` enrollment, `6` authority, `7` update, `8` adbBridge
 
@@ -65,7 +66,7 @@ Order within an epoch by its sequence. Epoch IDs do not establish epoch order; a
 
 **AuditTargetScope**: `0` unknown, `1` host, `2` domain, `3` any
 
-**AuditAuthentication**: `0` unknown, `1` unverified, `2` decisionKey, `3` biometricKey, `4` localAdministrator, `5` system
+**AuditAuthentication**: `0` unknown, `1` unverified, `2` decisionKey, `3` biometricKey, `4` localAdministrator, `5` system, `6` localUser
 
 **AuditOutcome**: `0` unknown, `1` pending, `2` accepted, `3` rejected, `4` noDispatch, `5` attempted, `6` verifiedSuccess, `7` verifiedFailure, `8` unresolved, `9` cancelled, `10` expired
 
@@ -85,6 +86,8 @@ The Android encrypted cache, sync protocol, history views, and retention control
 
 ## Evidence
 
-The shared fixtures include 85 valid cases and 78 invalid cases. Both native codecs round-trip the same canonical bytes. Tests cover every tag, missing observations, unsigned bounds, malformed fields and IDs, unsupported tags/schema, orphan scopes, rejection counts, and independent byte limits. Projection tests cover each action and lifetime and prove different timed durations collapse to the same metadata class. Kotlin tests also verify array ownership.
+The shared fixtures include 87 valid cases and 78 invalid cases. Both native codecs round-trip the same canonical bytes. Tests cover every tag, missing observations, unsigned bounds, malformed fields and IDs, unsupported tags/schema, orphan scopes, rejection counts, and independent byte limits. Projection tests cover each action and lifetime and prove different timed durations collapse to the same metadata class. Kotlin tests also verify array ownership.
 
 These are synthetic contract tests. They do not prove journal durability, authentic history, UI behavior, hardware authentication, or end-to-end operation.
+
+Routing changes add event kind `routingChanged` (22) and local authentication `localUser` (6). They carry no approval action or request payload.

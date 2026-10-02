@@ -62,3 +62,5 @@ The [authority gateway journal](gateway-authority.md) consumes token proofs and 
 Phone epoch removal now commits a permanent gateway revocation, its signed delivery control, and the shared counter together. See [authority gateway state](gateway-authority.md).
 
 The [enrollment journal](enrollment-journal.md) owns approval keys and combines removal, gateway revocation, and audit writes. Public consumption and gateway token operations check stored trust within the same transaction.
+
+The [routing journal](routing-journal.md) persists local modes and validates one-time Away controls against current stored enrollment.

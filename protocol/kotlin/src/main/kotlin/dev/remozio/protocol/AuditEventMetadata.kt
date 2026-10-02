@@ -6,7 +6,7 @@ enum class AuditEventKind(val tag: ULong) {
     EXPIRED(8u), CANCELLED(9u), UNKNOWN_OUTCOME(10u), ENROLLMENT_ADDED(11u),
     ENROLLMENT_REVOKED(12u), RECOVERY(13u), UPDATE_SCHEDULED(14u), UPDATE_ACTIVATED(15u),
     UPDATE_INTERRUPTED(16u), BRIDGE_STARTED(17u), BRIDGE_STOPPED(18u), DISMISSED(19u),
-    BIOMETRIC_CANCELLED(20u), AGGREGATED_REJECTIONS(21u);
+    BIOMETRIC_CANCELLED(20u), AGGREGATED_REJECTIONS(21u), ROUTING_CHANGED(22u);
 }
 
 enum class AuditCategory(val tag: ULong) {
@@ -32,7 +32,7 @@ enum class AuditTargetScope(val tag: ULong) {
 
 enum class AuditAuthentication(val tag: ULong) {
     UNKNOWN(0u), UNVERIFIED(1u), DECISION_KEY(2u), BIOMETRIC_KEY(3u),
-    LOCAL_ADMINISTRATOR(4u), SYSTEM(5u);
+    LOCAL_ADMINISTRATOR(4u), SYSTEM(5u), LOCAL_USER(6u);
 }
 
 enum class AuditOutcome(val tag: ULong) {
