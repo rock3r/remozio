@@ -55,3 +55,33 @@ enum GatewayStoredRecipient: Sendable {
         }
     }
 }
+
+/// One coherent local counter and its root-signed historical receipt. This is not an authenticated network reply.
+public struct GatewayHeadEvidence: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    public let registration: GatewayRegistrationIdentity
+    public let revision: UInt64
+    public let receipt: GatewayControlReceipt?
+    public var description: String { "GatewayHeadEvidence(redacted)" }
+    public var debugDescription: String { description }
+}
+
+/// Historical control evidence. Its signature does not prove the gateway's current head or authorize delivery.
+public enum GatewayControlReceipt: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    case candidate(GatewayCandidateReceipt)
+    case recipient(GatewayRecipientReceipt)
+
+    public var revision: UInt64 {
+        switch self { case .candidate(let value): value.candidate.revision; case .recipient(let value): value.revision }
+    }
+    public var operationID: Data {
+        switch self { case .candidate(let value): value.candidate.operationID; case .recipient(let value): value.operationID }
+    }
+    public var canonicalPayload: Data {
+        switch self { case .candidate(let value): value.canonicalPayload; case .recipient(let value): value.canonicalPayload }
+    }
+    public var signature: Data {
+        switch self { case .candidate(let value): value.signature; case .recipient(let value): value.signature }
+    }
+    public var description: String { "GatewayControlReceipt(redacted)" }
+    public var debugDescription: String { description }
+}

@@ -88,6 +88,25 @@ The caller must obtain fresh enrollment authority from protected state; choosing
 It validates the activation receipt, original candidate receipt, latest activation and token digest before returning stored evidence.
 Active mappings survive restart; pending probes do not. Receipts include the provider challenge and must not become phone-fetchable metadata.
 
+## Counter evidence for reconnects
+
+`headEvidence` reads the counter and its latest root-signed receipt in one SQLite transaction.
+It returns the pinned registration and either a candidate, activation, or revocation receipt.
+Only an empty history with counter zero returns no receipt. Gaps between signed revisions are valid.
+The full unsigned counter range is preserved.
+
+The read checks that the latest receipt matches the counter, its indexed fields, scope, and root signature.
+Conflicting latest revisions or operation IDs across the two receipt tables fail and retire the owner.
+Expiry and restart do not erase historical evidence. This read cannot renew a candidate, restore a token, or change a mapping.
+It checks the latest receipt, not every historical row or the completeness of an old backup.
+
+This is local evidence for a future authenticated reply, not a network acknowledgment.
+The service must bind that reply to the authenticated peer, registration, and fresh query.
+The root must compare signed trust changes with its own retained history before advancing any counter.
+A valid old signature alone cannot prove freshness or justify restoring enrollment.
+No counter reconciliation or acknowledgment persistence is implemented here.
+Receipts contain provider challenges. Keep this API restricted to the authority channel and redact its output from logs.
+
 ## Schema migration
 
 Supported migrations are schema 1 or 2 to schema 3. The service controller must explicitly set `migrateLegacyStore` for this known transition.
@@ -121,7 +140,7 @@ A returned mapping is historical evidence, not permission to send. The coordinat
 
 ## Validation
 
-Thirty-seven database tests use real private SQLite files under a normal-user fixture lease.
+Database tests use real private SQLite files under a normal-user fixture lease.
 They cover atomic rollback, duplicate and conflicting controls, quotas, expiry, restart, unsigned revision boundaries, registration binding and failure cleanup.
 They also check signature corruption, clock changes, file replacement, malformed stores, recipient transitions, migration and failure during mapping replacement.
 The ten candidate-verifier tests cover the shared authentication logic after its extraction for historical retries.
