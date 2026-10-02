@@ -212,7 +212,7 @@ final class EnrollmentJournalTests: XCTestCase {
     func testExplicitSchemaFiveMigrationKeepsAuditAndStartsUnconfigured() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         _ = try db.write { try $0.createEpoch(descriptor()) }; try db.close()
-        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; PRAGMA user_version=5")
+        try fixture.sql("DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; PRAGMA user_version=5")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 5)
         XCTAssertNotNil(try migrated.read { try $0.epoch(id(3)) })
@@ -256,7 +256,7 @@ final class EnrollmentJournalTests: XCTestCase {
         _ = try add(db, writer: writer, revision: empty); try db.close()
         try fixture.sql("PRAGMA user_version=5")
         XCTAssertThrowsError(try open(fixture, migrate: 5))
-        try fixture.sql("PRAGMA user_version=6")
+        try fixture.sql("PRAGMA user_version=7")
         let reopened = try open(fixture)
         XCTAssertEqual(try reopened.read { try $0.approvalEnrollments().count }, 1)
         XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 1)

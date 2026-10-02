@@ -92,8 +92,8 @@ A complete backup rollback still needs the independent continuity witness; these
 
 ## Schema and service integration
 
-Root journal schema 6 retains the gateway tables from schemas 4 and 5 and adds [approval enrollment state](enrollment-journal.md).
-Known migrations from versions 1, 2, 3, 4, and 5 require the explicit source version. They preserve existing audit and consumption state.
+Root journal schema 7 retains gateway and [approval enrollment state](enrollment-journal.md) and adds [routing state](routing-journal.md).
+Known migrations from versions 1 through 6 require the explicit source version. They preserve existing audit and consumption state.
 A migration does not derive enrollment or gateway authority from audit records. Failed migration rolls back its table and version changes.
 The separate gateway database remains at schema 3.
 

@@ -17,6 +17,7 @@ public final class JournalDatabase {
     private var consumption: ConsumptionJournal?
     private var gateway: GatewayAuthorityJournal?
     private var enrollment: EnrollmentJournal?
+    private var routing: RoutingJournal?
     private let recordLimits: CBORLimits
     private var active: UUID?
     private var unavailable = false
@@ -24,23 +25,23 @@ public final class JournalDatabase {
     /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
     public static func open(directoryPath: String, macID: Data, accountID: Data,
                             recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> JournalDatabase {
+                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil) throws -> JournalDatabase {
         try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
                             recordLimits: recordLimits, descriptorLimits: descriptorLimits, decisionLimits: decisionLimits,
                             maximumConsumptions: maximumConsumptions, busyMilliseconds: busyMilliseconds,
-                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy)
+                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws {
+         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil) throws {
         self.lease = lease
         self.recordLimits = recordLimits
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -58,7 +59,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 6) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 7) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -72,6 +73,7 @@ public final class JournalDatabase {
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
             enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
+            if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
             if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy) }
             if initialize { try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption) }
             else if let migrateFromVersion { try migrate(macID: macID, accountID: accountID, consumption: consumption, from: migrateFromVersion) }
@@ -148,6 +150,12 @@ public final class JournalDatabase {
         return enrollment
     }
 
+    fileprivate func routingLedger(_ token: UUID) throws -> RoutingJournal {
+        _ = try access(token)
+        guard let routing else { throw RoutingJournalError.disabled }
+        return routing
+    }
+
     private func validateLease() throws {
         do { try lease.validate() }
         catch { unavailable = true; throw error }
@@ -171,8 +179,9 @@ public final class JournalDatabase {
             try GatewayAuthorityJournal.createSchema(db!)
             try GatewayAuthorityJournal.createRevocationSchema(db!)
             try EnrollmentJournal.createSchema(db!)
+            try RoutingJournal.createSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=6")
+            try exec("PRAGMA user_version=7")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -186,8 +195,9 @@ public final class JournalDatabase {
             if version < 3 { try consumption.createOutcomeSchema() }
             if version < 4 { try GatewayAuthorityJournal.createSchema(db!) }
             if version < 5 { try GatewayAuthorityJournal.createRevocationSchema(db!) }
-            try EnrollmentJournal.createSchema(db!)
-            try exec("PRAGMA user_version=6")
+            if version < 6 { try EnrollmentJournal.createSchema(db!) }
+            try RoutingJournal.createSchema(db!)
+            try exec("PRAGMA user_version=7")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -200,7 +210,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 6) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 7) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -228,6 +238,10 @@ public final class JournalDatabase {
             queries += ["SELECT id,policy,revision FROM main.approval_authority_v1 LIMIT 0",
                         "SELECT phone,epoch,active,body FROM main.approval_enrollments_v1 LIMIT 0"]
         }
+        if version >= 7 {
+            queries += ["SELECT id,mode,revision FROM main.routing_state_v1 LIMIT 0",
+                        "SELECT operation,payload,run,started,deadline,consumed FROM main.routing_operations_v1 LIMIT 0"]
+        }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -238,6 +252,7 @@ public final class JournalDatabase {
         consumption = nil
         gateway = nil
         enrollment = nil
+        routing = nil
         if let db {
             // No statement, blob handle or raw connection can escape this owner.
             precondition(sqlite3_close(db) == SQLITE_OK, "Journal connection retained a private SQLite resource")
@@ -407,6 +422,79 @@ public final class JournalTransaction {
     public func consumptionOutcome(requestID: Data) throws -> ConsumptionOutcome? {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.ledger(token).outcome(requestID: requestID)
+    }
+
+    private func withRouting<T>(write: Bool, _ body: (RoutingJournal) throws -> T) throws -> T {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.routingLedger(token))
+        } catch {
+            failed = true
+            if error as? RoutingJournalError == .corruptData || error as? RoutingJournalError == .invalidClock ||
+                error as? AuditJournalError == .headMismatch { headMismatch = true }
+            throw error
+        }
+    }
+
+    public func routingState() throws -> RoutingState { try withRouting(write: false) { try $0.state() } }
+
+    /// The host authenticates the local Mac control surface. Never expose this API to phone or transport callers.
+    public func setLocalRoutingMode(_ mode: RoutingMode, expectedRevision: UInt64, eventID: Data, receiptTimeMs: UInt64?,
+                                    writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> RoutingState {
+        try withRouting(write: true) { routing in
+            let trust = try approvalTrustSnapshot()
+            let state = try routing.setLocal(mode, expected: expectedRevision)
+            try routingEvent(phone: nil, eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer,
+                expectedHead: expectedAuditHead, trust: trust)
+            return state
+        }
+    }
+
+    private func routingEnrollment(phone: Data, epoch: Data, revision: UUID) throws -> (ApprovalTrustSnapshot, StoredApprovalEnrollment) {
+        try withEnrollment(write: false) { ledger in
+            let trust = try ledger.snapshot()
+            guard trust.revision == revision else { throw EnrollmentJournalError.staleRevision }
+            guard let enrollment = try ledger.all().first(where: {
+                $0.approval.phoneID == phone && $0.epoch == epoch && $0.approval.active
+            }) else { throw EnrollmentJournalError.unavailableEnrollment }
+            return (trust, enrollment)
+        }
+    }
+
+    /// Supply the separately authenticated phone identity. Publish the challenge only after this transaction commits.
+    public func issueRoutingChallenge(authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data, expectedTrustRevision: UUID,
+                                      expectedRoutingRevision: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> RoutingAwayControl {
+        try withRouting(write: true) { routing in
+            let (_, enrollment) = try routingEnrollment(phone: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch, revision: expectedTrustRevision)
+            return try routing.issue(enrollment: enrollment, expected: expectedRoutingRevision, wall: nowUnixMillis, now: now)
+        }
+    }
+
+    /// Rechecks stored enrollment and commits the mode, operation result and audit event together. Retries never reapply a mode.
+    public func applyRoutingAway(canonicalPayload: Data, signature: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+                                 expectedTrustRevision: UUID, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                 eventID: Data, writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> RoutingChange {
+        try withRouting(write: true) { routing in
+            let (trust, enrollment) = try routingEnrollment(phone: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch, revision: expectedTrustRevision)
+            let result = try routing.apply(payload: canonicalPayload, signature: signature, enrollment: enrollment, wall: nowUnixMillis, now: now)
+            if result.inserted {
+                try routingEvent(phone: authenticatedPhoneID, eventID: eventID, receiptTimeMs: nowUnixMillis,
+                    writer: writer, expectedHead: expectedAuditHead, trust: trust)
+            }
+            return result
+        }
+    }
+
+    private func routingEvent(phone: Data?, eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter,
+                               expectedHead: UInt64, trust: ApprovalTrustSnapshot) throws {
+        guard expectedHead < UInt64.max else { throw AuditJournalError.headMismatch }
+        let event = try AuditEventMetadata(eventID: eventID, macID: trust.macID, accountID: trust.accountID, journalEpoch: writer.epoch,
+            sequence: expectedHead + 1, requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: receiptTimeMs,
+            kind: .routingChanged, category: .authority, action: nil, decisionPhoneID: phone,
+            authentication: phone == nil ? .localUser : .decisionKey, outcome: .accepted, reason: .none, droppedEventCount: nil, peerDeviceID: nil)
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: expectedHead)
     }
 
     private func withGateway<T>(write: Bool, _ body: (GatewayAuthorityJournal) throws -> T) throws -> T {

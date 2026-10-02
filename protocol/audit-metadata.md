@@ -88,3 +88,5 @@ The Android encrypted cache, sync protocol, history views, and retention control
 The shared fixtures include 85 valid cases and 78 invalid cases. Both native codecs round-trip the same canonical bytes. Tests cover every tag, missing observations, unsigned bounds, malformed fields and IDs, unsupported tags/schema, orphan scopes, rejection counts, and independent byte limits. Projection tests cover each action and lifetime and prove different timed durations collapse to the same metadata class. Kotlin tests also verify array ownership.
 
 These are synthetic contract tests. They do not prove journal durability, authentic history, UI behavior, hardware authentication, or end-to-end operation.
+
+Routing changes add event kind `routingChanged` (22) and local authentication `localUser` (6). They carry no approval action or request payload.
