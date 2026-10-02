@@ -112,5 +112,6 @@ They also cover malformed queries, mismatched registration, signing failure, rep
 No test sends a live provider request or contacts a phone.
 
 The installed service still needs its authenticated endpoint, protected enrollment updates, durable desired-state scheduler, and root-side proof handling.
-That scheduler must resubmit capacity-limited work and recover routine registration after restart without another user prompt.
+The owned wake drain loop handles accepted wake batches and preparation retries.
+The root scheduler must still submit capacity-limited admissions and recover routine registration after restart without another user prompt.
 Root integration for approval wakes, cross-Mac provider quotas, and independent rollback witnesses remain separate integration work.

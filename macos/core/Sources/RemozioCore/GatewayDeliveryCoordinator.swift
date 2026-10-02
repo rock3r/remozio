@@ -37,6 +37,14 @@ public actor GatewayDeliveryCoordinator {
     private let wakePolicy: GatewayWakePolicy?
     private let sendWake: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
     private var phoneRouting = false
+    private let schedulerSleep: @Sendable (UInt64) async throws -> Void
+    private var schedulerTask: Task<Void, Never>?
+    private var scheduledWakes: [WakeScope: Task<Void, Never>] = [:]
+    private var schedulingRetryAt: [WakeScope: UInt64] = [:]
+    private var presenceCancelledSchedules: Set<WakeScope> = []
+    private var schedulerInterval: UInt64 = 0
+    private var lastScheduledScope: WakeScope?
+
     private struct WakeScope: Hashable { let phone: Data; let epoch: Data }
     private struct WakeEntry {
         let delivery: PhoneRequestDelivery
@@ -101,9 +109,10 @@ public actor GatewayDeliveryCoordinator {
          sleep: @escaping @Sendable (UInt64) async throws -> Void,
          send: @escaping @Sendable (FCMTokenProbe, FCMAccessToken) async throws -> FCMDeliveryResult,
          wakePolicy: GatewayWakePolicy? = nil,
-         sendWake: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)? = nil) throws {
+         sendWake: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)? = nil,
+         schedulerSleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(for: .milliseconds($0)) }) throws {
         guard (wakePolicy == nil) == (sendWake == nil) else { throw GatewayDeliveryError.invalidConfiguration }
-        self.wakePolicy = wakePolicy; self.sendWake = sendWake
+        self.wakePolicy = wakePolicy; self.sendWake = sendWake; self.schedulerSleep = schedulerSleep
         let first = try sample()
         let (next, overflow) = first.moment.milliseconds.addingReportingOverflow(policy.minimumSendIntervalMillis)
         guard !overflow else { throw GatewayDeliveryError.invalidClock }
@@ -133,6 +142,8 @@ public actor GatewayDeliveryCoordinator {
         }
         nextEnrollmentSend = nextEnrollmentSend.filter { next[$0.key.phone]?.epoch == $0.key.epoch }
         enrollments = next; self.active = active; trustRevision = UUID()
+        schedulingRetryAt = schedulingRetryAt.filter { next[$0.key.phone]?.epoch == $0.key.epoch }
+        pumpWakeScheduling()
     }
 
     public func admitCandidate(canonicalPayload: Data, signature: Data, wireVersion: UInt64,
@@ -156,6 +167,10 @@ public actor GatewayDeliveryCoordinator {
             for (id, entry) in wakes where entry.delivery.recipient.phoneID == result.receipt.phoneID &&
                 entry.delivery.recipient.enrollmentEpoch == result.receipt.enrollmentEpoch { withdrawWake(id) }
         }
+        if result.inserted && kind == .activation {
+            schedulingRetryAt.removeValue(forKey: WakeScope(phone: result.receipt.phoneID, epoch: result.receipt.enrollmentEpoch))
+        }
+        pumpWakeScheduling()
         return result
     }
 
@@ -194,7 +209,10 @@ public actor GatewayDeliveryCoordinator {
         let id = UUID()
         let task = Task { try await self.run(operationID: operationID, phoneID: phoneID) }
         flights[operationID] = Flight(id: id, phone: phoneID, enrollmentEpoch: enrollment.epoch, task: task)
-        defer { if flights[operationID]?.id == id { flights.removeValue(forKey: operationID) } }
+        defer {
+            if flights[operationID]?.id == id { flights.removeValue(forKey: operationID) }
+            pumpWakeScheduling()
+        }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
@@ -203,10 +221,15 @@ public actor GatewayDeliveryCoordinator {
     public func shutdown() async throws {
         if let shutdownTask { try await shutdownTask.value; return }
         stopped = true
+        let scheduler = schedulerTask, scheduled = Array(scheduledWakes.values)
+        scheduler?.cancel()
+        for task in scheduled { task.cancel() }
         let tasks = flights.values.map(\.task), wakeTasks = wakeFlights.values.map(\.task)
         for task in tasks { task.cancel() }
         for task in wakeTasks { task.cancel() }
         let task = Task {
+            await scheduler?.value
+            for task in scheduled { await task.value }
             for task in tasks { _ = await task.result }
             for task in wakeTasks { _ = await task.result }
             await tokens.shutdown()
@@ -220,7 +243,81 @@ public actor GatewayDeliveryCoordinator {
     /// Queued work pauses with its original batch identifier, attempt budget, and request deadlines.
     public func setPhoneRouting(_ enabled: Bool) throws {
         try running(); phoneRouting = enabled
-        if !enabled { for flight in wakeFlights.values { flight.task.cancel() } }
+        if !enabled {
+            presenceCancelledSchedules.formUnion(scheduledWakes.keys)
+            for flight in wakeFlights.values { flight.task.cancel() }
+        }
+        pumpWakeScheduling()
+    }
+
+    /// Start the service-owned drain loop after protected setup. The interval bounds retries of preparation failures.
+    /// New work and completed flights also trigger a drain without waiting for the timer. Shutdown owns every task.
+    public func startWakeScheduling(retryIntervalMillis: UInt64) throws {
+        try running()
+        guard wakePolicy != nil else { throw GatewayWakeError.unavailable }
+        guard (1...60_000).contains(retryIntervalMillis) else { throw GatewayDeliveryError.invalidConfiguration }
+        guard schedulerTask == nil else { throw GatewayDeliveryError.alreadyRunning }
+        _ = try current()
+        schedulerInterval = retryIntervalMillis
+        schedulerTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runWakeScheduling()
+        }
+        pumpWakeScheduling()
+    }
+
+    private func runWakeScheduling() async {
+        while !Task.isCancelled && !stopped {
+            do { try await schedulerSleep(schedulerInterval) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            pumpWakeScheduling()
+        }
+    }
+
+    private func pumpWakeScheduling() {
+        guard schedulerTask != nil, !stopped else { return }
+        let now: UInt64
+        do { now = try current().moment.milliseconds }
+        catch { return }
+        expireWakes(now)
+        for (scope, flight) in wakeFlights {
+            if let batch = wakeBatches[scope], wakeMembers(batch).isEmpty { flight.task.cancel() }
+        }
+        guard phoneRouting else { return }
+        let scopes = Set(wakes.values.filter { $0.status == .queued }.map(wakeScope)).sorted(by: scopePrecedes)
+        let ordered: [WakeScope]
+        if let lastScheduledScope {
+            ordered = scopes.filter { scopePrecedes(lastScheduledScope, $0) } + scopes.filter { !scopePrecedes(lastScheduledScope, $0) }
+        } else { ordered = scopes }
+        for scope in ordered where scheduledWakes[scope] == nil && wakeFlights[scope] == nil && (schedulingRetryAt[scope] ?? 0) <= now {
+            let reserved = scheduledWakes.keys.filter { wakeFlights[$0] == nil }.count
+            guard flights.count + wakeFlights.count + reserved < policy.maximumFlights else { break }
+            lastScheduledScope = scope
+            scheduledWakes[scope] = Task { await self.runScheduledWake(scope) }
+        }
+    }
+
+    private func scopePrecedes(_ a: WakeScope, _ b: WakeScope) -> Bool {
+        a.phone == b.phone ? a.epoch.lexicographicallyPrecedes(b.epoch) : a.phone.lexicographicallyPrecedes(b.phone)
+    }
+
+    private func runScheduledWake(_ scope: WakeScope) async {
+        do {
+            _ = try await deliverWakeBatch(phoneID: scope.phone, enrollmentEpoch: scope.epoch)
+            schedulingRetryAt.removeValue(forKey: scope)
+        } catch {
+            // An expected presence pause may resume immediately. Unexpected cancellation still needs preparation backoff.
+            if presenceCancelledSchedules.contains(scope) || !phoneRouting || wakeBatches[scope] == nil {
+                schedulingRetryAt.removeValue(forKey: scope)
+            } else if !stopped, let now = try? current().moment.milliseconds {
+                let (retry, overflow) = now.addingReportingOverflow(schedulerInterval)
+                schedulingRetryAt[scope] = overflow ? UInt64.max : retry
+            }
+        }
+        presenceCancelledSchedules.remove(scope)
+        scheduledWakes.removeValue(forKey: scope)
+        pumpWakeScheduling()
     }
 
     /// The root host submits only its current, authorized pending deliveries. This is not a wire endpoint.
@@ -249,6 +346,7 @@ public actor GatewayDeliveryCoordinator {
         guard wakes.count < wakePolicy.maximumEntries else { throw GatewayDeliveryError.capacityExceeded }
         let entry = WakeEntry(delivery: delivery)
         wakes[delivery.id] = entry
+        pumpWakeScheduling()
         return entry.progress
     }
 
@@ -282,6 +380,7 @@ public actor GatewayDeliveryCoordinator {
         defer {
             if wakeFlights[scope]?.id == id { wakeFlights.removeValue(forKey: scope) }
             discardFinishedWakeBatches()
+            pumpWakeScheduling()
         }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
@@ -496,12 +595,15 @@ public actor GatewayDeliveryCoordinator {
         try Task.checkCancellation()
     }
     var activeProbeCount: Int { flights.count }
+    var scheduledWakeCount: Int { scheduledWakes.count }
 
     private func running() throws { guard !stopped else { throw GatewayDeliveryError.stopped } }
     private func current() throws -> Sample {
         let result = try sample()
         guard result.moment.epoch == lastMoment.epoch, result.moment.milliseconds >= lastMoment.milliseconds else {
             stopped = true
+            schedulerTask?.cancel()
+            for task in scheduledWakes.values { task.cancel() }
             for flight in flights.values { flight.task.cancel() }
             for flight in wakeFlights.values { flight.task.cancel() }
             throw GatewayDeliveryError.invalidClock
