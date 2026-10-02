@@ -18,11 +18,13 @@ The launcher opens an empty Mac list. It uses native Compose, Material 3 Express
 
 Material 3 uses `1.5.0-alpha29` because the Expressive theme is not in the stable 1.4 release. Other Compose libraries use BOM `2026.09.00`. AGP supplies built-in Kotlin; the app does not apply a second Android Kotlin plugin.
 
-The app requests no device permissions. Backup is disabled. Explicit rules exclude every storage domain from cloud backup and Android device transfers. Before adding secrets or enrollment state, validate those rules on supported devices and use installation-bound key storage.
+The manifest declares notification permission, but the app does not request it at startup. Backup is disabled. Explicit rules exclude every storage domain from cloud backup and Android device transfers. Before adding secrets or enrollment state, validate those rules on supported devices and use installation-bound key storage.
 
 Build and lint checks do not prove device behavior. Installation, accessibility, launch appearance, animation settings, biometrics, and background behavior need the planned Pixel test session. No device is installed or contacted by these build tasks.
 
 References: [Android 17 setup](https://developer.android.com/about/versions/17/setup-sdk), [AGP 9.3](https://developer.android.com/build/releases/agp-9-3-0-release-notes), [Material 3 releases](https://developer.android.com/jetpack/androidx/releases/compose-material3), and [Android UX motion guidance](https://github.com/rock3r/android-ux-skills).
+
+The [generic notification backend](../phone/core/PUSH.md) is available for future push integration. It is not connected to the launcher or Firebase yet.
 
 ## Command inspection
 

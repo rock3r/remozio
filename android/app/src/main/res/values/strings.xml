@@ -112,4 +112,7 @@
     <string name="sample_status_title">Sample request status</string>
     <string name="request_status_title">Request status</string>
     <string name="status_details_unavailable">Request details are unavailable.</string>
+    <string name="request_notification_channel">Request notifications</string>
+    <string name="request_notification_channel_description">Generic notifications to check requests from your Macs.</string>
+    <string name="request_notification_generic">Requests may be waiting. Open Remozio to check.</string>
 </resources>
