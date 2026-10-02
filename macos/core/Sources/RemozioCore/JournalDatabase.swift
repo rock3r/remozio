@@ -570,7 +570,7 @@ public final class JournalTransaction {
     }
 
     /// Protected root recovery after independent continuity checks. Serialize with trust and registration changes.
-    /// Unknown history or revocations require the host to restrict affected authority and run trust recovery.
+    /// Apply recovered revocations before reconciliation. Unknown trust history still requires host recovery.
     /// Collection includes the shared boundary receipt when expectedLocalRevision is nonzero.
     /// Success retires old delivery attempts; renew only current desired tokens after commit.
     public func reconcileGatewayDeliveryHistory(_ history: VerifiedGatewayHistory, registrationActive: Bool,

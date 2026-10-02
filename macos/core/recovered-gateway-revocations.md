@@ -55,5 +55,6 @@ They exercise delivery withdrawal, unknown-epoch enrollment rejection, wrong sig
 Fault injection covers every write stage. Additional checks cover stored-signature corruption, capacity, and explicit schema-9 migration.
 
 The host recovery coordinator, independent rollback witness, and administrator repair of unknown trust changes remain integration work.
+After restriction, [history reconciliation](gateway-history-recovery.md) can record the removal receipt and repair the counter.
 This feature does not restore lost authority, resolve conflicting delivery history, or automatically re-enroll a revoked phone.
 No real credentials, device installation, phone prompts, or physical backup restoration were used.
