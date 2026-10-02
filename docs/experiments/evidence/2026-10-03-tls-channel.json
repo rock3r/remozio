@@ -1,0 +1,23 @@
+{
+  "recorded_at": "2026-10-02T22:42:55.182017+00:00",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+  "architecture": "arm64",
+  "xcode": "Xcode 27.0\nBuild version 27A266a",
+  "deployment_target": "26.0",
+  "runtime": "JDK 21 JSSE and macOS Network.framework",
+  "tests": [
+    "downgradeAndWrongApplicationProtocolFail",
+    "wrongOrMissingClientIdentityCannotReceiveAnEcho",
+    "relayTamperingCannotProduceApplicationReply",
+    "mutualTLS13PreservesPayloadThroughFragmentingOpaqueRelay",
+    "oversizedFrameIsRejectedWithoutAnEcho",
+    "wrongServerPinFailsBeforeApplicationData"
+  ],
+  "result": "passed",
+  "network_scope": "IPv4 loopback only",
+  "keys": "Disposable software P-256 PKCS12 fixtures; memory-only Swift import",
+  "android_device_tested": false,
+  "hardware_keys_tested": false,
+  "cloudflare_or_websocket_tested": false,
+  "production_transport_selected": false
+}

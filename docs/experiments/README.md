@@ -11,6 +11,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Keys and durable authority | [Disposable enclave signing and restoration measured](macos-key-custody.md) | Pre-login availability, code access, crash and rollback cases |
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Independent witness, protected storage, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | User-selected execution contract; broader runtime coverage |
+| Streaming encrypted channel | [TLS loopback harness](tls-channel.md) | Android keys, outer relay carrier, protected identities, and reconnect |
 | UI adapters and presence | Needs interactive session | Authorized dialog fixtures and remote desktop states |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |
 | Android ADB bridge | Needs device session | Wi-Fi-off fallback, listener exposure, reconnect and Stop |
