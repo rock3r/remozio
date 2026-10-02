@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
@@ -24,7 +25,7 @@ public struct GatewayDeliveryPolicy: Sendable {
     }
 }
 
-/// Owns the database and probe tasks. Trusted setup methods are local APIs, never submission endpoints.
+/// Owns the database, probe tasks, and approval wake tasks. Trusted setup methods are local APIs, never submission endpoints.
 public actor GatewayDeliveryCoordinator {
     private let database: GatewayDatabase
     private let identity: GatewayRegistrationIdentity
@@ -33,6 +34,34 @@ public actor GatewayDeliveryCoordinator {
     private let sample: @Sendable () throws -> Sample
     private let sleep: @Sendable (UInt64) async throws -> Void
     private let send: @Sendable (FCMTokenProbe, FCMAccessToken) async throws -> FCMDeliveryResult
+    private let wakePolicy: GatewayWakePolicy?
+    private let sendWake: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
+    private var phoneRouting = false
+    private struct WakeScope: Hashable { let phone: Data; let epoch: Data }
+    private struct WakeEntry {
+        let delivery: PhoneRequestDelivery
+        var status: GatewayWakeStatus = .queued
+        var attempts = 0
+        var providerResult: FCMDeliveryResult?
+        var progress: GatewayWakeProgress {
+            GatewayWakeProgress(deliveryID: delivery.id, status: status, attempts: attempts, lastProviderResult: providerResult)
+        }
+    }
+    private struct WakeBatch {
+        let id: UUID
+        let identifier: Data
+        let members: [UUID]
+        var attempts = 0
+        var retryAt: UInt64 = 0
+    }
+    private struct WakeFlight {
+        let id: UUID
+        let task: Task<[GatewayWakeProgress], any Error>
+    }
+    private var wakes: [UUID: WakeEntry] = [:]
+    private var wakeBatches: [WakeScope: WakeBatch] = [:]
+    private var wakeFlights: [WakeScope: WakeFlight] = [:]
+    private var nextEnrollmentSend: [WakeScope: UInt64] = [:]
     private var enrollments: [Data: GatewayPhoneEnrollment] = [:]
     private var trustRevision = UUID()
     private var active = true
@@ -51,7 +80,10 @@ public actor GatewayDeliveryCoordinator {
     }
 
     public init(database: sending GatewayDatabase, identity: GatewayRegistrationIdentity, tokens: FCMTokenSource,
-                sender: FCMWakeSender, policy: GatewayDeliveryPolicy, clockEpoch: UUID) throws {
+                sender: FCMWakeSender, policy: GatewayDeliveryPolicy, clockEpoch: UUID, wakePolicy: GatewayWakePolicy? = nil) throws {
+        let wakeSender: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
+        if wakePolicy != nil { wakeSender = { try await sender.send($0, accessToken: $1) } }
+        else { wakeSender = nil }
         try self.init(database: database, identity: identity, tokens: tokens, policy: policy, sample: {
             let wall = Date().timeIntervalSince1970 * 1000
             guard wall.isFinite, wall >= 0, wall < Double(UInt64.max) else { throw GatewayDeliveryError.invalidClock }
@@ -60,13 +92,18 @@ public actor GatewayDeliveryCoordinator {
             let millis = Double(mach_continuous_time()) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000
             guard millis.isFinite, millis >= 0, millis < Double(UInt64.max) else { throw GatewayDeliveryError.invalidClock }
             return Sample(wall: UInt64(wall), moment: AuthorityMoment(epoch: clockEpoch, milliseconds: UInt64(millis)))
-        }, sleep: { try await Task.sleep(for: .milliseconds($0)) }, send: { try await sender.send($0, accessToken: $1) })
+        }, sleep: { try await Task.sleep(for: .milliseconds($0)) }, send: { try await sender.send($0, accessToken: $1) },
+            wakePolicy: wakePolicy, sendWake: wakeSender)
     }
 
     init(database: sending GatewayDatabase, identity: GatewayRegistrationIdentity, tokens: FCMTokenSource,
          policy: GatewayDeliveryPolicy, sample: @escaping @Sendable () throws -> Sample,
          sleep: @escaping @Sendable (UInt64) async throws -> Void,
-         send: @escaping @Sendable (FCMTokenProbe, FCMAccessToken) async throws -> FCMDeliveryResult) throws {
+         send: @escaping @Sendable (FCMTokenProbe, FCMAccessToken) async throws -> FCMDeliveryResult,
+         wakePolicy: GatewayWakePolicy? = nil,
+         sendWake: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)? = nil) throws {
+        guard (wakePolicy == nil) == (sendWake == nil) else { throw GatewayDeliveryError.invalidConfiguration }
+        self.wakePolicy = wakePolicy; self.sendWake = sendWake
         let first = try sample()
         let (next, overflow) = first.moment.milliseconds.addingReportingOverflow(policy.minimumSendIntervalMillis)
         guard !overflow else { throw GatewayDeliveryError.invalidClock }
@@ -88,6 +125,13 @@ public actor GatewayDeliveryCoordinator {
                 flight.task.cancel()
             }
         }
+        for (id, entry) in wakes {
+            let before = enrollments[entry.delivery.recipient.phoneID], after = next[entry.delivery.recipient.phoneID]
+            if !active || before?.epoch != after?.epoch || before?.tag != after?.tag || after?.active != true {
+                withdrawWake(id)
+            }
+        }
+        nextEnrollmentSend = nextEnrollmentSend.filter { next[$0.key.phone]?.epoch == $0.key.epoch }
         enrollments = next; self.active = active; trustRevision = UUID()
     }
 
@@ -109,6 +153,8 @@ public actor GatewayDeliveryCoordinator {
             for flight in flights.values where flight.phone == result.receipt.phoneID && flight.enrollmentEpoch == result.receipt.enrollmentEpoch {
                 flight.task.cancel()
             }
+            for (id, entry) in wakes where entry.delivery.recipient.phoneID == result.receipt.phoneID &&
+                entry.delivery.recipient.enrollmentEpoch == result.receipt.enrollmentEpoch { withdrawWake(id) }
         }
         return result
     }
@@ -141,7 +187,7 @@ public actor GatewayDeliveryCoordinator {
         try running(); try Task.checkCancellation()
         guard operationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
         guard flights[operationID] == nil else { throw GatewayDeliveryError.alreadyRunning }
-        guard flights.count < policy.maximumFlights else { throw GatewayDeliveryError.capacityExceeded }
+        guard flights.count + wakeFlights.count < policy.maximumFlights else { throw GatewayDeliveryError.capacityExceeded }
         let enrollment = try trust(phoneID).enrollment
         guard let receipt = try database.receipt(operationID: operationID), receipt.candidate.binding.phoneID == phoneID,
               receipt.candidate.binding.enrollmentEpoch == enrollment.epoch else { throw GatewayDatabaseError.wrongScope }
@@ -157,15 +203,221 @@ public actor GatewayDeliveryCoordinator {
     public func shutdown() async throws {
         if let shutdownTask { try await shutdownTask.value; return }
         stopped = true
-        let tasks = flights.values.map(\.task)
+        let tasks = flights.values.map(\.task), wakeTasks = wakeFlights.values.map(\.task)
         for task in tasks { task.cancel() }
+        for task in wakeTasks { task.cancel() }
         let task = Task {
             for task in tasks { _ = await task.result }
+            for task in wakeTasks { _ = await task.result }
             await tokens.shutdown()
             try database.close()
         }
         shutdownTask = task
         try await task.value
+    }
+
+    /// Authenticated root-host state only. Presence changes delivery, never approval authority.
+    /// Queued work pauses with its original batch identifier, attempt budget, and request deadlines.
+    public func setPhoneRouting(_ enabled: Bool) throws {
+        try running(); phoneRouting = enabled
+        if !enabled { for flight in wakeFlights.values { flight.task.cancel() } }
+    }
+
+    /// The root host submits only its current, authorized pending deliveries. This is not a wire endpoint.
+    /// Repeating an unchanged identity returns its current state. A conflicting reuse cannot renew its deadline.
+    @discardableResult
+    public func enqueueWake(_ delivery: PhoneRequestDelivery) throws -> GatewayWakeProgress {
+        try running()
+        guard let wakePolicy else { throw GatewayWakeError.unavailable }
+        let now = try current().moment
+        expireWakes(now.milliseconds)
+        if let entry = wakes[delivery.id] {
+            guard entry.delivery == delivery else { throw GatewayWakeError.conflictingDelivery }
+            return entry.progress
+        }
+        guard delivery.recipient.phoneID.count == 16, delivery.recipient.enrollmentEpoch.count == 16,
+              delivery.requestID.count == 16, delivery.admittedAt.epoch == now.epoch,
+              delivery.admittedAt.milliseconds <= now.milliseconds, now.milliseconds < delivery.deadlineMilliseconds,
+              delivery.deadlineMilliseconds - delivery.admittedAt.milliseconds <= wakePolicy.maximumLifetimeMillis else {
+            throw GatewayWakeError.invalidDelivery
+        }
+        _ = try wakeMapping(WakeScope(phone: delivery.recipient.phoneID, epoch: delivery.recipient.enrollmentEpoch))
+        // Expired identities cannot be retried with their original deadlines. Live identities retain deduplication state.
+        discardFinishedWakeBatches()
+        let retained = Set(wakeBatches.values.flatMap(\.members))
+        wakes = wakes.filter { $0.value.delivery.deadlineMilliseconds > now.milliseconds || retained.contains($0.key) }
+        guard wakes.count < wakePolicy.maximumEntries else { throw GatewayDeliveryError.capacityExceeded }
+        let entry = WakeEntry(delivery: delivery)
+        wakes[delivery.id] = entry
+        return entry.progress
+    }
+
+    public func wakeProgress(deliveryID: UUID) throws -> GatewayWakeProgress? {
+        try running(); expireWakes(try current().moment.milliseconds)
+        return wakes[deliveryID]?.progress
+    }
+
+    /// Resolution, expiry from the root, or enrollment withdrawal retires only this delivery.
+    public func cancelWake(deliveryID: UUID) throws { try running(); withdrawWake(deliveryID) }
+
+    /// Freeze one enrollment's queued members before dispatch, then use the same opaque wake for every retry.
+    /// Later arrivals remain queued for the next batch. The host drains queued work and retries capacity or preparation failures.
+    public func deliverWakeBatch(phoneID: Data, enrollmentEpoch: Data) async throws -> [GatewayWakeProgress] {
+        try running(); try Task.checkCancellation()
+        guard wakePolicy != nil else { throw GatewayWakeError.unavailable }
+        guard phoneRouting else { throw GatewayWakeError.localRouting }
+        let scope = WakeScope(phone: phoneID, epoch: enrollmentEpoch)
+        guard wakeFlights[scope] == nil else { throw GatewayDeliveryError.alreadyRunning }
+        guard flights.count + wakeFlights.count < policy.maximumFlights else { throw GatewayDeliveryError.capacityExceeded }
+        expireWakes(try current().moment.milliseconds)
+        if wakeBatches[scope] == nil {
+            let members = wakes.values.filter { $0.status == .queued && wakeScope($0) == scope }
+                .map { $0.delivery.id }.sorted { $0.uuidString < $1.uuidString }
+            guard !members.isEmpty else { return [] }
+            wakeBatches[scope] = WakeBatch(id: UUID(), identifier: SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }, members: members)
+        }
+        let id = UUID()
+        let task = Task { try await self.runWake(scope) }
+        wakeFlights[scope] = WakeFlight(id: id, task: task)
+        defer {
+            if wakeFlights[scope]?.id == id { wakeFlights.removeValue(forKey: scope) }
+            discardFinishedWakeBatches()
+        }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    private func runWake(_ scope: WakeScope) async throws -> [GatewayWakeProgress] {
+        guard let initial = wakeBatches[scope], let wakePolicy, let sendWake else { throw GatewayWakeError.unavailable }
+        do {
+            while true {
+                try running(); try Task.checkCancellation()
+                guard phoneRouting else { throw GatewayWakeError.localRouting }
+                let now = try current().moment
+                expireWakes(now.milliseconds)
+                guard var batch = wakeBatches[scope], batch.id == initial.id else { throw GatewayWakeError.invalidDelivery }
+                let live = wakeMembers(batch)
+                if live.isEmpty { break }
+                if batch.attempts >= wakePolicy.maximumAttempts { finishWakeMembers(batch, status: .exhausted); break }
+                _ = try wakeMapping(scope)
+                let earliestDeadline = live.map { $0.delivery.deadlineMilliseconds }.min()!
+                let due = max(batch.retryAt, max(nextSend, nextEnrollmentSend[scope] ?? 0))
+                if now.milliseconds < due { try await wait(until: min(due, earliestDeadline)); continue }
+                let grant = try await tokens.token()
+                let bearer: FCMAccessToken
+                do { bearer = try await tokens.accessToken(for: grant) }
+                catch FCMError.tokenExpired { continue }
+                catch FCMTokenSourceError.invalidated { continue }
+                try running(); try Task.checkCancellation()
+                guard phoneRouting else { throw GatewayWakeError.localRouting }
+                let time = try current().moment
+                expireWakes(time.milliseconds)
+                let ready = wakeMembers(batch)
+                if ready.isEmpty { break }
+                let currentDue = max(batch.retryAt, max(nextSend, nextEnrollmentSend[scope] ?? 0))
+                if time.milliseconds < currentDue { continue }
+                let mapping = try wakeMapping(scope)
+                let remaining = ready.map { $0.delivery.deadlineMilliseconds - time.milliseconds }.min()!
+                let ttl = UInt32(min(UInt64(wakePolicy.maximumTTLSeconds), remaining / 1000))
+                let wake = try FCMWake(registrationToken: mapping.registrationToken, identifier: batch.identifier,
+                    enrollmentTag: mapping.activation.binding.enrollmentTag, ttlSeconds: ttl, priority: .high)
+                let (globalNext, globalOverflow) = time.milliseconds.addingReportingOverflow(policy.minimumSendIntervalMillis)
+                let (enrollmentNext, enrollmentOverflow) = time.milliseconds.addingReportingOverflow(wakePolicy.minimumEnrollmentIntervalMillis)
+                guard !globalOverflow, !enrollmentOverflow else { throw GatewayDeliveryError.invalidClock }
+                batch.attempts += 1; wakeBatches[scope] = batch
+                for entry in ready {
+                    wakes[entry.delivery.id]?.status = .dispatching
+                    wakes[entry.delivery.id]?.attempts = batch.attempts
+                }
+                nextSend = globalNext; nextEnrollmentSend[scope] = enrollmentNext
+                let result: FCMDeliveryResult
+                do { result = try await sendWake(wake, bearer) }
+                catch {
+                    try Task.checkCancellation()
+                    guard (error as? FCMError) == .network else { finishWakeMembers(batch, status: .failed); throw error }
+                    markWakeRetry(batch, result: nil)
+                    try scheduleWakeRetry(scope, batch: batch, minimum: 0)
+                    continue
+                }
+                try running(); try Task.checkCancellation()
+                expireWakes(try current().moment.milliseconds)
+                for entry in wakeMembers(batch) { wakes[entry.delivery.id]?.providerResult = result }
+                switch result {
+                case .accepted: finishWakeMembers(batch, status: .accepted)
+                case .authenticationRequired:
+                    markWakeRetry(batch, result: result)
+                    await tokens.invalidate(grant)
+                    try Task.checkCancellation()
+                    try scheduleWakeRetry(scope, batch: batch, minimum: 0)
+                    continue
+                case .retryable(let seconds):
+                    let delay = (seconds * 1000).rounded(.up)
+                    guard seconds.isFinite, seconds >= 0, delay.isFinite, delay < Double(UInt64.max) else {
+                        finishWakeMembers(batch, status: .rejected); break
+                    }
+                    markWakeRetry(batch, result: result)
+                    try scheduleWakeRetry(scope, batch: batch, minimum: UInt64(delay))
+                    continue
+                case .registrationInvalid:
+                    _ = try database.invalidateMapping(mapping, trust: trust(scope.phone))
+                    finishWakeMembers(batch, status: .rejected)
+                case .validated, .senderMismatch, .rejected: finishWakeMembers(batch, status: .rejected)
+                }
+                break
+            }
+        } catch {
+            // Cancellation or preparation failure keeps the frozen batch for an explicit host retry, without extending any deadline.
+            if let batch = wakeBatches[scope], batch.id == initial.id { markWakeRetry(batch, result: nil) }
+            throw error
+        }
+        let result = initial.members.compactMap { wakes[$0]?.progress }
+        wakeBatches.removeValue(forKey: scope)
+        return result
+    }
+
+    private func discardFinishedWakeBatches() {
+        for (scope, batch) in wakeBatches where wakeFlights[scope] == nil && wakeMembers(batch).isEmpty {
+            wakeBatches.removeValue(forKey: scope)
+        }
+    }
+
+    private func scheduleWakeRetry(_ scope: WakeScope, batch: WakeBatch, minimum: UInt64) throws {
+        let now = try current().moment.milliseconds
+        let delay = max(minimum, backoff(batch.attempts))
+        let (next, overflow) = now.addingReportingOverflow(delay)
+        if overflow { finishWakeMembers(batch, status: .rejected); return }
+        wakeBatches[scope]?.retryAt = next
+    }
+    private func markWakeRetry(_ batch: WakeBatch, result: FCMDeliveryResult?) {
+        for entry in wakeMembers(batch) {
+            wakes[entry.delivery.id]?.status = .queued
+            if let result { wakes[entry.delivery.id]?.providerResult = result }
+        }
+    }
+    private func finishWakeMembers(_ batch: WakeBatch, status: GatewayWakeStatus) {
+        for entry in wakeMembers(batch) { wakes[entry.delivery.id]?.status = status }
+    }
+    private func wakeMembers(_ batch: WakeBatch) -> [WakeEntry] {
+        batch.members.compactMap { wakes[$0] }.filter { $0.status == .queued || $0.status == .dispatching }
+    }
+    private func wakeScope(_ entry: WakeEntry) -> WakeScope {
+        WakeScope(phone: entry.delivery.recipient.phoneID, epoch: entry.delivery.recipient.enrollmentEpoch)
+    }
+    private func wakeMapping(_ scope: WakeScope) throws -> GatewayActiveMapping {
+        let trusted = try trust(scope.phone)
+        guard trusted.enrollment.epoch == scope.epoch,
+              let mapping = try database.activeMapping(trust: trusted) else { throw GatewayWakeError.unavailableMapping }
+        return mapping
+    }
+    private func expireWakes(_ now: UInt64) {
+        for (id, entry) in wakes where entry.delivery.deadlineMilliseconds <= now && (entry.status == .queued || entry.status == .dispatching) {
+            wakes[id]?.status = .expired
+        }
+    }
+    private func withdrawWake(_ id: UUID) {
+        guard let entry = wakes[id] else { return }
+        if entry.status == .queued || entry.status == .dispatching { wakes[id]?.status = .withdrawn }
+        let scope = wakeScope(entry)
+        if let batch = wakeBatches[scope], wakeMembers(batch).isEmpty { wakeFlights[scope]?.task.cancel() }
     }
 
     private func run(operationID: Data, phoneID: Data) async throws -> GatewayProbeProgress? {
@@ -251,6 +503,7 @@ public actor GatewayDeliveryCoordinator {
         guard result.moment.epoch == lastMoment.epoch, result.moment.milliseconds >= lastMoment.milliseconds else {
             stopped = true
             for flight in flights.values { flight.task.cancel() }
+            for flight in wakeFlights.values { flight.task.cancel() }
             throw GatewayDeliveryError.invalidClock
         }
         lastMoment = result.moment

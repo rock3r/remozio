@@ -2,6 +2,7 @@
 
 `GatewayDeliveryCoordinator` connects the protected gateway database, OAuth token source, and FCM sender.
 The actor takes sole ownership of the database. Its methods serialize admission, recipient controls, trust changes, and dispatch preparation.
+[Approval wake delivery](gateway-wake-delivery.md) shares this owner and its bounded provider capacity.
 This is a service component. The installed service and authenticated submission endpoint are still required.
 
 ```mermaid
@@ -36,7 +37,7 @@ The coordinator derives each snapshot's control head from its owned database. Th
 A changed phone epoch, tag, or active state cancels that phone's tasks. A changed gateway active state cancels all tasks.
 An identical reload or an unrelated phone change preserves a flight. A committed signed revocation cancels matching phone-epoch tasks.
 Cancellation reaches OAuth waits, retry sleeps, and provider requests. A late callback cannot turn a cancelled attempt into acceptance.
-Bytes already handed to the network cannot be recalled. They contain a challenge only and confer no approval or enrollment authority.
+Bytes already handed to the network cannot be recalled. They contain a probe challenge or an opaque wake and confer no approval or enrollment authority.
 
 Shutdown rejects new work, cancels tasks, waits for completion, stops the token source, then closes the database.
 Concurrent shutdown callers await the same result. The host must keep this coordinator alive and shut it down before replacing its service instance.
@@ -85,7 +86,7 @@ At most 64 flights are allowed. Each flight retains its slot while waiting for O
 A duplicate operation fails without starting another task. Capacity errors leave admission intact for the host scheduler to retry.
 No unbounded work queue is hidden in this component.
 
-A positive send interval spaces all probe handoffs, including the first handoff after startup.
+A positive send interval spaces probe and approval wake handoffs, including the first handoff after startup.
 This limit applies across this coordinator's candidates and phones. It is not a provider-account quota shared across multiple Macs.
 Restart does not grant an immediate burst. Database startup retires old pending candidates and attempts, as described in [the attempt lifecycle](gateway-probe-attempts.md).
 
@@ -112,4 +113,4 @@ No test sends a live provider request or contacts a phone.
 
 The installed service still needs its authenticated endpoint, protected enrollment updates, durable desired-state scheduler, and root-side proof handling.
 That scheduler must resubmit capacity-limited work and recover routine registration after restart without another user prompt.
-Approval wake delivery, cross-Mac provider quotas, and independent rollback witnesses remain separate integration work.
+Root integration for approval wakes, cross-Mac provider quotas, and independent rollback witnesses remain separate integration work.

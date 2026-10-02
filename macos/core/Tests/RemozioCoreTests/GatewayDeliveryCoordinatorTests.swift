@@ -20,6 +20,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     private actor Provider {
         var results: [FCMDeliveryResult]
         private(set) var times: [UInt64] = []
+        private(set) var wakes: [FCMWake] = []
         private var holding = false
         private var honorCancellation = true
         private var failures = 0
@@ -27,6 +28,10 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         init(_ results: [FCMDeliveryResult]) { self.results = results }
         func hold(honorCancellation: Bool = true) { holding = true; self.honorCancellation = honorCancellation }
         func failNext() { failures += 1 }
+        func send(wake: FCMWake, at time: UInt64) async throws -> FCMDeliveryResult {
+            wakes.append(wake)
+            return try await send(at: time)
+        }
         func send(at time: UInt64) async throws -> FCMDeliveryResult {
             times.append(time)
             if failures > 0 { failures -= 1; throw FCMError.network }
@@ -42,10 +47,10 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         private func cancel(_ id: Int) {
             if honorCancellation { pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
         }
-        func release() {
+        func release(result: FCMDeliveryResult = .accepted) {
             holding = false
             let values = pending.values; pending = [:]
-            for continuation in values { continuation.resume(returning: .accepted) }
+            for continuation in values { continuation.resume(returning: result) }
         }
     }
     private actor OAuthGate {
@@ -88,10 +93,10 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func identity() throws -> GatewayRegistrationIdentity {
             try .init(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5), rootPublicKey: key.publicKey.x963Representation)
         }
-        func enrollment(active: Bool = true) throws -> GatewayPhoneEnrollment {
-            try .init(phoneID: id(6), epoch: id(7), tag: id(6, 32), active: active)
+        func enrollment(active: Bool = true, phone: UInt8 = 6) throws -> GatewayPhoneEnrollment {
+            try .init(phoneID: id(phone), epoch: id(7), tag: id(phone, 32), active: active)
         }
-        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil) throws -> GatewayDeliveryCoordinator {
+        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
             let source = try tokenSource ?? FCMTokenSource(now: { .now }, refresh: {
                 refreshes.value.withLock { $0 += 1 }
@@ -102,33 +107,62 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
                 identity: identity(), payloadLimits: limits, signingLimits: limits, maximumOperations: 20,
                 maximumPendingPerEnrollment: 5, maximumLifetimeMillis: lifetime, clockEpoch: clock.epoch, busyMilliseconds: 100,
                 initialize: true, probePolicy: GatewayProbePolicy(maximumAttempts: attempts, minimumRetryDelayMillis: 50, maximumTTLSeconds: 60))
+            let wakeSend: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
+            if wakePolicy != nil {
+                wakeSend = { wake, token in
+                    if let sender { return try await sender.send(wake, accessToken: token) }
+                    return try await provider.send(wake: wake, at: clock.sample().moment.milliseconds)
+                }
+            } else { wakeSend = nil }
             return try GatewayDeliveryCoordinator(database: db, identity: coordinatorIdentity ?? identity(), tokens: source,
-                policy: GatewayDeliveryPolicy(maximumFlights: 2, minimumSendIntervalMillis: 10, retryBaseDelayMillis: retryBase, maximumRetryBackoffMillis: retryCap), sample: { clock.sample() },
+                policy: GatewayDeliveryPolicy(maximumFlights: maximumFlights, minimumSendIntervalMillis: 10, retryBaseDelayMillis: retryBase, maximumRetryBackoffMillis: retryCap), sample: { clock.sample() },
                 sleep: { clock.advance($0) }, send: { probe, token in
                     if let sender { return try await sender.send(probe, accessToken: token) }
                     return try await provider.send(at: clock.sample().moment.milliseconds)
-                })
+                }, wakePolicy: wakePolicy, sendWake: wakeSend)
         }
-        func revoke(_ coordinator: GatewayDeliveryCoordinator) async throws {
+        func revoke(_ coordinator: GatewayDeliveryCoordinator, revision: UInt64 = 2, phone: UInt8 = 6) async throws {
             let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
             let value = try GatewayPhoneRevocation(binding: GatewayPhoneEpochBinding(ownerID: id(1), macID: id(2), accountID: id(3),
-                gatewayID: id(4), lifecycleEpoch: id(5), phoneID: id(6), enrollmentEpoch: id(7)),
-                revision: 2, operationID: id(50), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 11_000)
+                gatewayID: id(4), lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(7)),
+                revision: revision, operationID: id(50), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 11_000)
             let payload = try value.encode(limits: limits)
             let input = try GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
                 canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
             _ = try await coordinator.applyRecipient(canonicalPayload: payload, signature: key.signature(for: input).rawRepresentation,
-                wireVersion: 1, kind: .phoneRevocation, phoneID: id(6))
+                wireVersion: 1, kind: .phoneRevocation, phoneID: id(phone))
         }
-        func admit(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, expires: UInt64 = 11_000) async throws {
+        func admit(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, expires: UInt64 = 11_000, phone: UInt8 = 6, token: String = "synthetic") async throws {
             let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
             let candidate = try GatewayTokenCandidate(binding: GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4),
-                lifecycleEpoch: id(5), phoneID: id(6), enrollmentEpoch: id(7), candidateID: id(n), tokenDigest: Data(SHA256.hash(data: Data("synthetic".utf8))),
-                challenge: id(n, 32), enrollmentTag: id(6, 32)), revision: UInt64(n), operationID: id(n), issuedAtUnixMillis: 1000, expiresAtUnixMillis: expires)
+                lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(7), candidateID: id(n), tokenDigest: Data(SHA256.hash(data: Data(token.utf8))),
+                challenge: id(n, 32), enrollmentTag: id(phone, 32)), revision: UInt64(n), operationID: id(n), issuedAtUnixMillis: 1000, expiresAtUnixMillis: expires)
             let payload = try candidate.encode(limits: limits)
             let input = try GatewayTokenCandidateSigningInput.make(wireVersion: 1, canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
             _ = try await coordinator.admitCandidate(canonicalPayload: payload, signature: key.signature(for: input).rawRepresentation,
-                wireVersion: 1, registrationToken: "synthetic", phoneID: id(6))
+                wireVersion: 1, registrationToken: token, phoneID: id(phone))
+        }
+        func activate(_ coordinator: GatewayDeliveryCoordinator, n: UInt8 = 1, phone: UInt8 = 6, token: String = "synthetic") async throws {
+            let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
+            let binding = try GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4),
+                lifecycleEpoch: id(5), phoneID: id(phone), enrollmentEpoch: id(7), candidateID: id(n),
+                tokenDigest: Data(SHA256.hash(data: Data(token.utf8))), challenge: id(n, 32), enrollmentTag: id(phone, 32))
+            let value = try GatewayMappingActivation(binding: binding, revision: UInt64(n) + 1, operationID: id(n + 100),
+                issuedAtUnixMillis: 1000, expiresAtUnixMillis: 11_000)
+            let payload = try value.encode(limits: limits)
+            let signature = try key.signature(for: GatewayRecipientSigningInput.make(wireVersion: 1, kind: .activation,
+                canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+            _ = try await coordinator.applyRecipient(canonicalPayload: payload, signature: signature, wireVersion: 1, kind: .activation, phoneID: id(phone))
+        }
+        func delivery(_ n: UInt8 = 1, deadline: UInt64 = 10_100, phone: UInt8 = 6, identifier: UUID = UUID()) throws -> PhoneRequestDelivery {
+            let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+            let enrollment = try StoredApprovalEnrollment(epoch: id(7), notificationTag: id(phone, 32), identityPublicKey: key.publicKey.x963Representation,
+                approval: ApprovalEnrollment(phoneID: id(phone), active: true, capabilities: ContractCapabilities(contracts: [contract: []]), keys: [
+                    EnrolledApprovalKey(id: id(11), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                    EnrolledApprovalKey(id: id(12), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                ]))
+            return PhoneRequestDelivery(id: identifier, recipient: DeliveryRecipient(enrollment), requestID: id(n),
+                admittedAt: AuthorityMoment(epoch: clock.epoch, milliseconds: 100), deadlineMilliseconds: deadline)
         }
     }
 
@@ -342,6 +376,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     }
 
     func testCoordinatorUsesRealSenderThroughInterceptedHTTPTransport() async throws {
+        CoordinatorHTTPFixture.requests.withLock { $0 = [] }
         let fixture = try Fixture(), provider = Provider([])
         let sender = try FCMWakeSender(project: "coordinator-fixture", packageName: "dev.remozio.android",
             transport: FCMHTTPTransport(timeoutSeconds: 2, protocolClasses: [CoordinatorHTTPFixture.self]))
@@ -539,6 +574,388 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             }
         }
         XCTAssertEqual(calls.value.withLock { $0 }, 0)
+    }
+
+    private func wakePolicy(entries: Int = 32, attempts: Int = 3) throws -> GatewayWakePolicy {
+        try GatewayWakePolicy(maximumEntries: entries, maximumAttempts: attempts, minimumEnrollmentIntervalMillis: 50,
+            maximumLifetimeMillis: 20_000, maximumTTLSeconds: 60)
+    }
+    private func prepareWakes(_ fixture: Fixture, _ coordinator: GatewayDeliveryCoordinator) async throws {
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        try await fixture.activate(coordinator)
+        try await coordinator.setPhoneRouting(true)
+    }
+    private func wakeState(_ coordinator: GatewayDeliveryCoordinator, _ delivery: PhoneRequestDelivery) async throws -> GatewayWakeProgress {
+        let progress = try await coordinator.wakeProgress(deliveryID: delivery.id)
+        return try XCTUnwrap(progress)
+    }
+    private func wakeToken(_ wake: FCMWake) throws -> String? {
+        let sender = try FCMWakeSender(project: "wake-fixture", packageName: "dev.remozio.android")
+        let request = try sender.request(wake, accessToken: FCMAccessToken("synthetic-access"), validateOnly: false)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        return (body["message"] as? [String: Any])?["token"] as? String
+    }
+
+    func testApprovalWakeExpiredProgressDoesNotPreventCancellation() async throws {
+        let f = try Fixture(), provider = Provider([])
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        let delivery = try f.delivery(deadline: 150)
+        try await c.enqueueWake(delivery)
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.times.count == 1 }
+        f.clock.advance(50)
+        let expired = try await wakeState(c, delivery)
+        XCTAssertEqual(expired.status, .expired)
+        try await c.cancelWake(deliveryID: delivery.id)
+        do { _ = try await task.value; XCTFail("Expired work was not cancelled") }
+        catch is CancellationError {}
+        let final = try await wakeState(c, delivery)
+        XCTAssertEqual(final.status, .expired)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeNeedsConfigurationMappingAndExplicitPhoneRouting() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await c.replaceTrustedEnrollments([f.enrollment()], active: true)
+        let delivery = try f.delivery()
+        do { try await c.enqueueWake(delivery); XCTFail("No mapping") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .unavailableMapping) }
+        try await f.admit(c); try await f.activate(c)
+        try await c.enqueueWake(delivery)
+        do { _ = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)); XCTFail("Routing defaults to local") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .localRouting) }
+        let wakes = await provider.wakes
+        XCTAssertTrue(wakes.isEmpty)
+        try await c.shutdown()
+        let other = try Fixture(), unconfigured = try other.coordinator(provider)
+        do { try await unconfigured.enqueueWake(other.delivery()); XCTFail("No wake policy") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .unavailable) }
+        try await unconfigured.shutdown()
+    }
+
+    func testApprovalWakeRejectsForeignClockFutureAdmissionAndOversizedLifetime() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        let base = try f.delivery()
+        let foreign = PhoneRequestDelivery(id: UUID(), recipient: base.recipient, requestID: base.requestID,
+            admittedAt: AuthorityMoment(epoch: UUID(), milliseconds: 100), deadlineMilliseconds: 200)
+        let future = PhoneRequestDelivery(id: UUID(), recipient: base.recipient, requestID: base.requestID,
+            admittedAt: AuthorityMoment(epoch: f.clock.epoch, milliseconds: 101), deadlineMilliseconds: 200)
+        for delivery in [foreign, future, try f.delivery(deadline: 20_101), try f.delivery(deadline: 100)] {
+            do { try await c.enqueueWake(delivery); XCTFail("Invalid delivery admitted") }
+            catch { XCTAssertEqual(error as? GatewayWakeError, .invalidDelivery) }
+        }
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeUsesRealSenderThroughInterceptedHTTPTransport() async throws {
+        CoordinatorHTTPFixture.requests.withLock { $0 = [] }
+        let f = try Fixture(), provider = Provider([])
+        let sender = try FCMWakeSender(project: "coordinator-fixture", packageName: "dev.remozio.android",
+            transport: FCMHTTPTransport(timeoutSeconds: 2, protocolClasses: [CoordinatorHTTPFixture.self]))
+        let c = try f.coordinator(provider, sender: sender, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        try await c.enqueueWake(f.delivery())
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first?.status, .accepted)
+        let requests = CoordinatorHTTPFixture.requests.withLock { $0 }
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.url?.absoluteString, "https://fcm.googleapis.com/v1/projects/coordinator-fixture/messages:send")
+        XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer synthetic")
+        try await c.shutdown()
+    }
+
+    func testApprovalWakePolicyRejectsUnboundedValues() throws {
+        XCTAssertThrowsError(try GatewayWakePolicy(maximumEntries: 0, maximumAttempts: 1,
+            minimumEnrollmentIntervalMillis: 1, maximumLifetimeMillis: 1, maximumTTLSeconds: 1))
+        XCTAssertThrowsError(try GatewayWakePolicy(maximumEntries: 4097, maximumAttempts: 1,
+            minimumEnrollmentIntervalMillis: 1, maximumLifetimeMillis: 1, maximumTTLSeconds: 1))
+        XCTAssertThrowsError(try GatewayWakePolicy(maximumEntries: 1, maximumAttempts: 33,
+            minimumEnrollmentIntervalMillis: 1, maximumLifetimeMillis: 1, maximumTTLSeconds: 1))
+        XCTAssertThrowsError(try GatewayWakePolicy(maximumEntries: 1, maximumAttempts: 1,
+            minimumEnrollmentIntervalMillis: 0, maximumLifetimeMillis: 1, maximumTTLSeconds: 1))
+        XCTAssertThrowsError(try GatewayWakePolicy(maximumEntries: 1, maximumAttempts: 1,
+            minimumEnrollmentIntervalMillis: 1, maximumLifetimeMillis: 86_400_001, maximumTTLSeconds: 1))
+        XCTAssertThrowsError(try GatewayWakePolicy(maximumEntries: 1, maximumAttempts: 1,
+            minimumEnrollmentIntervalMillis: 1, maximumLifetimeMillis: 1, maximumTTLSeconds: 86_401))
+    }
+
+    func testApprovalWakesCoalesceWithoutLosingRequestIdentityOrDeadline() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        let first = try f.delivery(1, deadline: 2100), second = try f.delivery(2, deadline: 4100)
+        _ = try await c.enqueueWake(first); _ = try await c.enqueueWake(second)
+        let results = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(Set(results.map(\.deliveryID)), [first.id, second.id])
+        XCTAssertTrue(results.allSatisfy { $0.status == .accepted && $0.attempts == 1 })
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 1); XCTAssertEqual(wakes.first?.ttlSeconds, 1)
+        XCTAssertEqual(wakes.first?.priority, .high); XCTAssertEqual(wakes.first?.enrollmentTag, id(6, 32))
+        XCTAssertEqual(try wakeToken(XCTUnwrap(wakes.first)), "synthetic")
+        let duplicate = try await c.enqueueWake(first)
+        XCTAssertEqual(duplicate.status, .accepted)
+        let again = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertTrue(again.isEmpty)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeArrivalAfterDispatchUsesANewBatch() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c); await provider.hold()
+        let first = try f.delivery(), second = try f.delivery(2)
+        _ = try await c.enqueueWake(first)
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.wakes.count == 1 }
+        _ = try await c.enqueueWake(second)
+        await provider.release()
+        let initial = try await task.value
+        XCTAssertEqual(initial.map(\.deliveryID), [first.id])
+        let next = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(next.map(\.deliveryID), [second.id])
+        let wakes = await provider.wakes, times = await provider.times
+        XCTAssertEqual(wakes.count, 2); XCTAssertNotEqual(wakes[0].identifier, wakes[1].identifier)
+        XCTAssertGreaterThanOrEqual(times[1] - times[0], 50)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeRetriesKeepIdentifierAndRespectProviderDelay() async throws {
+        let f = try Fixture(), provider = Provider([.retryable(minimumDelaySeconds: 0.2001), .accepted])
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        _ = try await c.enqueueWake(f.delivery())
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first?.status, .accepted); XCTAssertEqual(result.first?.attempts, 2)
+        let wakes = await provider.wakes, times = await provider.times
+        XCTAssertEqual(wakes.count, 2); XCTAssertEqual(wakes[0].identifier, wakes[1].identifier)
+        XCTAssertGreaterThanOrEqual(times[1] - times[0], 201)
+        XCTAssertLessThanOrEqual(wakes[1].ttlSeconds, wakes[0].ttlSeconds)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeNetworkFailuresExhaustBudgetAndExpiryCutsOffRetry() async throws {
+        for expires in [false, true] {
+            let f = try Fixture(), provider = Provider([.retryable(minimumDelaySeconds: 1)])
+            let c = try f.coordinator(provider, wakePolicy: wakePolicy(attempts: 2))
+            try await prepareWakes(f, c)
+            if !expires { await provider.failNext(); await provider.failNext() }
+            _ = try await c.enqueueWake(f.delivery(deadline: expires ? 150 : 10_100))
+            let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+            XCTAssertEqual(result.first?.status, expires ? .expired : .exhausted)
+            XCTAssertEqual(result.first?.attempts, expires ? 1 : 2)
+            let wakes = await provider.wakes
+            XCTAssertEqual(wakes.count, expires ? 1 : 2)
+            if expires { XCTAssertEqual(wakes.first?.ttlSeconds, 0) }
+            try await c.shutdown()
+        }
+    }
+
+    func testApprovalWakePresencePauseResumesSameBatchWithoutResettingBudget() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c); await provider.hold()
+        let delivery = try f.delivery()
+        _ = try await c.enqueueWake(delivery)
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.wakes.count == 1 }
+        try await c.setPhoneRouting(false)
+        do { _ = try await task.value; XCTFail("Paused task succeeded") } catch {}
+        let paused = try await wakeState(c, delivery)
+        XCTAssertEqual(paused.status, .queued); XCTAssertEqual(paused.attempts, 1)
+        do { _ = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)); XCTFail("Local routing sent") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .localRouting) }
+        await provider.release(); try await c.setPhoneRouting(true)
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first?.status, .accepted); XCTAssertEqual(result.first?.attempts, 2)
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 2); XCTAssertEqual(wakes[0].identifier, wakes[1].identifier)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeExpiryDuringOAuthPreventsProviderCall() async throws {
+        let f = try Fixture(), provider = Provider([]), gate = OAuthGate()
+        let source = try FCMTokenSource(now: { .now }, refresh: { try await gate.refresh() })
+        let c = try f.coordinator(provider, tokenSource: source, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        _ = try await c.enqueueWake(f.delivery(deadline: 150))
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await gate.started }
+        f.clock.advance(50); try await gate.release()
+        let result = try await task.value
+        XCTAssertEqual(result.first?.status, .expired); XCTAssertEqual(result.first?.attempts, 0)
+        let wakes = await provider.wakes
+        XCTAssertTrue(wakes.isEmpty)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeResolutionWithdrawsOneMemberWithoutLosingOthers() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c); await provider.hold()
+        let first = try f.delivery(), second = try f.delivery(2)
+        _ = try await c.enqueueWake(first); _ = try await c.enqueueWake(second)
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.wakes.count == 1 }
+        try await c.cancelWake(deliveryID: first.id)
+        await provider.release()
+        let result = try await task.value
+        XCTAssertEqual(result.first { $0.deliveryID == first.id }?.status, .withdrawn)
+        XCTAssertEqual(result.first { $0.deliveryID == second.id }?.status, .accepted)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeSignedRevocationSuppressesLateAcceptance() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c); await provider.hold(honorCancellation: false)
+        let delivery = try f.delivery()
+        _ = try await c.enqueueWake(delivery)
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.wakes.count == 1 }
+        try await f.revoke(c, revision: 3)
+        await provider.release()
+        do { _ = try await task.value; XCTFail("Revoked wake succeeded") } catch {}
+        let progress = try await wakeState(c, delivery)
+        XCTAssertEqual(progress.status, .withdrawn)
+        do { _ = try await c.enqueueWake(f.delivery(2)); XCTFail("Revoked mapping used") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .unavailableMapping) }
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeUsesTokenRotatedDuringOAuth() async throws {
+        let f = try Fixture(), provider = Provider([]), gate = OAuthGate()
+        let source = try FCMTokenSource(now: { .now }, refresh: { try await gate.refresh() })
+        let c = try f.coordinator(provider, tokenSource: source, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        _ = try await c.enqueueWake(f.delivery())
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await gate.started }
+        try await f.admit(c, n: 3, token: "rotated")
+        try await f.activate(c, n: 3, token: "rotated")
+        try await gate.release()
+        _ = try await task.value
+        let wakes = await provider.wakes
+        XCTAssertEqual(try wakeToken(XCTUnwrap(wakes.first)), "rotated")
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeInvalidTokenRemovesOnlyTheRejectedMapping() async throws {
+        for rotate in [false, true] {
+            let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+            try await prepareWakes(f, c); await provider.hold()
+            _ = try await c.enqueueWake(f.delivery())
+            let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+            defer { task.cancel() }
+            try await until { await provider.wakes.count == 1 }
+            if rotate {
+                try await f.admit(c, n: 3, token: "rotated")
+                try await f.activate(c, n: 3, token: "rotated")
+            }
+            await provider.release(result: .registrationInvalid)
+            let first = try await task.value
+            XCTAssertEqual(first.first?.status, .rejected)
+            if rotate {
+                _ = try await c.enqueueWake(f.delivery(2))
+                let next = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+                XCTAssertEqual(next.first?.status, .accepted)
+                let wakes = await provider.wakes
+                XCTAssertEqual(try wakeToken(XCTUnwrap(wakes.last)), "rotated")
+            } else {
+                do { _ = try await c.enqueueWake(f.delivery(2)); XCTFail("Invalid mapping retained") }
+                catch { XCTAssertEqual(error as? GatewayWakeError, .unavailableMapping) }
+            }
+            try await c.shutdown()
+        }
+    }
+
+    func testApprovalWakeQueueBoundsConflictingReuseAndExpiredReclamation() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy(entries: 1))
+        try await prepareWakes(f, c)
+        let first = try f.delivery(deadline: 150)
+        _ = try await c.enqueueWake(first)
+        do { _ = try await c.enqueueWake(f.delivery(2)); XCTFail("Capacity ignored") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .capacityExceeded) }
+        do { _ = try await c.enqueueWake(f.delivery(deadline: 200, identifier: first.id)); XCTFail("Deadline renewed") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .conflictingDelivery) }
+        f.clock.advance(50)
+        let expired = try await c.enqueueWake(first)
+        XCTAssertEqual(expired.status, .expired)
+        let next = try await c.enqueueWake(f.delivery(2))
+        XCTAssertEqual(next.status, .queued)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakesAndTokenProbesShareCapacityAndPacing() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy(), maximumFlights: 1)
+        try await prepareWakes(f, c); await provider.hold()
+        _ = try await c.enqueueWake(f.delivery())
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.wakes.count == 1 }
+        try await f.admit(c, n: 3)
+        do { _ = try await c.deliverProbe(operationID: id(3), phoneID: id(6)); XCTFail("Shared capacity exceeded") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .capacityExceeded) }
+        await provider.release(); _ = try await task.value
+        let probe = try await c.deliverProbe(operationID: id(3), phoneID: id(6))
+        XCTAssertEqual(probe?.status, .accepted)
+        let times = await provider.times
+        XCTAssertEqual(times.count, 2); XCTAssertGreaterThanOrEqual(times[1] - times[0], 10)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeAuthenticationRetryRefreshesOAuthAndKeepsBatch() async throws {
+        let f = try Fixture(), provider = Provider([.authenticationRequired, .accepted]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        _ = try await c.enqueueWake(f.delivery())
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first?.status, .accepted); XCTAssertEqual(result.first?.attempts, 2)
+        XCTAssertEqual(f.refreshes.value.withLock { $0 }, 2)
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes[0].identifier, wakes[1].identifier)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeRevocationLeavesOtherPhoneDeliveryRunning() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await c.replaceTrustedEnrollments([f.enrollment(), f.enrollment(phone: 8)], active: true)
+        try await f.admit(c); try await f.activate(c)
+        try await f.admit(c, n: 3, phone: 8); try await f.activate(c, n: 3, phone: 8)
+        try await c.setPhoneRouting(true); await provider.hold()
+        let first = try f.delivery(), second = try f.delivery(2, phone: 8)
+        _ = try await c.enqueueWake(first); _ = try await c.enqueueWake(second)
+        let a = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        let b = Task { try await c.deliverWakeBatch(phoneID: id(8), enrollmentEpoch: id(7)) }
+        defer { a.cancel(); b.cancel() }
+        try await until { await provider.wakes.count == 2 }
+        try await f.revoke(c, revision: 5)
+        await provider.release()
+        do { _ = try await a.value; XCTFail("Revoked phone succeeded") } catch {}
+        let result = try await b.value
+        XCTAssertEqual(result.first?.status, .accepted)
+        let state = try await wakeState(c, first)
+        XCTAssertEqual(state.status, .withdrawn)
+        try await c.shutdown()
+    }
+
+    func testApprovalWakeShutdownCancelsWorkAndReleasesStorage() async throws {
+        let f = try Fixture(), provider = Provider([]), c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c); await provider.hold()
+        _ = try await c.enqueueWake(f.delivery())
+        let task = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        defer { task.cancel() }
+        try await until { await provider.wakes.count == 1 }
+        try await c.shutdown()
+        do { _ = try await task.value; XCTFail("Shutdown wake succeeded") } catch {}
+        let lease = try ProtectedGatewayLease(anchor: f.root.path, relativeDirectory: "store", serviceUID: geteuid(), ancestorUID: geteuid())
+        lease.close()
+        do { _ = try await c.enqueueWake(f.delivery(2)); XCTFail("Stopped owner accepted") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .stopped) }
     }
 
     func testPolicyRejectsUnboundedAndInconsistentValues() throws {
