@@ -33,8 +33,7 @@ internal fun statusHeadline(status: TrackedRequestStatus): StatusHeadline = when
     RequestPhase.EXECUTING -> StatusHeadline.EXECUTING
     RequestPhase.SUCCEEDED -> StatusHeadline.SUCCEEDED
     RequestPhase.FAILED -> StatusHeadline.FAILED
-    RequestPhase.UNKNOWN -> if (status.status.reason == RequestStatusReason.TARGET_DISAPPEARED)
-        StatusHeadline.DISAPPEARED else StatusHeadline.UNKNOWN
+    RequestPhase.UNKNOWN -> StatusHeadline.UNKNOWN
     RequestPhase.DECLINED -> StatusHeadline.DECLINED
     RequestPhase.CANCELLED -> when (status.status.reason) {
         RequestStatusReason.TARGET_DISAPPEARED -> StatusHeadline.DISAPPEARED

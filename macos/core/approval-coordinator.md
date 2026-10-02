@@ -42,7 +42,11 @@ Admission publishes the payload only after creation metadata commits. It does no
 
 `consumedRequest` retains the original binding while the phase is Authorized or Executing. It is data for the executor's separate target and checkpoint checks, never permission to dispatch. Expiry cannot rewrite an already consumed action. Terminal transitions release the coordinator's capture reference. The host must also release any copies held by adapters or transport queues.
 
-`state` returns local observed metadata with a positive revision suitable for a status payload. It retains the reason, terminal time, deciding phone, and request bindings after capture release. Reconciliation can construct status without retaining a separate outcome description. Terminal time stays fixed. The wire terminal age is that time minus the first-observed time, not the elapsed time since completion. It is not a signed status message or a freshness guarantee. The host drives deadline evaluation even without phone traffic, reconciles terminal state to all devices, and withdraws queued work. When using `PendingRequestDelivery`, obtain a fresh owned snapshot before its dispatch boundary; never reuse a pre-consumption snapshot.
+`state` returns local observed metadata with a positive revision suitable for a status payload. It retains the reason, terminal time, deciding phone, and request bindings after capture release. Reconciliation can construct status without retaining a separate outcome description. Terminal time stays fixed. The wire terminal age is that time minus the first-observed time, not the elapsed time since completion. It is not a signed status message or a freshness guarantee. The host drives deadline evaluation even without phone traffic, reconciles terminal state to all devices, and withdraws queued work. Use `reconcileDelivery` after every owner transition and before transport work. It reads current owner state, commits elapsed expiry, and closes deliveries after capture release. Apply its withdrawals to queued and started retry tasks before discarding a closed delivery owner. Call it before `forgetTerminal`; forgotten requests cannot be reconciled. Storage or clock errors prohibit transport work and require the host to stop affected delivery tasks.
+
+Before the first transport write, obtain a fresh pending snapshot and use `PendingRequestDelivery.beginDelivery` under the same serialization boundary. Never reuse a pre-consumption snapshot.
+
+`ApprovalRequestState.statusPayload` preserves the v1 wire contract. Internal Unknown with target disappearance projects to Cancelled/target-disappeared, which existing phones render as “No longer available · reason unknown.” The owner remains Unknown. The host supplies a separate increasing observation revision, original observation ID, and current authority time, then authenticates the response. Reusing the lifecycle revision for a changed time sample is not valid. A future different wire form requires capability or schema negotiation.
 
 The configured request count includes terminal metadata until `forgetTerminal` removes it. The capture byte limit includes Authorized and Executing requests until their terminal outcome. Forgetting cannot remove a live request or its durable consumption receipt. New admission always creates a new ID and challenge.
 
@@ -66,7 +70,7 @@ A new coordinator starts empty. Journal history and old consumption receipts can
 
 ## Evidence and remaining gates
 
-Fourteen normal-user tests use the real protected journal and disposable P-256 keys. They cover fresh bindings, metadata privacy, presentation, first-decision ownership, current enrollment, decline, deadline enforcement, target loss, journal failures, outcome retention, memory limits, and restart.
+Sixteen normal-user tests use the real protected journal and disposable P-256 keys. They cover fresh bindings, metadata privacy, presentation, first-decision ownership, current enrollment, decline, deadline enforcement, target loss, journal failures, outcome retention, memory limits, and restart.
 
 Swift and Kotlin test every lifecycle state/event pair against the same fixture, including pending target loss. No action is executed and no real credential, provider, or phone is used.
 

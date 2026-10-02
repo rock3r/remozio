@@ -135,8 +135,6 @@ internal class RequestStatusTracker(
         }
         val terminalAge = next.terminalAgeMs
         if (terminalAge != null && terminalAge < old.observedAgeMs) reject(StatusRejection.CHANGED_TIMING)
-        if ((old.phase == RequestPhase.AUTHORIZED || old.phase == RequestPhase.EXECUTING) &&
-            next.reason == RequestStatusReason.TARGET_DISAPPEARED) reject(StatusRejection.INVALID_TRANSITION)
         val allowed = when (old.phase) {
             RequestPhase.QUEUED -> true
             RequestPhase.PRESENTED -> next.phase != RequestPhase.QUEUED

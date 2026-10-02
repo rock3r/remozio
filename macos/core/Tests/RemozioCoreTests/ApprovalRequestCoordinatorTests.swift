@@ -261,17 +261,89 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         for disappeared in [false, true] {
             if disappeared { _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(), receiptTimeMs: nil) }
             let state = try owner.state(requestID: request.requestID)
-            let status = try RequestStatusPayload(macID: state.macID, accountID: state.accountID, requestID: state.requestID,
-                requestDigest: state.requestDigest, challenge: state.challenge,
-                revision: state.revision, phase: state.phase, reason: state.reason,
-                observationID: id(40), observedAgeMs: 130 - state.firstObservedAt.milliseconds,
-                authorizationRemainingMs: state.phase.isTerminal ? nil : state.deadlineMilliseconds - 130,
-                estimatedLifetimeMs: nil, lateObservation: false,
-                terminalAgeMs: state.terminalAt.map { $0.milliseconds - state.firstObservedAt.milliseconds }, decisionPhoneID: state.decisionPhoneID)
+            let status = try state.statusPayload(observationID: id(40), observationRevision: state.revision,
+                now: now(130), estimatedLifetimeMs: nil, lateObservation: false)
+            XCTAssertEqual(state.phase, disappeared ? .unknown : .queued)
+            XCTAssertEqual(status.phase, disappeared ? .cancelled : .queued)
+            XCTAssertEqual(status.reason, disappeared ? .targetDisappeared : .none)
+            let later = try state.statusPayload(observationID: id(40), observationRevision: state.revision + 1,
+                now: now(150), estimatedLifetimeMs: nil, lateObservation: false)
+            XCTAssertEqual(later.terminalAgeMs, status.terminalAgeMs)
+            XCTAssertEqual(later.observedAgeMs, 50)
+            XCTAssertThrowsError(try state.statusPayload(observationID: id(40), observationRevision: 10,
+                now: .init(epoch: UUID(), milliseconds: 130), estimatedLifetimeMs: nil, lateObservation: false))
             XCTAssertEqual(status.observedAgeMs, 30)
             XCTAssertEqual(status.terminalAgeMs, disappeared ? 10 : nil)
             XCTAssertEqual(try RequestStatusPayload.decode(status.encode(limits: limits), limits: limits), status)
         }
+    }
+
+    func testDeliveryClosesFromOwnerStateAfterEveryPendingExit() throws {
+        enum Exit: CaseIterable { case cancelled, timedOut, disappeared, restart, declined, authorized, deadline }
+        for exit in Exit.allCases {
+            for started in [false, true] {
+                let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+                let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+                let retained = try owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil)
+                let delivery = try PendingRequestDelivery(request: retained)
+                var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
+                let routing = router.evaluate(mode: .away, snapshot: .init(), now: .init(epoch: clock, milliseconds: 110))
+                let queued = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+                    routing: routing, now: now(), receiptTimeMs: nil) { _ in true }
+                XCTAssertEqual(queued.active.count, 1)
+                let trust = try db.read { try $0.requestDeliveryTrust() }
+                if started {
+                    XCTAssertNotNil(delivery.beginDelivery(id: queued.active[0].id, current: retained, routing: routing,
+                        trust: trust, now: now()).delivery)
+                }
+                switch exit {
+                case .cancelled, .timedOut, .disappeared, .restart:
+                    let reason: PendingRequestRetirement = switch exit {
+                    case .cancelled: .cancelled
+                    case .timedOut: .targetTimedOut
+                    case .disappeared: .targetDisappeared
+                    default: .authorityRestart
+                    }
+                    _ = try owner.retirePending(requestID: request.requestID, reason: reason, now: now(), receiptTimeMs: nil)
+                case .declined:
+                    let (body, signature) = try decision(request, decline: true)
+                    _ = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: id(5),
+                        authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil)
+                case .authorized: _ = try consume(owner, request)
+                case .deadline: break
+                }
+                let time = now(exit == .deadline ? 200 : 120)
+                let closed = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+                    routing: routing, now: time, receiptTimeMs: nil) { _ in XCTFail("Closed request must not enqueue"); return true }
+                XCTAssertEqual(closed.closure, .requestPhase(try owner.state(requestID: request.requestID).phase))
+                XCTAssertEqual(closed.withdrawn, queued.active)
+                XCTAssertTrue(closed.active.isEmpty); XCTAssertTrue(closed.dispatched.isEmpty)
+                let repeated = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+                    routing: routing, now: time, receiptTimeMs: nil) { _ in XCTFail(); return true }
+                XCTAssertTrue(repeated.withdrawn.isEmpty)
+                XCTAssertNil(delivery.beginDelivery(id: queued.active[0].id, current: retained, routing: routing,
+                    trust: trust, now: time).delivery)
+            }
+        }
+    }
+
+    func testFailedExpiryCannotPublishDeliveryWithdrawalBeforeCommit() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let delivery = try PendingRequestDelivery(request: owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil))
+        var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
+        let routing = router.evaluate(mode: .away, snapshot: .init(), now: .init(epoch: clock, milliseconds: 110))
+        let queued = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+            routing: routing, now: now(), receiptTimeMs: nil) { _ in true }
+        try fixture.sql("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+            routing: routing, now: now(200), receiptTimeMs: nil) { _ in XCTFail(); return true })
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
+        try fixture.sql("DROP TRIGGER fail_audit")
+        let closed = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+            routing: routing, now: now(200), receiptTimeMs: nil) { _ in XCTFail(); return true }
+        XCTAssertEqual(closed.withdrawn, queued.active)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
     }
 
     private final class Fixture {

@@ -53,7 +53,7 @@ The deciding phone is descriptive. It identifies the accepted phone decision whe
 | Executing | 3 | None |
 | Succeeded | 4 | Verified result |
 | Failed | 5 | Verified result |
-| Unknown | 6 | Outcome unavailable; target disappeared before consumption; authority restarted |
+| Unknown | 6 | Outcome unavailable; authority restarted |
 | Declined | 7 | Declined |
 | Cancelled | 8 | User cancelled; target disappeared; authority restarted; no dispatch proved |
 | Expired | 9 | Authorization expired; target timed out |
@@ -62,7 +62,7 @@ Reason tags are: none `0`, verified result `1`, outcome unavailable `2`, decline
 
 The codec rejects combinations outside this table. It cannot prove an outcome or check the transition from previously retained state.
 
-“Unknown / target disappeared” ends the pending Remozio request without naming a deciding phone. The earlier “Cancelled / target disappeared” pair remains accepted for compatibility. It does not claim that Remozio cancelled the original operation or knows why its dialog disappeared. Present it as “No longer available · reason unknown.” A target timeout and a disappearance are different observations.
+“Cancelled / target disappeared” ends the pending Remozio request. It does not claim that Remozio cancelled the original operation or knows why its dialog disappeared. Present it as “No longer available · reason unknown.” A target timeout and a disappearance are different observations.
 
 After authorization or dispatch, disappearance must follow the existing consumption and outcome rules. It cannot become harmless expiry or cancellation without proof that no action dispatched. A failed result requires affirmative failure evidence; loss of a response produces Unknown.
 
@@ -108,7 +108,7 @@ Status bodies contain no command bytes, UI text, destination, secret, or free-fo
 
 ## Evidence and remaining integration
 
-Twenty shared valid fixtures cover every allowed phase/reason pair, absent estimates, zero timing, late observation, elapsed estimates, terminal age, and unsigned boundaries. The 174 rejected fixtures cover missing/extra fields, malformed bindings, unknown tags, invalid phase/reason pairs, a deciding phone on Unknown target disappearance, inconsistent timing, and canonical encoding failures.
+Nineteen shared valid fixtures cover every allowed phase/reason pair, absent estimates, zero timing, late observation, elapsed estimates, terminal age, and unsigned boundaries. The 174 rejected fixtures cover missing/extra fields, malformed bindings, unknown tags, every invalid phase/reason pair, inconsistent timing, and canonical encoding failures.
 
 Swift and Kotlin test exact field values and byte-for-byte re-encoding. Additional tests cover constructor validation, defensive byte copies, independent size/item limits, and elapsed estimates that remain pending. The native Swift signature test mutates each body field and the signing domain.
 

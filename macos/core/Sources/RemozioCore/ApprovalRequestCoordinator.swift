@@ -43,6 +43,23 @@ public struct ApprovalRequestState: Equatable, Sendable {
     public let revision: UInt64
     public let firstObservedAt: AuthorityMoment
     public let deadlineMilliseconds: UInt64
+
+    /// V1 status projection. The host supplies a fresh observation revision and authenticates the response separately.
+    public func statusPayload(observationID: Data, observationRevision: UInt64, now: AuthorityMoment,
+                              estimatedLifetimeMs: UInt64?, lateObservation: Bool) throws -> RequestStatusPayload {
+        guard now.epoch == firstObservedAt.epoch, now.milliseconds >= firstObservedAt.milliseconds,
+              terminalAt == nil || (terminalAt!.epoch == now.epoch && terminalAt!.milliseconds <= now.milliseconds) else {
+            throw ApprovalCoordinatorError.invalidClock
+        }
+        let pending = phase == .queued || phase == .presented
+        let wirePhase: RequestPhase = phase == .unknown && reason == .targetDisappeared ? .cancelled : phase
+        return try RequestStatusPayload(macID: macID, accountID: accountID, requestID: requestID,
+            requestDigest: requestDigest, challenge: challenge, revision: observationRevision, phase: wirePhase, reason: reason,
+            observationID: observationID, observedAgeMs: now.milliseconds - firstObservedAt.milliseconds,
+            authorizationRemainingMs: pending ? (now.milliseconds < deadlineMilliseconds ? deadlineMilliseconds - now.milliseconds : 0) : nil,
+            estimatedLifetimeMs: estimatedLifetimeMs, lateObservation: lateObservation,
+            terminalAgeMs: terminalAt.map { $0.milliseconds - firstObservedAt.milliseconds }, decisionPhoneID: decisionPhoneID)
+    }
 }
 
 /// The service serializes this non-Sendable owner with all other journal users and adapter observations.
@@ -183,6 +200,23 @@ public final class ApprovalRequestCoordinator {
         _ = try replace(decision.requestID, phase: receipt.event.outcome == .noDispatch ? .declined : .authorized,
             reason: receipt.event.outcome == .noDispatch ? .declined : .none, now: now, decisionPhoneID: receipt.decision.phoneID)
         return receipt
+    }
+
+    /// Reconcile queue ownership from current owner state, including terminal states whose capture was released.
+    public func reconcileDelivery(requestID: Data, delivery: PendingRequestDelivery, routing: PresenceRouting,
+                                  now: AuthorityMoment, receiptTimeMs: UInt64?,
+                                  enqueue: (PhoneRequestDelivery) -> Bool) throws -> RequestDeliveryUpdate {
+        try checkClock(now)
+        var current = try state(requestID: requestID)
+        if (current.phase == .queued || current.phase == .presented) && now.milliseconds >= current.deadlineMilliseconds {
+            current = try retirePending(requestID: requestID, reason: .deadlineElapsed, now: now, receiptTimeMs: receiptTimeMs)
+        }
+        guard current.phase == .queued || current.phase == .presented else {
+            return delivery.close(current: current, routing: routing, now: now)
+        }
+        guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
+        let trust = try database.read { try $0.requestDeliveryTrust() }
+        return delivery.reconcile(current: retained, routing: routing, trust: trust, now: now, enqueue: enqueue)
     }
 
     /// Original binding for the root executor's separate checkpoint and target checks. This snapshot grants no dispatch permission.

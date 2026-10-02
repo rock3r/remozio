@@ -21,7 +21,7 @@ class RequestStatusPayloadTest {
 
     @Test fun sharedStatusFieldsAndExactRoundTrips() {
         val vectors = vectors()
-        assertEquals(20, vectors.getValue("valid").jsonArray.size)
+        assertEquals(19, vectors.getValue("valid").jsonArray.size)
         assertEquals(RequestPhase.entries.toSet(), phases.toSet())
         for (row in vectors.getValue("valid").jsonArray) {
             val fields = row.jsonObject

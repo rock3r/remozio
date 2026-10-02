@@ -20,7 +20,7 @@ final class RequestStatusPayloadTests: XCTestCase {
 
     func testSharedStatusFieldsAndExactRoundTrips() throws {
         let vectors = try vectors()
-        XCTAssertEqual(vectors.valid.count, 20)
+        XCTAssertEqual(vectors.valid.count, 19)
         XCTAssertEqual(Set(phases), Set(RequestPhase.allCases))
         for row in vectors.valid {
             let bytes = hex(row.hex)
