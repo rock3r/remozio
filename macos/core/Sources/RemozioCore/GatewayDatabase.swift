@@ -7,6 +7,7 @@ import SQLite3
 public enum GatewayDatabaseError: Error, Equatable {
     case invalidConfiguration, incompatibleStore, wrongScope, closed, unavailable, transactionActive
     case headMismatch, operationConflict, capacityExceeded, invalidClock, corruptData
+    case revokedEnrollment, unavailableCandidate
     case storage(Int32)
 }
 
@@ -25,7 +26,7 @@ public struct GatewayCandidateAdmission: Sendable {
 }
 
 /// Owns one registration's private connection. Serialize calls with current gateway trust and enrollment changes.
-/// This store admits candidates only; it has no provider dispatch or recipient activation API.
+/// Candidate admission and recipient changes share one durable revision. No method grants provider dispatch authority.
 public final class GatewayDatabase {
     private static let applicationID: Int64 = 0x524D5A47
     private let lease: ProtectedGatewayLease
@@ -46,17 +47,17 @@ public final class GatewayDatabase {
     public static func open(directoryPath: String, serviceUID: uid_t, identity: GatewayRegistrationIdentity,
                             payloadLimits: CBORLimits, signingLimits: CBORLimits, maximumOperations: Int,
                             maximumPendingPerEnrollment: Int, maximumLifetimeMillis: UInt64, clockEpoch: UUID,
-                            busyMilliseconds: UInt32, initialize: Bool = false) throws -> GatewayDatabase {
+                            busyMilliseconds: UInt32, initialize: Bool = false, migrateLegacyStore: Bool = false) throws -> GatewayDatabase {
         try GatewayDatabase(lease: ProtectedGatewayLease.acquire(directoryPath: directoryPath, serviceUID: serviceUID),
             identity: identity, payloadLimits: payloadLimits, signingLimits: signingLimits, maximumOperations: maximumOperations,
             maximumPendingPerEnrollment: maximumPendingPerEnrollment, maximumLifetimeMillis: maximumLifetimeMillis,
-            clockEpoch: clockEpoch, busyMilliseconds: busyMilliseconds, initialize: initialize)
+            clockEpoch: clockEpoch, busyMilliseconds: busyMilliseconds, initialize: initialize, migrateLegacyStore: migrateLegacyStore)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers even if opening fails.
     init(lease: ProtectedGatewayLease, identity: GatewayRegistrationIdentity, payloadLimits: CBORLimits,
          signingLimits: CBORLimits, maximumOperations: Int, maximumPendingPerEnrollment: Int,
-         maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool) throws {
+         maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool, migrateLegacyStore: Bool = false) throws {
         self.lease = lease; self.identity = identity; self.payloadLimits = payloadLimits; self.signingLimits = signingLimits
         self.maximumOperations = maximumOperations; self.maximumPendingPerEnrollment = maximumPendingPerEnrollment
         self.maximumLifetimeMillis = maximumLifetimeMillis; self.clockEpoch = clockEpoch
@@ -76,12 +77,19 @@ public final class GatewayDatabase {
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
             _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(payloadLimits.maxBytes + 32768))
             try exec("PRAGMA trusted_schema=OFF"); try exec("PRAGMA foreign_keys=ON")
-            if initialize { try requireEmpty() } else { try validateIdentity() }
+            if initialize { try requireEmpty() } else { try validateIdentity(allowLegacy: migrateLegacyStore) }
             try exec("PRAGMA journal_mode=DELETE"); try exec("PRAGMA synchronous=EXTRA"); try exec("PRAGMA fullfsync=ON")
             guard try scalarText("PRAGMA journal_mode") == "delete", try scalar("PRAGMA synchronous") == 3,
                   try scalar("PRAGMA fullfsync") == 1, try scalar("PRAGMA foreign_keys") == 1,
                   try scalar("PRAGMA trusted_schema") == 0 else { throw GatewayDatabaseError.invalidConfiguration }
             if initialize { try transaction(write: true) { try create() } }
+            else if try scalar("PRAGMA user_version") == 1 {
+                try transaction(write: true) {
+                    try validateIdentity(allowLegacy: true)
+                    try createRecipientTables()
+                    try exec("PRAGMA user_version=2")
+                }
+            }
             try validateIdentity()
             // A restart cannot restore a process-local deadline or turn an old receipt into another probe.
             try transaction(write: true) { try exec("UPDATE gateway_candidates_v1 SET token=NULL WHERE token IS NOT NULL") }
@@ -108,11 +116,15 @@ public final class GatewayDatabase {
                 guard previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
                 return GatewayCandidateAdmission(receipt: previous, inserted: false)
             }
+            guard try storedRecipient(operationID: candidate.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+            guard try !isRevoked(phone: candidate.binding.phoneID, enrollment: candidate.binding.enrollmentEpoch) else {
+                throw GatewayDatabaseError.revokedEnrollment
+            }
             let verified = try GatewayCandidateVerifier.verify(canonicalCandidate: canonicalPayload, signature: signature,
                 wireVersion: wireVersion, registrationToken: registrationToken, trust: trust, nowUnixMillis: nowUnixMillis,
                 now: now, maximumLifetimeMillis: maximumLifetimeMillis, payloadLimits: payloadLimits, signingLimits: signingLimits)
             try expire(now)
-            guard try scalar("SELECT count(*) FROM gateway_candidates_v1") < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+            try requireCapacity()
             let pending = try statement("SELECT count(*) FROM gateway_candidates_v1 WHERE phone=? AND enrollment=? AND token IS NOT NULL",
                 [candidate.binding.phoneID, candidate.binding.enrollmentEpoch]) { stmt in
                 guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayDatabaseError.storage(sqlite3_errcode(db)) }
@@ -130,12 +142,207 @@ public final class GatewayDatabase {
                 canonicalPayload, signature, uint(candidate.revision), uuid(runID), uint(verified.deadlineMilliseconds), Data(registrationToken.utf8)]) {
                 try done($0)
             }
-            try statement("UPDATE gateway_identity_v1 SET head=? WHERE id=1 AND head=?", [uint(candidate.revision), uint(trust.appliedControlRevision)]) {
-                try done($0)
-                guard sqlite3_changes(db) == 1 else { throw GatewayDatabaseError.headMismatch }
-            }
+            try advanceHead(candidate.revision, from: trust.appliedControlRevision)
             return GatewayCandidateAdmission(receipt: GatewayCandidateReceipt(candidate: candidate, canonicalPayload: canonicalPayload, signature: signature), inserted: true)
         }
+    }
+
+    public func recipientReceipt(operationID: Data) throws -> GatewayRecipientReceipt? {
+        guard operationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
+        return try transaction(write: false) { try storedRecipient(operationID: operationID) }
+    }
+
+    public func isPhoneRevoked(phoneID: Data, enrollmentEpoch: Data) throws -> Bool {
+        guard phoneID.count == 16, enrollmentEpoch.count == 16 else { throw GatewayDatabaseError.wrongScope }
+        return try transaction(write: false) { try isRevoked(phone: phoneID, enrollment: enrollmentEpoch) }
+    }
+
+    /// Applies a current root claim atomically. Historical retries return the original receipt without restoring state.
+    public func applyRecipient(canonicalPayload: Data, signature: Data, wireVersion: UInt64, kind: GatewayRecipientKind,
+                               trust: GatewayCandidateTrust, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayRecipientApplication {
+        try transaction(write: true) {
+            try checkClock(now)
+            guard identity.matches(trust), trust.active else { throw GatewayDatabaseError.wrongScope }
+            guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            let control = try GatewayStoredRecipient.decode(canonicalPayload, kind: kind, limits: payloadLimits)
+            guard control.matches(identity), control.phoneID == trust.enrollment.phoneID,
+                  control.enrollmentEpoch == trust.enrollment.epoch else { throw GatewayDatabaseError.wrongScope }
+            guard try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: wireVersion,
+                kind: kind, canonicalPayload: canonicalPayload, payloadLimits: payloadLimits, inputLimits: signingLimits) else {
+                throw GatewayCandidateVerificationError.invalidSignature
+            }
+            if let previous = try storedRecipient(operationID: control.operationID) {
+                guard previous.kind == kind, previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
+                return GatewayRecipientApplication(receipt: previous, inserted: false)
+            }
+            guard try storedReceipt(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+            guard control.revision > trust.appliedControlRevision else { throw GatewayCandidateVerificationError.staleRevision }
+            guard control.issued <= nowUnixMillis else { throw GatewayCandidateVerificationError.futureIssue }
+            guard nowUnixMillis < control.expires else { throw GatewayCandidateVerificationError.expired }
+            guard control.expires - control.issued <= maximumLifetimeMillis else { throw GatewayCandidateVerificationError.excessiveLifetime }
+            try requireCapacity()
+            let token: Data?
+            switch control {
+            case .activation(let activation):
+                guard trust.enrollment.active, activation.binding.enrollmentTag == trust.enrollment.tag else {
+                    throw GatewayCandidateVerificationError.unavailableEnrollment
+                }
+                guard try !isRevoked(phone: control.phoneID, enrollment: control.enrollmentEpoch) else { throw GatewayDatabaseError.revokedEnrollment }
+                token = try pendingToken(for: activation, nowUnixMillis: nowUnixMillis, now: now)
+            case .revocation: token = nil
+            }
+            try statement("INSERT INTO gateway_recipients_v2 VALUES(?,?,?,?,?,?,?)", [control.operationID, uint(kind.rawValue),
+                control.phoneID, control.enrollmentEpoch, canonicalPayload, signature, uint(control.revision)]) { try done($0) }
+            switch control {
+            case .activation(let activation):
+                guard let token else { throw GatewayDatabaseError.corruptData }
+                let candidate = try candidateReceipt(for: activation).candidate
+                try statement("UPDATE gateway_candidates_v1 SET token=NULL WHERE phone=? AND revision<=?", [control.phoneID, uint(candidate.revision)]) { try done($0) }
+                try statement("""
+                    INSERT INTO gateway_mappings_v2 VALUES(?,?,?,?)
+                    ON CONFLICT(phone) DO UPDATE SET enrollment=excluded.enrollment,operation=excluded.operation,token=excluded.token
+                    """, [control.phoneID, control.enrollmentEpoch, control.operationID, token]) { try done($0) }
+            case .revocation:
+                try statement("UPDATE gateway_candidates_v1 SET token=NULL WHERE phone=? AND enrollment=?", [control.phoneID, control.enrollmentEpoch]) { try done($0) }
+                try statement("DELETE FROM gateway_mappings_v2 WHERE phone=? AND enrollment=?", [control.phoneID, control.enrollmentEpoch]) { try done($0) }
+            }
+            try advanceHead(control.revision, from: trust.appliedControlRevision)
+            return GatewayRecipientApplication(receipt: GatewayRecipientReceipt(control: control, canonicalPayload: canonicalPayload, signature: signature), inserted: true)
+        }
+    }
+
+    /// Returns stored mapping evidence only for the caller's current active enrollment. It does not authorize a send.
+    public func activeMapping(trust: GatewayCandidateTrust) throws -> GatewayActiveMapping? {
+        try transaction(write: false) {
+            guard identity.matches(trust), trust.active else { throw GatewayDatabaseError.wrongScope }
+            guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            guard trust.enrollment.active else { return nil }
+            if try isRevoked(phone: trust.enrollment.phoneID, enrollment: trust.enrollment.epoch) { return nil }
+            return try statement("SELECT enrollment,operation,token FROM gateway_mappings_v2 WHERE phone=?", [trust.enrollment.phoneID]) { stmt in
+                let rc = sqlite3_step(stmt)
+                if rc == SQLITE_DONE { return nil }
+                guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+                let enrollment = try blob(stmt, 0, maximum: 16), operation = try blob(stmt, 1, maximum: 16)
+                let token = try blob(stmt, 2, maximum: 16384)
+                guard let receipt = try storedRecipient(operationID: operation), case .activation(let activation) = receipt.control,
+                      activation.binding.phoneID == trust.enrollment.phoneID, activation.binding.enrollmentEpoch == enrollment else {
+                    throw GatewayDatabaseError.corruptData
+                }
+                guard enrollment == trust.enrollment.epoch, activation.binding.enrollmentTag == trust.enrollment.tag else { return nil }
+                let latest = try recipientOperation(phone: trust.enrollment.phoneID, enrollment: nil, kind: .activation)
+                guard latest == operation else { throw GatewayDatabaseError.corruptData }
+                do { _ = try candidateReceipt(for: activation) }
+                catch GatewayDatabaseError.unavailableCandidate { throw GatewayDatabaseError.corruptData }
+                let string = try checkedToken(token, binding: activation.binding)
+                return GatewayActiveMapping(activation: activation, receipt: receipt, registrationToken: string)
+            }
+        }
+    }
+
+    private func candidateReceipt(for activation: GatewayMappingActivation) throws -> GatewayCandidateReceipt {
+        let operation: Data? = try statement("SELECT operation FROM gateway_candidates_v1 WHERE candidate=?", [activation.binding.candidateID]) {
+            let rc = sqlite3_step($0)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+            return try blob($0, 0, maximum: 16)
+        }
+        guard let operation, let receipt = try storedReceipt(operationID: operation) else { throw GatewayDatabaseError.unavailableCandidate }
+        guard receipt.candidate.binding == activation.binding, receipt.candidate.revision < activation.revision else {
+            throw GatewayDatabaseError.unavailableCandidate
+        }
+        return receipt
+    }
+    private func pendingToken(for activation: GatewayMappingActivation, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> Data {
+        let receipt = try candidateReceipt(for: activation)
+        guard nowUnixMillis < receipt.candidate.expiresAtUnixMillis else { throw GatewayDatabaseError.unavailableCandidate }
+        if let operation = try recipientOperation(phone: activation.binding.phoneID, enrollment: nil, kind: .activation) {
+            guard let previous = try storedRecipient(operationID: operation), case .activation(let prior) = previous.control else {
+                throw GatewayDatabaseError.corruptData
+            }
+            let priorCandidate: GatewayCandidateReceipt
+            do { priorCandidate = try candidateReceipt(for: prior) }
+            catch GatewayDatabaseError.unavailableCandidate { throw GatewayDatabaseError.corruptData }
+            guard receipt.candidate.revision > priorCandidate.candidate.revision else { throw GatewayDatabaseError.unavailableCandidate }
+        }
+        return try statement("SELECT run,deadline,token FROM gateway_candidates_v1 WHERE operation=?", [receipt.candidate.operationID]) { stmt in
+            guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayDatabaseError.corruptData }
+            guard try blob(stmt, 0, maximum: 16) == uuid(runID), try unsigned(blob(stmt, 1, maximum: 8)) > now.milliseconds,
+                  sqlite3_column_type(stmt, 2) != SQLITE_NULL else { throw GatewayDatabaseError.unavailableCandidate }
+            let token = try blob(stmt, 2, maximum: 16384)
+            _ = try checkedToken(token, binding: activation.binding)
+            return token
+        }
+    }
+    private func checkedToken(_ token: Data, binding: GatewayTokenBinding) throws -> String {
+        guard !token.isEmpty, token.count <= 16384, token.allSatisfy({ (33...126).contains($0) }),
+              Data(SHA256.hash(data: token)) == binding.tokenDigest, let string = String(data: token, encoding: .utf8) else {
+            throw GatewayDatabaseError.corruptData
+        }
+        return string
+    }
+    private func storedRecipient(operationID: Data) throws -> GatewayRecipientReceipt? {
+        try statement("SELECT kind,phone,enrollment,payload,signature,revision FROM gateway_recipients_v2 WHERE operation=?", [operationID]) { stmt in
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+            guard let kind = try GatewayRecipientKind(rawValue: unsigned(blob(stmt, 0, maximum: 8))) else { throw GatewayDatabaseError.corruptData }
+            let payload = try blob(stmt, 3, maximum: payloadLimits.maxBytes), signature = try blob(stmt, 4, maximum: 64)
+            let control: GatewayStoredRecipient
+            do { control = try GatewayStoredRecipient.decode(payload, kind: kind, limits: payloadLimits) }
+            catch { throw GatewayDatabaseError.corruptData }
+            guard control.operationID == operationID, control.matches(identity),
+                  control.phoneID == (try blob(stmt, 1, maximum: 16)), control.enrollmentEpoch == (try blob(stmt, 2, maximum: 16)),
+                  control.revision == (try unsigned(blob(stmt, 5, maximum: 8))), control.revision <= (try storedHead()),
+                  try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: 1, kind: kind,
+                    canonicalPayload: payload, payloadLimits: payloadLimits, inputLimits: signingLimits) else { throw GatewayDatabaseError.corruptData }
+            return GatewayRecipientReceipt(control: control, canonicalPayload: payload, signature: signature)
+        }
+    }
+    private func recipientOperation(phone: Data, enrollment: Data?, kind: GatewayRecipientKind) throws -> Data? {
+        let predicate = enrollment == nil ? "phone=? AND kind=?" : "phone=? AND kind=? AND enrollment=?"
+        var values = [phone, uint(kind.rawValue)]
+        if let enrollment { values.append(enrollment) }
+        return try statement("SELECT operation FROM gateway_recipients_v2 WHERE \(predicate) ORDER BY revision DESC LIMIT 1", values) {
+            let rc = sqlite3_step($0)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+            return try blob($0, 0, maximum: 16)
+        }
+    }
+    private func isRevoked(phone: Data, enrollment: Data) throws -> Bool {
+        guard let operation = try recipientOperation(phone: phone, enrollment: enrollment, kind: .phoneRevocation) else { return false }
+        guard let receipt = try storedRecipient(operationID: operation), receipt.kind == .phoneRevocation,
+              receipt.phoneID == phone, receipt.enrollmentEpoch == enrollment else { throw GatewayDatabaseError.corruptData }
+        return true
+    }
+    private func operationCount() throws -> Int64 {
+        try scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)")
+    }
+    private func requireCapacity() throws {
+        guard try operationCount() < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+    }
+    private func advanceHead(_ revision: UInt64, from previous: UInt64) throws {
+        try statement("UPDATE gateway_identity_v1 SET head=? WHERE id=1 AND head=?", [uint(revision), uint(previous)]) {
+            try done($0); guard sqlite3_changes(db) == 1 else { throw GatewayDatabaseError.headMismatch }
+        }
+    }
+    private func createRecipientTables() throws {
+        try exec("""
+            CREATE TABLE gateway_recipients_v2 (
+                operation BLOB PRIMARY KEY CHECK(length(operation)=16), kind BLOB NOT NULL CHECK(length(kind)=8),
+                phone BLOB NOT NULL CHECK(length(phone)=16), enrollment BLOB NOT NULL CHECK(length(enrollment)=16),
+                payload BLOB NOT NULL, signature BLOB NOT NULL CHECK(length(signature)=64),
+                revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8)
+            ) STRICT, WITHOUT ROWID
+            """)
+        try exec("CREATE INDEX gateway_phone_controls_v2 ON gateway_recipients_v2(phone,kind,enrollment,revision)")
+        try exec("""
+            CREATE TABLE gateway_mappings_v2 (
+                phone BLOB PRIMARY KEY CHECK(length(phone)=16), enrollment BLOB NOT NULL CHECK(length(enrollment)=16),
+                operation BLOB NOT NULL UNIQUE REFERENCES gateway_recipients_v2(operation),
+                token BLOB NOT NULL CHECK(length(token)>0 AND length(token)<=16384)
+            ) STRICT, WITHOUT ROWID
+            """)
     }
 
     /// Reclaim expired token material without deleting the signed operation receipts or rewinding the head.
@@ -223,10 +430,12 @@ public final class GatewayDatabase {
             ) STRICT, WITHOUT ROWID
             """)
         try exec("CREATE INDEX gateway_pending_v1 ON gateway_candidates_v1(phone,enrollment) WHERE token IS NOT NULL")
-        try exec("PRAGMA application_id=\(Self.applicationID)"); try exec("PRAGMA user_version=1")
+        try createRecipientTables()
+        try exec("PRAGMA application_id=\(Self.applicationID)"); try exec("PRAGMA user_version=2")
     }
-    private func validateIdentity() throws {
-        guard try scalar("PRAGMA application_id") == Self.applicationID, try scalar("PRAGMA user_version") == 1 else {
+    private func validateIdentity(allowLegacy: Bool = false) throws {
+        let version = try scalar("PRAGMA user_version")
+        guard try scalar("PRAGMA application_id") == Self.applicationID, version == 2 || (allowLegacy && version == 1) else {
             throw GatewayDatabaseError.incompatibleStore
         }
         try statement("SELECT id,identity,head FROM gateway_identity_v1") {
@@ -238,7 +447,15 @@ public final class GatewayDatabase {
         try statement("SELECT operation,candidate,challenge,phone,enrollment,payload,signature,revision,run,deadline,token FROM gateway_candidates_v1 LIMIT 0") {
             guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
         }
-        guard try scalar("SELECT count(*) FROM gateway_candidates_v1") <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+        if version == 2 {
+            for sql in ["SELECT operation,kind,phone,enrollment,payload,signature,revision FROM gateway_recipients_v2 LIMIT 0",
+                        "SELECT phone,enrollment,operation,token FROM gateway_mappings_v2 LIMIT 0"] {
+                try statement(sql) { guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore } }
+            }
+            guard try operationCount() <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+        } else {
+            guard try scalar("SELECT count(*) FROM gateway_candidates_v1") <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+        }
     }
     private func shutdown() {
         if let db { precondition(sqlite3_close(db) == SQLITE_OK, "Gateway retained a private SQLite resource"); self.db = nil }

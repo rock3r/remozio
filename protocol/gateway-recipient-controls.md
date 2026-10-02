@@ -18,7 +18,7 @@ sequenceDiagram
     Note over G: Late activation cannot restore that phone epoch
 ```
 
-The diagram describes the integration contract. Candidate storage exists; activation, tombstones, the authority outbox and reconciliation remain separate work.
+The diagram describes the integration contract. The [gateway store](../macos/core/gateway-database.md) applies activation and revocation atomically. The authority outbox and reconciliation remain separate work.
 
 ## Exact payloads
 
