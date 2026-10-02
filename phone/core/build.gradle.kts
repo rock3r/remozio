@@ -22,7 +22,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("remozio.test.commandCapture", capture.asFile.absolutePath)
 }
 
-tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class") }
+tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class", "**/TLSInteropTest.class") }
 
 tasks.register<Test>("approvalFlowTest") {
     description = "Runs synthetic Swift and Kotlin approval and audit peers on a Mac."
@@ -34,11 +34,15 @@ tasks.register<Test>("approvalFlowTest") {
         includeTestsMatching("dev.remozio.phone.requests.ApprovalFlowTest")
         includeTestsMatching("dev.remozio.phone.audit.AuditFlowTest")
         includeTestsMatching("dev.remozio.phone.crypto.HPKEInteropTest")
+        includeTestsMatching("dev.remozio.phone.crypto.TLSInteropTest")
     }
     val peer = rootProject.layout.projectDirectory.file(
         ".build/approval-flow/ApprovalFlowPeer")
     inputs.file(peer)
     systemProperty("remozio.test.swiftPeer", peer.asFile.absolutePath)
+    val tlsPeer = rootProject.layout.projectDirectory.file(".build/approval-flow/TLSPeer")
+    inputs.file(tlsPeer)
+    systemProperty("remozio.test.tlsPeer", tlsPeer.asFile.absolutePath)
     val hpkePeer = rootProject.layout.projectDirectory.file(".build/approval-flow/HPKEPeer")
     inputs.file(hpkePeer)
     systemProperty("remozio.test.hpkePeer", hpkePeer.asFile.absolutePath)

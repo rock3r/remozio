@@ -23,3 +23,5 @@ Closed sessions clear their capture, expose a local closed signal, and reject la
 Limits are explicit caller-supplied window bounds, not selected product defaults. Terminal handles remain as tombstones during the window. Capacity fails explicitly; it never silently evicts a visible request or forgets a terminal result. Durable history, authenticated reconnect-window rotation, enrollment persistence, and product retention settings remain to be implemented. This layer provides neither freshness nor durable replay protection and exposes no approval control.
 
 The [wake router](PUSH.md) coalesces opaque hints per trusted enrollment and tracks bounded fetch demand.
+
+The [TLS channel experiment](../../docs/experiments/tls-channel.md) adds a loopback Swift/JVM transport check to the same native flow task. It uses disposable software identities and no devices.
