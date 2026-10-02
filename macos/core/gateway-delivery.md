@@ -42,6 +42,42 @@ Shutdown rejects new work, cancels tasks, waits for completion, stops the token 
 Concurrent shutdown callers await the same result. The host must keep this coordinator alive and shut it down before replacing its service instance.
 The token source belongs to this coordinator; do not share it with another independently managed gateway.
 
+## Signed recovery replies
+
+`recoveryHeadReply` and `recoveryHistoryReply` expose historical receipts through the database-owning actor.
+The service host must authenticate the registered root caller before invoking either method.
+These are local service APIs, not installed network or XPC endpoints.
+The host supplies the signer for its pinned gateway key. Message fields cannot supply a signer or replace a key pin.
+
+```mermaid
+sequenceDiagram
+    participant Root as Root recovery attempt
+    participant Host as Authenticated service host
+    participant Actor as Delivery coordinator
+    participant Store as Gateway database
+    Root->>Host: Fresh bounded head or history query
+    Host->>Actor: Query and local gateway signer
+    Actor->>Store: Check configured registration and read receipts
+    Store-->>Actor: Bounded historical reply
+    Actor-->>Host: Gateway-signed reply
+    Host-->>Root: Reply bytes and signature
+    Root->>Root: Verify query freshness, scope, and both signatures
+```
+
+The actor checks its configured registration against the owned database before signing.
+Reads serialize with control application and require no OAuth grant or provider call.
+A delivery waiting for OAuth does not block a recovery read.
+History pages keep the requested upper revision when newer controls arrive between pages.
+The root still verifies and collects every page with its pinned query owner.
+
+Historical reads remain available when delivery is inactive. This does not bypass the host's caller authorization.
+They do not report live registration activity, restore authority, publish a mapping, or resume delivery.
+Shutdown rejects further reads. Malformed and incorrectly scoped queries fail before signing.
+A signing failure does not change the database or consume the root's query.
+Replies include signed control receipts and omit registration tokens.
+
+The root uses [recovery attempts](gateway-recovery-attempt.md) to apply restrictions, collect history, reconcile counters, and require checkpoint completion.
+
 ## Bounds and retry policy
 
 The host supplies local settings through `GatewayDeliveryPolicy` and the database's `GatewayProbePolicy`.
@@ -69,6 +105,9 @@ Clock regression or an epoch change stops the owner. Shutdown remains available 
 The focused tests use protected normal-user SQLite fixtures, synthetic credentials, controlled clocks, and cancellable fake provider replies.
 They cover acceptance, retry timing and budgets, OAuth refresh, expiry, concurrency, cancellation, late replies, revocation, and shutdown.
 One test connects the real FCM sender through an HTTP interceptor that accepts every request locally.
+Six recovery tests connect the actor to the real root query verifier and history collector.
+They cover empty heads, removals, pagination with concurrent controls, OAuth waits, inactive delivery, and token exclusion.
+They also cover malformed queries, mismatched registration, signing failure, replay rejection, and shutdown.
 No test sends a live provider request or contacts a phone.
 
 The installed service still needs its authenticated endpoint, protected enrollment updates, durable desired-state scheduler, and root-side proof handling.

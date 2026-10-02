@@ -113,6 +113,25 @@ public actor GatewayDeliveryCoordinator {
         return result
     }
 
+    /// Registered root callers only; the service host must authenticate the channel before calling.
+    /// The signer belongs to the host's pinned gateway key and must never come from message fields.
+    /// Historical reads remain available while delivery is inactive. They grant no delivery or approval authority.
+    public func recoveryHeadReply(canonicalQuery: Data, sign: @Sendable (Data) throws -> Data) throws -> GatewayHeadReply {
+        try recoveryScope()
+        return try database.headReply(canonicalQuery: canonicalQuery, sign: sign)
+    }
+
+    /// Reads one bounded page on the same actor that applies controls. No token or provider call is involved.
+    public func recoveryHistoryReply(canonicalQuery: Data, sign: @Sendable (Data) throws -> Data) throws -> GatewayControlHistoryReply {
+        try recoveryScope()
+        return try database.controlHistoryReply(canonicalQuery: canonicalQuery, sign: sign)
+    }
+
+    private func recoveryScope() throws {
+        try running()
+        guard try database.headEvidence().registration == identity else { throw GatewayDatabaseError.wrongScope }
+    }
+
     public func progress(operationID: Data) throws -> GatewayProbeProgress? {
         try running(); return try database.probeProgress(candidateOperationID: operationID)
     }
