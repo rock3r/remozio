@@ -87,3 +87,5 @@ No live gateway, provider credentials, device installation, approval UI, or phys
 Production service recovery and authority restriction remain integration work.
 
 See [unknown trust restrictions](unknown-trust-restrictions.md) for durable phone restrictions that preserve pairing records.
+
+The host can apply a verified head or page through [verified recovery evidence](verified-recovery-evidence.md) before checking history continuity.

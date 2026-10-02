@@ -58,3 +58,5 @@ The host recovery coordinator, independent rollback witness, and administrator r
 After restriction, [history reconciliation](gateway-history-recovery.md) can record the removal receipt and repair the counter.
 This feature does not restore lost authority, resolve conflicting delivery history, or automatically re-enroll a revoked phone.
 No real credentials, device installation, phone prompts, or physical backup restoration were used.
+
+The host can apply a verified head or page through [verified recovery evidence](verified-recovery-evidence.md) before checking history continuity.

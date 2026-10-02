@@ -454,6 +454,63 @@ public final class JournalTransaction {
         }
     }
 
+    /// Apply the head receipt before collecting history. Missing history cannot cancel restrictive evidence.
+    public func recoverGatewayTrust(from head: VerifiedGatewayHead, expectedTrustRevision: UUID,
+                                    receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> GatewayTrustEvidenceRecovery {
+        try recoverGatewayTrust(records: head.evidence.receipt.map { [$0] } ?? [], registration: head.evidence.registration,
+            expectedTrustRevision: expectedTrustRevision, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: expectedAuditHead)
+    }
+
+    /// Apply each verified page before contiguity checks. A page with gaps still contains valid restrictive evidence.
+    /// Keep affected admission closed until the write and independent continuity checkpoint complete.
+    public func recoverGatewayTrust(from history: VerifiedGatewayControlHistory, expectedTrustRevision: UUID,
+                                    receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> GatewayTrustEvidenceRecovery {
+        try recoverGatewayTrust(records: history.page.records, registration: history.page.registration,
+            expectedTrustRevision: expectedTrustRevision, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: expectedAuditHead)
+    }
+
+    private func recoverGatewayTrust(records: [GatewayControlReceipt], registration: GatewayRegistrationIdentity,
+                                     expectedTrustRevision: UUID, receiptTimeMs: UInt64?, writer: AuditEpochWriter,
+                                     expectedAuditHead: UInt64) throws -> GatewayTrustEvidenceRecovery {
+        try withEnrollment(write: true) { ledger in
+            guard records.count <= 16 else { throw GatewayAuthorityError.capacityExceeded }
+            let snapshot = try ledger.snapshot()
+            guard snapshot.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            _ = try gatewayAuthorityHead(registration)
+            guard try epoch(writer.epoch)?.head == expectedAuditHead else { throw AuditJournalError.headMismatch }
+            var revision = expectedTrustRevision, auditHead = expectedAuditHead
+            var changed: Set<Data> = []
+            for record in records {
+                var eventUUID = UUID().uuid
+                let eventID = withUnsafeBytes(of: &eventUUID) { Data($0) }
+                let next: UUID, phone: Data
+                switch record {
+                case .candidate(let receipt):
+                    phone = receipt.candidate.binding.phoneID
+                    next = try restrictUnknownGatewayTrust(kind: .candidate, canonicalPayload: record.canonicalPayload,
+                        signature: record.signature, registration: registration, expectedTrustRevision: revision,
+                        eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: auditHead).trustRevision
+                case .recipient(let receipt):
+                    switch receipt.control {
+                    case .activation(let value):
+                        phone = value.binding.phoneID
+                        next = try restrictUnknownGatewayTrust(kind: .activation, canonicalPayload: record.canonicalPayload,
+                            signature: record.signature, registration: registration, expectedTrustRevision: revision,
+                            eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: auditHead).trustRevision
+                    case .revocation(let value):
+                        phone = value.binding.phoneID
+                        next = try recoverGatewayRevocation(canonicalPayload: record.canonicalPayload, signature: record.signature,
+                            registration: registration, expectedTrustRevision: revision, eventID: eventID,
+                            receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: auditHead)
+                    }
+                }
+                if next != revision { changed.insert(phone); auditHead += 1; revision = next }
+            }
+            return GatewayTrustEvidenceRecovery(trustRevision: revision, auditHead: auditHead,
+                changedPhoneIDs: changed, restrictedPhoneIDs: try ledger.restrictedPhones())
+        }
+    }
+
     /// Phones awaiting independent administrator repair. Retained pairing rows do not grant these phones authority.
     public func approvalTrustRestrictions() throws -> Set<Data> {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.restrictedPhones() }
