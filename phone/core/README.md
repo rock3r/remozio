@@ -21,3 +21,5 @@ Request keys contain Mac, account, and request IDs. Every delivery authenticates
 Closed sessions clear their capture, expose a local closed signal, and reject later status input. This is not a fabricated signed expiry or action outcome. Android removes the inspection and dismisses it when that signal arrives. Already copied snapshots cannot be erased by closing the owner.
 
 Limits are explicit caller-supplied window bounds, not selected product defaults. Terminal handles remain as tombstones during the window. Capacity fails explicitly; it never silently evicts a visible request or forgets a terminal result. Durable history, authenticated reconnect-window rotation, enrollment persistence, and product retention settings remain to be implemented. This layer provides neither freshness nor durable replay protection and exposes no approval control.
+
+The [wake router](PUSH.md) coalesces opaque hints per trusted enrollment and tracks bounded fetch demand.
