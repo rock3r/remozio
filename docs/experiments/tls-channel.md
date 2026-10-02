@@ -30,7 +30,7 @@ The relay copies bytes in both directions without a certificate or private key. 
 
 The controller supplies the pins through private process setup. This models an existing trusted enrollment; it is not pairing. The test directory permits only its owner to access it. Generated PKCS#12 files use a public synthetic password and are removed with the fixture. That password is not a production secret or security boundary.
 
-The Swift peer rejects release builds and root execution. It echoes one synthetic frame and closes the connection. Do not package it in the application or expose its harness through a tunnel.
+The Swift peer rejects release builds and root execution. It echoes one synthetic frame and closes the connection. Closing the controller pipe terminates the peer, including after a controller crash. Do not package it in the application or expose its harness through a tunnel.
 
 ## Verification
 
@@ -44,10 +44,11 @@ The test cases cover:
 - TLS 1.2 downgrade and unrelated ALPN rejection.
 - Modified relay traffic rejection without an application reply.
 - Oversized frame rejection before allocating its body.
+- Native listener shutdown when the controller pipe closes.
 
 A negative test must accompany the positive exchange. A failed connection alone does not establish correct peer authentication.
 
-The [recorded run](evidence/2026-10-03-tls-channel.json) passed all six tests on macOS 27.0.1, Apple Silicon, with JDK 21. The deployment target remains macOS 26; this is not a macOS 26 runtime result.
+The [recorded run](evidence/2026-10-03-tls-channel.json) passed all seven tests on macOS 27.0.1, Apple Silicon, with JDK 21. The deployment target remains macOS 26; this is not a macOS 26 runtime result.
 
 ## What this does not prove
 

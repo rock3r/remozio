@@ -101,9 +101,15 @@ final class Probe: @unchecked Sendable {
 fatalError("The TLS experiment is available only in debug builds.")
 #else
 guard getuid() != 0, CommandLine.arguments.count == 2 else { fatalError("Run the synthetic TLS peer as an ordinary user.") }
-let encodedSetup = FileHandle.standardInput.readData(ofLength: 16_384)
-guard let newline = encodedSetup.firstIndex(of: 10), newline == encodedSetup.count - 1 else { throw ProbeError.invalidInput }
-let setup = try JSONDecoder().decode(Setup.self, from: encodedSetup.prefix(upTo: newline))
+var encodedSetup = Data()
+while true {
+    let byte = getchar()
+    guard byte != EOF else { throw ProbeError.invalidInput }
+    if byte == 10 { break }
+    guard encodedSetup.count < 16_384 else { throw ProbeError.invalidInput }
+    encodedSetup.append(UInt8(byte))
+}
+let setup = try JSONDecoder().decode(Setup.self, from: encodedSetup)
 guard let peer = Data(base64Encoded: setup.peerCertificate), !peer.isEmpty, peer.count <= 8_192 else { throw ProbeError.invalidInput }
 let identityData = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
 guard identityData.count <= 65_536 else { throw ProbeError.invalidInput }
@@ -114,5 +120,9 @@ guard let items = imported as? [[String: Any]], let value = items.first?[kSecImp
 let identity = value as! SecIdentity
 let probe = try Probe(identity: identity, peerCertificate: peer)
 probe.start()
+DispatchQueue.global().async {
+    // The controller keeps this pipe open. EOF also handles controller crashes. No further commands are accepted.
+    exit(getchar() == EOF ? 0 : 1)
+}
 dispatchMain()
 #endif

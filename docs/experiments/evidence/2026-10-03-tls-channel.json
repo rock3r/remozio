@@ -1,11 +1,12 @@
 {
-  "recorded_at": "2026-10-02T22:42:55.182017+00:00",
+  "recorded_at": "2026-10-02T22:49:55.919335+00:00",
   "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
   "architecture": "arm64",
   "xcode": "Xcode 27.0\nBuild version 27A266a",
   "deployment_target": "26.0",
   "runtime": "JDK 21 JSSE and macOS Network.framework",
   "tests": [
+    "controllerPipeClosureStopsTheNativeListener",
     "downgradeAndWrongApplicationProtocolFail",
     "wrongOrMissingClientIdentityCannotReceiveAnEcho",
     "relayTamperingCannotProduceApplicationReply",

@@ -93,6 +93,11 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun controllerPipeClosureStopsTheNativeListener(): Unit = Fixture().use { f ->
+        f.closeControllerPipe()
+        assertTrue(f.waitForPeerExit())
+    }
+
     private fun exchange(socket: SSLSocket, payload: ByteArray): ByteArray {
         DataOutputStream(socket.outputStream).apply { writeInt(payload.size); write(payload); flush() }
         val input = DataInputStream(socket.inputStream)
@@ -125,8 +130,9 @@ class TLSInteropTest {
                 val peer = requireNotNull(System.getProperty("remozio.test.tlsPeer")) { "Build the native TLS peer first" }
                 child = ProcessBuilder(peer, mac.path.toString()).redirectError(directory.resolve("peer.log").toFile()).start()
                 process = child
-                process.outputStream.bufferedWriter().use {
+                process.outputStream.bufferedWriter().also {
                     it.write("{\"peerCertificate\":\"" + Base64.getEncoder().encodeToString(phone.certificate.encoded) + "\"}\n")
+                    it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()
                 try {
@@ -170,7 +176,10 @@ class TLSInteropTest {
                 sslParameters = sslParameters.apply { applicationProtocols = arrayOf("remozio-experiment/1") }
             }
         }
+        fun closeControllerPipe() { process.outputStream.close() }
+        fun waitForPeerExit(): Boolean = process.waitFor(3, TimeUnit.SECONDS)
         override fun close() {
+            process.outputStream.close()
             process.destroy()
             if (!process.waitFor(3, TimeUnit.SECONDS)) { process.destroyForcibly(); process.waitFor(3, TimeUnit.SECONDS) }
             clean()
