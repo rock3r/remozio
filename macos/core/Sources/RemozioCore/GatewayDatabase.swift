@@ -145,6 +145,47 @@ public final class GatewayDatabase {
         }
     }
 
+    /// Historical controls only. The caller must authenticate any network reply and inspect missing revisions.
+    public func controlHistory(afterRevision: UInt64, throughRevision: UInt64, maximumRecords: Int) throws -> GatewayControlHistoryPage {
+        guard afterRevision < throughRevision, (1...16).contains(maximumRecords) else { throw GatewayDatabaseError.invalidConfiguration }
+        return try transaction(write: false) {
+            guard try throughRevision <= storedHead() else { throw GatewayDatabaseError.headMismatch }
+            let rows: [(Int64, Data, UInt64)] = try statement("""
+                SELECT source,operation,revision FROM (
+                    SELECT 1 AS source,operation,revision FROM gateway_candidates_v1
+                    UNION ALL SELECT 2 AS source,operation,revision FROM gateway_recipients_v2
+                ) WHERE revision>? AND revision<=? ORDER BY revision LIMIT \(maximumRecords + 1)
+                """, [uint(afterRevision), uint(throughRevision)]) { stmt in
+                var result: [(Int64, Data, UInt64)] = []
+                while true {
+                    let code = sqlite3_step(stmt)
+                    if code == SQLITE_DONE { return result }
+                    guard code == SQLITE_ROW else { throw GatewayDatabaseError.storage(code) }
+                    result.append((sqlite3_column_int64(stmt, 0), try blob(stmt, 1, maximum: 16), try unsigned(blob(stmt, 2, maximum: 8))))
+                }
+            }
+            var previous = afterRevision
+            var receipts: [GatewayControlReceipt] = []
+            for row in rows {
+                guard row.2 > previous else { throw GatewayDatabaseError.corruptData }
+                let receipt: GatewayControlReceipt
+                if row.0 == 1 {
+                    guard let candidate = try storedReceipt(operationID: row.1),
+                          try storedRecipient(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
+                    receipt = .candidate(candidate)
+                } else {
+                    guard let recipient = try storedRecipient(operationID: row.1),
+                          try storedReceipt(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
+                    receipt = .recipient(recipient)
+                }
+                guard receipt.revision == row.2 else { throw GatewayDatabaseError.corruptData }
+                receipts.append(receipt); previous = row.2
+            }
+            return GatewayControlHistoryPage(registration: identity, afterRevision: afterRevision, throughRevision: throughRevision,
+                records: Array(receipts.prefix(maximumRecords)), hasMore: receipts.count > maximumRecords)
+        }
+    }
+
     public func receipt(operationID: Data) throws -> GatewayCandidateReceipt? {
         guard operationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
         return try transaction(write: false) { try storedReceipt(operationID: operationID) }
