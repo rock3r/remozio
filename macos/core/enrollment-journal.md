@@ -65,9 +65,13 @@ Its result is not a dispatch permit. Request admission, continuity, checkpointin
 The overload accepting a caller-supplied snapshot is internal; existing synthetic peers use it through their Debug-only test import.
 It is not available through the production library API.
 
-Gateway token APIs still require the protected host to supply current retained trust.
-The host must derive that trust from these enrollment records and serialize gateway operations with enrollment changes.
-Push registration never creates approval authority.
+Public gateway candidate creation, proof consumption, renewal, and pending-control reads now derive phone trust from the enrollment journal.
+Each call checks the expected trust revision and the exact active phone epoch. The notification tag comes only from stored enrollment.
+A revoked phone cannot create a candidate or use a late proof, even if a caller retains its former snapshot.
+A new epoch of the same phone cannot use its previous epoch's challenge.
+The host still authenticates the phone channel and supplies protected gateway registration activity and the root-local signer.
+Gateway identity is checked against the journal's pinned registration before a control is signed or returned.
+The caller-supplied phone-trust overloads are internal fixture paths. Push registration never creates approval authority.
 
 ## Schema and evidence
 

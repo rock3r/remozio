@@ -23,7 +23,8 @@ The policy fixes encoding limits, control capacity, candidate lifetime, and the 
 An explicit `configureGatewayAuthority` call pins one registration to the journal's Mac and account.
 It cannot replace an existing registration or initialize over orphaned gateway state.
 
-`prepareGatewayCandidate` checks the separately authenticated phone identity and epoch against current retained trust.
+`prepareGatewayCandidate` checks the separately authenticated phone identity and epoch against current durable enrollment.
+Its public API requires the expected enrollment trust revision and reads the phone tag from the protected journal.
 It generates a candidate ID, operation ID, challenge, and next control revision. It stores the token outside audit history.
 The host supplies a local typed signer. The journal verifies its signature with the pinned root key before storing the control.
 The candidate, desired-token pointer, signed outbox entry, and counter share the journal transaction.
@@ -37,14 +38,14 @@ The typed signing callbacks are root-local capabilities, not generic signing RPC
 
 ## Retry and recovery
 
-`pendingGatewayControl` rechecks current eligibility before returning the original signed envelope.
+`pendingGatewayControl` rechecks current durable enrollment, its trust revision, and control eligibility before returning the original signed envelope.
 A candidate stops being eligible after consumption. A superseded token choice cannot be published or proved as current.
 Provider acceptance alone never consumes a proof, activates a mapping, or changes enrollment.
 
 Each journal owner uses a fresh run ID. Old candidates cannot accept proofs or publish controls after reopening, even with a reused clock epoch.
 Retained desired tokens survive. `renewDesiredGatewayCandidate` reads only the latest desired token under current trusted enrollment.
 It generates a fresh candidate, challenge, operation, revision, and deadline. It does not refresh an arbitrary old outbox entry.
-Routine recovery needs no new phone biometric or operator prompt. The service scheduler must call this path after establishing local continuity.
+Routine recovery needs no new phone biometric or operator prompt. The public renewal path rechecks the stored active epoch and trust revision. The service scheduler must call this path after establishing local continuity.
 
 Historical signatures, token digests, counters, desired pointers, and proof-consumption links are checked when read.
 Known inconsistency or a clock regression retires the journal owner. These checks do not detect restoration of a complete, internally consistent backup.
@@ -96,7 +97,8 @@ Known migrations from versions 1, 2, 3, 4, and 5 require the explicit source ver
 A migration does not derive enrollment or gateway authority from audit records. Failed migration rolls back its table and version changes.
 The separate gateway database remains at schema 3.
 
-The service host must authenticate phone channels and administrator setup, own current enrollment state, and serialize trust changes with these calls.
+The service host must authenticate phone channels and administrator setup, and own protected gateway registration activity.
+The public token APIs read phone enrollment from the journal inside their transaction. Their overloads accepting caller-supplied phone trust are internal.
 It must provide the non-exportable root signer and establish continuity before publishing any signed control.
 Neither a constructor nor a supplied phone ID proves authentication. These methods are not exposed as network endpoints.
 The host may append metadata-only audit events in the same journal transaction. Tokens and challenges must never enter audit records.
@@ -113,3 +115,5 @@ They exercise atomic writes, injected failures, superseded proofs, expiry, resta
 A local integration test passes the stored candidate, activation, and revocation through the real gateway database and its provider-probe lifecycle.
 Removal tests cover late proofs, stale active trust, old epochs, restart, expiry, audit atomicity, failed migrations, and storage faults.
 The phone channel is a fixture in that test. It does not establish that authenticated transport or real FCM delivery works.
+
+Public enrollment-bound token tests cover stored tags, exact epochs, removal, re-enrollment, inactive registration, wrong scope, restart renewal, and swallowed failures.
