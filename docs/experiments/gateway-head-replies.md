@@ -72,7 +72,7 @@ Freshness means the reply answers one live query. It does not prove the gateway 
 - Serialize the database read and signing operation with gateway control application. The signer must sign only this typed response path.
 - Check local trust history before using `VerifiedGatewayHead`. A valid gateway signature cannot establish an enrollment or override a local revocation.
 - A missing signed revocation or unknown trust-changing control must restrict the affected authority under the plan's recovery rules.
-- A higher revision alone cannot advance the root counter. Counter reconciliation, acknowledgment persistence, and outbox renewal are not implemented here.
+- A higher revision alone cannot advance the root counter. The [root journal](../../macos/core/gateway-authority.md) now persists acknowledgments for known controls. Counter reconciliation and outbox renewal still require service integration.
 - Empty-head evidence is not proof that local history should be cleared. Neither component lowers its durable head through this API.
 
 ## Validation

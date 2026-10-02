@@ -48,6 +48,24 @@ public struct GatewayAuthorityEnvelope: Sendable, CustomStringConvertible, Custo
     public var debugDescription: String { description }
 }
 
+/// Highest known control that an authenticated gateway reply reported. This is historical, not live status.
+public struct GatewayAcknowledgment: Equatable, Sendable {
+    public let revision: UInt64
+    public let operationID: Data?
+}
+
+public enum GatewayAcknowledgmentDisposition: Sendable, Equatable {
+    case recorded, alreadyRecorded, olderThanRecorded
+    case missingLocalHistory, conflictingLocalHistory
+}
+
+public struct GatewayAcknowledgmentResult: Sendable {
+    public let disposition: GatewayAcknowledgmentDisposition
+    public let acknowledged: GatewayAcknowledgment?
+    public let localRevision: UInt64
+    public let reportedRevision: UInt64
+}
+
 /// Private table owner. Every call runs within the journal owner's transaction and protected writer lease.
 final class GatewayAuthorityJournal {
     private let db: OpaquePointer
@@ -99,6 +117,67 @@ final class GatewayAuthorityJournal {
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
     }
 
+    static func createAcknowledgmentSchema(_ db: OpaquePointer) throws {
+        let result = sqlite3_exec(db, """
+            CREATE TABLE main.gateway_acknowledgment_v1(
+                id INTEGER PRIMARY KEY CHECK(id=1), revision BLOB NOT NULL CHECK(length(revision)=8),
+                operation BLOB CHECK(operation IS NULL OR length(operation)=16)
+            ) STRICT;
+            """, nil, nil, nil)
+        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+    }
+
+    func acknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
+        let local = try head(identity)
+        return try statement("SELECT revision,operation FROM main.gateway_acknowledgment_v1 WHERE id=1", []) {
+            let result = sqlite3_step($0)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            let revision = try unsigned(blob($0, 0, maximum: 8))
+            let operation = sqlite3_column_type($0, 1) == SQLITE_NULL ? nil : try blob($0, 1, maximum: 16)
+            guard revision <= local, (revision == 0) == (operation == nil) else { throw GatewayAuthorityError.corruptData }
+            if let operation {
+                guard let retained = try envelope(operation, identity: identity), retained.revision == revision else {
+                    throw GatewayAuthorityError.corruptData
+                }
+            }
+            return GatewayAcknowledgment(revision: revision, operationID: operation)
+        }
+    }
+
+    /// Record only controls already present in protected local history. Never fill a history gap from this reply.
+    func acknowledge(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
+        let evidence = verified.evidence, identity = evidence.registration
+        let local = try head(identity), previous = try acknowledgment(identity)
+        func result(_ disposition: GatewayAcknowledgmentDisposition, _ value: GatewayAcknowledgment?) -> GatewayAcknowledgmentResult {
+            GatewayAcknowledgmentResult(disposition: disposition, acknowledged: value,
+                localRevision: local, reportedRevision: evidence.revision)
+        }
+        if let receipt = evidence.receipt {
+            guard let retained = try envelope(receipt.operationID, identity: identity) else {
+                return result(.missingLocalHistory, previous)
+            }
+            let kind: UInt64
+            switch receipt { case .candidate: kind = 1; case .recipient(let value): kind = value.kind.rawValue }
+            guard retained.revision == evidence.revision, retained.kind == kind,
+                  retained.canonicalPayload == receipt.canonicalPayload else {
+                return result(.conflictingLocalHistory, previous)
+            }
+        } else if evidence.revision != 0 { throw GatewayAuthorityError.corruptData }
+        // Check receipt consistency before treating an old response as harmless reordering.
+        if let previous {
+            if evidence.revision < previous.revision { return result(.olderThanRecorded, previous) }
+            if evidence.revision == previous.revision { return result(.alreadyRecorded, previous) }
+        }
+        guard evidence.revision <= local else { return result(.missingLocalHistory, previous) }
+        let value = GatewayAcknowledgment(revision: evidence.revision, operationID: evidence.receipt?.operationID)
+        try statement("""
+            INSERT INTO main.gateway_acknowledgment_v1 VALUES(1,?,?)
+            ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,operation=excluded.operation
+            """, [uint(value.revision), value.operationID]) { try done($0) }
+        return result(.recorded, value)
+    }
+
     func configure(_ identity: GatewayRegistrationIdentity) throws {
         try scope(identity)
         let encoded = try identity.encode()
@@ -111,7 +190,7 @@ final class GatewayAuthorityJournal {
             guard previous == encoded else { throw GatewayAuthorityError.wrongScope }
             return
         }
-        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)", []) {
+        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)", []) {
             guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
         }
         try statement("INSERT INTO main.gateway_authority_v1 VALUES(1,?,?)", [encoded, uint(0)]) { try done($0) }

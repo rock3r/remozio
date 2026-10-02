@@ -41,7 +41,7 @@ public final class JournalDatabase {
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -59,7 +59,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 7) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 8) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -180,8 +180,9 @@ public final class JournalDatabase {
             try GatewayAuthorityJournal.createRevocationSchema(db!)
             try EnrollmentJournal.createSchema(db!)
             try RoutingJournal.createSchema(db!)
+            try GatewayAuthorityJournal.createAcknowledgmentSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=7")
+            try exec("PRAGMA user_version=8")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -196,8 +197,9 @@ public final class JournalDatabase {
             if version < 4 { try GatewayAuthorityJournal.createSchema(db!) }
             if version < 5 { try GatewayAuthorityJournal.createRevocationSchema(db!) }
             if version < 6 { try EnrollmentJournal.createSchema(db!) }
-            try RoutingJournal.createSchema(db!)
-            try exec("PRAGMA user_version=7")
+            if version < 7 { try RoutingJournal.createSchema(db!) }
+            try GatewayAuthorityJournal.createAcknowledgmentSchema(db!)
+            try exec("PRAGMA user_version=8")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -210,7 +212,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 7) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 8) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -242,6 +244,7 @@ public final class JournalDatabase {
             queries += ["SELECT id,mode,revision FROM main.routing_state_v1 LIMIT 0",
                         "SELECT operation,payload,run,started,deadline,consumed FROM main.routing_operations_v1 LIMIT 0"]
         }
+        if version >= 8 { queries.append("SELECT id,revision,operation FROM main.gateway_acknowledgment_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -519,6 +522,17 @@ public final class JournalTransaction {
     }
     public func gatewayAuthorityHead(_ identity: GatewayRegistrationIdentity) throws -> UInt64 {
         try withGateway(write: false) { try $0.head(identity) }
+    }
+
+    /// Historical metadata only. It cannot establish current gateway availability or restore authority.
+    public func gatewayAcknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
+        try withGateway(write: false) { try $0.acknowledgment(identity) }
+    }
+
+    /// Root host only: use its protected query owner and serialize this transaction with local trust changes.
+    /// Missing or conflicting history requires reconciliation before publishing mappings or enabling affected authority.
+    public func acknowledgeGatewayHead(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
+        try withGateway(write: true) { try $0.acknowledge(verified) }
     }
 
     /// Internal verification path. Public token APIs derive phone trust from durable enrollment.

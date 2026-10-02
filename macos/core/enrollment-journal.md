@@ -75,7 +75,7 @@ The caller-supplied phone-trust overloads are internal fixture paths. Push regis
 
 ## Schema and evidence
 
-Root journal schema 7 retains authority policy and enrollment tables from schema 6 and adds routing state. Explicit migrations accept source versions 1 through 6.
+Root journal schema 8 retains authority policy, enrollment tables, and routing state. It adds gateway acknowledgments. Explicit migrations accept source versions 1 through 7.
 Existing audit, consumption, and gateway state survive migration. No migration creates enrollment authority from those records.
 A restored complete backup still needs the independent continuity witness. A valid local database alone does not prove freshness.
 
