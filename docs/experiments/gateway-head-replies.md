@@ -81,3 +81,8 @@ Nine added tests use the real protected gateway database with disposable softwar
 They cover every receipt kind, both signatures, domain separation, tampering, wrong scope, query replay, concurrent queries, deadlines, capacity, clock changes, and reopen behavior.
 The tests also verify that wrong-scope queries and a closed database never invoke the signer.
 No network endpoint, real credential, push provider, device, or privileged service runs during these checks.
+
+## Bounded history retrieval
+
+The same query owner now supports [authenticated control history](gateway-control-history.md) with distinct message kinds and a separate signing purpose.
+Head and history queries share its capacity, expiry, and invalidation rules. Existing head messages are unchanged.

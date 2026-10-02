@@ -37,7 +37,16 @@ public final class GatewayHeadQueryOwner {
     private let clockEpoch: UUID
     private let lifetimeMillis: UInt64
     private let maximumQueries: Int
-    private var pending: [Data: UInt64] = [:]
+    private struct Pending {
+        let deadline: UInt64
+        let history: HistoryRange?
+    }
+    private struct HistoryRange: Equatable {
+        let after: UInt64
+        let through: UInt64
+        let maximum: Int
+    }
+    private var pending: [Data: Pending] = [:]
     private var lastMoment: UInt64?
     private var stopped = false
 
@@ -52,17 +61,29 @@ public final class GatewayHeadQueryOwner {
         self.lifetimeMillis = lifetimeMillis; self.maximumQueries = maximumQueries
     }
 
-    public func makeQuery(now: AuthorityMoment) throws -> Data {
+    public func makeQuery(now: AuthorityMoment) throws -> Data { try makeQuery(history: nil, now: now) }
+
+    public func makeHistoryQuery(afterRevision: UInt64, throughRevision: UInt64, maximumRecords: Int = 16,
+                                 now: AuthorityMoment) throws -> Data {
+        guard afterRevision < throughRevision, (1...16).contains(maximumRecords) else { throw GatewayHeadReplyError.invalidConfiguration }
+        return try makeQuery(history: HistoryRange(after: afterRevision, through: throughRevision, maximum: maximumRecords), now: now)
+    }
+
+    private func makeQuery(history: HistoryRange?, now: AuthorityMoment) throws -> Data {
         try clock(now)
-        pending = pending.filter { now.milliseconds < $0.value }
+        pending = pending.filter { now.milliseconds < $0.value.deadline }
         guard pending.count < maximumQueries else { throw GatewayHeadReplyError.capacityExceeded }
         let (deadline, overflow) = now.milliseconds.addingReportingOverflow(lifetimeMillis)
         guard !overflow else { throw GatewayHeadReplyError.invalidClock }
         let nonce = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
         guard pending[nonce] == nil else { throw GatewayHeadReplyError.capacityExceeded }
-        let query = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .unsigned(0),
-            2: .bytes(registration.encode()), 3: .bytes(nonce)]), limits: GatewayHeadWire.queryLimits)
-        pending[nonce] = deadline
+        var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .unsigned(history == nil ? 0 : 2),
+            2: .bytes(try registration.encode()), 3: .bytes(nonce)]
+        if let history {
+            fields[4] = .unsigned(history.after); fields[5] = .unsigned(history.through); fields[6] = .unsigned(UInt64(history.maximum))
+        }
+        let query = try DeterministicCBOR.encode(.map(fields), limits: GatewayHeadWire.queryLimits)
+        pending[nonce] = Pending(deadline: deadline, history: history)
         return query
     }
 
@@ -76,8 +97,8 @@ public final class GatewayHeadQueryOwner {
         let fields = try GatewayHeadWire.fields(reply.canonicalPayload, kind: 1, lastKey: 7, limits: GatewayHeadWire.replyLimits)
         guard try GatewayHeadWire.bytes(fields, 2) == registration.encode() else { throw GatewayHeadReplyError.wrongScope }
         let nonce = try GatewayHeadWire.bytes(fields, 3)
-        guard nonce.count == 32, let deadline = pending[nonce] else { throw GatewayHeadReplyError.unknownQuery }
-        guard now.milliseconds < deadline else {
+        guard nonce.count == 32, let retained = pending[nonce], retained.history == nil else { throw GatewayHeadReplyError.unknownQuery }
+        guard now.milliseconds < retained.deadline else {
             pending.removeValue(forKey: nonce)
             throw GatewayHeadReplyError.expired
         }
@@ -89,6 +110,42 @@ public final class GatewayHeadQueryOwner {
             revision: revision, registration: registration)
         pending.removeValue(forKey: nonce)
         return VerifiedGatewayHead(evidence: GatewayHeadEvidence(registration: registration, revision: revision, receipt: receipt), receivedAt: now)
+    }
+
+    public func acceptHistory(_ reply: GatewayControlHistoryReply, now: AuthorityMoment) throws -> VerifiedGatewayControlHistory {
+        try clock(now)
+        guard reply.signature.count == 64, reply.canonicalPayload.count <= GatewayHeadWire.historyLimits.maxBytes,
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: reply.signature),
+              gatewayKey.isValidSignature(signature, for: GatewayHeadWire.historySigningInput(reply.canonicalPayload)) else {
+            throw GatewayHeadReplyError.invalidSignature
+        }
+        let fields = try GatewayHeadWire.fields(reply.canonicalPayload, kind: 3, lastKey: 7, limits: GatewayHeadWire.historyLimits)
+        guard try GatewayHeadWire.bytes(fields, 2) == registration.encode() else { throw GatewayHeadReplyError.wrongScope }
+        let nonce = try GatewayHeadWire.bytes(fields, 3)
+        guard nonce.count == 32, let retained = pending[nonce], let range = retained.history else { throw GatewayHeadReplyError.unknownQuery }
+        guard now.milliseconds < retained.deadline else {
+            pending.removeValue(forKey: nonce); throw GatewayHeadReplyError.expired
+        }
+        guard fields[4] == .unsigned(range.after), fields[5] == .unsigned(range.through),
+              case let .array(entries) = fields[6], entries.count <= range.maximum,
+              case let .boolean(more) = fields[7], !more || entries.count == range.maximum else { throw GatewayHeadReplyError.invalidMessage }
+        var records: [GatewayControlReceipt] = []
+        var previous = range.after
+        for entry in entries {
+            guard case let .map(values) = entry, Set(values.keys) == Set(0...UInt64(3)),
+                  case let .unsigned(kind) = values[0], case let .unsigned(revision) = values[3],
+                  revision > previous, revision <= range.through else { throw GatewayHeadReplyError.invalidReceipt }
+            guard let receipt = try GatewayHeadWire.receipt(kind: kind, payload: GatewayHeadWire.bytes(values, 1),
+                signature: GatewayHeadWire.bytes(values, 2), revision: revision, registration: registration) else {
+                throw GatewayHeadReplyError.invalidReceipt
+            }
+            records.append(receipt); previous = revision
+        }
+        guard !more || previous < range.through else { throw GatewayHeadReplyError.invalidMessage }
+        pending.removeValue(forKey: nonce)
+        let page = GatewayControlHistoryPage(registration: registration, afterRevision: range.after, throughRevision: range.through,
+            records: records, hasMore: more)
+        return VerifiedGatewayControlHistory(page: page, receivedAt: now)
     }
 
     /// Trust changes, service shutdown, or key replacement invalidate every in-flight query.
@@ -104,6 +161,29 @@ public final class GatewayHeadQueryOwner {
 }
 
 extension GatewayDatabase {
+    /// Registered callers only. This endpoint returns historical receipts, never delivery tokens or authority.
+    public func controlHistoryReply(canonicalQuery: Data, sign: (Data) throws -> Data) throws -> GatewayControlHistoryReply {
+        let fields = try GatewayHeadWire.fields(canonicalQuery, kind: 2, lastKey: 6, limits: GatewayHeadWire.queryLimits)
+        let nonce = try GatewayHeadWire.bytes(fields, 3)
+        guard nonce.count == 32, case let .unsigned(after) = fields[4], case let .unsigned(through) = fields[5],
+              case let .unsigned(maximum) = fields[6], (1...16).contains(maximum), after < through else {
+            throw GatewayHeadReplyError.invalidMessage
+        }
+        let page = try controlHistory(afterRevision: after, throughRevision: through, maximumRecords: Int(maximum))
+        guard try GatewayHeadWire.bytes(fields, 2) == page.registration.encode() else { throw GatewayHeadReplyError.wrongScope }
+        let entries: [CBORValue] = page.records.map { receipt in
+            let kind: UInt64
+            switch receipt { case .candidate: kind = 1; case .recipient(let value): kind = value.kind.rawValue }
+            return .map([0: .unsigned(kind), 1: .bytes(receipt.canonicalPayload), 2: .bytes(receipt.signature), 3: .unsigned(receipt.revision)])
+        }
+        let payload = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .unsigned(3),
+            2: .bytes(page.registration.encode()), 3: .bytes(nonce), 4: .unsigned(after), 5: .unsigned(through),
+            6: .array(entries), 7: .boolean(page.hasMore)]), limits: GatewayHeadWire.historyLimits)
+        let signature = try sign(GatewayHeadWire.historySigningInput(payload))
+        guard signature.count == 64 else { throw GatewayHeadReplyError.invalidSignature }
+        return GatewayControlHistoryReply(canonicalPayload: payload, signature: signature)
+    }
+
     /// Call only after authenticating the registered caller. The signer is the gateway's separately pinned key.
     /// The service serializes this read with control application. No private token is included in the reply.
     public func headReply(canonicalQuery: Data, sign: (Data) throws -> Data) throws -> GatewayHeadReply {
@@ -129,6 +209,10 @@ extension GatewayDatabase {
 }
 
 private enum GatewayHeadWire {
+    static let historyLimits = try! CBORLimits(maxBytes: 1_100_000, maxDepth: 6, maxItems: 512)
+    static func historySigningInput(_ payload: Data) -> Data {
+        Data("Remozio/GatewayControlHistory/v1\u{0}".utf8) + payload
+    }
     static let queryLimits = try! CBORLimits(maxBytes: 1024, maxDepth: 4, maxItems: 32)
     static let replyLimits = try! CBORLimits(maxBytes: 70_000, maxDepth: 4, maxItems: 32)
     static let receiptLimits = try! CBORLimits(maxBytes: 65_536, maxDepth: 8, maxItems: 128)

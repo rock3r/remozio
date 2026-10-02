@@ -929,6 +929,141 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
     }
 
+    private func historyReply(_ db: GatewayDatabase, owner: GatewayHeadQueryOwner, key: P256.Signing.PrivateKey,
+                              after: UInt64, through: UInt64, maximum: Int = 16) throws -> GatewayControlHistoryReply {
+        let query = try owner.makeHistoryQuery(afterRevision: after, throughRevision: through, maximumRecords: maximum, now: headMoment(1))
+        return try db.controlHistoryReply(canonicalQuery: query) { try key.signature(for: $0).rawRepresentation }
+    }
+    private func changeHistory(_ original: GatewayControlHistoryReply, key: P256.Signing.PrivateKey,
+                               change: (inout [UInt64: CBORValue]) throws -> Void) throws -> GatewayControlHistoryReply {
+        let limits = try CBORLimits(maxBytes: 1_100_000, maxDepth: 6, maxItems: 512)
+        guard case var .map(fields) = try DeterministicCBOR.decode(original.canonicalPayload, limits: limits) else { fatalError() }
+        try change(&fields)
+        let payload = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        return GatewayControlHistoryReply(canonicalPayload: payload,
+            signature: try key.signature(for: Data("Remozio/GatewayControlHistory/v1\u{0}".utf8) + payload).rawRepresentation)
+    }
+
+    func testSignedHistoryPaginatesAllControlKindsWithoutExposingTokens() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        let proposed = try candidate(); _ = try admit(db, proposed)
+        _ = try activate(db, activation(proposed), head: 1); _ = try revoke(db)
+        let owner = try headOwner(gateway)
+        let first = try historyReply(db, owner: owner, key: gateway, after: 0, through: 3, maximum: 2)
+        let page = try owner.acceptHistory(first, now: headMoment(1)).page
+        XCTAssertEqual(page.records.map(\.revision), [1, 2]); XCTAssertTrue(page.hasMore); XCTAssertFalse(page.coversRequestedRange)
+        XCTAssertNil(first.canonicalPayload.range(of: Data(token.utf8)))
+        let second = try historyReply(db, owner: owner, key: gateway, after: 2, through: 3, maximum: 2)
+        let last = try owner.acceptHistory(second, now: headMoment(1)).page
+        XCTAssertEqual(last.records.map(\.revision), [3]); XCTAssertFalse(last.hasMore); XCTAssertTrue(last.coversRequestedRange)
+        guard case .recipient(let revocation) = last.records[0] else { return XCTFail("Expected revocation") }
+        XCTAssertEqual(revocation.kind, .phoneRevocation)
+        XCTAssertEqual(try db.head(), 3)
+        let complete = try historyReply(db, owner: owner, key: gateway, after: 0, through: 3)
+        XCTAssertTrue(try owner.acceptHistory(complete, now: headMoment(1)).page.coversRequestedRange)
+    }
+
+    func testHistoryKeepsMissingRevisionsExplicit() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db); _ = try admit(db, candidate(3, revision: 3), head: 1)
+        let owner = try headOwner(gateway)
+        for (after, through, expected) in [(UInt64(0), UInt64(3), [UInt64(1), 3]), (1, 2, [])] {
+            let reply = try historyReply(db, owner: owner, key: gateway, after: after, through: through)
+            let page = try owner.acceptHistory(reply, now: headMoment(1)).page
+            XCTAssertEqual(page.records.map(\.revision), expected)
+            XCTAssertFalse(page.hasMore); XCTAssertFalse(page.coversRequestedRange)
+        }
+    }
+
+    func testHistoryQueryDoesNotExpandWhenGatewayHeadAdvances() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db)
+        let owner = try headOwner(gateway)
+        let query = try owner.makeHistoryQuery(afterRevision: 0, throughRevision: 1, now: headMoment(1))
+        _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let reply = try db.controlHistoryReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        let page = try owner.acceptHistory(reply, now: headMoment(2)).page
+        XCTAssertEqual(page.records.map(\.revision), [1]); XCTAssertTrue(page.coversRequestedRange)
+        XCTAssertEqual(try db.head(), 2)
+    }
+
+    func testHistoryRequiresGatewaySignatureAndEachRootSignature() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db)
+        let owner = try headOwner(gateway), reply = try historyReply(db, owner: owner, key: gateway, after: 0, through: 1)
+        let wrongGateway = try changeHistory(reply, key: key) { _ in }
+        headFails(.invalidSignature) { try owner.acceptHistory(wrongGateway, now: headMoment(2)) }
+        let wrongRoot = try changeHistory(reply, key: gateway) { fields in
+            guard case var .array(entries) = fields[6], case var .map(record) = entries[0] else { fatalError() }
+            record[2] = .bytes(Data(repeating: 1, count: 64)); entries[0] = .map(record); fields[6] = .array(entries)
+        }
+        headFails(.invalidReceipt) { try owner.acceptHistory(wrongRoot, now: headMoment(2)) }
+        _ = try owner.acceptHistory(reply, now: headMoment(2))
+        headFails(.unknownQuery) { try owner.acceptHistory(reply, now: headMoment(2)) }
+    }
+
+    func testHistoryRejectsChangedRangesOrderingVersionsAndContinuationClaims() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db); _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let owner = try headOwner(gateway), reply = try historyReply(db, owner: owner, key: gateway, after: 0, through: 2, maximum: 2)
+        let changedRange = try changeHistory(reply, key: gateway) { $0[5] = .unsigned(3) }
+        headFails(.invalidMessage) { try owner.acceptHistory(changedRange, now: headMoment(2)) }
+        let duplicate = try changeHistory(reply, key: gateway) { fields in
+            guard case let .array(entries) = fields[6] else { fatalError() }
+            fields[6] = .array([entries[0], entries[0]])
+        }
+        headFails(.invalidReceipt) { try owner.acceptHistory(duplicate, now: headMoment(2)) }
+        let future = try changeHistory(reply, key: gateway) { $0[0] = .unsigned(2) }
+        headFails(.unsupportedVersion) { try owner.acceptHistory(future, now: headMoment(2)) }
+        let moreAfterEnd = try changeHistory(reply, key: gateway) { $0[7] = .boolean(true) }
+        headFails(.invalidMessage) { try owner.acceptHistory(moreAfterEnd, now: headMoment(2)) }
+        let noProgress = try changeHistory(reply, key: gateway) { $0[6] = .array([]); $0[7] = .boolean(true) }
+        headFails(.invalidMessage) { try owner.acceptHistory(noProgress, now: headMoment(2)) }
+        _ = try owner.acceptHistory(reply, now: headMoment(2))
+    }
+
+    func testHeadAndHistoryQueriesCannotConsumeEachOthersNonceOrSignature() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db)
+        let owner = try headOwner(gateway)
+        let query = try owner.makeQuery(now: headMoment(1))
+        let head = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        let history = try historyReply(db, owner: owner, key: gateway, after: 0, through: 1)
+        headFails(.invalidSignature) { try owner.accept(GatewayHeadReply(canonicalPayload: history.canonicalPayload, signature: history.signature), now: headMoment(2)) }
+        headFails(.invalidSignature) { try owner.acceptHistory(GatewayControlHistoryReply(canonicalPayload: head.canonicalPayload, signature: head.signature), now: headMoment(2)) }
+        guard case let .map(queryFields) = try DeterministicCBOR.decode(query, limits: limits) else { fatalError() }
+        let stolenNonce = try changeHistory(history, key: gateway) { $0[3] = queryFields[3] }
+        headFails(.unknownQuery) { try owner.acceptHistory(stolenNonce, now: headMoment(2)) }
+        _ = try owner.accept(head, now: headMoment(2)); _ = try owner.acceptHistory(history, now: headMoment(2))
+    }
+
+    func testHistoryQueriesShareCapacityExpiryAndInvalidationWithHeadQueries() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db)
+        let owner = try headOwner(gateway, lifetime: 10, maximum: 1)
+        let reply = try historyReply(db, owner: owner, key: gateway, after: 0, through: 1)
+        headFails(.capacityExceeded) { try owner.makeQuery(now: headMoment(1)) }
+        headFails(.expired) { try owner.acceptHistory(reply, now: headMoment(11)) }
+        _ = try owner.makeHistoryQuery(afterRevision: 0, throughRevision: 1, now: headMoment(11))
+        owner.invalidate()
+        headFails(.stopped) { try owner.acceptHistory(reply, now: headMoment(11)) }
+        XCTAssertThrowsError(try db.controlHistory(afterRevision: 0, throughRevision: 1, maximumRecords: 17))
+        XCTAssertThrowsError(try db.controlHistory(afterRevision: 1, throughRevision: 1, maximumRecords: 1))
+        XCTAssertThrowsError(try db.controlHistory(afterRevision: 0, throughRevision: 2, maximumRecords: 1))
+        XCTAssertEqual(try db.head(), 1)
+    }
+
+    func testHistoryPaginationUsesUnsignedRevisionsAndPreservesHistoricalDataAfterReopen() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db, candidate(revision: UInt64.max))
+        try db.close()
+        let reopened = try open(f), owner = try headOwner(gateway)
+        let reply = try historyReply(reopened, owner: owner, key: gateway, after: UInt64.max - 1, through: UInt64.max)
+        let page = try owner.acceptHistory(reply, now: headMoment(2)).page
+        XCTAssertEqual(page.records.map(\.revision), [UInt64.max]); XCTAssertTrue(page.coversRequestedRange)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
+    }
+
     private final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }
