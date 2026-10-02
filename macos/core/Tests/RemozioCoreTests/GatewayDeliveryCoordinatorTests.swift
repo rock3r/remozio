@@ -7,6 +7,7 @@ import RemozioProtocol
 @testable import RemozioCore
 
 final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
+    private enum Failure: Error { case injected }
     private func id(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
     private final class Clock: Sendable {
         let epoch = UUID()
@@ -90,7 +91,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func enrollment(active: Bool = true) throws -> GatewayPhoneEnrollment {
             try .init(phoneID: id(6), epoch: id(7), tag: id(6, 32), active: active)
         }
-        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1) throws -> GatewayDeliveryCoordinator {
+        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
             let source = try tokenSource ?? FCMTokenSource(now: { .now }, refresh: {
                 refreshes.value.withLock { $0 += 1 }
@@ -101,7 +102,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
                 identity: identity(), payloadLimits: limits, signingLimits: limits, maximumOperations: 20,
                 maximumPendingPerEnrollment: 5, maximumLifetimeMillis: lifetime, clockEpoch: clock.epoch, busyMilliseconds: 100,
                 initialize: true, probePolicy: GatewayProbePolicy(maximumAttempts: attempts, minimumRetryDelayMillis: 50, maximumTTLSeconds: 60))
-            return try GatewayDeliveryCoordinator(database: db, identity: identity(), tokens: source,
+            return try GatewayDeliveryCoordinator(database: db, identity: coordinatorIdentity ?? identity(), tokens: source,
                 policy: GatewayDeliveryPolicy(maximumFlights: 2, minimumSendIntervalMillis: 10, retryBaseDelayMillis: retryBase, maximumRetryBackoffMillis: retryCap), sample: { clock.sample() },
                 sleep: { clock.advance($0) }, send: { probe, token in
                     if let sender { return try await sender.send(probe, accessToken: token) }
@@ -386,6 +387,158 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         lease.close()
         let times = await provider.times
         XCTAssertTrue(times.isEmpty)
+    }
+
+    func testRecoveryRepliesVerifyAtRootAndContainNoTokenOrProviderWork() async throws {
+        let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)
+        let gatewayKey = P256.Signing.PrivateKey()
+        let owner = try GatewayHeadQueryOwner(registration: fixture.identity(), gatewayPublicKey: gatewayKey.publicKey.x963Representation,
+            clockEpoch: fixture.clock.epoch)
+        let now = fixture.clock.sample().moment
+        let emptyQuery = try owner.makeQuery(now: now)
+        let emptyReply = try await coordinator.recoveryHeadReply(canonicalQuery: emptyQuery) { try gatewayKey.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try owner.accept(emptyReply, now: now).evidence.revision, 0)
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        try await fixture.revoke(coordinator)
+        let query = try owner.makeQuery(now: now)
+        let reply = try await coordinator.recoveryHeadReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
+        let head = try owner.accept(reply, now: now)
+        XCTAssertEqual(head.evidence.revision, 2)
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        for after: UInt64 in [0, 1] {
+            let query = try owner.makeHistoryQuery(afterRevision: after, throughRevision: 2, maximumRecords: 1, now: now)
+            let reply = try await coordinator.recoveryHistoryReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
+            XCTAssertNil(reply.canonicalPayload.range(of: Data("synthetic".utf8)))
+            let page = try owner.acceptHistory(reply, now: now)
+            let history = try collector.accept(page)
+            if after == 0 { XCTAssertNil(history) }
+            else {
+                XCTAssertEqual(history?.records.count, 2)
+                guard case .recipient(let receipt) = history?.records.last else { return XCTFail("Missing removal receipt") }
+                XCTAssertEqual(receipt.kind, .phoneRevocation)
+            }
+        }
+        let times = await provider.times
+        XCTAssertTrue(times.isEmpty)
+        XCTAssertEqual(fixture.refreshes.value.withLock { $0 }, 0)
+        try await coordinator.shutdown()
+    }
+
+    func testRecoveryHistoryKeepsPinnedRangeWhileNewControlsArrive() async throws {
+        let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        try await fixture.admit(coordinator, n: 2)
+        let key = P256.Signing.PrivateKey(), now = fixture.clock.sample().moment
+        let owner = try GatewayHeadQueryOwner(registration: fixture.identity(), gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: now.epoch)
+        let headReply = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: now)) { try key.signature(for: $0).rawRepresentation }
+        let head = try owner.accept(headReply, now: now)
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        let firstReply = try await coordinator.recoveryHistoryReply(canonicalQuery: owner.makeHistoryQuery(afterRevision: 0,
+            throughRevision: 2, maximumRecords: 1, now: now)) { try key.signature(for: $0).rawRepresentation }
+        XCTAssertNil(try collector.accept(owner.acceptHistory(firstReply, now: now)))
+        try await fixture.admit(coordinator, n: 3)
+        let lastReply = try await coordinator.recoveryHistoryReply(canonicalQuery: owner.makeHistoryQuery(afterRevision: 1,
+            throughRevision: 2, maximumRecords: 1, now: now)) { try key.signature(for: $0).rawRepresentation }
+        let history = try XCTUnwrap(collector.accept(owner.acceptHistory(lastReply, now: now)))
+        XCTAssertEqual(history.records.map(\.revision), [1, 2])
+        let latestReply = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: now)) { try key.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try owner.accept(latestReply, now: now).evidence.revision, 3)
+        try await coordinator.shutdown()
+    }
+
+    func testRecoveryReadsRemainAvailableDuringOAuthWaitAndInactiveDelivery() async throws {
+        let fixture = try Fixture(), provider = Provider([]), gate = OAuthGate()
+        let source = try FCMTokenSource(now: { .now }, refresh: { try await gate.refresh() })
+        let coordinator = try fixture.coordinator(provider, tokenSource: source)
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        let task = Task { try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)) }
+        defer { task.cancel() }
+        try await until { await gate.started }
+        let key = P256.Signing.PrivateKey(), now = fixture.clock.sample().moment
+        let owner = try GatewayHeadQueryOwner(registration: fixture.identity(), gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: now.epoch)
+        let reply = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: now)) { try key.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try owner.accept(reply, now: now).evidence.revision, 1)
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: false)
+        do { _ = try await task.value; XCTFail("Inactive delivery succeeded") } catch {}
+        let pageReply = try await coordinator.recoveryHistoryReply(canonicalQuery: owner.makeHistoryQuery(afterRevision: 0,
+            throughRevision: 1, now: now)) { try key.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try owner.acceptHistory(pageReply, now: now).page.records.count, 1)
+        let times = await provider.times
+        XCTAssertTrue(times.isEmpty)
+        try await coordinator.shutdown()
+    }
+
+    func testRecoveryRepliesRejectMalformedQueriesAndWrongScopeBeforeSigning() async throws {
+        let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        let key = P256.Signing.PrivateKey(), calls = Counter(), now = fixture.clock.sample().moment
+        let other = try GatewayRegistrationIdentity(ownerID: id(1), macID: id(22), accountID: id(3), gatewayID: id(4),
+            lifecycleEpoch: id(5), rootPublicKey: fixture.key.publicKey.x963Representation)
+        let owner = try GatewayHeadQueryOwner(registration: other, gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: now.epoch)
+        let wrongHead = try owner.makeQuery(now: now)
+        let wrongPage = try owner.makeHistoryQuery(afterRevision: 0, throughRevision: 1, now: now)
+        for query in [Data(), Data(repeating: 0, count: 2048), wrongHead, wrongPage] {
+            do {
+                _ = try await coordinator.recoveryHeadReply(canonicalQuery: query) { _ in calls.value.withLock { $0 += 1 }; return Data() }
+                XCTFail("Invalid head query accepted")
+            } catch {}
+            do {
+                _ = try await coordinator.recoveryHistoryReply(canonicalQuery: query) { _ in calls.value.withLock { $0 += 1 }; return Data() }
+                XCTFail("Invalid history query accepted")
+            } catch {}
+        }
+        XCTAssertEqual(calls.value.withLock { $0 }, 0)
+        let times = await provider.times
+        XCTAssertTrue(times.isEmpty)
+        XCTAssertEqual(fixture.refreshes.value.withLock { $0 }, 0)
+        try await coordinator.shutdown()
+    }
+
+    func testRecoverySignerFailureDoesNotChangeStoreOrConsumeRootQuery() async throws {
+        let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)
+        let key = P256.Signing.PrivateKey(), now = fixture.clock.sample().moment
+        let owner = try GatewayHeadQueryOwner(registration: fixture.identity(), gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: now.epoch)
+        let query = try owner.makeQuery(now: now)
+        do { _ = try await coordinator.recoveryHeadReply(canonicalQuery: query) { _ in throw Failure.injected }; XCTFail("Signer succeeded") }
+        catch { XCTAssertTrue(error is Failure) }
+        do { _ = try await coordinator.recoveryHeadReply(canonicalQuery: query) { _ in Data() }; XCTFail("Short signature accepted") }
+        catch { XCTAssertEqual(error as? GatewayHeadReplyError, .invalidSignature) }
+        let reply = try await coordinator.recoveryHeadReply(canonicalQuery: query) { try key.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try owner.accept(reply, now: now).evidence.revision, 0)
+        XCTAssertThrowsError(try owner.accept(reply, now: now))
+        try await coordinator.shutdown()
+    }
+
+    func testRecoveryReadsRejectMismatchedHostIdentityAndStoppedOwner() async throws {
+        let fixture = try Fixture(), provider = Provider([]), calls = Counter()
+        let other = try GatewayRegistrationIdentity(ownerID: id(1), macID: id(22), accountID: id(3), gatewayID: id(4),
+            lifecycleEpoch: id(5), rootPublicKey: fixture.key.publicKey.x963Representation)
+        let coordinator = try fixture.coordinator(provider, coordinatorIdentity: other)
+        let key = P256.Signing.PrivateKey(), now = fixture.clock.sample().moment
+        let owner = try GatewayHeadQueryOwner(registration: fixture.identity(), gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: now.epoch)
+        let head = try owner.makeQuery(now: now), page = try owner.makeHistoryQuery(afterRevision: 0, throughRevision: 1, now: now)
+        for stopped in [false, true] {
+            if stopped { try await coordinator.shutdown() }
+            do {
+                _ = try await coordinator.recoveryHeadReply(canonicalQuery: head) { _ in calls.value.withLock { $0 += 1 }; return Data() }
+                XCTFail("Unavailable owner replied")
+            } catch {
+                if stopped { XCTAssertEqual(error as? GatewayDeliveryError, .stopped) }
+                else { XCTAssertEqual(error as? GatewayDatabaseError, .wrongScope) }
+            }
+            do {
+                _ = try await coordinator.recoveryHistoryReply(canonicalQuery: page) { _ in calls.value.withLock { $0 += 1 }; return Data() }
+                XCTFail("Unavailable owner replied")
+            } catch {
+                if stopped { XCTAssertEqual(error as? GatewayDeliveryError, .stopped) }
+                else { XCTAssertEqual(error as? GatewayDatabaseError, .wrongScope) }
+            }
+        }
+        XCTAssertEqual(calls.value.withLock { $0 }, 0)
     }
 
     func testPolicyRejectsUnboundedAndInconsistentValues() throws {
