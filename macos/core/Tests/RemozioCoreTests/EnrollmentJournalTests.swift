@@ -412,6 +412,26 @@ final class EnrollmentJournalTests: XCTestCase {
         _ = try tokenCandidate(db, revision: revision)
     }
 
+    func testDeliveryTrustUsesCurrentDurableEnrollmentEpochs() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        let request = try request(), session = try PendingRequestDelivery(request: request)
+        let routing = PresenceRouting(destination: .phones, reason: .manualAway, detectionLimited: false)
+        let before = try db.read { try $0.requestDeliveryTrust() }
+        XCTAssertEqual(before.approval.revision, revision)
+        let first = session.reconcile(current: request, routing: routing, trust: before, now: moment()) { _ in true }
+        XCTAssertEqual(first.active.first?.recipient.enrollmentEpoch, id(9))
+        let removed = try remove(db, writer: writer, revision: revision)
+        let after = try db.read { try $0.requestDeliveryTrust() }
+        XCTAssertEqual(after.approval.revision, removed.revision)
+        XCTAssertFalse(try XCTUnwrap(after.enrollments.first).approval.active)
+        let update = session.reconcile(current: request, routing: routing, trust: after, now: moment()) { _ in
+            XCTFail("Revoked recipient must not enqueue"); return true
+        }
+        XCTAssertEqual(update.withdrawn, first.active)
+        XCTAssertTrue(update.active.isEmpty)
+    }
+
     private final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }
