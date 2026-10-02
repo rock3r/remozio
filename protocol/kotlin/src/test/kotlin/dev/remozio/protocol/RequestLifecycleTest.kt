@@ -14,7 +14,7 @@ class RequestLifecycleTest {
     @Test
     fun completeTransitionMatrix() {
         val rows = Json.parseToJsonElement(File(checkNotNull(System.getProperty("remozio.lifecycleVectors"))).readText()).jsonArray
-        assertEquals(19, rows.size)
+        assertEquals(21, rows.size)
         val expected = mutableMapOf<Pair<RequestPhase, RequestEvent>, RequestPhase>()
         for (row in rows) {
             val cells = row.jsonArray

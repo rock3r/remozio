@@ -13,7 +13,7 @@ enum class RequestPhase {
 
 enum class RequestEvent {
     PRESENT, AUTHORIZE, DECLINE, CANCEL, EXPIRE, BEGIN_DISPATCH,
-    VERIFY_SUCCESS, VERIFY_FAILURE, LOSE_OUTCOME, RESTART_AUTHORITY, PROVE_NO_DISPATCH,
+    VERIFY_SUCCESS, VERIFY_FAILURE, LOSE_OUTCOME, RESTART_AUTHORITY, PROVE_NO_DISPATCH, LOSE_TARGET,
 }
 
 enum class LifecycleFailure { TERMINAL, INVALID_TRANSITION }
@@ -30,6 +30,7 @@ object RequestLifecycle {
             pending && event == RequestEvent.DECLINE -> RequestPhase.DECLINED
             pending && event == RequestEvent.CANCEL -> RequestPhase.CANCELLED
             pending && event == RequestEvent.EXPIRE -> RequestPhase.EXPIRED
+            pending && event == RequestEvent.LOSE_TARGET -> RequestPhase.UNKNOWN
             phase == RequestPhase.AUTHORIZED && event == RequestEvent.BEGIN_DISPATCH -> RequestPhase.EXECUTING
             phase == RequestPhase.AUTHORIZED && event == RequestEvent.PROVE_NO_DISPATCH -> RequestPhase.CANCELLED
             phase == RequestPhase.EXECUTING && event == RequestEvent.VERIFY_SUCCESS -> RequestPhase.SUCCEEDED
