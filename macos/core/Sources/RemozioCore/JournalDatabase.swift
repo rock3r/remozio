@@ -429,9 +429,9 @@ public final class JournalTransaction {
         try withGateway(write: false) { try $0.head(identity) }
     }
 
-    /// The host authenticates the phone channel separately and supplies retained enrollment state.
-    /// Keep the signer local to the root authority. Publish only after this transaction commits and continuity is established.
-    public func prepareGatewayCandidate(registrationToken: String, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+    /// Internal verification path. Public token APIs derive phone trust from durable enrollment.
+    /// Keep the signer local to the root authority. Publish only after commit and continuity checks.
+    func prepareGatewayCandidate(registrationToken: String, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
                                         trust: GatewayAuthorityTrust, expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
                                         sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try withGateway(write: true) {
@@ -441,14 +441,14 @@ public final class JournalTransaction {
     }
 
     /// The root host establishes continuity and current enrollment before automatic recovery. No new phone prompt is needed.
-    public func renewDesiredGatewayCandidate(trust: GatewayAuthorityTrust, expectedHead: UInt64,
+    func renewDesiredGatewayCandidate(trust: GatewayAuthorityTrust, expectedHead: UInt64,
                                              nowUnixMillis: UInt64, now: AuthorityMoment,
                                              sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try withGateway(write: true) { try $0.renewDesired(trust: trust, expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign) }
     }
 
     /// Proof consumption and the signed activation outbox share this transaction. No biometric is required for routine token rotation.
-    public func consumeGatewayProof(canonicalProof: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+    func consumeGatewayProof(canonicalProof: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
                                     trust: GatewayAuthorityTrust, expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
                                     sign: (GatewayMappingActivation) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try withGateway(write: true) {
@@ -457,9 +457,67 @@ public final class JournalTransaction {
         }
     }
 
-    public func pendingGatewayControl(operationID: Data, trust: GatewayAuthorityTrust,
+    func pendingGatewayControl(operationID: Data, trust: GatewayAuthorityTrust,
                                       nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
         try withGateway(write: false) { try $0.pending(operationID: operationID, trust: trust, wall: nowUnixMillis, now: now) }
+    }
+
+    private func storedGatewayTrust(phoneID: Data, epoch: Data, registration: GatewayRegistrationIdentity,
+                                    registrationActive: Bool, expectedTrustRevision: UUID) throws -> GatewayAuthorityTrust {
+        try withEnrollment(write: false) { ledger in
+            let snapshot = try ledger.snapshot()
+            guard snapshot.macID == registration.macID, snapshot.accountID == registration.accountID else { throw GatewayAuthorityError.wrongScope }
+            guard snapshot.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            guard let enrolled = try ledger.all().first(where: {
+                $0.approval.phoneID == phoneID && $0.epoch == epoch && $0.approval.active
+            }) else { throw EnrollmentJournalError.unavailableEnrollment }
+            return try GatewayAuthorityTrust(registration: registration,
+                enrollment: GatewayPhoneEnrollment(phoneID: phoneID, epoch: epoch, tag: enrolled.notificationTag, active: true),
+                active: registrationActive)
+        }
+    }
+
+    /// The host authenticates the phone channel. The journal supplies its current epoch and notification tag.
+    /// Registration activity remains protected host state. Neither it nor the signer may come from a phone message.
+    public func prepareGatewayCandidate(registrationToken: String, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+                                        registration: GatewayRegistrationIdentity, registrationActive: Bool, expectedTrustRevision: UUID,
+                                        expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                        sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        let trust = try storedGatewayTrust(phoneID: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch,
+            registration: registration, registrationActive: registrationActive, expectedTrustRevision: expectedTrustRevision)
+        return try prepareGatewayCandidate(registrationToken: registrationToken, authenticatedPhoneID: authenticatedPhoneID,
+            authenticatedEnrollmentEpoch: authenticatedEnrollmentEpoch, trust: trust, expectedHead: expectedHead,
+            nowUnixMillis: nowUnixMillis, now: now, sign: sign)
+    }
+
+    /// Automatic recovery reads only this enrolled epoch's current desired token. It requires no new phone prompt.
+    public func renewDesiredGatewayCandidate(phoneID: Data, enrollmentEpoch: Data,
+                                             registration: GatewayRegistrationIdentity, registrationActive: Bool, expectedTrustRevision: UUID,
+                                             expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                             sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        let trust = try storedGatewayTrust(phoneID: phoneID, epoch: enrollmentEpoch,
+            registration: registration, registrationActive: registrationActive, expectedTrustRevision: expectedTrustRevision)
+        return try renewDesiredGatewayCandidate(trust: trust, expectedHead: expectedHead, nowUnixMillis: nowUnixMillis, now: now, sign: sign)
+    }
+
+    /// Current durable enrollment is checked in the proof-consumption transaction, before any activation is signed.
+    public func consumeGatewayProof(canonicalProof: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+                                    registration: GatewayRegistrationIdentity, registrationActive: Bool, expectedTrustRevision: UUID,
+                                    expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                    sign: (GatewayMappingActivation) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        let trust = try storedGatewayTrust(phoneID: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch,
+            registration: registration, registrationActive: registrationActive, expectedTrustRevision: expectedTrustRevision)
+        return try consumeGatewayProof(canonicalProof: canonicalProof, authenticatedPhoneID: authenticatedPhoneID,
+            authenticatedEnrollmentEpoch: authenticatedEnrollmentEpoch, trust: trust, expectedHead: expectedHead,
+            nowUnixMillis: nowUnixMillis, now: now, sign: sign)
+    }
+
+    public func pendingGatewayControl(operationID: Data, phoneID: Data, enrollmentEpoch: Data,
+                                      registration: GatewayRegistrationIdentity, registrationActive: Bool, expectedTrustRevision: UUID,
+                                      nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        let trust = try storedGatewayTrust(phoneID: phoneID, epoch: enrollmentEpoch,
+            registration: registration, registrationActive: registrationActive, expectedTrustRevision: expectedTrustRevision)
+        return try pendingGatewayControl(operationID: operationID, trust: trust, nowUnixMillis: nowUnixMillis, now: now)
     }
 
     /// Protected enrollment removal only. Append the enrollment audit event in this same transaction.

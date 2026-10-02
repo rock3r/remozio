@@ -279,6 +279,139 @@ final class EnrollmentJournalTests: XCTestCase {
         _ = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
     }
 
+    private func tokenCandidate(_ db: JournalDatabase, revision: UUID, head: UInt64 = 0, epoch: UInt8 = 9) throws -> GatewayAuthorityEnvelope {
+        try db.write { try $0.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(epoch),
+            registration: identity(), registrationActive: true, expectedTrustRevision: revision, expectedHead: head,
+            nowUnixMillis: 1000, now: moment(), sign: signCandidate) }
+    }
+    private func signCandidate(_ value: GatewayTokenCandidate) throws -> Data {
+        try rootKey.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1, canonicalPayload: value.encode(limits: limits),
+            payloadLimits: limits, inputLimits: limits)).rawRepresentation
+    }
+    private func tokenProof(_ envelope: GatewayAuthorityEnvelope) throws -> Data {
+        try GatewayTokenProof(binding: GatewayTokenCandidate.decode(envelope.canonicalPayload, limits: limits).binding).encode(limits: limits)
+    }
+    private func activate(_ db: JournalDatabase, envelope: GatewayAuthorityEnvelope, revision: UUID, head: UInt64 = 1,
+                          epoch: UInt8 = 9) throws -> GatewayAuthorityEnvelope {
+        try db.write { try $0.consumeGatewayProof(canonicalProof: tokenProof(envelope), authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(epoch),
+            registration: identity(), registrationActive: true, expectedTrustRevision: revision, expectedHead: head, nowUnixMillis: 1000, now: moment()) { value in
+                try rootKey.signature(for: GatewayRecipientSigningInput.make(wireVersion: 1, kind: .activation,
+                    canonicalPayload: value.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation
+            } }
+    }
+
+    func testPublicGatewayCandidateAndProofUseStoredPhoneTagAndEpoch() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        XCTAssertThrowsError(try tokenCandidate(db, revision: empty)) { XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment) }
+        let revision = try add(db, writer: writer, revision: empty)
+        let envelope = try tokenCandidate(db, revision: revision)
+        let value = try GatewayTokenCandidate.decode(envelope.canonicalPayload, limits: limits)
+        XCTAssertEqual(value.binding.enrollmentTag, id(5, count: 32)); XCTAssertEqual(value.binding.enrollmentEpoch, id(9))
+        XCTAssertEqual(try db.read { try $0.pendingGatewayControl(operationID: envelope.operationID, phoneID: id(5), enrollmentEpoch: id(9),
+            registration: identity(), registrationActive: true, expectedTrustRevision: revision, nowUnixMillis: 1000, now: moment()) }?.signature, envelope.signature)
+        let activation = try activate(db, envelope: envelope, revision: revision)
+        XCTAssertEqual(try GatewayMappingActivation.decode(activation.canonicalPayload, limits: limits).binding, value.binding)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 2)
+    }
+
+    func testPublicGatewayRemovalBlocksLateProofRenewalAndPendingControls() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let envelope = try tokenCandidate(db, revision: revision)
+        let removed = try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval(head: 1))
+        XCTAssertThrowsError(try activate(db, envelope: envelope, revision: revision, head: 2)) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        XCTAssertThrowsError(try activate(db, envelope: envelope, revision: removed.revision, head: 2)) { XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment) }
+        XCTAssertThrowsError(try db.write { try $0.renewDesiredGatewayCandidate(phoneID: id(5), enrollmentEpoch: id(9),
+            registration: identity(), registrationActive: true, expectedTrustRevision: removed.revision, expectedHead: 2,
+            nowUnixMillis: 1000, now: moment(), sign: signCandidate) }) { XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment) }
+        XCTAssertThrowsError(try db.read { try $0.pendingGatewayControl(operationID: envelope.operationID, phoneID: id(5), enrollmentEpoch: id(9),
+            registration: identity(), registrationActive: true, expectedTrustRevision: removed.revision, nowUnixMillis: 1000, now: moment()) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+        }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 2)
+    }
+
+    func testPublicGatewayRejectsWrongPeerScopeAndInactiveRegistrationBeforeSigning() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let r = try identity()
+        let wrongAccount = try GatewayRegistrationIdentity(ownerID: r.ownerID, macID: r.macID, accountID: id(99), gatewayID: r.gatewayID,
+            lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey)
+        let wrongKey = try GatewayRegistrationIdentity(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID, gatewayID: r.gatewayID,
+            lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+        var signed = false
+        for (phone, epoch, registration, active) in [(id(8), id(9), r, true), (id(5), id(10), r, true),
+            (id(5), id(9), wrongAccount, true), (id(5), id(9), wrongKey, true), (id(5), id(9), r, false)] {
+            XCTAssertThrowsError(try db.write { try $0.prepareGatewayCandidate(registrationToken: "synthetic-token",
+                authenticatedPhoneID: phone, authenticatedEnrollmentEpoch: epoch, registration: registration,
+                registrationActive: active, expectedTrustRevision: revision, expectedHead: 0, nowUnixMillis: 1000, now: moment()) {
+                    signed = true; return try signCandidate($0)
+                } })
+        }
+        XCTAssertFalse(signed)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
+        _ = try tokenCandidate(db, revision: revision)
+    }
+
+    func testPublicGatewayRestartRenewalKeepsPairingAndUsesFreshChallenge() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let old = try tokenCandidate(db, revision: revision)
+        try db.close()
+        let reopened = try open(fixture)
+        XCTAssertThrowsError(try activate(reopened, envelope: old, revision: revision)) { XCTAssertEqual($0 as? GatewayAuthorityError, .expired) }
+        let fresh = try reopened.write { try $0.renewDesiredGatewayCandidate(phoneID: id(5), enrollmentEpoch: id(9),
+            registration: identity(), registrationActive: true, expectedTrustRevision: revision, expectedHead: 1,
+            nowUnixMillis: 1000, now: moment(), sign: signCandidate) }
+        let first = try GatewayTokenCandidate.decode(old.canonicalPayload, limits: limits), next = try GatewayTokenCandidate.decode(fresh.canonicalPayload, limits: limits)
+        XCTAssertNotEqual(first.binding.challenge, next.binding.challenge)
+        XCTAssertEqual(next.binding.enrollmentEpoch, first.binding.enrollmentEpoch)
+        XCTAssertEqual(next.binding.enrollmentTag, first.binding.enrollmentTag)
+        _ = try activate(reopened, envelope: fresh, revision: revision, head: 2)
+    }
+
+    func testPublicGatewayNewEnrollmentCannotUseOldEpochProof() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let old = try tokenCandidate(db, revision: revision)
+        let removed = try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval(head: 1))
+        let material = try enrollment(phone: 8, epoch: 10, signingKey: P256.Signing.PrivateKey())
+        let replacement = try StoredApprovalEnrollment(epoch: material.epoch, notificationTag: material.notificationTag,
+            identityPublicKey: material.identityPublicKey, approval: ApprovalEnrollment(phoneID: id(5), active: true,
+                capabilities: material.approval.capabilities, keys: material.approval.keys))
+        let nextRevision = try db.write { try $0.addApprovalEnrollment(replacement, expectedTrustRevision: removed.revision,
+            eventID: id(42), receiptTimeMs: nil, writer: writer, expectedAuditHead: 2) }
+        XCTAssertThrowsError(try activate(db, envelope: old, revision: nextRevision, head: 2)) { XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment) }
+        let fresh = try tokenCandidate(db, revision: nextRevision, head: 2, epoch: 10)
+        XCTAssertThrowsError(try activate(db, envelope: old, revision: nextRevision, head: 3, epoch: 10)) { XCTAssertEqual($0 as? GatewayAuthorityError, .superseded) }
+        _ = try activate(db, envelope: fresh, revision: nextRevision, head: 3, epoch: 10)
+        XCTAssertEqual(try GatewayTokenCandidate.decode(fresh.canonicalPayload, limits: limits).binding.enrollmentTag, material.notificationTag)
+    }
+
+    func testPublicGatewayReadOnlyAndSwallowedEnrollmentFailureCannotWrite() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        XCTAssertThrowsError(try db.read { try $0.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: id(5),
+            authenticatedEnrollmentEpoch: id(9), registration: identity(), registrationActive: true, expectedTrustRevision: revision,
+            expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: signCandidate) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
+        XCTAssertThrowsError(try db.write { tx in
+            _ = try? tx.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: id(5),
+                authenticatedEnrollmentEpoch: id(9), registration: identity(), registrationActive: true, expectedTrustRevision: empty,
+                expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: signCandidate)
+            _ = try tx.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: id(5),
+                authenticatedEnrollmentEpoch: id(9), registration: identity(), registrationActive: true, expectedTrustRevision: revision,
+                expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: signCandidate)
+        }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
+        _ = try tokenCandidate(db, revision: revision)
+    }
+
     private final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }
