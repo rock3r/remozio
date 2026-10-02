@@ -345,6 +345,11 @@ public final class JournalTransaction {
     public func approvalTrustSnapshot() throws -> ApprovalTrustSnapshot {
         try withEnrollment(write: false) { try $0.snapshot() }
     }
+    public func requestDeliveryTrust() throws -> RequestDeliveryTrust {
+        try withEnrollment(write: false) { ledger in
+            try RequestDeliveryTrust(approval: ledger.snapshot(), enrollments: ledger.all())
+        }
+    }
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
     }
