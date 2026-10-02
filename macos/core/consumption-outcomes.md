@@ -37,7 +37,7 @@ The operation inserts revision one or compares and updates revision one to two, 
 
 Audit pruning does not remove the winner or the latest outcome. Reaching the consumption row limit does not block observations for existing rows. This is not a guarantee against disk exhaustion; lifecycle storage reservations remain required. There is no outcome deletion, reset or automatic retry API.
 
-Schema version 3 adds the outcome table through explicit version 1 or 2 migration. Migration preserves audit history and existing receipts. It creates no outcome observations or recovery conclusions. A failed migration rolls back its schema changes and version update. See [the connection contract](journal-database.md).
+Schema version 3 introduced the outcome table. Current migration also adds the schema-4 gateway tables. Migration preserves audit history and existing receipts. It creates no outcome observations or recovery conclusions. A failed migration rolls back its schema changes and version update. See [the connection contract](journal-database.md).
 
 ## Evidence and remaining gates
 

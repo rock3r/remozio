@@ -56,3 +56,5 @@ The [gateway database](gateway-database.md) commits candidate records and contro
 [Gateway probe attempts](gateway-probe-attempts.md) provide durable reservations, a single-use dispatch handoff and bounded retry outcomes.
 
 The [gateway delivery coordinator](gateway-delivery.md) connects durable probe attempts to OAuth and bounded, cancellable FCM delivery.
+
+The [authority gateway journal](gateway-authority.md) consumes token proofs and retains signed controls in one protected transaction.

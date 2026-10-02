@@ -15,28 +15,29 @@ public final class JournalDatabase {
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?
     private var consumption: ConsumptionJournal?
+    private var gateway: GatewayAuthorityJournal?
     private var active: UUID?
     private var unavailable = false
 
     /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
     public static func open(directoryPath: String, macID: Data, accountID: Data,
                             recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil) throws -> JournalDatabase {
+                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> JournalDatabase {
         try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
                             recordLimits: recordLimits, descriptorLimits: descriptorLimits, decisionLimits: decisionLimits,
                             maximumConsumptions: maximumConsumptions, busyMilliseconds: busyMilliseconds,
-                            initialize: initialize, migrateFromVersion: migrateFromVersion)
+                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil) throws {
+         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws {
         self.lease = lease
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -50,11 +51,11 @@ public final class JournalDatabase {
             guard sqlite3_busy_timeout(connection, Int32(busyMilliseconds)) == SQLITE_OK,
                   sqlite3_compileoption_used("OMIT_LOAD_EXTENSION") == 1 else { throw JournalDatabaseError.invalidConfiguration }
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
-            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096))
+            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, (gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768)))
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 3) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 4) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -67,6 +68,7 @@ public final class JournalDatabase {
             let consumption = ConsumptionJournal(connection: connection, macID: macID, accountID: accountID,
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
+            if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy) }
             if initialize { try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption) }
             else if let migrateFromVersion { try migrate(macID: macID, accountID: accountID, consumption: consumption, from: migrateFromVersion) }
             try validateIdentity(macID: macID, accountID: accountID)
@@ -126,6 +128,12 @@ public final class JournalDatabase {
         return consumption
     }
 
+    fileprivate func gatewayLedger(_ token: UUID) throws -> GatewayAuthorityJournal {
+        _ = try access(token)
+        guard let gateway else { throw GatewayAuthorityError.disabled }
+        return gateway
+    }
+
     private func validateLease() throws {
         do { try lease.validate() }
         catch { unavailable = true; throw error }
@@ -146,8 +154,9 @@ public final class JournalDatabase {
             try tables.createSchema()
             try consumption.createSchema()
             try consumption.createOutcomeSchema()
+            try GatewayAuthorityJournal.createSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=3")
+            try exec("PRAGMA user_version=4")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -158,8 +167,9 @@ public final class JournalDatabase {
         do {
             try validateIdentity(macID: macID, accountID: accountID, version: version)
             if version == 1 { try consumption.createSchema() }
-            try consumption.createOutcomeSchema()
-            try exec("PRAGMA user_version=3")
+            if version < 3 { try consumption.createOutcomeSchema() }
+            try GatewayAuthorityJournal.createSchema(db!)
+            try exec("PRAGMA user_version=4")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -172,7 +182,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 3) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 4) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -188,7 +198,13 @@ public final class JournalDatabase {
         var queries = ["SELECT mac,account,epoch,descriptor,head,retained FROM main.audit_epochs_v1 LIMIT 0",
                        "SELECT mac,account,epoch,sequence,event,body FROM main.audit_records_v1 LIMIT 0"]
         if version >= 2 { queries.append("SELECT mac,account,request,decision,event FROM main.consumptions_v1 LIMIT 0") }
-        if version == 3 { queries.append("SELECT mac,account,request,revision,event FROM main.consumption_outcomes_v1 LIMIT 0") }
+        if version >= 3 { queries.append("SELECT mac,account,request,revision,event FROM main.consumption_outcomes_v1 LIMIT 0") }
+        if version >= 4 {
+            queries += ["SELECT id,identity,head FROM main.gateway_authority_v1 LIMIT 0",
+                        "SELECT operation,revision,kind,candidate,payload,signature,token FROM main.gateway_outbox_v1 LIMIT 0",
+                        "SELECT candidate,phone,enrollment,operation,run,started,deadline,consumed FROM main.gateway_root_candidates_v1 LIMIT 0",
+                        "SELECT phone,candidate FROM main.gateway_desired_tokens_v1 LIMIT 0"]
+        }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -197,6 +213,7 @@ public final class JournalDatabase {
     private func shutdown() {
         tables = nil
         consumption = nil
+        gateway = nil
         if let db {
             // No statement, blob handle or raw connection can escape this owner.
             precondition(sqlite3_close(db) == SQLITE_OK, "Journal connection retained a private SQLite resource")
@@ -289,6 +306,59 @@ public final class JournalTransaction {
     public func consumptionOutcome(requestID: Data) throws -> ConsumptionOutcome? {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.ledger(token).outcome(requestID: requestID)
+    }
+
+    private func withGateway<T>(write: Bool, _ body: (GatewayAuthorityJournal) throws -> T) throws -> T {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.gatewayLedger(token))
+        } catch {
+            failed = true
+            if let error = error as? GatewayAuthorityError, [.headMismatch, .invalidClock, .corruptData].contains(error) { headMismatch = true }
+            throw error
+        }
+    }
+
+    /// Protected administrator setup only. This method cannot replace an existing gateway registration.
+    public func configureGatewayAuthority(_ identity: GatewayRegistrationIdentity) throws {
+        try withGateway(write: true) { try $0.configure(identity) }
+    }
+    public func gatewayAuthorityHead(_ identity: GatewayRegistrationIdentity) throws -> UInt64 {
+        try withGateway(write: false) { try $0.head(identity) }
+    }
+
+    /// The host authenticates the phone channel separately and supplies retained enrollment state.
+    /// Keep the signer local to the root authority. Publish only after this transaction commits and continuity is established.
+    public func prepareGatewayCandidate(registrationToken: String, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+                                        trust: GatewayAuthorityTrust, expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                        sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) {
+            try $0.prepare(token: registrationToken, authenticatedPhoneID: authenticatedPhoneID, authenticatedEnrollmentEpoch: authenticatedEnrollmentEpoch,
+                trust: trust, expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign)
+        }
+    }
+
+    /// The root host establishes continuity and current enrollment before automatic recovery. No new phone prompt is needed.
+    public func renewDesiredGatewayCandidate(trust: GatewayAuthorityTrust, expectedHead: UInt64,
+                                             nowUnixMillis: UInt64, now: AuthorityMoment,
+                                             sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) { try $0.renewDesired(trust: trust, expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign) }
+    }
+
+    /// Proof consumption and the signed activation outbox share this transaction. No biometric is required for routine token rotation.
+    public func consumeGatewayProof(canonicalProof: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data,
+                                    trust: GatewayAuthorityTrust, expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                    sign: (GatewayMappingActivation) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) {
+            try $0.consume(proofBytes: canonicalProof, authenticatedPhoneID: authenticatedPhoneID, authenticatedEnrollmentEpoch: authenticatedEnrollmentEpoch,
+                trust: trust, expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign)
+        }
+    }
+
+    public func pendingGatewayControl(operationID: Data, trust: GatewayAuthorityTrust,
+                                      nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        try withGateway(write: false) { try $0.pending(operationID: operationID, trust: trust, wall: nowUnixMillis, now: now) }
     }
 
     public func createEpoch(_ descriptor: AuditEpochDescriptor) throws -> AuditEpochWriter {
