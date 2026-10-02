@@ -71,6 +71,20 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             continuation = nil
         }
     }
+    private actor SchedulerTimer {
+        private var continuation: CheckedContinuation<Void, any Error>?
+        var waiting: Bool { continuation != nil }
+        func sleep(_ milliseconds: UInt64) async throws {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                    if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                    else { self.continuation = continuation }
+                }
+            } onCancel: { Task { await self.cancel() } }
+        }
+        func tick() { continuation?.resume(); continuation = nil }
+        func cancel() { continuation?.resume(throwing: CancellationError()); continuation = nil }
+    }
     private final class Counter: Sendable { let value = Mutex(0) }
     private final class Fixture {
         let root: URL
@@ -96,7 +110,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func enrollment(active: Bool = true, phone: UInt8 = 6) throws -> GatewayPhoneEnrollment {
             try .init(phoneID: id(phone), epoch: id(7), tag: id(phone, 32), active: active)
         }
-        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2) throws -> GatewayDeliveryCoordinator {
+        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
             let source = try tokenSource ?? FCMTokenSource(now: { .now }, refresh: {
                 refreshes.value.withLock { $0 += 1 }
@@ -119,7 +133,10 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
                 sleep: { clock.advance($0) }, send: { probe, token in
                     if let sender { return try await sender.send(probe, accessToken: token) }
                     return try await provider.send(at: clock.sample().moment.milliseconds)
-                }, wakePolicy: wakePolicy, sendWake: wakeSend)
+                }, wakePolicy: wakePolicy, sendWake: wakeSend, schedulerSleep: { milliseconds in
+                    if let schedulerTimer { try await schedulerTimer.sleep(milliseconds) }
+                    else { try await Task.sleep(for: .milliseconds(milliseconds)) }
+                })
         }
         func revoke(_ coordinator: GatewayDeliveryCoordinator, revision: UInt64 = 2, phone: UInt8 = 6) async throws {
             let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
@@ -595,6 +612,237 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         let request = try sender.request(wake, accessToken: FCMAccessToken("synthetic-access"), validateOnly: false)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         return (body["message"] as? [String: Any])?["token"] as? String
+    }
+
+    func testWakeSchedulerDrainsNewArrivalsWithoutWaitingForTimer() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        try await until { await timer.waiting }
+        let first = try f.delivery(), second = try f.delivery(2)
+        try await c.enqueueWake(first)
+        try await until { (try? await c.wakeProgress(deliveryID: first.id)?.status) == .accepted }
+        try await c.enqueueWake(second)
+        try await until { (try? await c.wakeProgress(deliveryID: second.id)?.status) == .accepted }
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 2)
+        XCTAssertNotEqual(wakes.first?.identifier, wakes.last?.identifier)
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerPresencePausesAndResumesFrozenBatchImmediately() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.setPhoneRouting(false)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        let delivery = try f.delivery()
+        try await c.enqueueWake(delivery)
+        try await until { await timer.waiting }
+        let before = await provider.wakes
+        XCTAssertTrue(before.isEmpty)
+        await provider.hold()
+        try await c.setPhoneRouting(true)
+        try await until { await provider.wakes.count == 1 }
+        try await c.setPhoneRouting(false)
+        try await until { await c.scheduledWakeCount == 0 }
+        await provider.release()
+        try await c.setPhoneRouting(true)
+        try await until { (try? await c.wakeProgress(deliveryID: delivery.id)?.status) == .accepted }
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 2); XCTAssertEqual(wakes.first?.identifier, wakes.last?.identifier)
+        let progress = try await wakeState(c, delivery)
+        XCTAssertEqual(progress.attempts, 2)
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerRetriesPreparationFailureAtBoundedInterval() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer(), refreshes = Counter()
+        let source = try FCMTokenSource(now: { .now }, refresh: {
+            let attempt = refreshes.value.withLock { $0 += 1; return $0 }
+            if attempt == 1 { throw FCMError.network }
+            return FCMTokenLease(value: try FCMAccessToken("synthetic"), expiresAt: .now.advanced(by: .seconds(3600)))
+        })
+        let c = try f.coordinator(provider, tokenSource: source, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        let delivery = try f.delivery()
+        try await c.enqueueWake(delivery)
+        try await until {
+            let count = await c.scheduledWakeCount
+            return refreshes.value.withLock { $0 == 1 } && count == 0
+        }
+        let queued = try await wakeState(c, delivery)
+        XCTAssertEqual(queued.status, .queued); XCTAssertEqual(queued.attempts, 0)
+        try await until { await timer.waiting }
+        f.clock.advance(49); await timer.tick()
+        try await until { await timer.waiting }
+        XCTAssertEqual(refreshes.value.withLock { $0 }, 1)
+        f.clock.advance(1); await timer.tick()
+        try await until { (try? await c.wakeProgress(deliveryID: delivery.id)?.status) == .accepted }
+        XCTAssertEqual(refreshes.value.withLock { $0 }, 2)
+        let progress = try await wakeState(c, delivery)
+        XCTAssertEqual(progress.attempts, 1)
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerUnexpectedOAuthCancellationDoesNotSpin() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer(), refreshes = Counter()
+        let source = try FCMTokenSource(now: { .now }, refresh: {
+            refreshes.value.withLock { $0 += 1 }
+            throw CancellationError()
+        })
+        let c = try f.coordinator(provider, tokenSource: source, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        let delivery = try f.delivery(deadline: 150)
+        try await c.enqueueWake(delivery)
+        try await until {
+            let count = await c.scheduledWakeCount
+            return count == 0 && refreshes.value.withLock { $0 == 1 }
+        }
+        try await until { await timer.waiting }
+        f.clock.advance(40); await timer.tick()
+        try await until { (try? await c.wakeProgress(deliveryID: delivery.id)?.status) == .expired }
+        XCTAssertEqual(refreshes.value.withLock { $0 }, 1)
+        let wakes = await provider.wakes
+        XCTAssertTrue(wakes.isEmpty)
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerExpiresAndCancelsStalledProviderWithoutRootTraffic() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        let delivery = try f.delivery(deadline: 150)
+        try await c.enqueueWake(delivery)
+        try await until { await provider.wakes.count == 1 }
+        try await until { await timer.waiting }
+        f.clock.advance(40); await timer.tick()
+        try await until { await c.scheduledWakeCount == 0 }
+        let expired = try await wakeState(c, delivery)
+        XCTAssertEqual(expired.status, .expired)
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerRoundRobinLeavesRoomForOtherPhonesBeforeNextBatch() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), maximumFlights: 1, schedulerTimer: timer)
+        try await c.replaceTrustedEnrollments([f.enrollment(phone: 6), f.enrollment(phone: 8), f.enrollment(phone: 10)], active: true)
+        for (n, phone): (UInt8, UInt8) in [(1, 6), (3, 8), (5, 10)] {
+            try await f.admit(c, n: n, phone: phone); try await f.activate(c, n: n, phone: phone)
+        }
+        try await c.setPhoneRouting(true)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        try await c.enqueueWake(f.delivery())
+        try await until { await provider.wakes.count == 1 }
+        try await c.enqueueWake(f.delivery(2, phone: 6))
+        try await c.enqueueWake(f.delivery(3, phone: 8))
+        try await c.enqueueWake(f.delivery(4, phone: 10))
+        let count = await c.scheduledWakeCount
+        XCTAssertEqual(count, 1)
+        await provider.release()
+        try await until { await provider.wakes.count == 4 }
+        let tags = await provider.wakes.map(\.enrollmentTag)
+        XCTAssertEqual(tags, [id(6, 32), id(8, 32), id(10, 32), id(6, 32)])
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerUsesSlotReleasedByTokenProbeWithoutTimer() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), maximumFlights: 1, schedulerTimer: timer)
+        try await prepareWakes(f, c); try await f.admit(c, n: 3)
+        let probe = Task { try await c.deliverProbe(operationID: id(3), phoneID: id(6)) }
+        defer { probe.cancel() }
+        try await until { await provider.times.count == 1 }
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        let delivery = try f.delivery()
+        try await c.enqueueWake(delivery)
+        let count = await c.scheduledWakeCount
+        XCTAssertEqual(count, 0)
+        await provider.release(); _ = try await probe.value
+        try await until { (try? await c.wakeProgress(deliveryID: delivery.id)?.status) == .accepted }
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 1)
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerResumesAfterMappingRepairWithoutWaitingForTimer() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        let first = try f.delivery(), second = try f.delivery(2)
+        try await c.enqueueWake(first)
+        try await until { await provider.wakes.count == 1 }
+        try await c.enqueueWake(second)
+        await provider.release(result: .registrationInvalid)
+        try await until {
+            let count = await c.scheduledWakeCount
+            let status = try? await c.wakeProgress(deliveryID: first.id)?.status
+            return count == 0 && status == .rejected
+        }
+        let queued = try await wakeState(c, second)
+        XCTAssertEqual(queued.status, .queued); XCTAssertEqual(queued.attempts, 0)
+        try await f.admit(c, n: 3, token: "repaired")
+        try await f.activate(c, n: 3, token: "repaired")
+        try await until { (try? await c.wakeProgress(deliveryID: second.id)?.status) == .accepted }
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 2)
+        XCTAssertEqual(try wakeToken(XCTUnwrap(wakes.last)), "repaired")
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerClockRegressionStopsAndReleasesOwnedTasks() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        try await c.enqueueWake(f.delivery())
+        try await until { await provider.wakes.count == 1 }
+        try await until { await timer.waiting }
+        f.clock.value.withLock { $0 = 100 }
+        await timer.tick()
+        try await until { await c.scheduledWakeCount == 0 }
+        do { try await c.setPhoneRouting(true); XCTFail("Clock regression must stop owner") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .stopped) }
+        try await c.shutdown()
+    }
+
+    func testWakeSchedulerShutdownCancelsTimerAndProviderBeforeStorageRelease() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        await provider.hold()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        try await c.enqueueWake(f.delivery())
+        try await until { await provider.wakes.count == 1 }
+        try await until { await timer.waiting }
+        try await c.shutdown()
+        let count = await c.scheduledWakeCount, waiting = await timer.waiting
+        XCTAssertEqual(count, 0); XCTAssertFalse(waiting)
+        let lease = try ProtectedGatewayLease(anchor: f.root.path, relativeDirectory: "store", serviceUID: geteuid(), ancestorUID: geteuid())
+        lease.close()
+    }
+
+    func testWakeSchedulerValidatesStartupConfiguration() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        for interval: UInt64 in [0, 60_001] {
+            do { try await c.startWakeScheduling(retryIntervalMillis: interval); XCTFail("Invalid interval") }
+            catch { XCTAssertEqual(error as? GatewayDeliveryError, .invalidConfiguration) }
+        }
+        try await c.startWakeScheduling(retryIntervalMillis: 50)
+        do { try await c.startWakeScheduling(retryIntervalMillis: 50); XCTFail("Already started") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .alreadyRunning) }
+        try await c.shutdown()
     }
 
     func testApprovalWakeExpiredProgressDoesNotPreventCancellation() async throws {
