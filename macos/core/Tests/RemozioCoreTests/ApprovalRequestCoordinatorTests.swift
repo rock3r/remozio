@@ -264,10 +264,12 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             let status = try RequestStatusPayload(macID: state.macID, accountID: state.accountID, requestID: state.requestID,
                 requestDigest: state.requestDigest, challenge: state.challenge,
                 revision: state.revision, phase: state.phase, reason: state.reason,
-                observationID: id(40), observedAgeMs: 120 - state.firstObservedAt.milliseconds,
-                authorizationRemainingMs: state.phase.isTerminal ? nil : state.deadlineMilliseconds - 120,
+                observationID: id(40), observedAgeMs: 130 - state.firstObservedAt.milliseconds,
+                authorizationRemainingMs: state.phase.isTerminal ? nil : state.deadlineMilliseconds - 130,
                 estimatedLifetimeMs: nil, lateObservation: false,
-                terminalAgeMs: state.terminalAt.map { 120 - $0.milliseconds }, decisionPhoneID: state.decisionPhoneID)
+                terminalAgeMs: state.terminalAt.map { $0.milliseconds - state.firstObservedAt.milliseconds }, decisionPhoneID: state.decisionPhoneID)
+            XCTAssertEqual(status.observedAgeMs, 30)
+            XCTAssertEqual(status.terminalAgeMs, disappeared ? 10 : nil)
             XCTAssertEqual(try RequestStatusPayload.decode(status.encode(limits: limits), limits: limits), status)
         }
     }
