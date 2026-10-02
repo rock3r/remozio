@@ -1,5 +1,9 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.phone.transport.PinnedTLSClient
+import dev.remozio.phone.transport.TLSClientProgress
+import dev.remozio.phone.transport.TLSClientState
+import java.nio.ByteBuffer
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -142,6 +146,91 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun engineExchangesFragmentedRecordsWithTheNativePeer(): Unit = Fixture().use { f ->
+        Relay(f.port).use { relay ->
+            f.engine().use { engine ->
+                Socket("127.0.0.1", relay.port).use { socket ->
+                    socket.soTimeout = 4_000
+                    val plaintext = ByteArrayOutputStream()
+                    fun deliver(batch: TLSClientProgress) {
+                        batch.encrypted.forEach { socket.outputStream.write(it.copyBytes()) }
+                        socket.outputStream.flush()
+                        batch.plaintext.forEach { plaintext.write(it.copyBytes()) }
+                    }
+                    fun receive() {
+                        val buffer = ByteArray(173)
+                        val count = socket.inputStream.read(buffer)
+                        if (count < 0) { engine.endOfInput(); error("Unexpected EOF") }
+                        deliver(engine.receive(buffer.copyOf(count)))
+                    }
+                    deliver(engine.start())
+                    while (engine.state() == TLSClientState.HANDSHAKING) {
+                        assertEquals(0, plaintext.size())
+                        receive()
+                    }
+                    assertEquals(TLSClientState.OPEN, engine.state())
+                    val payload = "synthetic-engine-private-data".repeat(2_000).toByteArray()
+                    val frame = ByteBuffer.allocate(payload.size + 4).putInt(payload.size).put(payload).array()
+                    var sent = 0
+                    while (sent < frame.size) {
+                        val batch = engine.send(frame.copyOfRange(sent, minOf(sent + 32_768, frame.size)))
+                        sent += batch.consumedPlaintextBytes
+                        deliver(batch)
+                        if (batch.consumedPlaintextBytes == 0) receive()
+                    }
+                    while (plaintext.size() < frame.size) receive()
+                    assertArrayEquals(frame, plaintext.toByteArray())
+                    assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("synthetic-engine-private-data"))
+                }
+            }
+        }
+    }
+
+    @Test fun engineRejectsWrongPinClientIdentityAndApplicationProtocol(): Unit = Fixture().use { f ->
+        for (engine in listOf(f.engine(pin = f.phone.certificate), f.engine(protocol = "unrelated/1"), f.engine(identity = f.mac))) {
+            engine.use {
+                Socket("127.0.0.1", f.port).use { socket ->
+                    socket.soTimeout = 4_000
+                    assertThrows(IOException::class.java) {
+                        var batch = engine.start()
+                        while (true) {
+                            assertTrue(batch.plaintext.isEmpty())
+                            batch.encrypted.forEach { socket.outputStream.write(it.copyBytes()) }
+                            socket.outputStream.flush()
+                            val buffer = ByteArray(4_096)
+                            val count = socket.inputStream.read(buffer)
+                            batch = if (count < 0) engine.endOfInput() else engine.receive(buffer.copyOf(count))
+                        }
+                    }
+                    assertEquals(TLSClientState.FAILED, engine.state())
+                }
+            }
+        }
+    }
+
+    @Test fun engineLimitsAndAbortReleaseTheChannel(): Unit = Fixture().use { f ->
+        f.engine(budget = 1).use { engine ->
+            assertThrows(IOException::class.java) { engine.start() }
+            assertEquals(TLSClientState.FAILED, engine.state())
+        }
+        f.engine().use { engine ->
+            assertThrows(IllegalStateException::class.java) { engine.send(byteArrayOf(1)) }
+            val start = engine.start()
+            assertEquals(0, start.consumedPlaintextBytes)
+            assertTrue(start.plaintext.isEmpty())
+            assertThrows(IOException::class.java) { engine.receive(ByteArray(32_769)) }
+            assertEquals(TLSClientState.FAILED, engine.state())
+        }
+        f.engine().use { engine ->
+            engine.start()
+            assertThrows(IOException::class.java) { engine.endOfInput() }
+            assertEquals(TLSClientState.FAILED, engine.state())
+            engine.close()
+            assertEquals(TLSClientState.CLOSED, engine.state())
+            assertThrows(IllegalStateException::class.java) { engine.receive(byteArrayOf()) }
+        }
+    }
+
     private fun exchange(socket: SSLSocket, payload: ByteArray): ByteArray {
         DataOutputStream(socket.outputStream).apply { writeInt(payload.size); write(payload); flush() }
         val input = DataInputStream(socket.inputStream)
@@ -202,6 +291,8 @@ class TLSInteropTest {
             Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
             return Identity(path)
         }
+        fun engine(pin: X509Certificate = mac.certificate, protocol: String = "remozio-experiment/1", budget: Int = 65_536, identity: Identity = phone) =
+            PinnedTLSClient(identity.keyManagers, pin.publicKey.encoded, protocol, budget)
         fun connect(port: Int, identity: Identity? = phone, serverPin: X509Certificate = mac.certificate): SSLSocket {
             val context = SSLContext.getInstance("TLSv1.3")
             val trust = object : X509TrustManager {
