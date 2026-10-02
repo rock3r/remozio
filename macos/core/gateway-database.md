@@ -28,7 +28,7 @@ Constructing this value does not authenticate setup. Never source it from an inc
 
 Opening requires an existing file and the dedicated service's lease. SQLite uses `NOFOLLOW` without `CREATE`.
 Initialization is explicit and accepts only an empty store. Unknown schemas, mismatched identities and malformed stores fail without replacement.
-The connection uses a distinct application ID, schema 2, trusted schema disabled, foreign keys enabled, DELETE journaling, EXTRA synchronization and full filesystem synchronization.
+The connection uses a distinct application ID, schema 3, trusted schema disabled, foreign keys enabled, DELETE journaling, EXTRA synchronization and full filesystem synchronization.
 Attachments are disabled, extension loading must be omitted, and busy time and value sizes are bounded.
 No raw connection, statement or SQL callback escapes the owner.
 
@@ -90,9 +90,9 @@ Active mappings survive restart; pending probes do not. Receipts include the pro
 
 ## Schema migration
 
-The only supported migration is schema 1 to schema 2. The service controller must explicitly set `migrateLegacyStore` for this known transition.
+Supported migrations are schema 1 or 2 to schema 3. The service controller must explicitly set `migrateLegacyStore` for this known transition.
 This is a storage API choice, not a new user confirmation. Normal product upgrades should select the known migration automatically.
-Migration checks the pinned identity and legacy layout, creates the recipient tables, and advances the schema version in one transaction.
+Migration checks the pinned identity and legacy layout, creates missing recipient and probe tables, and advances the schema version in one transaction.
 It preserves all candidate receipts and the shared head. Failure rolls back the schema changes without resetting history.
 Unknown versions still fail. Reopening after migration retires pending token references under the existing restart policy.
 
@@ -115,12 +115,13 @@ The candidate control and receipt must not be exposed as phone-fetchable metadat
 
 This component does not implement phone proof consumption, acknowledgments, reconciliation or the root outbox.
 It does not install a service or provide a rollback witness. A restored database and valid old signatures do not establish current trust.
-The provider coordinator must add durable attempt tracking, current-trust checks and rate limits before sending probes.
+The [probe attempt store](gateway-probe-attempts.md) provides durable reservations and per-candidate retry limits.
+The provider coordinator must use it with current-trust checks and aggregate rate limits before sending probes.
 A returned mapping is historical evidence, not permission to send. The coordinator must suspend delivery while a required state change cannot commit.
 
 ## Validation
 
-Twenty-eight database tests use real private SQLite files under a normal-user fixture lease.
+Thirty-seven database tests use real private SQLite files under a normal-user fixture lease.
 They cover atomic rollback, duplicate and conflicting controls, quotas, expiry, restart, unsigned revision boundaries, registration binding and failure cleanup.
 They also check signature corruption, clock changes, file replacement, malformed stores, recipient transitions, migration and failure during mapping replacement.
 The ten candidate-verifier tests cover the shared authentication logic after its extraction for historical retries.

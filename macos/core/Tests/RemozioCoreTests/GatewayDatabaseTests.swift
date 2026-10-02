@@ -16,9 +16,9 @@ final class GatewayDatabaseTests: XCTestCase {
         try GatewayRegistrationIdentity(ownerID: id(owner), macID: id(2), accountID: id(3), gatewayID: id(4),
             lifecycleEpoch: id(5), rootPublicKey: key.publicKey.x963Representation)
     }
-    private func trust(head: UInt64, phone: UInt8 = 6, active: Bool = true, phoneEpoch: UInt8 = 7) throws -> GatewayCandidateTrust {
+    private func trust(head: UInt64, phone: UInt8 = 6, active: Bool = true, phoneEpoch: UInt8 = 7, snapshot: UUID = UUID()) throws -> GatewayCandidateTrust {
         try GatewayCandidateTrust(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5),
-            rootPublicKey: key.publicKey.x963Representation, active: true, revision: UUID(), appliedControlRevision: head,
+            rootPublicKey: key.publicKey.x963Representation, active: true, revision: snapshot, appliedControlRevision: head,
             enrollment: GatewayPhoneEnrollment(phoneID: id(phone), epoch: id(phoneEpoch), tag: id(phone, 32), active: active))
     }
     private func candidate(_ n: UInt8 = 1, revision: UInt64 = 1, phone: UInt8 = 6, operation: UInt8? = nil,
@@ -38,10 +38,10 @@ final class GatewayDatabaseTests: XCTestCase {
             nowUnixMillis: wall, now: AuthorityMoment(epoch: clock ?? epoch, milliseconds: monotonic))
     }
     private func open(_ fixture: Fixture, initialize: Bool = false, owner: UInt8 = 1, maximum: Int = 10, pending: Int = 2,
-                      lifetime: UInt64 = 1000, busy: UInt32 = 100, registration: GatewayRegistrationIdentity? = nil, migrate: Bool = false) throws -> GatewayDatabase {
+                      lifetime: UInt64 = 1000, busy: UInt32 = 100, registration: GatewayRegistrationIdentity? = nil, migrate: Bool = false, probePolicy: GatewayProbePolicy? = nil) throws -> GatewayDatabase {
         try GatewayDatabase(lease: fixture.lease(), identity: registration ?? identity(owner: owner), payloadLimits: limits, signingLimits: limits,
             maximumOperations: maximum, maximumPendingPerEnrollment: pending, maximumLifetimeMillis: lifetime,
-            clockEpoch: epoch, busyMilliseconds: busy, initialize: initialize, migrateLegacyStore: migrate)
+            clockEpoch: epoch, busyMilliseconds: busy, initialize: initialize, migrateLegacyStore: migrate, probePolicy: probePolicy)
     }
     private func fails(_ expected: GatewayDatabaseError, _ action: () throws -> Any, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try action(), file: file, line: line) { XCTAssertEqual($0 as? GatewayDatabaseError, expected, file: file, line: line) }
@@ -147,7 +147,7 @@ final class GatewayDatabaseTests: XCTestCase {
         fails(.incompatibleStore) { try open(fixture, initialize: true) }
         try fixture.sql("PRAGMA user_version=99")
         fails(.incompatibleStore) { try open(fixture) }
-        try fixture.sql("PRAGMA user_version=2")
+        try fixture.sql("PRAGMA user_version=3")
         let reopened = try open(fixture)
         XCTAssertEqual(try reopened.head(), 1); try reopened.close()
         try fixture.sql("DROP TABLE gateway_candidates_v1")
@@ -421,11 +421,11 @@ final class GatewayDatabaseTests: XCTestCase {
     func testExplicitLegacyMigrationPreservesCandidateReceiptAndHead() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         let receipt = try admit(db).receipt; try db.close()
-        try fixture.sql("DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1")
+        try fixture.sql("DROP TABLE gateway_probes_v3; DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1")
         fails(.incompatibleStore) { try open(fixture) }
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 1)
         let migrated = try open(fixture, migrate: true)
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 2)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 3)
         XCTAssertEqual(try migrated.head(), 1)
         XCTAssertEqual(try migrated.receipt(operationID: id(1))?.canonicalPayload, receipt.canonicalPayload)
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
@@ -437,7 +437,7 @@ final class GatewayDatabaseTests: XCTestCase {
     func testLegacyMigrationFailureRollsBackWithoutResettingHistory() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         _ = try admit(db); try db.close()
-        try fixture.sql("DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1; CREATE TABLE gateway_mappings_v2(block INTEGER)")
+        try fixture.sql("DROP TABLE gateway_probes_v3; DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1; CREATE TABLE gateway_mappings_v2(block INTEGER)")
         XCTAssertThrowsError(try open(fixture, migrate: true))
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 1)
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM sqlite_schema WHERE name='gateway_recipients_v2'"), 0)
@@ -499,6 +499,181 @@ final class GatewayDatabaseTests: XCTestCase {
         try fixture.sql("UPDATE gateway_mappings_v2 SET operation=x'\(oldOperation)'")
         fails(.corruptData) { try db.activeMapping(trust: trust(head: 4)) }
         fails(.unavailable) { try db.head() }
+    }
+
+    private func probePolicy(_ attempts: Int = 3, delay: UInt64 = 100, ttl: UInt32 = 30) throws -> GatewayProbePolicy {
+        try GatewayProbePolicy(maximumAttempts: attempts, minimumRetryDelayMillis: delay, maximumTTLSeconds: ttl)
+    }
+    private func reserve(_ db: GatewayDatabase, operation: UInt8 = 1, head: UInt64 = 1, snapshot: UUID,
+                         wall: UInt64 = 1000, moment: UInt64 = 100, active: Bool = true) throws -> GatewayProbeReservation {
+        try db.reserveProbe(candidateOperationID: id(operation), trust: trust(head: head, active: active, snapshot: snapshot),
+            nowUnixMillis: wall, now: AuthorityMoment(epoch: epoch, milliseconds: moment))
+    }
+    private func take(_ db: GatewayDatabase, _ ticket: GatewayProbeReservation, head: UInt64 = 1, snapshot: UUID,
+                      wall: UInt64 = 1000, moment: UInt64 = 100, active: Bool = true) throws -> FCMTokenProbe {
+        try db.takeProbe(ticket, trust: trust(head: head, active: active, snapshot: snapshot), nowUnixMillis: wall,
+            now: AuthorityMoment(epoch: epoch, milliseconds: moment))
+    }
+    private func finish(_ db: GatewayDatabase, _ ticket: GatewayProbeReservation, _ outcome: GatewayProbeOutcome,
+                        moment: UInt64 = 100) throws -> Bool {
+        try db.finishProbe(ticket, outcome: outcome, now: AuthorityMoment(epoch: epoch, milliseconds: moment))
+    }
+    private func probeFails(_ expected: GatewayProbeError, _ body: () throws -> Any, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try body(), file: file, line: line) { XCTAssertEqual($0 as? GatewayProbeError, expected, file: file, line: line) }
+    }
+
+    func testProbeReservationAndDispatchAreSingleUseAndNeverActivateMapping() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+        let candidate = try candidate(); _ = try admit(db, candidate)
+        let ticket = try reserve(db, snapshot: snapshot)
+        XCTAssertEqual(ticket.number, 1); XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .reserved)
+        probeFails(.attemptInFlight) { try reserve(db, snapshot: snapshot) }
+        probeFails(.staleReservation) { try finish(db, ticket, .accepted) }
+        let message = try take(db, ticket, snapshot: snapshot)
+        XCTAssertEqual(message.registrationToken, token); XCTAssertEqual(message.payload.challenge, candidate.binding.challenge)
+        XCTAssertEqual(message.ttlSeconds, 1)
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .dispatched)
+        probeFails(.staleReservation) { try take(db, ticket, snapshot: snapshot) }
+        XCTAssertTrue(try finish(db, ticket, .accepted))
+        XCTAssertFalse(try finish(db, ticket, .terminal))
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .accepted)
+        probeFails(.finished) { try reserve(db, snapshot: snapshot) }
+        XCTAssertNil(try db.activeMapping(trust: trust(head: 1)))
+        XCTAssertEqual(try db.head(), 1)
+        XCTAssertEqual(String(reflecting: ticket), "GatewayProbeReservation(redacted)")
+        _ = try activate(db, activation(candidate), head: 1)
+        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 2)))
+    }
+
+    func testProbeRetryHonorsFloorProviderDelayBudgetAndLateCallbacks() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy(2)), snapshot = UUID()
+        _ = try admit(db)
+        let first = try reserve(db, snapshot: snapshot); _ = try take(db, first, snapshot: snapshot)
+        XCTAssertTrue(try finish(db, first, .retry(minimumDelayMillis: 200)))
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.retryAtMilliseconds, 300)
+        probeFails(.retryNotDue) { try reserve(db, snapshot: snapshot, moment: 299) }
+        let second = try reserve(db, snapshot: snapshot, moment: 300)
+        XCTAssertEqual(second.number, 2)
+        XCTAssertFalse(try finish(db, first, .accepted, moment: 300))
+        _ = try take(db, second, snapshot: snapshot, moment: 300)
+        XCTAssertTrue(try finish(db, second, .retry(minimumDelayMillis: 0), moment: 300))
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .terminal)
+        probeFails(.finished) { try reserve(db, snapshot: snapshot, moment: 400) }
+        XCTAssertEqual(try db.head(), 1)
+        XCTAssertFalse(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 1)
+    }
+
+    func testProbeRetryCannotExtendCandidateOrOverflowClock() throws {
+        for delay: UInt64 in [0, 1000, .max] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+            _ = try admit(db); let ticket = try reserve(db, snapshot: snapshot); _ = try take(db, ticket, snapshot: snapshot)
+            XCTAssertTrue(try finish(db, ticket, .retry(minimumDelayMillis: delay)))
+            let progress = try XCTUnwrap(db.probeProgress(candidateOperationID: id(1)))
+            XCTAssertEqual(progress.status, delay == 0 ? .retryable : .terminal)
+            XCTAssertEqual(progress.retryAtMilliseconds, delay == 0 ? 200 : nil)
+        }
+    }
+
+    func testProbeTakeRechecksTrustRevocationActivationAndBothDeadlines() throws {
+        for action in 0...5 {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+            let candidate = try candidate(); _ = try admit(db, candidate)
+            let ticket = try reserve(db, snapshot: snapshot)
+            switch action {
+            case 0: probeFails(.staleReservation) { try take(db, ticket, snapshot: UUID()) }
+            case 1: XCTAssertThrowsError(try take(db, ticket, snapshot: snapshot, active: false))
+            case 2:
+                _ = try revoke(db, revision: 2, head: 1)
+                fails(.revokedEnrollment) { try take(db, ticket, head: 2, snapshot: snapshot) }
+            case 3:
+                _ = try activate(db, activation(candidate), head: 1)
+                fails(.unavailableCandidate) { try take(db, ticket, head: 2, snapshot: snapshot) }
+            case 4: fails(.unavailableCandidate) { try take(db, ticket, snapshot: snapshot, wall: 2000) }
+            default: fails(.unavailableCandidate) { try take(db, ticket, snapshot: snapshot, moment: 1100) }
+            }
+            XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .reserved)
+        }
+    }
+
+    func testProbeCancellationBeforeDispatchIsTerminalAndProviderFailureDoesNotRevoke() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+        _ = try admit(db); let ticket = try reserve(db, snapshot: snapshot)
+        XCTAssertTrue(try finish(db, ticket, .terminal))
+        probeFails(.staleReservation) { try take(db, ticket, snapshot: snapshot) }
+        probeFails(.finished) { try reserve(db, snapshot: snapshot) }
+        XCTAssertFalse(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+        _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let next = try reserve(db, operation: 2, head: 2, snapshot: snapshot)
+        _ = try take(db, next, head: 2, snapshot: snapshot)
+        _ = try revoke(db, revision: 3, head: 2)
+        XCTAssertTrue(try finish(db, next, .retry(minimumDelayMillis: 1)))
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(2))?.status, .terminal)
+        XCTAssertTrue(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+    }
+
+    func testRestartRetiresProbeReservationsWithoutRenewingCandidateOrBudget() throws {
+        for dispatch in [false, true] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+            _ = try admit(db); let ticket = try reserve(db, snapshot: snapshot)
+            if dispatch { _ = try take(db, ticket, snapshot: snapshot) }
+            try db.close()
+            let reopened = try open(fixture, probePolicy: probePolicy())
+            XCTAssertEqual(try reopened.probeProgress(candidateOperationID: id(1))?.status, .terminal)
+            XCTAssertEqual(try reopened.probeProgress(candidateOperationID: id(1))?.number, 1)
+            probeFails(.staleReservation) { try take(reopened, ticket, snapshot: snapshot, moment: 0) }
+            probeFails(.staleReservation) { try finish(reopened, ticket, .accepted, moment: 0) }
+            fails(.unavailableCandidate) { try reserve(reopened, snapshot: snapshot, moment: 0) }
+            XCTAssertEqual(try reopened.head(), 1)
+        }
+    }
+
+    func testProbeWritesRollBackReservationDispatchAndOutcomeOnStorageFailure() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+        _ = try admit(db)
+        try fixture.sql("CREATE TRIGGER reject_insert BEFORE INSERT ON gateway_probes_v3 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try reserve(db, snapshot: snapshot))
+        XCTAssertNil(try db.probeProgress(candidateOperationID: id(1)))
+        try fixture.sql("DROP TRIGGER reject_insert")
+        let ticket = try reserve(db, snapshot: snapshot)
+        try fixture.sql("CREATE TRIGGER reject_update BEFORE UPDATE ON gateway_probes_v3 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try take(db, ticket, snapshot: snapshot))
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .reserved)
+        try fixture.sql("DROP TRIGGER reject_update")
+        _ = try take(db, ticket, snapshot: snapshot)
+        try fixture.sql("CREATE TRIGGER reject_update BEFORE UPDATE ON gateway_probes_v3 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try finish(db, ticket, .accepted))
+        XCTAssertEqual(try db.probeProgress(candidateOperationID: id(1))?.status, .dispatched)
+        try fixture.sql("DROP TRIGGER reject_update")
+        XCTAssertTrue(try finish(db, ticket, .accepted))
+    }
+
+    func testProbePolicyDisabledUnknownCandidateAndCorruptionFailClosed() throws {
+        for attempts in [0, 33] { XCTAssertThrowsError(try probePolicy(attempts)) }
+        XCTAssertThrowsError(try probePolicy(delay: 0)); XCTAssertThrowsError(try probePolicy(ttl: 2_419_201))
+        let fixture = try Fixture(), disabled = try open(fixture, initialize: true), snapshot = UUID()
+        _ = try admit(disabled)
+        probeFails(.disabled) { try reserve(disabled, snapshot: snapshot) }
+        try disabled.close()
+        let db = try open(fixture, probePolicy: probePolicy())
+        fails(.unavailableCandidate) { try reserve(db, operation: 42, snapshot: snapshot) }
+        _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let ticket = try reserve(db, operation: 2, head: 2, snapshot: snapshot)
+        try fixture.sql("UPDATE gateway_probes_v3 SET number=zeroblob(8)")
+        fails(.corruptData) { try take(db, ticket, head: 2, snapshot: snapshot) }
+        fails(.unavailable) { try db.head() }
+    }
+
+    func testSchemaTwoMigrationKeepsActiveMappingAndStartsWithNoProbeAttempts() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), candidate = try candidate()
+        _ = try admit(db, candidate); _ = try activate(db, activation(candidate), head: 1); try db.close()
+        try fixture.sql("DROP TABLE gateway_probes_v3; PRAGMA user_version=2")
+        fails(.incompatibleStore) { try open(fixture) }
+        let migrated = try open(fixture, migrate: true, probePolicy: probePolicy())
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 3)
+        XCTAssertEqual(try migrated.head(), 2)
+        XCTAssertEqual(try migrated.activeMapping(trust: trust(head: 2))?.activation.binding, candidate.binding)
+        XCTAssertNil(try migrated.probeProgress(candidateOperationID: id(1)))
     }
 
     private final class Fixture {

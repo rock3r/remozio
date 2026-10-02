@@ -7,20 +7,26 @@ public struct FCMTokenProbe: Sendable, CustomStringConvertible, CustomDebugStrin
     public let payload: PushTokenChallenge
     public let ttlSeconds: UInt32
     public init(candidate: VerifiedGatewayCandidate, nowUnixMillis: UInt64, now: AuthorityMoment, maximumTTLSeconds: UInt32) throws {
+        try self.init(candidate: candidate.candidate, registrationToken: candidate.registrationToken,
+            admittedAt: candidate.admittedAt, deadlineMilliseconds: candidate.deadlineMilliseconds,
+            nowUnixMillis: nowUnixMillis, now: now, maximumTTLSeconds: maximumTTLSeconds)
+    }
+    init(candidate: GatewayTokenCandidate, registrationToken: String, admittedAt: AuthorityMoment, deadlineMilliseconds: UInt64,
+         nowUnixMillis: UInt64, now: AuthorityMoment, maximumTTLSeconds: UInt32) throws {
         guard maximumTTLSeconds <= 2_419_200 else { throw FCMError.invalidConfiguration }
-        guard now.epoch == candidate.admittedAt.epoch, now.milliseconds >= candidate.admittedAt.milliseconds else {
+        guard now.epoch == admittedAt.epoch, now.milliseconds >= admittedAt.milliseconds else {
             throw GatewayCandidateVerificationError.invalidClock
         }
-        guard now.milliseconds < candidate.deadlineMilliseconds,
-              nowUnixMillis >= candidate.candidate.issuedAtUnixMillis, nowUnixMillis < candidate.candidate.expiresAtUnixMillis else {
+        guard now.milliseconds < deadlineMilliseconds,
+              nowUnixMillis >= candidate.issuedAtUnixMillis, nowUnixMillis < candidate.expiresAtUnixMillis else {
             throw GatewayCandidateVerificationError.expired
         }
-        let remaining = min(candidate.deadlineMilliseconds - now.milliseconds, candidate.candidate.expiresAtUnixMillis - nowUnixMillis)
+        let remaining = min(deadlineMilliseconds - now.milliseconds, candidate.expiresAtUnixMillis - nowUnixMillis)
         // Round down; TTL zero asks the provider to deliver immediately or discard the probe.
         self.ttlSeconds = UInt32(min(UInt64(maximumTTLSeconds), remaining / 1000))
-        let binding = candidate.candidate.binding
+        let binding = candidate.binding
         self.payload = try PushTokenChallenge(candidateID: binding.candidateID, challenge: binding.challenge, enrollmentTag: binding.enrollmentTag)
-        self.registrationToken = candidate.registrationToken
+        self.registrationToken = registrationToken
     }
     public var description: String { "FCMTokenProbe(redacted)" }
     public var debugDescription: String { description }
