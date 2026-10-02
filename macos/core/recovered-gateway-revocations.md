@@ -35,6 +35,7 @@ New evidence or an active enrollment change advances the trust revision and appe
 The event uses the recovery kind, enrollment category, system authentication, and revoked reason.
 It does not claim that an administrator just authorized a new removal.
 Repeated evidence for an already restricted epoch does not append another event or change the trust revision.
+Existing normal revocation rows also count as permanent evidence. Recovery does not duplicate them or consume another storage slot.
 
 All changes share the journal transaction. Failed evidence insertion, token retirement, enrollment writes, or audit writes roll back together.
 The host keeps affected admission closed until restriction and the independent continuity checkpoint succeed.

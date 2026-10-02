@@ -227,7 +227,8 @@ final class GatewayAuthorityJournal {
         guard GatewayStoredRecipient.revocation(value).matches(identity) else { throw GatewayAuthorityError.wrongScope }
         let phone = value.binding.phoneID, epoch = value.binding.enrollmentEpoch
         var changed = false
-        if try recoveredRevocation(phone: phone, epoch: epoch, identity: identity) == nil {
+        if try latestRevocation(phone: phone, epoch: epoch, identity: identity) == nil,
+           try recoveredRevocation(phone: phone, epoch: epoch, identity: identity) == nil {
             try capacity()
             try statement("INSERT INTO main.gateway_recovered_revocations_v1 VALUES(?,?,?,?,?)",
                 [phone, epoch, value.operationID, payload, signature]) { try done($0) }
@@ -237,8 +238,10 @@ final class GatewayAuthorityJournal {
             DELETE FROM main.gateway_desired_tokens_v1 WHERE candidate IN
             (SELECT candidate FROM main.gateway_root_candidates_v1 WHERE phone=? AND enrollment=?)
             """, [phone, epoch]) { try done($0); changed = changed || sqlite3_changes(db) != 0 }
-        try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16) WHERE phone=? AND enrollment=? AND run<>zeroblob(16)",
-            [phone, epoch]) { try done($0); changed = changed || sqlite3_changes(db) != 0 }
+        if changed {
+            try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16) WHERE phone=? AND enrollment=? AND run<>zeroblob(16)",
+                [phone, epoch]) { try done($0) }
+        }
         return (value, changed)
     }
 
@@ -504,13 +507,16 @@ final class GatewayAuthorityJournal {
         let deadline: UInt64
     }
     private func latestRevocation(trust: GatewayAuthorityTrust) throws -> Revocation? {
+        try latestRevocation(phone: trust.enrollment.phoneID, epoch: trust.enrollment.epoch, identity: trust.registration)
+    }
+    private func latestRevocation(phone: Data, epoch: Data, identity: GatewayRegistrationIdentity) throws -> Revocation? {
         try statement("SELECT operation FROM main.gateway_revocations_v1 WHERE phone=? AND enrollment=? ORDER BY revision DESC LIMIT 1",
-            [trust.enrollment.phoneID, trust.enrollment.epoch]) {
+            [phone, epoch]) {
             let result = sqlite3_step($0)
             if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW, let entry = try revocation(blob($0, 0, maximum: 16), identity: trust.registration),
-                  entry.value.binding.phoneID == trust.enrollment.phoneID,
-                  entry.value.binding.enrollmentEpoch == trust.enrollment.epoch else { throw GatewayAuthorityError.corruptData }
+            guard result == SQLITE_ROW, let entry = try revocation(blob($0, 0, maximum: 16), identity: identity),
+                  entry.value.binding.phoneID == phone,
+                  entry.value.binding.enrollmentEpoch == epoch else { throw GatewayAuthorityError.corruptData }
             return entry
         }
     }

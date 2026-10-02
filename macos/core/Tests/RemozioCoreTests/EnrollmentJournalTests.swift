@@ -493,6 +493,37 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
     }
 
+    func testRecoveryReusesNormalRevocationAtFullCapacityWithoutAuditOrRevisionChanges() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        _ = try tokenCandidate(db, revision: revision)
+        let removed = try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval(head: 1))
+        let evidence = try XCTUnwrap(removed.gatewayControl)
+        let next = try recoverRemoval(db, writer: writer, revision: removed.revision, head: 2,
+            evidence: (evidence.canonicalPayload, evidence.signature))
+        XCTAssertEqual(next, removed.revision)
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 2)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 2)
+        XCTAssertEqual(try recoverRemoval(db, writer: writer, revision: next, head: 2), next)
+    }
+
+    func testKnownNormalRevocationStillDisablesAnActiveEnrollmentDuringRecovery() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let removal = try gatewayRemoval()
+        let trusted = try GatewayAuthorityTrust(registration: identity(),
+            enrollment: GatewayPhoneEnrollment(phoneID: id(5), epoch: id(9), tag: id(5, count: 32), active: false), active: true)
+        let evidence = try db.write { try $0.revokeGatewayEnrollment(trust: trusted, expectedHead: 0,
+            nowUnixMillis: 1000, now: moment(), sign: removal.sign) }
+        let next = try recoverRemoval(db, writer: writer, revision: revision,
+            evidence: (evidence.canonicalPayload, evidence.signature))
+        XCTAssertNotEqual(next, revision)
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 2)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 1)
+    }
+
     func testRecoveredUnknownEpochCannotBeEnrolledAndDoesNotDisableNewerEpoch() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f)
         try db.write { try $0.configureGatewayAuthority(identity()) }
