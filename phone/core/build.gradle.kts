@@ -5,6 +5,7 @@ kotlin { jvmToolchain(21) }
 dependencies {
     implementation(project(":protocol-kotlin"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    testImplementation("org.bouncycastle:bcprov-jdk18on:1.86")
     testImplementation(kotlin("test-junit"))
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
@@ -20,7 +21,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("remozio.test.commandCapture", capture.asFile.absolutePath)
 }
 
-tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class") }
+tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class") }
 
 tasks.register<Test>("approvalFlowTest") {
     description = "Runs synthetic Swift and Kotlin approval and audit peers on a Mac."
@@ -31,11 +32,15 @@ tasks.register<Test>("approvalFlowTest") {
     filter {
         includeTestsMatching("dev.remozio.phone.requests.ApprovalFlowTest")
         includeTestsMatching("dev.remozio.phone.audit.AuditFlowTest")
+        includeTestsMatching("dev.remozio.phone.crypto.HPKEInteropTest")
     }
     val peer = rootProject.layout.projectDirectory.file(
         ".build/approval-flow/ApprovalFlowPeer")
     inputs.file(peer)
     systemProperty("remozio.test.swiftPeer", peer.asFile.absolutePath)
+    val hpkePeer = rootProject.layout.projectDirectory.file(".build/approval-flow/HPKEPeer")
+    inputs.file(hpkePeer)
+    systemProperty("remozio.test.hpkePeer", hpkePeer.asFile.absolutePath)
     val auditPeer = rootProject.layout.projectDirectory.file(".build/approval-flow/AuditFlowPeer")
     inputs.file(auditPeer)
     systemProperty("remozio.test.auditPeer", auditPeer.asFile.absolutePath)
