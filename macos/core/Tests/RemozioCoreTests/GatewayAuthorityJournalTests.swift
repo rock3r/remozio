@@ -894,6 +894,243 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         return (head, collect ? try XCTUnwrap(collector.accept(page)) : nil)
     }
 
+    private func withRecoveryAttempt(_ controls: [GatewayAuthorityEnvelope], tag: UInt8 = 6, pageSize: Int = 16,
+                                     maximumRecords: Int = 100_000,
+                                     body: (Fixture, JournalDatabase, AuditEpochWriter, GatewayDatabase, P256.Signing.PrivateKey, GatewayRecoveryAttempt) throws -> Void) throws {
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        _ = try enrollForRecovery(db, tag: tag, onWriter: { writer = $0 })
+        let audit = try XCTUnwrap(writer)
+        let gf = try Fixture(), trusted = try trust(), r = trusted.registration
+        let gateway = try gf.gateway(identity: r, limits: limits, epoch: clockEpoch)
+        defer { try? gateway.close(); try? db.close() }
+        for control in controls {
+            let snapshot = try GatewayCandidateTrust(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID,
+                gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey,
+                active: true, revision: UUID(), appliedControlRevision: gateway.head(), enrollment: trusted.enrollment)
+            if control.kind == 1 {
+                _ = try gateway.admitCandidate(canonicalPayload: control.canonicalPayload, signature: control.signature,
+                    wireVersion: 1, registrationToken: XCTUnwrap(control.registrationToken), trust: snapshot,
+                    nowUnixMillis: 1010, now: moment(110))
+            } else {
+                _ = try gateway.applyRecipient(canonicalPayload: control.canonicalPayload, signature: control.signature,
+                    wireVersion: 1, kind: XCTUnwrap(GatewayRecipientKind(rawValue: control.kind)), trust: snapshot,
+                    nowUnixMillis: 1010, now: moment(110))
+            }
+        }
+        let gatewayKey = P256.Signing.PrivateKey()
+        let attempt = try GatewayRecoveryAttempt(database: db, writer: audit, registration: r,
+            gatewayPublicKey: gatewayKey.publicKey.x963Representation, clockEpoch: clockEpoch,
+            queryLifetimeMillis: 10, pageSize: pageSize, maximumRecords: maximumRecords)
+        try body(f, db, audit, gateway, gatewayKey, attempt)
+    }
+
+    private func receiveHead(_ attempt: GatewayRecoveryAttempt, _ gateway: GatewayDatabase,
+                             _ gatewayKey: P256.Signing.PrivateKey, now: UInt64 = 110) throws {
+        let query = try attempt.makeQuery(now: moment(now))
+        let reply = try gateway.headReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
+        try attempt.accept(reply, now: moment(now + 1))
+    }
+
+    private func receivePage(_ attempt: GatewayRecoveryAttempt, _ gateway: GatewayDatabase,
+                             _ gatewayKey: P256.Signing.PrivateKey, now: UInt64) throws {
+        let query = try attempt.makeQuery(now: moment(now))
+        let reply = try gateway.controlHistoryReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
+        try attempt.accept(reply, now: moment(now + 1))
+    }
+
+    func testRecoveryAttemptCheckpointsRestrictionsBeforeCollectingEveryPage() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source)
+        let activation = try consume(source, first), removal = try revoke(source, head: 2)
+        try withRecoveryAttempt([first, activation, removal], pageSize: 1) { _, db, _, gateway, key, attempt in
+            try receiveHead(attempt, gateway, key)
+            XCTAssertThrowsError(try attempt.makeQuery(now: moment(111)))
+            var checkpoints = 0
+            let checkpoint: (GatewayTrustEvidenceRecovery) throws -> Void = { state in
+                checkpoints += 1
+                XCTAssertEqual(state.auditHead, 2)
+                XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+                XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(self.trust().registration) }, 0)
+            }
+            try attempt.processPending(receiptTimeMs: 1020, checkpointAndRefresh: checkpoint)
+            for time: UInt64 in [112, 114, 116] {
+                try receivePage(attempt, gateway, key, now: time)
+                try attempt.processPending(receiptTimeMs: 1020, checkpointAndRefresh: checkpoint)
+            }
+            XCTAssertEqual(checkpoints, 4)
+            guard case .history(let history) = attempt.result else { return XCTFail("Missing collected history") }
+            XCTAssertEqual(history.records.count, 3)
+            XCTAssertEqual(attempt.expectedLocalRevision, 0)
+            XCTAssertThrowsError(try attempt.makeQuery(now: moment(118)))
+            let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+            XCTAssertEqual(try recover(db, history, revision: revision, local: attempt.expectedLocalRevision).disposition, .reconciled)
+        }
+    }
+
+    func testRecoveryAttemptRetriesCheckpointWithoutRepeatingCommittedRestriction() throws {
+        let sf = try Fixture(), source = try setup(sf), removal = try revoke(source, head: 0)
+        try withRecoveryAttempt([removal]) { f, db, _, gateway, key, attempt in
+            try receiveHead(attempt, gateway, key)
+            XCTAssertThrowsError(try attempt.processPending(receiptTimeMs: 1020) { _ in throw Failure.injected })
+            let pending = try XCTUnwrap(attempt.pendingCheckpoint)
+            XCTAssertEqual(pending.changedPhoneIDs, [id(6)])
+            XCTAssertEqual(pending.auditHead, 2)
+            XCTAssertThrowsError(try attempt.makeQuery(now: moment(112)))
+            try f.sql("CREATE TRIGGER reject_retry BEFORE INSERT ON gateway_recovered_revocations_v1 BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            try attempt.processPending(receiptTimeMs: 9000) { state in
+                XCTAssertEqual(state.trustRevision, pending.trustRevision)
+                XCTAssertEqual(state.changedPhoneIDs, pending.changedPhoneIDs)
+                XCTAssertEqual(state.auditHead, 2)
+            }
+            XCTAssertNil(attempt.pendingCheckpoint)
+            XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+            try receivePage(attempt, gateway, key, now: 112)
+        }
+    }
+
+    func testRecoveryAttemptRetainsVerifiedReplyAcrossStorageFailure() throws {
+        let sf = try Fixture(), source = try setup(sf), removal = try revoke(source, head: 0)
+        try withRecoveryAttempt([removal]) { f, db, _, gateway, key, attempt in
+            try receiveHead(attempt, gateway, key)
+            try f.sql("CREATE TRIGGER reject_recovery BEFORE INSERT ON gateway_recovered_revocations_v1 BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            var callbacks = 0
+            XCTAssertThrowsError(try attempt.processPending(receiptTimeMs: 1020) { _ in callbacks += 1 })
+            XCTAssertEqual(callbacks, 0); XCTAssertNil(attempt.pendingCheckpoint)
+            XCTAssertFalse(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+            try f.sql("DROP TRIGGER reject_recovery")
+            try attempt.processPending(receiptTimeMs: 1020) { _ in callbacks += 1 }
+            XCTAssertEqual(callbacks, 1)
+            XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        }
+    }
+
+    func testRecoveryAttemptKeepsRestrictionWhenCollectionHasAGapOrExceedsBound() throws {
+        let sf = try Fixture(), source = try setup(sf)
+        _ = try prepare(source)
+        let removal = try revoke(source, head: 1)
+        for maximum in [1, 100] {
+            try withRecoveryAttempt([removal], maximumRecords: maximum) { _, db, _, gateway, key, attempt in
+                try receiveHead(attempt, gateway, key)
+                if maximum == 1 {
+                    XCTAssertThrowsError(try attempt.processPending(receiptTimeMs: 1020) { _ in }) {
+                        XCTAssertEqual($0 as? GatewayHistoryCollectionError, .capacityExceeded)
+                    }
+                } else {
+                    try attempt.processPending(receiptTimeMs: 1020) { _ in }
+                    try receivePage(attempt, gateway, key, now: 112)
+                    XCTAssertThrowsError(try attempt.processPending(receiptTimeMs: 1020) { _ in }) {
+                        XCTAssertEqual($0 as? GatewayHistoryCollectionError, .incompleteHistory)
+                    }
+                }
+                XCTAssertNil(attempt.result)
+                XCTAssertThrowsError(try attempt.makeQuery(now: moment(114))) {
+                    XCTAssertEqual($0 as? GatewayRecoveryAttemptError, .stopped)
+                }
+                XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+                XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+            }
+        }
+    }
+
+    func testRecoveryAttemptExpiresQueriesAndRejectsReplayAndWrongSignature() throws {
+        try withRecoveryAttempt([]) { _, _, _, gateway, key, attempt in
+            let old = try attempt.makeQuery(now: moment(110))
+            let oldReply = try gateway.headReply(canonicalQuery: old) { try key.signature(for: $0).rawRepresentation }
+            XCTAssertThrowsError(try attempt.makeQuery(now: moment(111)))
+            let fresh = try attempt.makeQuery(now: moment(120))
+            XCTAssertThrowsError(try attempt.accept(oldReply, now: moment(120)))
+            let reply = try gateway.headReply(canonicalQuery: fresh) { try key.signature(for: $0).rawRepresentation }
+            XCTAssertThrowsError(try attempt.accept(GatewayHeadReply(canonicalPayload: reply.canonicalPayload, signature: id(9, count: 64)), now: moment(120)))
+            try attempt.accept(reply, now: moment(121))
+            XCTAssertThrowsError(try attempt.accept(reply, now: moment(121)))
+            var checkpoints = 0
+            try attempt.processPending(receiptTimeMs: nil) { _ in checkpoints += 1 }
+            XCTAssertEqual(checkpoints, 1)
+            guard case .head(let head) = attempt.result else { return XCTFail("Missing empty head") }
+            XCTAssertEqual(head.evidence.revision, 0)
+        }
+    }
+
+    func testRecoveryAttemptStopsAfterCheckpointStateDriftOrInvalidation() throws {
+        let sf = try Fixture(), source = try setup(sf), first = try prepare(source)
+        let removal = try revoke(source, head: 1)
+        for drift in [false, true] {
+            try withRecoveryAttempt([first]) { _, db, audit, gateway, key, attempt in
+                try receiveHead(attempt, gateway, key)
+                XCTAssertThrowsError(try attempt.processPending(receiptTimeMs: 1020) { _ in
+                    if drift {
+                        let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+                        _ = try db.write { try $0.recoverGatewayRevocation(canonicalPayload: removal.canonicalPayload, signature: removal.signature,
+                            registration: trust().registration, expectedTrustRevision: revision,
+                            eventID: id(50), receiptTimeMs: 1020, writer: audit, expectedAuditHead: 1) }
+                    } else {
+                        attempt.invalidate()
+                    }
+                }) {
+                    XCTAssertEqual($0 as? GatewayRecoveryAttemptError, drift ? .localStateChanged : .stopped)
+                }
+                XCTAssertNil(attempt.result)
+                XCTAssertThrowsError(try attempt.makeQuery(now: moment(112)))
+            }
+        }
+    }
+
+    func testRecoveryAttemptIncludesSharedBoundaryAndRequiresCurrentLocalHeadAtRepair() throws {
+        let sf = try Fixture(), source = try setup(sf), first = try prepare(source), activation = try consume(source, first)
+        try withRecoveryAttempt([first, activation]) { _, db, writer, gateway, key, unused in
+            unused.invalidate()
+            _ = try prepare(db)
+            let attempt = try GatewayRecoveryAttempt(database: db, writer: writer, registration: trust().registration,
+                gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: clockEpoch)
+            XCTAssertEqual(attempt.expectedLocalRevision, 1)
+            try receiveHead(attempt, gateway, key)
+            try attempt.processPending(receiptTimeMs: nil) { _ in }
+            try receivePage(attempt, gateway, key, now: 112)
+            try attempt.processPending(receiptTimeMs: nil) { _ in }
+            guard case .history(let history) = attempt.result else { return XCTFail("Missing history") }
+            XCTAssertEqual(history.afterRevision, 0)
+            XCTAssertEqual(history.records.count, 2)
+            let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+            XCTAssertEqual(try recover(db, history, revision: revision, local: 1).disposition, .conflictingLocalHistory)
+            _ = try prepare(db, head: 1, wall: 1020, now: 120)
+            XCTAssertEqual(try recover(db, history, revision: revision, local: 1).disposition, .localHeadChanged)
+        }
+    }
+
+    func testRecoveryAttemptBlocksReentryAndKeepsUnknownTrustRestrictedAfterCollection() throws {
+        let sf = try Fixture(), source = try setup(sf), first = try prepare(source)
+        try withRecoveryAttempt([first], tag: 99) { _, db, _, gateway, key, attempt in
+            try receiveHead(attempt, gateway, key)
+            try attempt.processPending(receiptTimeMs: nil) { state in
+                XCTAssertEqual(state.restrictedPhoneIDs, [id(6)])
+                XCTAssertThrowsError(try attempt.processPending(receiptTimeMs: nil) { _ in })
+                XCTAssertThrowsError(try attempt.makeQuery(now: moment(112)))
+            }
+            try receivePage(attempt, gateway, key, now: 112)
+            try attempt.processPending(receiptTimeMs: nil) { _ in }
+            guard case .history(let history) = attempt.result else { return XCTFail("Missing history") }
+            let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+            XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .requiresTrustRecovery)
+            XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        }
+    }
+
+    func testRecoveryAttemptRejectsNewClockEpochAndInvalidConfiguration() throws {
+        try withRecoveryAttempt([]) { _, db, writer, _, key, attempt in
+            for pageSize in [0, 17] {
+                XCTAssertThrowsError(try GatewayRecoveryAttempt(database: db, writer: writer, registration: trust().registration,
+                    gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: clockEpoch, pageSize: pageSize))
+            }
+            _ = try attempt.makeQuery(now: moment(110))
+            XCTAssertThrowsError(try attempt.makeQuery(now: moment(120, epoch: UUID()))) {
+                XCTAssertEqual($0 as? GatewayHeadReplyError, .invalidClock)
+            }
+            XCTAssertThrowsError(try attempt.makeQuery(now: moment(121))) {
+                XCTAssertEqual($0 as? GatewayHeadReplyError, .stopped)
+            }
+        }
+    }
+
     private func recoveryPage(_ controls: [GatewayAuthorityEnvelope], maximum: Int = 16) throws -> (VerifiedGatewayHead, VerifiedGatewayControlHistory) {
         var page: VerifiedGatewayControlHistory?
         let evidence = try gatewayEvidence(controls, after: 0, maximumRecords: maximum, collect: false, onPage: { page = $0 })
