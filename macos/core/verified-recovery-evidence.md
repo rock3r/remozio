@@ -64,3 +64,6 @@ The schema and wire protocol remain unchanged.
 The production host must drive the query, transaction, checkpoint, and collection sequence.
 Independent rollback continuity and administrator repair remain separate work; these tests do not establish either.
 No real gateway credentials, phone prompts, privileged installation, or end-to-end tests were used.
+
+[Gateway recovery attempts](gateway-recovery-attempt.md) now own query verification, retry state, checkpoint sequencing, and history collection.
+The protected service must still provide the real checkpoint and delivery refresh operation before using this owner.
