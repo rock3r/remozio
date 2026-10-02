@@ -476,7 +476,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
     }
 
-    private func enrollForRecovery(_ db: JournalDatabase, tag: UInt8 = 6, empty: Bool = false) throws -> UUID {
+    private func enrollForRecovery(_ db: JournalDatabase, tag: UInt8 = 6, empty: Bool = false, onWriter: (AuditEpochWriter) -> Void = { _ in }) throws -> UUID {
         let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
         let capabilities = ContractCapabilities(contracts: [contract: []])
         let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
@@ -486,6 +486,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
             4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
         ]), limits: limits), limits: limits)
         let writer = try db.write { try $0.createEpoch(descriptor) }
+        onWriter(writer)
         let value = try StoredApprovalEnrollment(epoch: id(7), notificationTag: id(tag, count: 32),
             identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
             approval: ApprovalEnrollment(phoneID: id(6), active: true, capabilities: capabilities, keys: [
@@ -563,6 +564,158 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .requiresTrustRecovery)
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+    }
+
+    private func recoverRemoval(_ db: JournalDatabase, _ removal: GatewayAuthorityEnvelope, revision: UUID,
+                                writer: AuditEpochWriter) throws -> UUID {
+        try db.write { try $0.recoverGatewayRevocation(canonicalPayload: removal.canonicalPayload, signature: removal.signature,
+            registration: trust().registration, expectedTrustRevision: revision, eventID: id(22), receiptTimeMs: 1020,
+            writer: writer, expectedAuditHead: 1) }
+    }
+
+    func testRestrictedRemovalHistoryReconcilesWithoutRestoringAuthorityOrReplayingControl() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source)
+        let activation = try consume(source, first), removal = try revoke(source, head: 2)
+        let history = try XCTUnwrap(gatewayEvidence([first, activation, removal], after: 0).1)
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let before = try enrollForRecovery(db, onWriter: { writer = $0 })
+        let revision = try recoverRemoval(db, removal, revision: before, writer: XCTUnwrap(writer))
+        XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .reconciled)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 3)
+        XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration) }?.operationID, removal.operationID)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot() }.revision, revision)
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot() }.enrollments.isEmpty)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "2")
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_revocations_v1"), "1")
+        XCTAssertThrowsError(try db.read { try $0.pendingGatewayRevocation(operationID: removal.operationID,
+            trust: trust(active: false), nowUnixMillis: 1020, now: moment(120)) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .expired)
+        }
+        XCTAssertThrowsError(try prepare(db, head: 3, wall: 1020, now: 120)) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableEnrollment)
+        }
+        XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .localHeadChanged)
+        let refreshed = try revoke(db, head: 3, trusted: trust(active: false), wall: 1020, now: 120)
+        XCTAssertEqual(refreshed.revision, 4)
+        XCTAssertNotEqual(refreshed.operationID, removal.operationID)
+        XCTAssertNotNil(try db.read { try $0.pendingGatewayRevocation(operationID: refreshed.operationID,
+            trust: trust(active: false), nowUnixMillis: 1020, now: moment(120)) })
+        try db.close()
+        let reopened = try open(f)
+        XCTAssertEqual(try reopened.read { try $0.gatewayAuthorityHead(trust().registration) }, 4)
+        XCTAssertEqual(try reopened.read { try $0.gatewayAcknowledgment(trust().registration) }?.revision, 3)
+        XCTAssertTrue(try reopened.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+    }
+
+    func testRevocationRestrictionAndHistoryRepairCanCommitTogetherAtSharedBoundary() throws {
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?, removal: GatewayAuthorityEnvelope?
+        let before = try enrollForRecovery(db, onWriter: { writer = $0 })
+        let first = try prepare(db)
+        do {
+            try db.write {
+                removal = try $0.revokeGatewayEnrollment(trust: trust(), expectedHead: 1,
+                    nowUnixMillis: 1010, now: moment(110), sign: sign)
+                throw Failure.injected
+            }
+        } catch Failure.injected { }
+        let evidence = try XCTUnwrap(removal), history = try XCTUnwrap(gatewayEvidence([first, evidence], after: 1).1)
+        let revision = try db.write { tx in
+            let revision = try tx.recoverGatewayRevocation(canonicalPayload: evidence.canonicalPayload, signature: evidence.signature,
+                registration: trust().registration, expectedTrustRevision: before, eventID: id(22), receiptTimeMs: 1020,
+                writer: XCTUnwrap(writer), expectedAuditHead: 1)
+            let result = try tx.reconcileGatewayDeliveryHistory(history, registrationActive: true,
+                expectedTrustRevision: revision, expectedLocalRevision: 1, now: moment(120))
+            XCTAssertEqual(result.disposition, .reconciled)
+            return revision
+        }
+        XCTAssertNotEqual(revision, before)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+        XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration) }?.revision, 2)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_desired_tokens_v1"), "0")
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot() }.enrollments.isEmpty)
+        XCTAssertEqual(try db.write { try $0.recoverGatewayRevocation(canonicalPayload: evidence.canonicalPayload, signature: evidence.signature,
+            registration: trust().registration, expectedTrustRevision: revision, eventID: id(23), receiptTimeMs: 1020,
+            writer: XCTUnwrap(writer), expectedAuditHead: 2) }, revision)
+    }
+
+    func testReconciliationRequiresBothPermanentEvidenceAndInactiveEnrollment() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source), removal = try revoke(source, head: 1)
+        let history = try XCTUnwrap(gatewayEvidence([first, removal], after: 0).1)
+        for missingEvidence in [true, false] {
+            let f = try Fixture(), db = try setup(f)
+            var writer: AuditEpochWriter?
+            let before = try enrollForRecovery(db, onWriter: { writer = $0 })
+            let revision = try recoverRemoval(db, removal, revision: before, writer: XCTUnwrap(writer))
+            if missingEvidence { try f.sql("DELETE FROM gateway_recovered_revocations_v1") }
+            else { try f.sql("UPDATE approval_enrollments_v1 SET active=1") }
+            XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .requiresTrustRecovery)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_revocations_v1"), "0")
+        }
+    }
+
+    func testRestrictedRemovalReconciliationRollsBackWithoutUndoingCommittedRestriction() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source), removal = try revoke(source, head: 1)
+        let history = try XCTUnwrap(gatewayEvidence([first, removal], after: 0).1)
+        for target in ["gateway_reconciled_controls_v1", "gateway_revocations_v1", "gateway_authority_v1", "gateway_acknowledgment_v1"] {
+            let f = try Fixture(), db = try setup(f)
+            var writer: AuditEpochWriter?
+            let before = try enrollForRecovery(db, onWriter: { writer = $0 })
+            let revision = try recoverRemoval(db, removal, revision: before, writer: XCTUnwrap(writer))
+            let operation = target == "gateway_authority_v1" ? "UPDATE" : "INSERT"
+            try f.sql("CREATE TRIGGER reject_recovery BEFORE \(operation) ON \(target) BEGIN SELECT RAISE(ABORT,'fixture'); END")
+            XCTAssertThrowsError(try recover(db, history, revision: revision, local: 0))
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_revocations_v1"), "0")
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+            XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+            XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot() }.enrollments.isEmpty)
+            XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(trust().registration) })
+            try f.sql("DROP TRIGGER reject_recovery")
+            XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .reconciled)
+        }
+    }
+
+    func testRecoveredRemovalOperationCannotBeReusedByDifferentHistoricalControl() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source), removal = try revoke(source, head: 1)
+        let history = try XCTUnwrap(gatewayEvidence([first, removal], after: 0).1)
+        let original = try GatewayPhoneRevocation.decode(removal.canonicalPayload, limits: limits)
+        for operation in [first.operationID, removal.operationID] {
+            let f = try Fixture(), db = try setup(f)
+            var writer: AuditEpochWriter?
+            let before = try enrollForRecovery(db, onWriter: { writer = $0 })
+            let other = try GatewayPhoneRevocation(binding: original.binding, revision: original.revision, operationID: operation,
+                issuedAtUnixMillis: original.issuedAtUnixMillis, expiresAtUnixMillis: original.expiresAtUnixMillis + 1)
+            let evidence = try GatewayAuthorityEnvelope(kind: 3, operationID: operation, revision: other.revision,
+                canonicalPayload: other.encode(limits: limits), signature: sign(other), registrationToken: nil)
+            let revision = try recoverRemoval(db, evidence, revision: before, writer: XCTUnwrap(writer))
+            XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .conflictingLocalHistory)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+            XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+        }
+    }
+
+    func testRestrictedRemovalHistoryCapacityAndUnknownTagStillRefuseAdoption() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source), removal = try revoke(source, head: 1)
+        let history = try XCTUnwrap(gatewayEvidence([first, removal], after: 0).1)
+        for capacity in [true, false] {
+            let f = try Fixture(), db = try setup(f, maximum: capacity ? 2 : 20)
+            var writer: AuditEpochWriter?
+            let before = try enrollForRecovery(db, tag: capacity ? 6 : 99, onWriter: { writer = $0 })
+            let revision = try recoverRemoval(db, removal, revision: before, writer: XCTUnwrap(writer))
+            if capacity {
+                XCTAssertThrowsError(try recover(db, history, revision: revision, local: 0)) {
+                    XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded)
+                }
+            } else {
+                XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .requiresTrustRecovery)
+            }
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+            XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+        }
     }
 
     func testRecoveryRechecksLocalCounterTrustRevisionRegistrationAndTransactionMode() throws {

@@ -175,28 +175,55 @@ final class GatewayAuthorityJournal {
             }
             missing = missing.dropFirst()
         }
-        var bindings: [GatewayTokenBinding] = []
+        var candidates: [Data?] = []
         for record in missing {
+            if let recovered = try recoveredRevocation(operation: record.operationID, identity: identity) {
+                guard case .recipient(let receipt) = record, case .revocation(let value) = receipt.control,
+                      recovered == value else { return result(.conflictingLocalHistory) }
+            }
             let binding: GatewayTokenBinding
             switch record {
             case .candidate(let value): binding = value.candidate.binding
             case .recipient(let value):
-                guard case .activation(let activation) = value.control else { return result(.requiresTrustRecovery) }
-                binding = activation.binding
+                switch value.control {
+                case .activation(let activation): binding = activation.binding
+                case .revocation(let revocation):
+                    let phone = revocation.binding.phoneID, epoch = revocation.binding.enrollmentEpoch
+                    guard !enrollments.contains(where: { $0.approval.phoneID == phone && $0.epoch == epoch && $0.approval.active }),
+                          try latestRevocation(phone: phone, epoch: epoch, identity: identity) != nil ||
+                              recoveredRevocation(phone: phone, epoch: epoch, identity: identity) != nil else {
+                        return result(.requiresTrustRecovery)
+                    }
+                    guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
+                    guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
+                    candidates.append(nil)
+                    continue
+                }
             }
             guard enrollments.contains(where: {
                 $0.approval.phoneID == binding.phoneID && $0.epoch == binding.enrollmentEpoch && $0.notificationTag == binding.enrollmentTag
             }) else { return result(.requiresTrustRecovery) }
             guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
             guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
-            bindings.append(binding)
+            candidates.append(binding.candidateID)
         }
         try capacity(additional: missing.count)
-        for (record, binding) in zip(missing, bindings) {
-            let kind: UInt64
-            switch record { case .candidate: kind = 1; case .recipient: kind = 2 }
-            try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",
-                [record.operationID, uint(record.revision), binding.candidateID, record.canonicalPayload, record.signature]) { try done($0) }
+        for (record, candidate) in zip(missing, candidates) {
+            if let candidate {
+                let kind: UInt64
+                switch record { case .candidate: kind = 1; case .recipient: kind = 2 }
+                try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",
+                    [record.operationID, uint(record.revision), candidate, record.canonicalPayload, record.signature]) { try done($0) }
+            } else {
+                guard case .recipient(let receipt) = record, case .revocation(let value) = receipt.control else {
+                    throw GatewayAuthorityError.corruptData
+                }
+                // The zero run cannot belong to a live owner. Preserve the signed duration for stored-row validation.
+                try statement("INSERT INTO main.gateway_revocations_v1 VALUES(?,?,?,?,?,?,?,?,?)",
+                    [record.operationID, uint(record.revision), value.binding.phoneID, value.binding.enrollmentEpoch,
+                     record.canonicalPayload, record.signature, Data(repeating: 0, count: 16), uint(0),
+                     uint(value.expiresAtUnixMillis - value.issuedAtUnixMillis)]) { try done($0) }
+            }
         }
         // Retain desired token material, but retire every old candidate and proof in the same transaction.
         try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16)", []) { try done($0) }
@@ -243,6 +270,17 @@ final class GatewayAuthorityJournal {
                 [phone, epoch]) { try done($0) }
         }
         return (value, changed)
+    }
+
+    private func recoveredRevocation(operation: Data, identity: GatewayRegistrationIdentity) throws -> GatewayPhoneRevocation? {
+        try statement("SELECT phone,enrollment FROM main.gateway_recovered_revocations_v1 WHERE operation=?", [operation]) {
+            let result = sqlite3_step($0)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW,
+                  let value = try recoveredRevocation(phone: blob($0, 0, maximum: 16), epoch: blob($0, 1, maximum: 16), identity: identity),
+                  value.operationID == operation else { throw GatewayAuthorityError.corruptData }
+            return value
+        }
     }
 
     private func recoveredRevocation(phone: Data, epoch: Data, identity: GatewayRegistrationIdentity) throws -> GatewayPhoneRevocation? {
