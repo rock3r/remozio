@@ -1,6 +1,6 @@
 # Phone request core
 
-This Kotlin/JVM module owns authenticated command sessions and signed status tracking. The Android app uses these classes directly. They contain no Android platform APIs, network client, approval controls, or private signing keys. The audit core owns encrypted storage through caller-supplied adapters.
+This Kotlin/JVM module owns authenticated command sessions and signed status tracking. The Android app uses these classes directly. They contain no Android platform APIs, socket I/O, approval controls, or embedded private keys. The audit core owns encrypted storage through caller-supplied adapters.
 
 A session verifies a command against caller-supplied trusted enrollment identity. It retains the typed capture until a verified terminal status clears it. The status tracker preserves request bindings, revision ordering, outcome continuity, and elapsed-time bounds. The caller still owns enrollment invalidation and clock sampling.
 
@@ -27,3 +27,5 @@ The [wake router](PUSH.md) coalesces opaque hints per trusted enrollment and tra
 The [TLS channel experiment](../../docs/experiments/tls-channel.md) adds a loopback Swift/JVM transport check to the same native flow task. It uses disposable software identities and no devices.
 
 The [WebSocket carrier extension](../../docs/experiments/websocket-carrier.md) keeps outer relay authentication separate from the inner Mac pin. OkHttp dependencies remain test-only.
+
+The [phone TLS engine](TRANSPORT.md) accepts ordered ciphertext without a local socket bridge. The host supplies an enrollment key manager and peer key pin. Carrier and Android hardware integration remain separate work.
