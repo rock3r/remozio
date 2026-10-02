@@ -63,3 +63,5 @@ TLS protects this stream. It does not reconcile request state across reconnects 
 Further evidence must cover Android's hardware-backed client key, the outer relay carrier, protected service identities, and reconnect behavior before this candidate can become the production channel.
 
 References: [Apple security options](https://developer.apple.com/documentation/network/security-options), [PKCS#12 import](https://developer.apple.com/documentation/security/secpkcs12import(_:_:_:)), and [JSSE guide](https://docs.oracle.com/en/java/javase/21/security/java-secure-socket-extension-jsse-reference-guide.html).
+
+The later [WebSocket carrier experiment](websocket-carrier.md) tests an independent outer HTTPS layer. This page records the original byte-forwarder experiment.

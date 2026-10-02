@@ -6,6 +6,8 @@ dependencies {
     implementation(project(":protocol-kotlin"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     testImplementation("org.bouncycastle:bcprov-jdk18on:1.86")
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
+    testImplementation("com.squareup.okhttp3:okhttp-tls:5.5.0")
     testImplementation(kotlin("test-junit"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     testImplementation("junit:junit:4.13.2")

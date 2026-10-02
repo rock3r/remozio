@@ -98,6 +98,50 @@ class TLSInteropTest {
         assertTrue(f.waitForPeerExit())
     }
 
+    @Test fun innerTLSCrossesAnIndependentlyAuthenticatedWebSocketCarrier(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port).use { relay ->
+            val payload = "synthetic-inner-private-request".repeat(2_000).toByteArray()
+            f.connect(relay.port).use { socket ->
+                socket.startHandshake()
+                assertTrue(relay.outerAuthenticated.get())
+                assertEquals("TLSv1.3", socket.session.protocol)
+                assertArrayEquals(payload, exchange(socket, payload))
+            }
+            val visible = relay.capture()
+            assertTrue(visible.size > payload.size)
+            assertFalse(String(visible, Charsets.ISO_8859_1).contains("synthetic-inner-private-request"))
+        }
+    }
+
+    @Test fun validOuterTLSDoesNotOverrideTheInnerMacPin(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port).use { relay ->
+            f.connect(relay.port, serverPin = f.phone.certificate).use { socket ->
+                assertThrows(IOException::class.java) { socket.startHandshake() }
+                assertTrue(relay.outerAuthenticated.get())
+            }
+        }
+    }
+
+    @Test fun outerCarrierTrustFailureDoesNotReachTheInnerPeer(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port, trustOuter = false).use { relay ->
+            f.connect(relay.port).use { socket ->
+                assertThrows(IOException::class.java) { socket.startHandshake() }
+                assertFalse(relay.outerAuthenticated.get())
+                assertEquals(0, relay.capture().size)
+            }
+        }
+    }
+
+    @Test fun authenticatedWebSocketRelayCannotAlterInnerTraffic(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port).use { relay ->
+            f.connect(relay.port).use { socket ->
+                socket.startHandshake(); relay.tamper.set(true)
+                assertThrows(IOException::class.java) { exchange(socket, "synthetic-inner-tamper".toByteArray()) }
+                assertTrue(relay.outerAuthenticated.get()); assertTrue(relay.changed.get())
+            }
+        }
+    }
+
     private fun exchange(socket: SSLSocket, payload: ByteArray): ByteArray {
         DataOutputStream(socket.outputStream).apply { writeInt(payload.size); write(payload); flush() }
         val input = DataInputStream(socket.inputStream)

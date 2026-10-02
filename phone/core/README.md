@@ -25,3 +25,5 @@ Limits are explicit caller-supplied window bounds, not selected product defaults
 The [wake router](PUSH.md) coalesces opaque hints per trusted enrollment and tracks bounded fetch demand.
 
 The [TLS channel experiment](../../docs/experiments/tls-channel.md) adds a loopback Swift/JVM transport check to the same native flow task. It uses disposable software identities and no devices.
+
+The [WebSocket carrier extension](../../docs/experiments/websocket-carrier.md) keeps outer relay authentication separate from the inner Mac pin. OkHttp dependencies remain test-only.
