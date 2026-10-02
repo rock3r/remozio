@@ -36,6 +36,7 @@ public final class GatewayDatabase {
     private let maximumOperations: Int
     private let maximumPendingPerEnrollment: Int
     private let maximumLifetimeMillis: UInt64
+    private let probePolicy: GatewayProbePolicy?
     private let clockEpoch: UUID
     private let runID = UUID()
     private var lastMoment: UInt64?
@@ -47,20 +48,20 @@ public final class GatewayDatabase {
     public static func open(directoryPath: String, serviceUID: uid_t, identity: GatewayRegistrationIdentity,
                             payloadLimits: CBORLimits, signingLimits: CBORLimits, maximumOperations: Int,
                             maximumPendingPerEnrollment: Int, maximumLifetimeMillis: UInt64, clockEpoch: UUID,
-                            busyMilliseconds: UInt32, initialize: Bool = false, migrateLegacyStore: Bool = false) throws -> GatewayDatabase {
+                            busyMilliseconds: UInt32, initialize: Bool = false, migrateLegacyStore: Bool = false, probePolicy: GatewayProbePolicy? = nil) throws -> GatewayDatabase {
         try GatewayDatabase(lease: ProtectedGatewayLease.acquire(directoryPath: directoryPath, serviceUID: serviceUID),
             identity: identity, payloadLimits: payloadLimits, signingLimits: signingLimits, maximumOperations: maximumOperations,
             maximumPendingPerEnrollment: maximumPendingPerEnrollment, maximumLifetimeMillis: maximumLifetimeMillis,
-            clockEpoch: clockEpoch, busyMilliseconds: busyMilliseconds, initialize: initialize, migrateLegacyStore: migrateLegacyStore)
+            clockEpoch: clockEpoch, busyMilliseconds: busyMilliseconds, initialize: initialize, migrateLegacyStore: migrateLegacyStore, probePolicy: probePolicy)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers even if opening fails.
     init(lease: ProtectedGatewayLease, identity: GatewayRegistrationIdentity, payloadLimits: CBORLimits,
          signingLimits: CBORLimits, maximumOperations: Int, maximumPendingPerEnrollment: Int,
-         maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool, migrateLegacyStore: Bool = false) throws {
+         maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool, migrateLegacyStore: Bool = false, probePolicy: GatewayProbePolicy? = nil) throws {
         self.lease = lease; self.identity = identity; self.payloadLimits = payloadLimits; self.signingLimits = signingLimits
         self.maximumOperations = maximumOperations; self.maximumPendingPerEnrollment = maximumPendingPerEnrollment
-        self.maximumLifetimeMillis = maximumLifetimeMillis; self.clockEpoch = clockEpoch
+        self.maximumLifetimeMillis = maximumLifetimeMillis; self.clockEpoch = clockEpoch; self.probePolicy = probePolicy
         do {
             guard maximumOperations > 0, maximumOperations <= 1_000_000,
                   maximumPendingPerEnrollment > 0, maximumPendingPerEnrollment <= maximumOperations,
@@ -83,16 +84,20 @@ public final class GatewayDatabase {
                   try scalar("PRAGMA fullfsync") == 1, try scalar("PRAGMA foreign_keys") == 1,
                   try scalar("PRAGMA trusted_schema") == 0 else { throw GatewayDatabaseError.invalidConfiguration }
             if initialize { try transaction(write: true) { try create() } }
-            else if try scalar("PRAGMA user_version") == 1 {
+            else if try scalar("PRAGMA user_version") < 3 {
                 try transaction(write: true) {
                     try validateIdentity(allowLegacy: true)
-                    try createRecipientTables()
-                    try exec("PRAGMA user_version=2")
+                    if try scalar("PRAGMA user_version") == 1 { try createRecipientTables() }
+                    try createProbeTable()
+                    try exec("PRAGMA user_version=3")
                 }
             }
             try validateIdentity()
             // A restart cannot restore a process-local deadline or turn an old receipt into another probe.
-            try transaction(write: true) { try exec("UPDATE gateway_candidates_v1 SET token=NULL WHERE token IS NOT NULL") }
+            try transaction(write: true) {
+                try exec("UPDATE gateway_candidates_v1 SET token=NULL WHERE token IS NOT NULL")
+                try exec("UPDATE gateway_probes_v3 SET status=5,retry=NULL WHERE status IN (1,2,4)")
+            }
         } catch { shutdown(); throw error }
     }
     deinit { shutdown() }
@@ -345,6 +350,162 @@ public final class GatewayDatabase {
             """)
     }
 
+    /// Reserve before transport. This commits the attempt count but does not expose a provider message.
+    public func reserveProbe(candidateOperationID: Data, trust: GatewayCandidateTrust,
+                             nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayProbeReservation {
+        guard let policy = probePolicy else { throw GatewayProbeError.disabled }
+        guard candidateOperationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
+        return try transaction(write: true) {
+            try checkClock(now)
+            _ = try probeMaterial(operation: candidateOperationID, trust: trust, wall: nowUnixMillis, now: now)
+            let previous = try probeRow(operation: candidateOperationID)
+            if let previous {
+                guard previous.run == uuid(runID) else { throw GatewayDatabaseError.corruptData }
+                switch previous.status {
+                case .reserved, .dispatched: throw GatewayProbeError.attemptInFlight
+                case .accepted, .terminal: throw GatewayProbeError.finished
+                case .retryable:
+                    guard let retry = previous.retry, now.milliseconds >= retry else { throw GatewayProbeError.retryNotDue }
+                }
+            }
+            let number = (previous?.number ?? 0) + 1
+            guard number <= policy.maximumAttempts else { throw GatewayProbeError.attemptsExhausted }
+            let identifier = UUID()
+            try statement("""
+                INSERT INTO gateway_probes_v3(operation,attempt,number,status,run,trust,started,retry) VALUES(?,?,?,1,?,?,?,NULL)
+                ON CONFLICT(operation) DO UPDATE SET attempt=excluded.attempt,number=excluded.number,status=1,
+                    run=excluded.run,trust=excluded.trust,started=excluded.started,retry=NULL
+                """, [candidateOperationID, uuid(identifier), uint(UInt64(number)), uuid(runID), uuid(trust.revision), uint(now.milliseconds)]) { try done($0) }
+            return GatewayProbeReservation(owner: runID, operationID: candidateOperationID, identifier: identifier,
+                trustRevision: trust.revision, number: number)
+        }
+    }
+
+    /// Consume exactly once immediately before sending. The service must serialize this handoff with trust changes.
+    public func takeProbe(_ reservation: GatewayProbeReservation, trust: GatewayCandidateTrust,
+                          nowUnixMillis: UInt64, now: AuthorityMoment) throws -> FCMTokenProbe {
+        guard let policy = probePolicy else { throw GatewayProbeError.disabled }
+        guard reservation.owner == runID else { throw GatewayProbeError.staleReservation }
+        return try transaction(write: true) {
+            try checkClock(now)
+            guard trust.revision == reservation.trustRevision,
+                  let row = try probeRow(operation: reservation.operationID), matches(row, reservation), row.status == .reserved else {
+                throw GatewayProbeError.staleReservation
+            }
+            let material = try probeMaterial(operation: reservation.operationID, trust: trust, wall: nowUnixMillis, now: now)
+            let probe = try FCMTokenProbe(candidate: material.receipt.candidate, registrationToken: material.token,
+                admittedAt: AuthorityMoment(epoch: clockEpoch, milliseconds: row.started), deadlineMilliseconds: material.deadline,
+                nowUnixMillis: nowUnixMillis, now: now, maximumTTLSeconds: policy.maximumTTLSeconds)
+            try statement("UPDATE gateway_probes_v3 SET status=2 WHERE operation=? AND attempt=? AND status=1",
+                [reservation.operationID, uuid(reservation.identifier)]) {
+                try done($0); guard sqlite3_changes(db) == 1 else { throw GatewayProbeError.staleReservation }
+            }
+            return probe
+        }
+    }
+
+    /// First outcome wins. A stale callback cannot change a newer attempt, a mapping or enrollment authority.
+    /// A reserved attempt can be cancelled with terminal; accepted and retry outcomes require a dispatch.
+    @discardableResult public func finishProbe(_ reservation: GatewayProbeReservation, outcome: GatewayProbeOutcome,
+                                               now: AuthorityMoment) throws -> Bool {
+        guard let policy = probePolicy else { throw GatewayProbeError.disabled }
+        guard reservation.owner == runID else { throw GatewayProbeError.staleReservation }
+        return try transaction(write: true) {
+            try checkClock(now)
+            guard let row = try probeRow(operation: reservation.operationID), matches(row, reservation) else { return false }
+            if row.status != .reserved && row.status != .dispatched { return false }
+            if row.status == .reserved {
+                guard case .terminal = outcome else { throw GatewayProbeError.staleReservation }
+            }
+            let status: GatewayProbeStatus, retry: UInt64?
+            switch outcome {
+            case .accepted: status = .accepted; retry = nil
+            case .terminal: status = .terminal; retry = nil
+            case .retry(let requested):
+                let (next, overflow) = now.milliseconds.addingReportingOverflow(max(requested, policy.minimumRetryDelayMillis))
+                let available: Bool = try statement("SELECT run,deadline,token FROM gateway_candidates_v1 WHERE operation=?", [reservation.operationID]) {
+                    guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayDatabaseError.corruptData }
+                    return try blob($0, 0, maximum: 16) == uuid(runID) && unsigned(blob($0, 1, maximum: 8)) > next && sqlite3_column_type($0, 2) != SQLITE_NULL
+                }
+                if overflow || !available || row.number >= policy.maximumAttempts { status = .terminal; retry = nil }
+                else { status = .retryable; retry = next }
+            }
+            if let retry {
+                try statement("UPDATE gateway_probes_v3 SET status=4,retry=? WHERE operation=? AND attempt=?",
+                    [uint(retry), reservation.operationID, uuid(reservation.identifier)]) { try done($0) }
+            } else {
+                try statement("UPDATE gateway_probes_v3 SET status=\(status.rawValue),retry=NULL WHERE operation=? AND attempt=?",
+                    [reservation.operationID, uuid(reservation.identifier)]) { try done($0) }
+            }
+            return true
+        }
+    }
+
+    public func probeProgress(candidateOperationID: Data) throws -> GatewayProbeProgress? {
+        guard candidateOperationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
+        return try transaction(write: false) {
+            guard let row = try probeRow(operation: candidateOperationID) else { return nil }
+            guard try storedReceipt(operationID: candidateOperationID) != nil else { throw GatewayDatabaseError.corruptData }
+            return GatewayProbeProgress(number: row.number, status: row.status, retryAtMilliseconds: row.run == uuid(runID) ? row.retry : nil)
+        }
+    }
+
+    private struct ProbeRow {
+        let attempt: Data
+        let number: Int
+        let status: GatewayProbeStatus
+        let run: Data
+        let trust: Data
+        let started: UInt64
+        let retry: UInt64?
+    }
+    private func matches(_ row: ProbeRow, _ reservation: GatewayProbeReservation) -> Bool {
+        row.attempt == uuid(reservation.identifier) && row.number == reservation.number && row.run == uuid(runID) && row.trust == uuid(reservation.trustRevision)
+    }
+    private func probeRow(operation: Data) throws -> ProbeRow? {
+        try statement("SELECT attempt,number,status,run,trust,started,retry FROM gateway_probes_v3 WHERE operation=?", [operation]) { stmt in
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+            let number = try unsigned(blob(stmt, 1, maximum: 8))
+            guard (1...32).contains(number), sqlite3_column_type(stmt, 2) == SQLITE_INTEGER,
+                  let status = GatewayProbeStatus(rawValue: Int(sqlite3_column_int64(stmt, 2))) else { throw GatewayDatabaseError.corruptData }
+            let attempt = try blob(stmt, 0, maximum: 16), run = try blob(stmt, 3, maximum: 16), trust = try blob(stmt, 4, maximum: 16)
+            let started = try unsigned(blob(stmt, 5, maximum: 8))
+            let retry = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : try unsigned(blob(stmt, 6, maximum: 8))
+            guard attempt.count == 16, run.count == 16, trust.count == 16, (status == .retryable) == (retry != nil),
+                  retry.map({ $0 > started }) ?? true else { throw GatewayDatabaseError.corruptData }
+            return ProbeRow(attempt: attempt, number: Int(number), status: status, run: run, trust: trust, started: started, retry: retry)
+        }
+    }
+    private func probeMaterial(operation: Data, trust: GatewayCandidateTrust, wall: UInt64, now: AuthorityMoment) throws -> (receipt: GatewayCandidateReceipt, token: String, deadline: UInt64) {
+        guard identity.matches(trust) else { throw GatewayDatabaseError.wrongScope }
+        guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+        guard let receipt = try storedReceipt(operationID: operation) else { throw GatewayDatabaseError.unavailableCandidate }
+        let candidate = receipt.candidate
+        guard try !isRevoked(phone: candidate.binding.phoneID, enrollment: candidate.binding.enrollmentEpoch) else { throw GatewayDatabaseError.revokedEnrollment }
+        let material = try statement("SELECT run,deadline,token FROM gateway_candidates_v1 WHERE operation=?", [operation]) { stmt -> (String, UInt64) in
+            guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayDatabaseError.corruptData }
+            let deadline = try unsigned(blob(stmt, 1, maximum: 8))
+            guard try blob(stmt, 0, maximum: 16) == uuid(runID), deadline > now.milliseconds, sqlite3_column_type(stmt, 2) != SQLITE_NULL,
+                  candidate.issuedAtUnixMillis <= wall, wall < candidate.expiresAtUnixMillis else { throw GatewayDatabaseError.unavailableCandidate }
+            return (try checkedToken(blob(stmt, 2, maximum: 16384), binding: candidate.binding), deadline)
+        }
+        _ = try GatewayCandidateVerifier.authenticate(canonicalCandidate: receipt.canonicalPayload, signature: receipt.signature,
+            wireVersion: 1, registrationToken: material.0, trust: trust, payloadLimits: payloadLimits, signingLimits: signingLimits)
+        return (receipt, material.0, material.1)
+    }
+    private func createProbeTable() throws {
+        try exec("""
+            CREATE TABLE gateway_probes_v3 (
+                operation BLOB PRIMARY KEY REFERENCES gateway_candidates_v1(operation), attempt BLOB NOT NULL CHECK(length(attempt)=16),
+                number BLOB NOT NULL CHECK(length(number)=8), status INTEGER NOT NULL CHECK(status BETWEEN 1 AND 5),
+                run BLOB NOT NULL CHECK(length(run)=16), trust BLOB NOT NULL CHECK(length(trust)=16),
+                started BLOB NOT NULL CHECK(length(started)=8), retry BLOB CHECK(retry IS NULL OR length(retry)=8)
+            ) STRICT, WITHOUT ROWID
+            """)
+    }
+
     /// Reclaim expired token material without deleting the signed operation receipts or rewinding the head.
     public func expireCandidates(now: AuthorityMoment) throws {
         try transaction(write: true) { try checkClock(now); try expire(now) }
@@ -430,12 +591,12 @@ public final class GatewayDatabase {
             ) STRICT, WITHOUT ROWID
             """)
         try exec("CREATE INDEX gateway_pending_v1 ON gateway_candidates_v1(phone,enrollment) WHERE token IS NOT NULL")
-        try createRecipientTables()
-        try exec("PRAGMA application_id=\(Self.applicationID)"); try exec("PRAGMA user_version=2")
+        try createRecipientTables(); try createProbeTable()
+        try exec("PRAGMA application_id=\(Self.applicationID)"); try exec("PRAGMA user_version=3")
     }
     private func validateIdentity(allowLegacy: Bool = false) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, version == 2 || (allowLegacy && version == 1) else {
+        guard try scalar("PRAGMA application_id") == Self.applicationID, version == 3 || (allowLegacy && (version == 1 || version == 2)) else {
             throw GatewayDatabaseError.incompatibleStore
         }
         try statement("SELECT id,identity,head FROM gateway_identity_v1") {
@@ -447,10 +608,18 @@ public final class GatewayDatabase {
         try statement("SELECT operation,candidate,challenge,phone,enrollment,payload,signature,revision,run,deadline,token FROM gateway_candidates_v1 LIMIT 0") {
             guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
         }
-        if version == 2 {
+        if version >= 2 {
             for sql in ["SELECT operation,kind,phone,enrollment,payload,signature,revision FROM gateway_recipients_v2 LIMIT 0",
                         "SELECT phone,enrollment,operation,token FROM gateway_mappings_v2 LIMIT 0"] {
                 try statement(sql) { guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore } }
+            }
+            if version == 3 {
+                try statement("SELECT operation,attempt,number,status,run,trust,started,retry FROM gateway_probes_v3 LIMIT 0") {
+                    guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
+                }
+                guard try scalar("SELECT count(*) FROM gateway_probes_v3") <= scalar("SELECT count(*) FROM gateway_candidates_v1") else {
+                    throw GatewayDatabaseError.corruptData
+                }
             }
             guard try operationCount() <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
         } else {
