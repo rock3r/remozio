@@ -512,9 +512,9 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         return controls
     }
 
-    private func recover(_ db: JournalDatabase, _ history: VerifiedGatewayHistory, revision: UUID) throws -> GatewayHistoryRecoveryResult {
+    private func recover(_ db: JournalDatabase, _ history: VerifiedGatewayHistory, revision: UUID, local: UInt64 = 1) throws -> GatewayHistoryRecoveryResult {
         try db.write { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: true,
-            expectedTrustRevision: revision, now: moment(120)) }
+            expectedTrustRevision: revision, expectedLocalRevision: local, now: moment(120)) }
     }
 
     func testCompleteDeliveryRecoveryRetiresOldProofAndRenewsOnlyLocalDesiredToken() throws {
@@ -560,7 +560,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         let sourceFixture = try Fixture(), source = try setup(sourceFixture), candidate = try prepare(source), removal = try revoke(source, head: 1)
         let history = try XCTUnwrap(gatewayEvidence([candidate, removal], after: 0).1)
         let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
-        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .requiresTrustRecovery)
+        XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .requiresTrustRecovery)
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
     }
@@ -571,9 +571,9 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
         XCTAssertThrowsError(try recover(db, history, revision: UUID())) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
         XCTAssertThrowsError(try db.write { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: false,
-            expectedTrustRevision: revision, now: moment(120)) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableRegistration) }
+            expectedTrustRevision: revision, expectedLocalRevision: 1, now: moment(120)) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableRegistration) }
         XCTAssertThrowsError(try db.read { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: true,
-            expectedTrustRevision: revision, now: moment(120)) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
+            expectedTrustRevision: revision, expectedLocalRevision: 1, now: moment(120)) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
         _ = try prepare(db, head: 1, now: 120)
         XCTAssertEqual(try recover(db, history, revision: revision).disposition, .localHeadChanged)
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
@@ -600,8 +600,10 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     func testRecoveryCapacityFailureDoesNotPartiallyAdoptHistory() throws {
         let f = try Fixture(), db = try setup(f, maximum: 2), revision = try enrollForRecovery(db)
         let first = try prepare(db)
-        let sourceFixture = try Fixture(), source = try setup(sourceFixture), remote = try prepare(source), lost = try lostDelivery(source)
-        let history = try XCTUnwrap(gatewayEvidence([remote] + lost, after: 1).1)
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture)
+        _ = try prepare(source)
+        let lost = try lostDelivery(source)
+        let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
         XCTAssertThrowsError(try recover(db, history, revision: revision)) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, first.revision)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
@@ -609,13 +611,47 @@ final class GatewayAuthorityJournalTests: XCTestCase {
 
     func testRecoveryRejectsAnOperationAlreadyRetainedAtAnotherRevision() throws {
         let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db), first = try prepare(db)
+        let boundary = try prepare(db, head: 1)
         let original = try candidate(first)
-        let reused = try GatewayTokenCandidate(binding: original.binding, revision: 2, operationID: first.operationID,
+        let reused = try GatewayTokenCandidate(binding: original.binding, revision: 3, operationID: first.operationID,
             issuedAtUnixMillis: original.issuedAtUnixMillis, expiresAtUnixMillis: original.expiresAtUnixMillis)
-        let envelope = try GatewayAuthorityEnvelope(kind: 1, operationID: first.operationID, revision: 2,
+        let envelope = try GatewayAuthorityEnvelope(kind: 1, operationID: first.operationID, revision: 3,
             canonicalPayload: reused.encode(limits: limits), signature: sign(reused), registrationToken: first.registrationToken)
-        let history = try XCTUnwrap(gatewayEvidence([envelope], after: 1).1)
+        let history = try XCTUnwrap(gatewayEvidence([boundary, envelope], after: 2).1)
+        XCTAssertEqual(try recover(db, history, revision: revision, local: 2).disposition, .conflictingLocalHistory)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+    }
+
+    func testRecoveryRejectsAConflictingSharedBoundaryWithoutRetiringCandidates() throws {
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db), first = try prepare(db)
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), remote = try prepare(source)
+        let activation = try consume(source, remote)
+        let history = try XCTUnwrap(gatewayEvidence([remote, activation], after: 1).1)
         XCTAssertEqual(try recover(db, history, revision: revision).disposition, .conflictingLocalHistory)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+        XCTAssertNotNil(try db.read { try $0.pendingGatewayControl(operationID: first.operationID,
+            trust: trust(), nowUnixMillis: 1020, now: moment(120)) })
+    }
+
+    func testRecoveryRequiresTheSharedReceiptEvenWhenTheSuffixIsComplete() throws {
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+        let first = try prepare(db), lost = try lostDelivery(db)
+        let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1, includeBoundary: false).1)
+        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .conflictingLocalHistory)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+    }
+
+    func testRecoveryDoesNotHideALocalRevocationBehindAnEqualGatewayCounter() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), remote = try prepare(source)
+        let activation = try consume(source, remote)
+        let history = try XCTUnwrap(gatewayEvidence([remote, activation], after: 1).1)
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+        _ = try revoke(db, head: 0)
+        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .conflictingLocalHistory)
+        XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
     }
@@ -649,7 +685,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     private func verifiedHead(_ controls: [GatewayAuthorityEnvelope]) throws -> VerifiedGatewayHead {
         try gatewayEvidence(controls).0
     }
-    private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil) throws -> (VerifiedGatewayHead, VerifiedGatewayHistory?) {
+    private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil, includeBoundary: Bool = true) throws -> (VerifiedGatewayHead, VerifiedGatewayHistory?) {
         let f = try Fixture(), trusted = try trust()
         let gateway = try f.gateway(identity: trusted.registration, limits: limits, epoch: clockEpoch)
         defer { try? gateway.close() }
@@ -675,8 +711,9 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         let reply = try gateway.headReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
         let head = try owner.accept(reply, now: moment(111))
         guard let after else { return (head, nil) }
-        let collector = try GatewayHistoryCollector(head: head, afterRevision: after)
-        let historyQuery = try owner.makeHistoryQuery(afterRevision: after, throughRevision: head.evidence.revision, now: moment(111))
+        let lowerBound = after == 0 || !includeBoundary ? after : after - 1
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: lowerBound)
+        let historyQuery = try owner.makeHistoryQuery(afterRevision: lowerBound, throughRevision: head.evidence.revision, now: moment(111))
         let historyReply = try gateway.controlHistoryReply(canonicalQuery: historyQuery) { try gatewayKey.signature(for: $0).rawRepresentation }
         let page = try owner.acceptHistory(historyReply, now: moment(112))
         return (head, try XCTUnwrap(collector.accept(page)))

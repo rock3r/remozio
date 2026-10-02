@@ -7,12 +7,14 @@ It runs inside the protected root journal transaction. The caller first establis
 flowchart TD
     H[Complete history from authenticated gateway] --> C{Local revision still matches?}
     C -->|No| Q[Requery without changing storage]
-    C -->|Yes| E{All controls belong to retained enrollment epochs and tags?}
+    C -->|Yes| B{Shared boundary receipt matches?}
+    B -->|No| X[Return conflicting history]
+    B -->|Yes| E{All controls belong to retained enrollment epochs and tags?}
     E -->|No| R[Return trust recovery required]
     E -->|Yes| V{Any recovered revocation?}
     V -->|Yes| R
     V -->|No| O{Operation already exists locally?}
-    O -->|Yes| X[Return conflicting history]
+    O -->|Yes| X
     O -->|No| T[One protected transaction]
     T --> S[Store historical delivery receipts]
     S --> I[Retire old candidates and token proofs]
@@ -20,6 +22,11 @@ flowchart TD
     A --> D[Commit]
     D --> N[Renew current local desired tokens with fresh controls]
 ```
+
+The caller supplies its expected local revision. For a nonzero local head, collection starts one revision before it.
+The first collected receipt must match the local boundary control's kind, operation ID, and canonical payload.
+An equal counter is insufficient. A missing or conflicting boundary returns `conflictingLocalHistory` without changing storage.
+For a zero local head, collection starts after revision zero. Only the later receipts enter recovered history.
 
 The transaction checks the current enrollment revision against the caller's expected revision.
 Each candidate or activation must refer to a retained phone, enrollment epoch, and notification tag.
@@ -57,6 +64,7 @@ The separate gateway database remains at schema 3.
 Synthetic tests use real root and gateway databases, signed controls, fresh gateway queries, and the complete history collector.
 A rolled-back test transaction models lost local delivery writes while preserving their signed evidence for the gateway fixture.
 Tests verify fresh renewal from local desired state, stale-proof rejection, unknown enrollment and tag rejection, and refusal to adopt revocations.
+They also reject mismatched and missing boundary receipts, including a local revocation hidden behind an equal gateway counter.
 They cover changed local counters, stale trust revisions, inactive registration, read-only transactions, capacity, and operation conflicts.
 Injected storage failures verify atomic rollback at every recovery write stage. Reopen and corruption tests exercise recovered receipt verification.
 Migration tests preserve existing desired state and require explicit schema consent.

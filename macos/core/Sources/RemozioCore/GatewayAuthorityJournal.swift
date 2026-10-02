@@ -149,7 +149,7 @@ final class GatewayAuthorityJournal {
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
     }
 
-    func reconcile(_ history: VerifiedGatewayHistory, enrollments: [StoredApprovalEnrollment],
+    func reconcile(_ history: VerifiedGatewayHistory, expectedLocalRevision: UInt64, enrollments: [StoredApprovalEnrollment],
                    now: AuthorityMoment) throws -> GatewayHistoryRecoveryResult {
         let identity = history.head.evidence.registration, local = try head(identity)
         func result(_ disposition: GatewayHistoryRecoveryDisposition) -> GatewayHistoryRecoveryResult {
@@ -160,9 +160,23 @@ final class GatewayAuthorityJournal {
         guard history.receivedAt.epoch == now.epoch, history.receivedAt.milliseconds <= now.milliseconds else {
             throw GatewayAuthorityError.invalidClock
         }
-        guard local == history.afterRevision else { return result(.localHeadChanged) }
+        guard local == expectedLocalRevision else { return result(.localHeadChanged) }
+        guard history.afterRevision == (local == 0 ? 0 : local - 1), history.head.evidence.revision > local else {
+            return result(.conflictingLocalHistory)
+        }
+        var missing = history.records[...]
+        if local > 0 {
+            guard let boundary = missing.first, boundary.revision == local,
+                  let retained = try envelope(boundary.operationID, identity: identity) else { return result(.conflictingLocalHistory) }
+            let kind: UInt64
+            switch boundary { case .candidate: kind = 1; case .recipient(let value): kind = value.kind.rawValue }
+            guard retained.revision == local, retained.kind == kind, retained.canonicalPayload == boundary.canonicalPayload else {
+                return result(.conflictingLocalHistory)
+            }
+            missing = missing.dropFirst()
+        }
         var bindings: [GatewayTokenBinding] = []
-        for record in history.records {
+        for record in missing {
             let binding: GatewayTokenBinding
             switch record {
             case .candidate(let value): binding = value.candidate.binding
@@ -178,10 +192,10 @@ final class GatewayAuthorityJournal {
             bindings.append(binding)
         }
         guard local <= UInt64(policy.maximumControls),
-              UInt64(history.records.count) <= UInt64(policy.maximumControls) - local else {
+              UInt64(missing.count) <= UInt64(policy.maximumControls) - local else {
             throw GatewayAuthorityError.capacityExceeded
         }
-        for (record, binding) in zip(history.records, bindings) {
+        for (record, binding) in zip(missing, bindings) {
             let kind: UInt64
             switch record { case .candidate: kind = 1; case .recipient: kind = 2 }
             try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",

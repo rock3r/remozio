@@ -540,9 +540,10 @@ public final class JournalTransaction {
 
     /// Protected root recovery after independent continuity checks. Serialize with trust and registration changes.
     /// Unknown history or revocations require the host to restrict affected authority and run trust recovery.
+    /// Collection includes the shared boundary receipt when expectedLocalRevision is nonzero.
     /// Success retires old delivery attempts; renew only current desired tokens after commit.
     public func reconcileGatewayDeliveryHistory(_ history: VerifiedGatewayHistory, registrationActive: Bool,
-                                               expectedTrustRevision: UUID, now: AuthorityMoment) throws -> GatewayHistoryRecoveryResult {
+                                               expectedTrustRevision: UUID, expectedLocalRevision: UInt64, now: AuthorityMoment) throws -> GatewayHistoryRecoveryResult {
         guard registrationActive else { throw GatewayAuthorityError.unavailableRegistration }
         let enrollments = try withEnrollment(write: false) { ledger in
             let snapshot = try ledger.snapshot(), identity = history.head.evidence.registration
@@ -550,7 +551,7 @@ public final class JournalTransaction {
             guard snapshot.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
             return try ledger.all()
         }
-        return try withGateway(write: true) { try $0.reconcile(history, enrollments: enrollments, now: now) }
+        return try withGateway(write: true) { try $0.reconcile(history, expectedLocalRevision: expectedLocalRevision, enrollments: enrollments, now: now) }
     }
 
     /// Internal verification path. Public token APIs derive phone trust from durable enrollment.
