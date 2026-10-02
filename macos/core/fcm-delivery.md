@@ -45,3 +45,8 @@ Pending work includes protected provider credentials, OAuth integration and rene
 - [Android message fields](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages#AndroidConfig): TTL, priority and package restriction.
 - [FCM error codes](https://firebase.google.com/docs/cloud-messaging/error-codes): typed errors, quota backoff and Retry-After handling.
 - [Android priority guidance](https://firebase.google.com/docs/cloud-messaging/android-message-priority): user-visible notification expectations and possible deprioritization.
+
+## Token registration probes
+
+The same bounded sender accepts `FCMTokenProbe` for silent registration challenges. It always uses normal priority.
+The [push data contract](../../protocol/push-data.md) specifies the exact fields, lifetime caps, phone parser and remaining coordinator checks.
