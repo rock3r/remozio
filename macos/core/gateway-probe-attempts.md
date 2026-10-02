@@ -59,9 +59,9 @@ It must not replay an old receipt or present another biometric prompt for routin
 
 ## Service integration still required
 
-The service coordinator must own trust snapshots, OAuth acquisition, cancellation, timeout handling and the network task.
-It must use these APIs to enforce the attempt lifecycle and add aggregate rate and concurrency limits across candidates and phones.
-This per-candidate budget alone is not an aggregate rate limiter. The store does not schedule retries or call FCM.
+The [delivery coordinator](gateway-delivery.md) now owns trust snapshots, OAuth acquisition, cancellation, and bounded network tasks.
+It enforces spacing and concurrency limits across its candidates and phones. The installed service and durable desired-state scheduler remain required.
+This per-candidate budget alone is not an aggregate rate limiter. The store itself does not schedule retries or call FCM.
 Whole-backup rollback detection still needs the independent witness from the design.
 
 ## Validation
