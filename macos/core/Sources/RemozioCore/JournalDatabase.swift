@@ -16,6 +16,8 @@ public final class JournalDatabase {
     private var tables: AuditJournalTables?
     private var consumption: ConsumptionJournal?
     private var gateway: GatewayAuthorityJournal?
+    private var enrollment: EnrollmentJournal?
+    private let recordLimits: CBORLimits
     private var active: UUID?
     private var unavailable = false
 
@@ -34,10 +36,11 @@ public final class JournalDatabase {
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
          maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws {
         self.lease = lease
+        self.recordLimits = recordLimits
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -51,11 +54,11 @@ public final class JournalDatabase {
             guard sqlite3_busy_timeout(connection, Int32(busyMilliseconds)) == SQLITE_OK,
                   sqlite3_compileoption_used("OMIT_LOAD_EXTENSION") == 1 else { throw JournalDatabaseError.invalidConfiguration }
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
-            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, (gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768)))
+            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, max((gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768, 65536))))
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 5) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 6) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -68,6 +71,7 @@ public final class JournalDatabase {
             let consumption = ConsumptionJournal(connection: connection, macID: macID, accountID: accountID,
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
+            enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
             if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy) }
             if initialize { try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption) }
             else if let migrateFromVersion { try migrate(macID: macID, accountID: accountID, consumption: consumption, from: migrateFromVersion) }
@@ -134,6 +138,16 @@ public final class JournalDatabase {
         return gateway
     }
 
+    fileprivate func appendEnrollmentEvent(_ event: AuditEventMetadata, token: UUID, writer: AuditEpochWriter, expectedHead: UInt64) throws {
+        try access(token).append(event.encode(limits: recordLimits), writer: writer, expectedHead: expectedHead)
+    }
+
+    fileprivate func enrollmentLedger(_ token: UUID) throws -> EnrollmentJournal {
+        _ = try access(token)
+        guard let enrollment else { throw JournalDatabaseError.expiredTransaction }
+        return enrollment
+    }
+
     private func validateLease() throws {
         do { try lease.validate() }
         catch { unavailable = true; throw error }
@@ -156,8 +170,9 @@ public final class JournalDatabase {
             try consumption.createOutcomeSchema()
             try GatewayAuthorityJournal.createSchema(db!)
             try GatewayAuthorityJournal.createRevocationSchema(db!)
+            try EnrollmentJournal.createSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=5")
+            try exec("PRAGMA user_version=6")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -170,8 +185,9 @@ public final class JournalDatabase {
             if version == 1 { try consumption.createSchema() }
             if version < 3 { try consumption.createOutcomeSchema() }
             if version < 4 { try GatewayAuthorityJournal.createSchema(db!) }
-            try GatewayAuthorityJournal.createRevocationSchema(db!)
-            try exec("PRAGMA user_version=5")
+            if version < 5 { try GatewayAuthorityJournal.createRevocationSchema(db!) }
+            try EnrollmentJournal.createSchema(db!)
+            try exec("PRAGMA user_version=6")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -184,7 +200,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 5) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 6) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -208,6 +224,10 @@ public final class JournalDatabase {
                         "SELECT phone,candidate FROM main.gateway_desired_tokens_v1 LIMIT 0"]
         }
         if version >= 5 { queries.append("SELECT operation,revision,phone,enrollment,payload,signature,run,started,deadline FROM main.gateway_revocations_v1 LIMIT 0") }
+        if version >= 6 {
+            queries += ["SELECT id,policy,revision FROM main.approval_authority_v1 LIMIT 0",
+                        "SELECT phone,epoch,active,body FROM main.approval_enrollments_v1 LIMIT 0"]
+        }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -217,6 +237,7 @@ public final class JournalDatabase {
         tables = nil
         consumption = nil
         gateway = nil
+        enrollment = nil
         if let db {
             // No statement, blob handle or raw connection can escape this owner.
             precondition(sqlite3_close(db) == SQLITE_OK, "Journal connection retained a private SQLite resource")
@@ -277,9 +298,8 @@ public final class JournalTransaction {
             throw error
         }
     }
-    /// Verify against the caller's current retained request and trust snapshot, then write both records.
-    /// The authority must serialize lifecycle and trust changes with this call. The result is never a dispatch permit.
-    public func consume(canonicalDecision: Data, signature: Data, retained: RetainedApprovalRequest,
+    /// Internal verification path. Public callers must use the overload that reads durable trust.
+    func consume(canonicalDecision: Data, signature: Data, retained: RetainedApprovalRequest,
                         trust: ApprovalTrustSnapshot, now: AuthorityMoment, eventID: Data, receiptTimeMs: UInt64?,
                         writer: AuditEpochWriter, expectedHead: UInt64, requestLimits: CBORLimits,
                         signingLimits: CBORLimits) throws -> ConsumptionReceipt {
@@ -288,6 +308,84 @@ public final class JournalTransaction {
             return try owner.ledger(token).consume(canonicalDecision: canonicalDecision, signature: signature,
                 retained: retained, trust: trust, now: now, eventID: eventID, receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedHead: expectedHead, audit: audit, requestLimits: requestLimits, signingLimits: signingLimits)
+        }
+    }
+
+    private func withEnrollment<T>(write: Bool, _ body: (EnrollmentJournal) throws -> T) throws -> T {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.enrollmentLedger(token))
+        } catch {
+            failed = true
+            if error as? EnrollmentJournalError == .corruptData || error as? AuditJournalError == .headMismatch { headMismatch = true }
+            throw error
+        }
+    }
+
+    /// Protected administrator setup. This stores policy only; it cannot infer trust from audit records or incoming decisions.
+    public func configureApprovalAuthority(capabilities: ContractCapabilities, allowedContracts: Set<RequestContract>) throws -> UUID {
+        try withEnrollment(write: true) { try $0.configure(capabilities: capabilities, allowed: allowedContracts) }
+    }
+    public func approvalTrustSnapshot() throws -> ApprovalTrustSnapshot {
+        try withEnrollment(write: false) { try $0.snapshot() }
+    }
+    public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
+        try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
+    }
+
+    /// The host verifies administrator authorization and the biometric enrollment proof before calling this method.
+    public func addApprovalEnrollment(_ enrollment: StoredApprovalEnrollment, expectedTrustRevision: UUID,
+                                      eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> UUID {
+        try withEnrollment(write: true) { ledger in
+            let next = try ledger.add(enrollment, expected: expectedTrustRevision)
+            try enrollmentEvent(phone: enrollment.approval.phoneID, added: true, eventID: eventID, receiptTimeMs: receiptTimeMs,
+                writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
+            return next
+        }
+    }
+
+    /// Removal and its audit event share the transaction with the signed gateway control when a gateway is configured.
+    public func revokeApprovalEnrollment(phoneID: Data, epoch: Data, expectedTrustRevision: UUID,
+                                         eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedAuditHead: UInt64,
+                                         gateway: EnrollmentGatewayRemoval? = nil) throws -> (revision: UUID, gatewayControl: GatewayAuthorityEnvelope?) {
+        try withEnrollment(write: true) { ledger in
+            if try ledger.hasGateway(), gateway == nil { throw EnrollmentJournalError.gatewayRequired }
+            let (old, next) = try ledger.revoke(phone: phoneID, epoch: epoch, expected: expectedTrustRevision)
+            var control: GatewayAuthorityEnvelope?
+            if let gateway {
+                let enrollment = try GatewayPhoneEnrollment(phoneID: phoneID, epoch: epoch, tag: old.notificationTag, active: false)
+                control = try revokeGatewayEnrollment(trust: GatewayAuthorityTrust(registration: gateway.registration, enrollment: enrollment, active: true),
+                    expectedHead: gateway.expectedHead, nowUnixMillis: gateway.nowUnixMillis, now: gateway.now, sign: gateway.sign)
+            }
+            try enrollmentEvent(phone: phoneID, added: false, eventID: eventID, receiptTimeMs: receiptTimeMs,
+                writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
+            return (next, control)
+        }
+    }
+
+    private func enrollmentEvent(phone: Data, added: Bool, eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter,
+                                 expectedHead: UInt64, snapshot: ApprovalTrustSnapshot) throws {
+        guard expectedHead < UInt64.max else { throw AuditJournalError.headMismatch }
+        let event = try AuditEventMetadata(eventID: eventID, macID: snapshot.macID, accountID: snapshot.accountID,
+            journalEpoch: writer.epoch, sequence: expectedHead + 1, requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: receiptTimeMs,
+            kind: added ? .enrollmentAdded : .enrollmentRevoked, category: .enrollment, action: nil, decisionPhoneID: nil,
+            authentication: .localAdministrator, outcome: .accepted, reason: added ? .none : .revoked, droppedEventCount: nil, peerDeviceID: phone)
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: expectedHead)
+    }
+
+    /// Reads current enrolled keys in this write transaction. No caller-supplied enrollment snapshot can authorize consumption.
+    public func consume(canonicalDecision: Data, signature: Data, retained: RetainedApprovalRequest,
+                        expectedTrustRevision: UUID, now: AuthorityMoment, eventID: Data, receiptTimeMs: UInt64?,
+                        writer: AuditEpochWriter, expectedHead: UInt64, requestLimits: CBORLimits,
+                        signingLimits: CBORLimits) throws -> ConsumptionReceipt {
+        try withEnrollment(write: true) { ledger in
+            let trust = try ledger.snapshot()
+            guard trust.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            return try consume(canonicalDecision: canonicalDecision, signature: signature, retained: retained, trust: trust,
+                now: now, eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedHead: expectedHead,
+                requestLimits: requestLimits, signingLimits: signingLimits)
         }
     }
 

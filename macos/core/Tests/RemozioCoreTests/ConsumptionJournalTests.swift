@@ -263,7 +263,7 @@ final class ConsumptionJournalTests: XCTestCase {
         let prior = try database.write { try consume($0, writer, request: request()) }
         try database.close()
         // Recreate the pre-consumption v1 layout. This is a fixture, never a recovery operation.
-        try fixture.sql("DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1; PRAGMA user_version=1")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1; PRAGMA user_version=1")
         XCTAssertThrowsError(try open(fixture))
         XCTAssertThrowsError(try open(fixture, migrate: 1, account: 9))
         XCTAssertEqual(try fixture.version(), 1)
@@ -272,7 +272,7 @@ final class ConsumptionJournalTests: XCTestCase {
                        try [prior.event.encode(limits: bounds)])
         XCTAssertNil(try migrated.read { try $0.consumption(requestID: id(4)) }) // Audit history never recreates authority state.
         try migrated.close()
-        XCTAssertEqual(try fixture.version(), 5)
+        XCTAssertEqual(try fixture.version(), 6)
         XCTAssertThrowsError(try open(fixture, migrate: 1))
         let reopened = try open(fixture)
         try reopened.close()
@@ -284,10 +284,10 @@ final class ConsumptionJournalTests: XCTestCase {
         try fixture.sql("PRAGMA user_version=1") // Deliberate conflicting table.
         XCTAssertThrowsError(try open(fixture, migrate: 1))
         XCTAssertEqual(try fixture.version(), 1)
-        try fixture.sql("PRAGMA user_version=5; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1")
+        try fixture.sql("PRAGMA user_version=6; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1")
         XCTAssertThrowsError(try open(fixture))
         XCTAssertThrowsError(try open(fixture, initialize: true))
-        XCTAssertEqual(try fixture.version(), 5)
+        XCTAssertEqual(try fixture.version(), 6)
     }
 
     func testMalformedAndInconsistentReceiptsFailBoundedReads() throws {
@@ -507,7 +507,7 @@ final class ConsumptionJournalTests: XCTestCase {
         let writer = try database.write { try $0.createEpoch(descriptor()) }
         let receipt = try database.write { try consume($0, writer, request: request()) }
         try database.close()
-        try fixture.sql("DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; DROP TABLE consumption_outcomes_v1; PRAGMA user_version=2")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; DROP TABLE consumption_outcomes_v1; PRAGMA user_version=2")
         XCTAssertThrowsError(try open(fixture))
         XCTAssertThrowsError(try open(fixture, migrate: 2, account: 9))
         let migrated = try open(fixture, migrate: 2)
@@ -515,14 +515,14 @@ final class ConsumptionJournalTests: XCTestCase {
         XCTAssertEqual(outcome.receipt, receipt); XCTAssertEqual(outcome.revision, 0)
         XCTAssertEqual(outcome.phase, .authorized) // Stored receipt only; startup recovery must reconcile this.
         try migrated.close()
-        XCTAssertEqual(try fixture.version(), 5)
-        for version: Int64 in [0, 1, 2, 3, 4, 5, 99] { XCTAssertThrowsError(try open(fixture, migrate: version)) }
+        XCTAssertEqual(try fixture.version(), 6)
+        for version: Int64 in [0, 1, 2, 3, 4, 5, 6, 99] { XCTAssertThrowsError(try open(fixture, migrate: version)) }
     }
 
     func testFailedOutcomeMigrationRollsBackTheNewConsumptionTable() throws {
         let fixture = try Fixture(), database = try open(fixture, initialize: true)
         try database.close()
-        try fixture.sql("DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1; PRAGMA user_version=1; CREATE TABLE consumption_outcomes_v1(conflict INTEGER)")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; DROP TABLE consumption_outcomes_v1; DROP TABLE consumptions_v1; PRAGMA user_version=1; CREATE TABLE consumption_outcomes_v1(conflict INTEGER)")
         XCTAssertThrowsError(try open(fixture, migrate: 1))
         XCTAssertEqual(try fixture.version(), 1)
         XCTAssertNoThrow(try fixture.sql("CREATE TABLE consumptions_v1(probe INTEGER)"))

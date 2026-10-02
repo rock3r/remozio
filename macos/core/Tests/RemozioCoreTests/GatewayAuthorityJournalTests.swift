@@ -232,10 +232,10 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         ]), limits: limits), limits: limits)
         _ = try db.write { try $0.createEpoch(descriptor) }
         try db.close()
-        try fixture.sql("DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 3)
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "5")
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "6")
         XCTAssertNotNil(try migrated.read { try $0.epoch(id(40)) })
         XCTAssertThrowsError(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unconfigured) }
         try migrated.write { try $0.configureGatewayAuthority(trust().registration) }
@@ -245,7 +245,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     func testFailedSchemaThreeMigrationLeavesVersionAndOldTablesIntact() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         try db.close()
-        try fixture.sql("DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3; CREATE TABLE gateway_outbox_v1(conflict INTEGER)")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3; CREATE TABLE gateway_outbox_v1(conflict INTEGER)")
         XCTAssertThrowsError(try open(fixture, migrate: 3))
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "3")
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM sqlite_schema WHERE name='gateway_authority_v1'"), "0")
@@ -453,7 +453,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     func testSchemaFourMigrationPreservesCandidateAndAddsNoRevocation() throws {
         let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
         try db.close()
-        try fixture.sql("DROP TABLE gateway_revocations_v1; PRAGMA user_version=4")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; PRAGMA user_version=4")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 4)
         XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
@@ -461,7 +461,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         let fresh = try migrated.write { try $0.renewDesiredGatewayCandidate(trust: trust(), expectedHead: 1,
             nowUnixMillis: 1000, now: moment(), sign: sign) }
         XCTAssertEqual(fresh.registrationToken, first.registrationToken)
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "5")
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "6")
     }
 
     func testFailedSchemaFourMigrationKeepsVersionAndExistingControls() throws {
@@ -471,7 +471,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertThrowsError(try open(fixture, migrate: 4))
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "4")
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
-        try fixture.sql("DROP TABLE gateway_revocations_v1")
+        try fixture.sql("DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1")
         let migrated = try open(fixture, migrate: 4)
         XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
     }

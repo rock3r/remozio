@@ -91,8 +91,8 @@ A complete backup rollback still needs the independent continuity witness; these
 
 ## Schema and service integration
 
-Root journal schema 5 adds signed revocation rows to the schema 4 registration, candidate, desired-token, and outbox tables.
-Known migrations from versions 1, 2, 3, and 4 require the explicit source version. They preserve existing audit and consumption state.
+Root journal schema 6 retains the gateway tables from schemas 4 and 5 and adds [approval enrollment state](enrollment-journal.md).
+Known migrations from versions 1, 2, 3, 4, and 5 require the explicit source version. They preserve existing audit and consumption state.
 A migration does not derive enrollment or gateway authority from audit records. Failed migration rolls back its table and version changes.
 The separate gateway database remains at schema 3.
 
@@ -101,7 +101,8 @@ It must provide the non-exportable root signer and establish continuity before p
 Neither a constructor nor a supplied phone ID proves authentication. These methods are not exposed as network endpoints.
 The host may append metadata-only audit events in the same journal transaction. Tokens and challenges must never enter audit records.
 
-Durable enrollment creation, approval-key ownership, authenticated gateway acknowledgments, counter reconciliation, and scheduling remain integration work.
+The [enrollment journal](enrollment-journal.md) now owns approval keys and combines enrollment removal with the gateway outbox.
+Authenticated enrollment setup, gateway acknowledgments, counter reconciliation, and scheduling remain integration work.
 The retained row limit is a storage bound; no history pruning or whole-backup recovery is implemented here.
 Do not report registration as healthy until the actual gateway and phone flow provides the required evidence.
 
