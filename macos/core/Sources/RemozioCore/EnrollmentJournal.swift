@@ -187,7 +187,7 @@ final class EnrollmentJournal {
                 throw EnrollmentJournalError.reusedIdentity
             }
         }
-        try statement("SELECT count(*) FROM main.gateway_revocations_v1 WHERE phone=? AND enrollment=?", [enrollment.approval.phoneID, enrollment.epoch]) {
+        try statement("SELECT (SELECT count(*) FROM main.gateway_revocations_v1 WHERE phone=? AND enrollment=?)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1 WHERE phone=? AND enrollment=?)", [enrollment.approval.phoneID, enrollment.epoch, enrollment.approval.phoneID, enrollment.epoch]) {
             guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw EnrollmentJournalError.reusedIdentity }
         }
         try statement("INSERT INTO main.approval_enrollments_v1 VALUES(?,?,1,?)",
@@ -204,6 +204,12 @@ final class EnrollmentJournal {
             try done($0); guard sqlite3_changes(db) == 1 else { throw EnrollmentJournalError.staleRevision }
         }
         return (old, try advance(expected))
+    }
+    func restrictRecovered(phone: Data, epoch: Data, expected: UUID, evidenceChanged: Bool) throws -> UUID {
+        try require(expected)
+        try statement("UPDATE main.approval_enrollments_v1 SET active=0 WHERE phone=? AND epoch=? AND active=1", [phone, epoch]) { try done($0) }
+        let changed = sqlite3_changes(db) != 0
+        return changed || evidenceChanged ? try advance(expected) : expected
     }
     func hasGateway() throws -> Bool { try scalar("SELECT count(*) FROM main.gateway_authority_v1") != 0 }
     private func require(_ revision: UUID) throws {

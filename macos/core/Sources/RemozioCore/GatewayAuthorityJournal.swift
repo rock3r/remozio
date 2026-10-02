@@ -191,10 +191,7 @@ final class GatewayAuthorityJournal {
             guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
             bindings.append(binding)
         }
-        guard local <= UInt64(policy.maximumControls),
-              UInt64(missing.count) <= UInt64(policy.maximumControls) - local else {
-            throw GatewayAuthorityError.capacityExceeded
-        }
+        try capacity(additional: missing.count)
         for (record, binding) in zip(missing, bindings) {
             let kind: UInt64
             switch record { case .candidate: kind = 1; case .recipient: kind = 2 }
@@ -206,6 +203,58 @@ final class GatewayAuthorityJournal {
         try advance(from: local, to: history.head.evidence.revision)
         guard try acknowledge(history.head).disposition == .recorded else { throw GatewayAuthorityError.corruptData }
         return result(.reconciled)
+    }
+
+    static func createRecoveredRevocationsSchema(_ db: OpaquePointer) throws {
+        let result = sqlite3_exec(db, """
+            CREATE TABLE main.gateway_recovered_revocations_v1(
+                phone BLOB NOT NULL CHECK(length(phone)=16), enrollment BLOB NOT NULL CHECK(length(enrollment)=16),
+                operation BLOB NOT NULL UNIQUE CHECK(length(operation)=16), payload BLOB NOT NULL,
+                signature BLOB NOT NULL CHECK(length(signature)=64), PRIMARY KEY(phone,enrollment)
+            ) STRICT, WITHOUT ROWID;
+            """, nil, nil, nil)
+        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+    }
+
+    /// Restrictive evidence is permanent. Its delivery expiry cannot restore a revoked enrollment.
+    func recoverRevocation(payload: Data, signature: Data, identity: GatewayRegistrationIdentity) throws -> (GatewayPhoneRevocation, Bool) {
+        _ = try head(identity)
+        let value = try GatewayPhoneRevocation.decode(payload, limits: policy.payloadLimits)
+        guard try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: 1,
+            kind: .phoneRevocation, canonicalPayload: payload, payloadLimits: policy.payloadLimits, inputLimits: policy.signingLimits) else {
+            throw GatewayAuthorityError.invalidSignature
+        }
+        guard GatewayStoredRecipient.revocation(value).matches(identity) else { throw GatewayAuthorityError.wrongScope }
+        let phone = value.binding.phoneID, epoch = value.binding.enrollmentEpoch
+        var changed = false
+        if try recoveredRevocation(phone: phone, epoch: epoch, identity: identity) == nil {
+            try capacity()
+            try statement("INSERT INTO main.gateway_recovered_revocations_v1 VALUES(?,?,?,?,?)",
+                [phone, epoch, value.operationID, payload, signature]) { try done($0) }
+            changed = true
+        }
+        try statement("""
+            DELETE FROM main.gateway_desired_tokens_v1 WHERE candidate IN
+            (SELECT candidate FROM main.gateway_root_candidates_v1 WHERE phone=? AND enrollment=?)
+            """, [phone, epoch]) { try done($0); changed = changed || sqlite3_changes(db) != 0 }
+        try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16) WHERE phone=? AND enrollment=? AND run<>zeroblob(16)",
+            [phone, epoch]) { try done($0); changed = changed || sqlite3_changes(db) != 0 }
+        return (value, changed)
+    }
+
+    private func recoveredRevocation(phone: Data, epoch: Data, identity: GatewayRegistrationIdentity) throws -> GatewayPhoneRevocation? {
+        try statement("SELECT operation,payload,signature FROM main.gateway_recovered_revocations_v1 WHERE phone=? AND enrollment=?", [phone, epoch]) {
+            let result = sqlite3_step($0)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            let payload = try blob($0, 1, maximum: policy.payloadLimits.maxBytes), signature = try blob($0, 2, maximum: 64)
+            guard let value = try? GatewayPhoneRevocation.decode(payload, limits: policy.payloadLimits),
+                  try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: 1,
+                    kind: .phoneRevocation, canonicalPayload: payload, payloadLimits: policy.payloadLimits, inputLimits: policy.signingLimits),
+                  GatewayStoredRecipient.revocation(value).matches(identity), value.binding.phoneID == phone, value.binding.enrollmentEpoch == epoch,
+                  try blob($0, 0, maximum: 16) == value.operationID else { throw GatewayAuthorityError.corruptData }
+            return value
+        }
     }
 
     func acknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
@@ -271,7 +320,7 @@ final class GatewayAuthorityJournal {
             guard previous == encoded else { throw GatewayAuthorityError.wrongScope }
             return
         }
-        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)", []) {
+        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)", []) {
             guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
         }
         try statement("INSERT INTO main.gateway_authority_v1 VALUES(1,?,?)", [encoded, uint(0)]) { try done($0) }
@@ -402,7 +451,7 @@ final class GatewayAuthorityJournal {
 
     func revoked(trust: GatewayAuthorityTrust) throws -> Bool {
         _ = try head(trust.registration)
-        return try latestRevocation(trust: trust) != nil
+        return try latestRevocation(trust: trust) != nil || recoveredRevocation(phone: trust.enrollment.phoneID, epoch: trust.enrollment.epoch, identity: trust.registration) != nil
     }
 
     /// The signed row is both the permanent epoch tombstone and its retryable delivery control.
@@ -586,11 +635,11 @@ final class GatewayAuthorityJournal {
         catch { throw GatewayAuthorityError.corruptData }
     }
 
-    private func capacity() throws {
-        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)", []) { stmt in
+    private func capacity(additional: Int = 1) throws {
+        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)", []) { stmt in
             guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }; return sqlite3_column_int64(stmt, 0)
         }
-        guard count < policy.maximumControls else { throw GatewayAuthorityError.capacityExceeded }
+        guard additional > 0, count <= policy.maximumControls, additional <= policy.maximumControls - Int(count) else { throw GatewayAuthorityError.capacityExceeded }
     }
     private func insert(_ entry: GatewayAuthorityEnvelope, candidate: Data) throws {
         try capacity()
