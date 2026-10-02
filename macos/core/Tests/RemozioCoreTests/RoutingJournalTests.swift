@@ -66,7 +66,7 @@ final class RoutingJournalTests: XCTestCase {
             var db = try open(f, initialize: true)
             if migrate {
                 try db.close()
-                try f.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; PRAGMA user_version=6")
+                try f.sql("DROP TABLE gateway_recovered_revocations_v1; DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; PRAGMA user_version=6")
                 db = try open(f, migrate: 6)
             }
             let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
@@ -223,7 +223,7 @@ final class RoutingJournalTests: XCTestCase {
         try db.close()
         try f.sql("PRAGMA user_version=6")
         XCTAssertThrowsError(try open(f, migrate: 6))
-        try f.sql("PRAGMA user_version=9")
+        try f.sql("PRAGMA user_version=10")
         let reopened = try open(f)
         XCTAssertEqual(try reopened.read { try $0.routingState() }, RoutingState(mode: .present, revision: 1))
     }
@@ -231,7 +231,7 @@ final class RoutingJournalTests: XCTestCase {
     func testSchemaSixMigrationPreservesEnrollmentAndInitializesAutomatic() throws {
         let f = try Fixture(), (db, _, trust) = try setup(f)
         try db.close()
-        try f.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; PRAGMA user_version=6")
+        try f.sql("DROP TABLE gateway_recovered_revocations_v1; DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; PRAGMA user_version=6")
         XCTAssertThrowsError(try open(f))
         let migrated = try open(f, migrate: 6)
         XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().revision }, trust)

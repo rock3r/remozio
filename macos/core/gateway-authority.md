@@ -92,8 +92,8 @@ A complete backup rollback still needs the independent continuity witness; these
 
 ## Schema and service integration
 
-Root journal schema 9 retains gateway, [approval enrollment](enrollment-journal.md), and [routing state](routing-journal.md). It retains historical gateway acknowledgments and adds recovered delivery receipts.
-Known migrations from versions 1 through 8 require the explicit source version. They preserve existing audit and consumption state.
+Root journal schema 10 retains gateway, [approval enrollment](enrollment-journal.md), and [routing state](routing-journal.md). It retains historical gateway acknowledgments and retains recovered delivery receipts and adds recovered revocations.
+Known migrations from versions 1 through 9 require the explicit source version. They preserve existing audit and consumption state.
 A migration does not derive enrollment or gateway authority from audit records. Failed migration rolls back its table and version changes.
 The separate gateway database remains at schema 3.
 
@@ -151,3 +151,5 @@ Seven additional tests connect real root and gateway databases through fresh sig
 They cover all receipt kinds, replay and reordering, missing delivery and revocation history, conflicting controls, scope isolation, write failures, corruption, reopen, and migration.
 
 See [gateway history recovery](gateway-history-recovery.md) for transactional counter repair and its trust boundary.
+
+See [recovered gateway revocations](recovered-gateway-revocations.md) for permanent restrictions and atomic system audit events.

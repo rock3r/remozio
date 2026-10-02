@@ -52,13 +52,14 @@ A repeated call with the same evidence observes a changed local head and does no
 `requiresTrustRecovery` and `conflictingLocalHistory` are not success states.
 The host must restrict affected authority and mapping publication, apply verified revocations, and use the existing trust recovery path.
 This delivery-only API does not implement those host transitions or grant permission to continue accepting phone operations.
+The host can apply signed restrictive evidence through [recovered gateway revocations](recovered-gateway-revocations.md).
 It does not establish whole-backup continuity, install a witness, or infer trust from a gateway counter.
 Gateway unavailability alone does not require administrator recovery.
 
 ## Storage and validation
 
-Root journal schema 9 adds `gateway_reconciled_controls_v1` and preserves existing desired tokens and acknowledgments.
-Explicit migrations accept schemas 1 through 8. Migration does not invent recovered history.
+Schema 9 introduced `gateway_reconciled_controls_v1` and preserves existing desired tokens and acknowledgments.
+Current root schema 10 also retains recovered revocations. Explicit migrations accept schemas 1 through 9. Migration does not invent recovered history.
 The separate gateway database remains at schema 3.
 
 Synthetic tests use real root and gateway databases, signed controls, fresh gateway queries, and the complete history collector.

@@ -41,7 +41,7 @@ public final class JournalDatabase {
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -59,7 +59,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 9) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 10) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -182,8 +182,9 @@ public final class JournalDatabase {
             try RoutingJournal.createSchema(db!)
             try GatewayAuthorityJournal.createAcknowledgmentSchema(db!)
             try GatewayAuthorityJournal.createReconciledSchema(db!)
+            try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=9")
+            try exec("PRAGMA user_version=10")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -200,8 +201,9 @@ public final class JournalDatabase {
             if version < 6 { try EnrollmentJournal.createSchema(db!) }
             if version < 7 { try RoutingJournal.createSchema(db!) }
             if version < 8 { try GatewayAuthorityJournal.createAcknowledgmentSchema(db!) }
-            try GatewayAuthorityJournal.createReconciledSchema(db!)
-            try exec("PRAGMA user_version=9")
+            if version < 9 { try GatewayAuthorityJournal.createReconciledSchema(db!) }
+            try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!)
+            try exec("PRAGMA user_version=10")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -214,7 +216,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 9) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 10) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -248,6 +250,7 @@ public final class JournalDatabase {
         }
         if version >= 8 { queries.append("SELECT id,revision,operation FROM main.gateway_acknowledgment_v1 LIMIT 0") }
         if version >= 9 { queries.append("SELECT operation,revision,kind,candidate,payload,signature FROM main.gateway_reconciled_controls_v1 LIMIT 0") }
+        if version >= 10 { queries.append("SELECT phone,enrollment,operation,payload,signature FROM main.gateway_recovered_revocations_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -387,6 +390,34 @@ public final class JournalTransaction {
             try enrollmentEvent(phone: phoneID, added: false, eventID: eventID, receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
             return (next, control)
+        }
+    }
+
+    /// Root-signed revocation evidence can only restrict authority. Expired delivery envelopes remain valid evidence.
+    /// The host closes affected admission until this transaction and its continuity checkpoint have committed.
+    /// A changed return revision means that a system recovery event was appended at expectedAuditHead + 1.
+    public func recoverGatewayRevocation(canonicalPayload: Data, signature: Data, registration: GatewayRegistrationIdentity,
+                                         expectedTrustRevision: UUID, eventID: Data, receiptTimeMs: UInt64?,
+                                         writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> UUID {
+        try withEnrollment(write: true) { ledger in
+            let snapshot = try ledger.snapshot()
+            guard snapshot.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            guard snapshot.macID == registration.macID, snapshot.accountID == registration.accountID else { throw GatewayAuthorityError.wrongScope }
+            let (revocation, changed) = try withGateway(write: true) {
+                try $0.recoverRevocation(payload: canonicalPayload, signature: signature, identity: registration)
+            }
+            let next = try ledger.restrictRecovered(phone: revocation.binding.phoneID, epoch: revocation.binding.enrollmentEpoch,
+                expected: expectedTrustRevision, evidenceChanged: changed)
+            if next != expectedTrustRevision {
+                guard expectedAuditHead < UInt64.max else { throw AuditJournalError.headMismatch }
+                let event = try AuditEventMetadata(eventID: eventID, macID: snapshot.macID, accountID: snapshot.accountID,
+                    journalEpoch: writer.epoch, sequence: expectedAuditHead + 1, requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: receiptTimeMs,
+                    kind: .recovery, category: .enrollment, action: nil, decisionPhoneID: nil, authentication: .system,
+                    outcome: .accepted, reason: .revoked, droppedEventCount: nil, peerDeviceID: revocation.binding.phoneID)
+                guard let owner else { throw JournalDatabaseError.expiredTransaction }
+                try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: expectedAuditHead)
+            }
+            return next
         }
     }
 
