@@ -73,3 +73,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Gateway recipient controls](gateway-recipient-controls.md) define separate signed activation and phone-epoch revocation claims.
 
 [Opaque push data](push-data.md) separates approval wake-ups from provider-only token challenges in Swift and Kotlin.
+
+[Phone routing controls](routing-away.md) define the separately signed Away-only command for an enrolled Mac/account.
