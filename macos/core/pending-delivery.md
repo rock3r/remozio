@@ -23,7 +23,7 @@ The authority serializes this controller with request lifecycle, target checks, 
 2. Recheck the original target. Supply the current retained request and the current `PresenceRouter` result to `reconcile`.
 3. The synchronous callback accepts bounded local queue ownership. Return false only when no work was accepted. It must not send, await, or reenter the controller.
 4. Prepare the authenticated transport and any provider credentials before starting delivery.
-5. Refresh trust, target validity, time, and routing. Call `beginDelivery` immediately before the first transport write. Do not await or change authority state between this check and that write.
+5. Refresh target validity, time, and routing. Use the root owner’s `handoffDelivery` to reread current request and trust before synchronous transport acceptance. Do not await or change authority state during that callback.
 6. Always apply the returned update, including withdrawals when no delivery can start. A queued identity alone permits neither request fetch nor notification dispatch.
 
 `active` lists queue-owned work. `dispatched` lists work that passed the start boundary. Neither field grants action authority or proves that a phone displayed anything. Each delivery keeps the original request ID, admission moment, and deadline. The signed request retains its original wall times and audit link.
@@ -49,3 +49,8 @@ Tests cover local-to-phone handoff, multiple phones, unchanged age and expiry, n
 This component does not install presence observers, run a transport, write handoff audit events, or implement the local command approval surface. Those service integrations and physical-device acceptance checks remain required. No real credentials, provider calls, or target actions are used by these tests.
 
 The approval request owner exposes `reconcileDelivery` for pending and completed requests. It closes queued and started deliveries from retained metadata after capture release. Apply withdrawals before forgetting terminal owner state.
+
+`PendingRequestDelivery.handoff` marks dispatch only after its synchronous callback accepts ownership.
+Backpressure leaves the same identity queued, with no deadline extension. `beginDelivery` remains the lower-level unconditional start boundary.
+The root coordinator's `handoffDelivery` is the service entry point when current journal and request state must be read together.
+Seven owner tests cover refused and repeated handoffs, presence changes, revocation, consumed requests, expiry commit failures, wrong identities, and unavailable authority.

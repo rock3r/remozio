@@ -128,12 +128,21 @@ public final class PendingRequestDelivery {
     /// The queue owns bounded retries of a started delivery, using the same identity and current reconciliation state.
     public func beginDelivery(id: UUID, current: RetainedApprovalRequest, routing: PresenceRouting,
                               trust: RequestDeliveryTrust, now: AuthorityMoment) -> RequestDeliveryDispatch {
+        handoff(id: id, current: current, routing: routing, trust: trust, now: now) { _ in true }
+    }
+
+    /// Recheck and synchronously transfer ownership. False means no bytes or work were accepted, so the same identity may retry.
+    /// The callback must not await, reenter this controller, or change authority state. Acceptance is not provider or phone receipt.
+    public func handoff(id: UUID, current: RetainedApprovalRequest, routing: PresenceRouting,
+                        trust: RequestDeliveryTrust, now: AuthorityMoment,
+                        accept: (PhoneRequestDelivery) -> Bool) -> RequestDeliveryDispatch {
         let update = reconcile(current: current, routing: routing, trust: trust, now: now) { _ in false }
         guard closure == nil, routing.destination == .phones,
               let recipient = entries.first(where: { $0.value.delivery.id == id })?.key,
               var entry = entries[recipient], entry.enqueued, !entry.retired, !entry.dispatched else {
             return RequestDeliveryDispatch(delivery: nil, update: update)
         }
+        guard accept(entry.delivery) else { return RequestDeliveryDispatch(delivery: nil, update: update) }
         entry.dispatched = true
         entries[recipient] = entry
         return RequestDeliveryDispatch(delivery: entry.delivery, update: RequestDeliveryUpdate(
