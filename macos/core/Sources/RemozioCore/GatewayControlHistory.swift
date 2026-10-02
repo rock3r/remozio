@@ -34,7 +34,10 @@ public struct GatewayControlHistoryReply: Sendable, CustomStringConvertible, Cus
 public struct VerifiedGatewayControlHistory: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let page: GatewayControlHistoryPage
     public let receivedAt: AuthorityMoment
-    init(page: GatewayControlHistoryPage, receivedAt: AuthorityMoment) { self.page = page; self.receivedAt = receivedAt }
+    let queryOwnerID: UUID
+    init(page: GatewayControlHistoryPage, receivedAt: AuthorityMoment, queryOwnerID: UUID) {
+        self.page = page; self.receivedAt = receivedAt; self.queryOwnerID = queryOwnerID
+    }
     public var description: String { "VerifiedGatewayControlHistory(redacted)" }
     public var debugDescription: String { description }
 }

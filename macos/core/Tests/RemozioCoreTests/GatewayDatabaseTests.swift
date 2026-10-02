@@ -929,6 +929,151 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
     }
 
+    private func collectedHead(_ db: GatewayDatabase, owner: GatewayHeadQueryOwner, key: P256.Signing.PrivateKey) throws -> VerifiedGatewayHead {
+        let query = try owner.makeQuery(now: headMoment(1))
+        let reply = try db.headReply(canonicalQuery: query) { try key.signature(for: $0).rawRepresentation }
+        return try owner.accept(reply, now: headMoment(1))
+    }
+    private func collectionFails(_ error: GatewayHistoryCollectionError, _ action: () throws -> Any,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try action(), file: file, line: line) {
+            XCTAssertEqual($0 as? GatewayHistoryCollectionError, error, file: file, line: line)
+        }
+    }
+
+    func testCollectorAnchorsMultiplePagesIncludingRevocationAndCompletesOnce() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        let proposed = try candidate(); _ = try admit(db, proposed)
+        _ = try activate(db, activation(proposed), head: 1); _ = try revoke(db)
+        let head = try collectedHead(db, owner: owner, key: gateway)
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        let first = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 0, through: 3, maximum: 2), now: headMoment(1))
+        XCTAssertNil(try collector.accept(first)); XCTAssertEqual(collector.nextAfterRevision, 2)
+        let last = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 2, through: 3), now: headMoment(1))
+        let result = try XCTUnwrap(collector.accept(last))
+        XCTAssertEqual(result.records.map(\.revision), [1, 2, 3]); XCTAssertEqual(result.afterRevision, 0)
+        XCTAssertEqual(result.head.evidence.receipt?.canonicalPayload, result.records.last?.canonicalPayload)
+        XCTAssertNil(collector.nextAfterRevision)
+        XCTAssertEqual(String(reflecting: result), "VerifiedGatewayHistory(redacted)")
+        collectionFails(.stopped) { try collector.accept(last) }
+        XCTAssertEqual(try db.head(), 3)
+    }
+
+    func testCollectorRejectsMissingRevisionAndCannotResumeAfterFailure() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db); _ = try admit(db, candidate(3, revision: 3), head: 1)
+        let collector = try GatewayHistoryCollector(head: collectedHead(db, owner: owner, key: gateway), afterRevision: 0)
+        let page = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 0, through: 3), now: headMoment(1))
+        collectionFails(.incompleteHistory) { try collector.accept(page) }
+        XCTAssertNil(collector.nextAfterRevision)
+        collectionFails(.stopped) { try collector.accept(page) }
+    }
+
+    func testCollectorRejectsOtherQueryOwnerEvenWithIdenticalPins() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db)
+        let collector = try GatewayHistoryCollector(head: collectedHead(db, owner: owner, key: gateway), afterRevision: 0)
+        let other = try headOwner(gateway)
+        let page = try other.acceptHistory(historyReply(db, owner: other, key: gateway, after: 0, through: 1), now: headMoment(1))
+        collectionFails(.wrongQueryOwner) { try collector.accept(page) }
+    }
+
+    func testCollectorRejectsRangeChangesRepeatedPagesAndEarlyTerminal() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db); _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let head = try collectedHead(db, owner: owner, key: gateway)
+        let wrong = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 1, through: 2), now: headMoment(1))
+        collectionFails(.wrongRange) { try GatewayHistoryCollector(head: head, afterRevision: 0).accept(wrong) }
+        let first = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 0, through: 2, maximum: 1), now: headMoment(1))
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        XCTAssertNil(try collector.accept(first))
+        collectionFails(.wrongRange) { try collector.accept(first) }
+        let original = try historyReply(db, owner: owner, key: gateway, after: 0, through: 2, maximum: 1)
+        let early = try changeHistory(original, key: gateway) { $0[7] = .boolean(false) }
+        let page = try owner.acceptHistory(early, now: headMoment(1))
+        collectionFails(.incompleteHistory) { try GatewayHistoryCollector(head: head, afterRevision: 0).accept(page) }
+        let emptyReply = try historyReply(db, owner: owner, key: gateway, after: 0, through: 2)
+        let empty = try changeHistory(emptyReply, key: gateway) { $0[6] = .array([]) }
+        let emptyPage = try owner.acceptHistory(empty, now: headMoment(1))
+        collectionFails(.incompleteHistory) { try GatewayHistoryCollector(head: head, afterRevision: 0).accept(emptyPage) }
+    }
+
+    func testCollectorRejectsSignedHistoryThatConflictsWithAnchoredHead() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db)
+        let head = try collectedHead(db, owner: owner, key: gateway)
+        let original = try historyReply(db, owner: owner, key: gateway, after: 0, through: 1)
+        let alternative = try candidate(challenge: 99), payload = try alternative.encode(limits: limits)
+        let signature = try key.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+            canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+        let reply = try changeHistory(original, key: gateway) {
+            $0[6] = .array([.map([0: .unsigned(1), 1: .bytes(payload), 2: .bytes(signature), 3: .unsigned(1)])])
+        }
+        let page = try owner.acceptHistory(reply, now: headMoment(1))
+        collectionFails(.conflictingHead) { try GatewayHistoryCollector(head: head, afterRevision: 0).accept(page) }
+    }
+
+    func testCollectorRejectsOperationReuseAcrossIndependentlyVerifiedPages() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db); _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let collector = try GatewayHistoryCollector(head: collectedHead(db, owner: owner, key: gateway), afterRevision: 0)
+        let first = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 0, through: 2, maximum: 1), now: headMoment(1))
+        XCTAssertNil(try collector.accept(first))
+        let original = try historyReply(db, owner: owner, key: gateway, after: 1, through: 2)
+        let duplicate = try candidate(2, revision: 2, operation: 1), payload = try duplicate.encode(limits: limits)
+        let signature = try key.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+            canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+        let reply = try changeHistory(original, key: gateway) {
+            $0[6] = .array([.map([0: .unsigned(1), 1: .bytes(payload), 2: .bytes(signature), 3: .unsigned(2)])])
+        }
+        let page = try owner.acceptHistory(reply, now: headMoment(1))
+        collectionFails(.duplicateOperation) { try collector.accept(page) }
+        XCTAssertNil(collector.nextAfterRevision)
+    }
+
+    func testCollectorComparesCanonicalReceiptRatherThanSignatureBytes() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        let proposed = try candidate(); _ = try admit(db, proposed)
+        let head = try collectedHead(db, owner: owner, key: gateway)
+        let original = try historyReply(db, owner: owner, key: gateway, after: 0, through: 1)
+        let payload = try proposed.encode(limits: limits)
+        let signature = try key.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+            canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+        let reply = try changeHistory(original, key: gateway) {
+            $0[6] = .array([.map([0: .unsigned(1), 1: .bytes(payload), 2: .bytes(signature), 3: .unsigned(1)])])
+        }
+        let page = try owner.acceptHistory(reply, now: headMoment(1))
+        XCTAssertNotNil(try GatewayHistoryCollector(head: head, afterRevision: 0).accept(page))
+    }
+
+    func testCollectorEnforcesTotalBoundsAndExplicitInvalidation() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db); _ = try admit(db, candidate(2, revision: 2), head: 1)
+        let head = try collectedHead(db, owner: owner, key: gateway)
+        collectionFails(.capacityExceeded) { try GatewayHistoryCollector(head: head, afterRevision: 0, maximumRecords: 1) }
+        collectionFails(.invalidConfiguration) { try GatewayHistoryCollector(head: head, afterRevision: 2) }
+        collectionFails(.invalidConfiguration) { try GatewayHistoryCollector(head: head, afterRevision: 0, maximumBytes: 0) }
+        let page = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 0, through: 2), now: headMoment(1))
+        let exact = page.page.records.reduce(0) { $0 + $1.canonicalPayload.count + $1.signature.count }
+        collectionFails(.capacityExceeded) { try GatewayHistoryCollector(head: head, afterRevision: 0, maximumBytes: exact - 1).accept(page) }
+        XCTAssertNotNil(try GatewayHistoryCollector(head: head, afterRevision: 0, maximumBytes: exact).accept(page))
+        let stopped = try GatewayHistoryCollector(head: head, afterRevision: 0); stopped.invalidate()
+        XCTAssertNil(stopped.nextAfterRevision); collectionFails(.stopped) { try stopped.accept(page) }
+    }
+
+    func testCollectorAcceptsUnsignedMaximumAndRejectsOlderPages() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        _ = try admit(db, candidate(revision: UInt64.max))
+        let page = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: UInt64.max - 1, through: UInt64.max), now: headMoment(1))
+        let head = try collectedHead(db, owner: owner, key: gateway)
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: UInt64.max - 1)
+        XCTAssertEqual(try collector.accept(page)?.records.last?.revision, UInt64.max)
+        let query = try owner.makeQuery(now: headMoment(2))
+        let reply = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        let laterHead = try owner.accept(reply, now: headMoment(2))
+        collectionFails(.invalidClock) { try GatewayHistoryCollector(head: laterHead, afterRevision: UInt64.max - 1).accept(page) }
+    }
+
     private func historyReply(_ db: GatewayDatabase, owner: GatewayHeadQueryOwner, key: P256.Signing.PrivateKey,
                               after: UInt64, through: UInt64, maximum: Int = 16) throws -> GatewayControlHistoryReply {
         let query = try owner.makeHistoryQuery(afterRevision: after, throughRevision: through, maximumRecords: maximum, now: headMoment(1))
