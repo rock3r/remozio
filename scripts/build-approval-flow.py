@@ -15,6 +15,6 @@ log = BUILD / 'swift-build.log'
 log.write_text(result.stdout + result.stderr)
 require(result.returncode == 0, f'Synthetic peer build failed; see {log}')
 binary_directory = Path(run(*arguments, '--show-bin-path').stdout.strip())
-for peer in ('ApprovalFlowPeer', 'AuditFlowPeer'):
+for peer in ('ApprovalFlowPeer', 'AuditFlowPeer', 'HPKEPeer'):
     shutil.copy2(binary_directory / peer, BUILD / peer)
-print('Synthetic approval and audit peers built. No requests executed.')
+print('Synthetic approval, audit, and HPKE peers built. No requests executed.')
