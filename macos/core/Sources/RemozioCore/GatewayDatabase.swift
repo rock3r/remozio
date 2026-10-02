@@ -103,6 +103,48 @@ public final class GatewayDatabase {
     deinit { shutdown() }
 
     public func head() throws -> UInt64 { try transaction(write: false) { try storedHead() } }
+    /// Reads the counter and latest signed receipt in one transaction. The service must authenticate any network response separately.
+    public func headEvidence() throws -> GatewayHeadEvidence {
+        try transaction(write: false) {
+            let head = try storedHead()
+            let latest: [(Int64, Data, UInt64)] = try statement("""
+                SELECT source,operation,revision FROM (
+                    SELECT 1 AS source,operation,revision FROM gateway_candidates_v1
+                    UNION ALL
+                    SELECT 2 AS source,operation,revision FROM gateway_recipients_v2
+                ) ORDER BY revision DESC LIMIT 2
+                """) { stmt in
+                var rows: [(Int64, Data, UInt64)] = []
+                while true {
+                    let rc = sqlite3_step(stmt)
+                    if rc == SQLITE_DONE { return rows }
+                    guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+                    rows.append((sqlite3_column_int64(stmt, 0), try blob(stmt, 1, maximum: 16),
+                                 try unsigned(blob(stmt, 2, maximum: 8))))
+                }
+            }
+            guard let row = latest.first else {
+                guard head == 0 else { throw GatewayDatabaseError.corruptData }
+                return GatewayHeadEvidence(registration: identity, revision: 0, receipt: nil)
+            }
+            guard head > 0, row.2 == head, latest.count == 1 || latest[1].2 < head else {
+                throw GatewayDatabaseError.corruptData
+            }
+            let receipt: GatewayControlReceipt
+            if row.0 == 1 {
+                guard let value = try storedReceipt(operationID: row.1),
+                      try storedRecipient(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
+                receipt = .candidate(value)
+            } else {
+                guard let value = try storedRecipient(operationID: row.1),
+                      try storedReceipt(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
+                receipt = .recipient(value)
+            }
+            guard receipt.revision == head else { throw GatewayDatabaseError.corruptData }
+            return GatewayHeadEvidence(registration: identity, revision: head, receipt: receipt)
+        }
+    }
+
     public func receipt(operationID: Data) throws -> GatewayCandidateReceipt? {
         guard operationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
         return try transaction(write: false) { try storedReceipt(operationID: operationID) }

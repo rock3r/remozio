@@ -66,6 +66,94 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertEqual(String(reflecting: result.receipt), "GatewayCandidateReceipt(redacted)")
     }
 
+    func testHeadEvidenceTracksAllControlKindsWithoutChangingState() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let empty = try db.headEvidence()
+        XCTAssertEqual(empty.revision, 0); XCTAssertNil(empty.receipt)
+        XCTAssertEqual(empty.registration, try identity())
+        let candidate = try candidate(), admission = try admit(db, candidate)
+        let proposed = try db.headEvidence()
+        guard case .candidate(let stored) = proposed.receipt else { return XCTFail("Expected candidate evidence") }
+        XCTAssertEqual(proposed.revision, 1)
+        XCTAssertEqual(stored.canonicalPayload, admission.receipt.canonicalPayload)
+        XCTAssertEqual(stored.signature, admission.receipt.signature)
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 1)
+        let applied = try activate(db, activation(candidate), head: 1)
+        let active = try db.headEvidence()
+        guard case .recipient(let receipt) = active.receipt else { return XCTFail("Expected recipient evidence") }
+        XCTAssertEqual(receipt.kind, .activation); XCTAssertEqual(active.revision, 2)
+        XCTAssertEqual(receipt.signature, applied.receipt.signature)
+        let removed = try revoke(db), revoked = try db.headEvidence()
+        guard case .recipient(let tombstone) = revoked.receipt else { return XCTFail("Expected revocation evidence") }
+        XCTAssertEqual(tombstone.kind, .phoneRevocation); XCTAssertEqual(revoked.revision, 3)
+        XCTAssertEqual(revoked.receipt?.canonicalPayload, removed.receipt.canonicalPayload)
+        XCTAssertEqual(revoked.receipt?.signature, removed.receipt.signature)
+        XCTAssertEqual(revoked.receipt?.operationID, id(60))
+        XCTAssertEqual(revoked.receipt?.revision, 3)
+        XCTAssertEqual(String(reflecting: revoked), "GatewayHeadEvidence(redacted)")
+        XCTAssertEqual(String(reflecting: try XCTUnwrap(revoked.receipt)), "GatewayControlReceipt(redacted)")
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_mappings_v2"), 0)
+        try db.close()
+        let reopened = try open(fixture), restored = try reopened.headEvidence()
+        XCTAssertEqual(restored.revision, revoked.revision)
+        XCTAssertEqual(restored.receipt?.signature, revoked.receipt?.signature)
+        XCTAssertTrue(try reopened.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+    }
+
+    func testHeadEvidencePreservesUnsignedSkippedRevisionsAndExpiredReceipts() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let result = try admit(db, candidate(revision: .max))
+        try db.expireCandidates(now: AuthorityMoment(epoch: epoch, milliseconds: 2000))
+        let evidence = try db.headEvidence()
+        XCTAssertEqual(evidence.revision, UInt64.max)
+        XCTAssertEqual(evidence.receipt?.signature, result.receipt.signature)
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
+        try db.close()
+        let reopened = try open(fixture)
+        XCTAssertEqual(try reopened.headEvidence().receipt?.canonicalPayload, result.receipt.canonicalPayload)
+    }
+
+    func testHeadEvidenceRejectsMissingMismatchedOrForgedLatestReceipt() throws {
+        for sql in [
+            "DELETE FROM gateway_candidates_v1",
+            "UPDATE gateway_identity_v1 SET head=x'0000000000000000'",
+            "UPDATE gateway_identity_v1 SET head=x'0000000000000002'",
+            "UPDATE gateway_candidates_v1 SET signature=zeroblob(64)",
+            "UPDATE gateway_candidates_v1 SET revision=x'0000000000000002'",
+            "UPDATE gateway_candidates_v1 SET phone=zeroblob(16)"
+        ] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true)
+            _ = try admit(db); try fixture.sql(sql)
+            fails(.corruptData) { try db.headEvidence() }
+            fails(.unavailable) { try db.headEvidence() }
+        }
+        for sql in [
+            "UPDATE gateway_recipients_v2 SET signature=zeroblob(64)",
+            "UPDATE gateway_candidates_v1 SET revision=x'0000000000000002'",
+            "UPDATE gateway_recipients_v2 SET operation=(SELECT operation FROM gateway_candidates_v1)"
+        ] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true), candidate = try candidate()
+            _ = try admit(db, candidate); _ = try activate(db, activation(candidate), head: 1)
+            try fixture.sql(sql)
+            fails(.corruptData) { try db.headEvidence() }
+            fails(.unavailable) { try db.head() }
+        }
+    }
+
+    func testHeadEvidenceDoesNotAdvanceAfterFailedRecipientCommit() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), candidate = try candidate()
+        _ = try admit(db, candidate)
+        let before = try db.headEvidence()
+        try fixture.sql("CREATE TRIGGER reject_head BEFORE UPDATE OF head ON gateway_identity_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try activate(db, activation(candidate), head: 1))
+        let after = try db.headEvidence()
+        XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(after.receipt?.canonicalPayload, before.receipt?.canonicalPayload)
+        XCTAssertEqual(after.receipt?.signature, before.receipt?.signature)
+        try db.close()
+        fails(.closed) { try db.headEvidence() }
+    }
+
     func testOperationCandidateAndChallengeConflictsNeverAdvanceHead() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         _ = try admit(db)
