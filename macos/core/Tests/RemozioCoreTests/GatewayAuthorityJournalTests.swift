@@ -896,11 +896,13 @@ final class GatewayAuthorityJournalTests: XCTestCase {
 
     private func withRecoveryAttempt(_ controls: [GatewayAuthorityEnvelope], tag: UInt8 = 6, pageSize: Int = 16,
                                      maximumRecords: Int = 100_000,
+                                     prepareLocal: ((JournalDatabase) throws -> [GatewayAuthorityEnvelope])? = nil,
                                      body: (Fixture, JournalDatabase, AuditEpochWriter, GatewayDatabase, P256.Signing.PrivateKey, GatewayRecoveryAttempt) throws -> Void) throws {
         let f = try Fixture(), db = try setup(f)
         var writer: AuditEpochWriter?
         _ = try enrollForRecovery(db, tag: tag, onWriter: { writer = $0 })
         let audit = try XCTUnwrap(writer)
+        let controls = try prepareLocal?(db) ?? controls
         let gf = try Fixture(), trusted = try trust(), r = trusted.registration
         let gateway = try gf.gateway(identity: r, limits: limits, epoch: clockEpoch)
         defer { try? gateway.close(); try? db.close() }
@@ -1127,6 +1129,208 @@ final class GatewayAuthorityJournalTests: XCTestCase {
             }
             XCTAssertThrowsError(try attempt.makeQuery(now: moment(121))) {
                 XCTAssertEqual($0 as? GatewayHeadReplyError, .stopped)
+            }
+        }
+    }
+
+    private func collectRecovery(_ attempt: GatewayRecoveryAttempt, _ gateway: GatewayDatabase,
+                                 _ key: P256.Signing.PrivateKey) throws {
+        try receiveHead(attempt, gateway, key)
+        try attempt.processPending(receiptTimeMs: nil) { _ in }
+        if attempt.result == nil {
+            try receivePage(attempt, gateway, key, now: 112)
+            try attempt.processPending(receiptTimeMs: nil) { _ in }
+        }
+        XCTAssertNotNil(attempt.result)
+    }
+
+    func testRecoveryAttemptReconcilesAndRenewsOnlyCurrentDesiredTokenAfterCheckpoint() throws {
+        var first: GatewayAuthorityEnvelope?
+        try withRecoveryAttempt([], prepareLocal: { db in
+            first = try self.prepare(db)
+            return [try XCTUnwrap(first)] + (try self.lostDelivery(db))
+        }) { f, db, _, gateway, key, attempt in
+            try collectRecovery(attempt, gateway, key)
+            XCTAssertNil(attempt.reconciliationResult)
+            var checkpoints = 0
+            let resolution = try attempt.reconcile(registrationActive: true, now: moment(120)) { pending in
+                checkpoints += 1
+                XCTAssertEqual(pending.disposition, .reconciled)
+                XCTAssertEqual(pending.localRevision, 3)
+                XCTAssertEqual(pending.acknowledgment?.revision, 3)
+                XCTAssertEqual(attempt.pendingReconciliationCheckpoint?.localRevision, 3)
+                XCTAssertNil(attempt.reconciliationResult)
+                XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_root_candidates_v1 WHERE run != zeroblob(16)"), "0")
+                XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in })
+            }
+            XCTAssertEqual(checkpoints, 1)
+            XCTAssertEqual(resolution.disposition, .reconciled)
+            XCTAssertEqual(resolution.reportedRevision, 3)
+            XCTAssertEqual(resolution.auditHead, 1)
+            XCTAssertTrue(resolution.restrictedPhoneIDs.isEmpty)
+            XCTAssertNil(attempt.pendingReconciliationCheckpoint)
+            XCTAssertEqual(attempt.reconciliationResult?.disposition, .reconciled)
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(121)) { _ in })
+            let next = try db.write { try $0.renewDesiredGatewayCandidate(phoneID: id(6), enrollmentEpoch: id(7),
+                registration: trust().registration, registrationActive: true, expectedTrustRevision: resolution.trustRevision,
+                expectedHead: resolution.localRevision, nowUnixMillis: 1020, now: moment(120), sign: sign) }
+            XCTAssertEqual(next.revision, 4)
+            XCTAssertEqual(next.registrationToken, "synthetic-token")
+            XCTAssertNotEqual(next.operationID, first?.operationID)
+        }
+    }
+
+    func testRecoveryAttemptRetriesReconciliationCheckpointWithoutRepeatingRepair() throws {
+        try withRecoveryAttempt([], prepareLocal: { db in
+            [try self.prepare(db)] + (try self.lostDelivery(db))
+        }) { f, db, _, gateway, key, attempt in
+            try collectRecovery(attempt, gateway, key)
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in throw Failure.injected })
+            XCTAssertNil(attempt.reconciliationResult)
+            let pending = try XCTUnwrap(attempt.pendingReconciliationCheckpoint)
+            XCTAssertEqual(pending.disposition, .reconciled)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 3)
+            try f.sql("CREATE TRIGGER reject_repair BEFORE INSERT ON gateway_reconciled_controls_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+            let resolution = try attempt.reconcile(registrationActive: true, now: moment(121)) { state in
+                XCTAssertEqual(state.disposition, .reconciled)
+                XCTAssertEqual(state.trustRevision, pending.trustRevision)
+                XCTAssertEqual(state.localRevision, pending.localRevision)
+            }
+            XCTAssertEqual(resolution.disposition, .reconciled)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "2")
+        }
+    }
+
+    func testRecoveryAttemptRetainsCollectionAcrossReconciliationStorageFailure() throws {
+        try withRecoveryAttempt([], prepareLocal: { db in
+            [try self.prepare(db)] + (try self.lostDelivery(db))
+        }) { f, db, _, gateway, key, attempt in
+            try collectRecovery(attempt, gateway, key)
+            try f.sql("CREATE TRIGGER reject_ack BEFORE INSERT ON gateway_acknowledgment_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+            var checkpoints = 0
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in checkpoints += 1 })
+            XCTAssertEqual(checkpoints, 0)
+            XCTAssertNotNil(attempt.result)
+            XCTAssertNil(attempt.reconciliationResult)
+            XCTAssertNil(attempt.pendingReconciliationCheckpoint)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+            try f.sql("DROP TRIGGER reject_ack")
+            let resolution = try attempt.reconcile(registrationActive: true, now: moment(121)) { _ in checkpoints += 1 }
+            XCTAssertEqual(resolution.disposition, .reconciled)
+            XCTAssertEqual(checkpoints, 1)
+        }
+    }
+
+    func testRecoveryAttemptAcknowledgesKnownHeadAndRetriesOnlyItsCheckpoint() throws {
+        for empty in [false, true] {
+            try withRecoveryAttempt([], prepareLocal: { db in empty ? [] : [try self.prepare(db)] }) { f, db, _, gateway, key, attempt in
+                try collectRecovery(attempt, gateway, key)
+                XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in throw Failure.injected })
+                let pending = try XCTUnwrap(attempt.pendingReconciliationCheckpoint)
+                XCTAssertEqual(pending.disposition, .acknowledged)
+                XCTAssertEqual(pending.localRevision, empty ? 0 : 1)
+                XCTAssertEqual(pending.acknowledgment?.revision, pending.localRevision)
+                try f.sql("CREATE TRIGGER reject_ack BEFORE INSERT ON gateway_acknowledgment_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+                let resolution = try attempt.reconcile(registrationActive: true, now: moment(121)) { _ in }
+                XCTAssertEqual(resolution.disposition, .acknowledged)
+                XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration) }, resolution.acknowledgment)
+            }
+        }
+    }
+
+    func testRecoveryAttemptDoesNotCheckpointStaleOrMissingHeadHistory() throws {
+        let sf = try Fixture(), source = try setup(sf), remote = try prepare(source)
+        for drift in [false, true] {
+            try withRecoveryAttempt([remote], prepareLocal: { db in
+                _ = try self.prepare(db)
+                return [remote]
+            }) { _, db, _, gateway, key, attempt in
+                try collectRecovery(attempt, gateway, key)
+                if drift { _ = try prepare(db, head: 1, now: 120) }
+                var checkpoints = 0
+                let resolution = try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in checkpoints += 1 }
+                XCTAssertEqual(resolution.disposition, drift ? .localHeadChanged : .missingLocalHistory)
+                XCTAssertEqual(resolution.localRevision, drift ? 2 : 1)
+                XCTAssertNil(resolution.acknowledgment)
+                XCTAssertEqual(checkpoints, 0)
+                XCTAssertEqual(attempt.reconciliationResult?.disposition, resolution.disposition)
+                XCTAssertNil(attempt.pendingReconciliationCheckpoint)
+            }
+        }
+    }
+
+    func testRecoveryAttemptReportsUnknownTrustWithoutCheckpointOrCounterAdoption() throws {
+        let sf = try Fixture(), source = try setup(sf), first = try prepare(source)
+        try withRecoveryAttempt([first], tag: 99) { _, db, _, gateway, key, attempt in
+            try collectRecovery(attempt, gateway, key)
+            var checkpoints = 0
+            let result = try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in checkpoints += 1 }
+            XCTAssertEqual(result.disposition, .requiresTrustRecovery)
+            XCTAssertEqual(result.restrictedPhoneIDs, [id(6)])
+            XCTAssertEqual(result.localRevision, 0)
+            XCTAssertNil(result.acknowledgment)
+            XCTAssertEqual(checkpoints, 0)
+            XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        }
+    }
+
+    func testRecoveryAttemptStopsOnCounterDriftDuringReconciliationCheckpoint() throws {
+        try withRecoveryAttempt([], prepareLocal: { db in [try self.prepare(db)] }) { _, db, _, gateway, key, attempt in
+            try collectRecovery(attempt, gateway, key)
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in
+                _ = try prepare(db, head: 1, now: 120)
+            }) { XCTAssertEqual($0 as? GatewayRecoveryAttemptError, .localStateChanged) }
+            XCTAssertNil(attempt.reconciliationResult)
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(121)) { _ in }) {
+                XCTAssertEqual($0 as? GatewayRecoveryAttemptError, .stopped)
+            }
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+            XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration)?.revision }, 1)
+        }
+    }
+
+    func testRecoveryAttemptDetectsAcknowledgmentDriftBeforeCheckpointRetry() throws {
+        var controls: [GatewayAuthorityEnvelope] = []
+        try withRecoveryAttempt([], prepareLocal: { db in
+            let first = try self.prepare(db)
+            controls = [first, try self.consume(db, first)]
+            return [first]
+        }) { _, db, _, gateway, key, attempt in
+            try collectRecovery(attempt, gateway, key)
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(120)) { _ in throw Failure.injected })
+            let pending = try XCTUnwrap(attempt.pendingReconciliationCheckpoint)
+            XCTAssertEqual(pending.localRevision, 2)
+            XCTAssertEqual(pending.acknowledgment?.revision, 1)
+            let newer = try verifiedHead(controls)
+            XCTAssertEqual(try db.write { try $0.acknowledgeGatewayHead(newer).disposition }, .recorded)
+            var checkpoints = 0
+            XCTAssertThrowsError(try attempt.reconcile(registrationActive: true, now: moment(121)) { _ in checkpoints += 1 }) {
+                XCTAssertEqual($0 as? GatewayRecoveryAttemptError, .localStateChanged)
+            }
+            XCTAssertEqual(checkpoints, 0)
+            XCTAssertNil(attempt.reconciliationResult)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+            XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration)?.revision }, 2)
+        }
+    }
+
+    func testRecoveryAttemptRejectsInactiveRegistrationClockRollbackAndCancellationAtReconciliation() throws {
+        for mode in 0...3 {
+            try withRecoveryAttempt([]) { _, db, _, gateway, key, attempt in
+                try collectRecovery(attempt, gateway, key)
+                var checkpoints = 0
+                XCTAssertThrowsError(try attempt.reconcile(registrationActive: mode != 0,
+                    now: mode == 1 ? moment(100) : mode == 2 ? moment(120, epoch: UUID()) : moment(120)) { _ in
+                    checkpoints += 1
+                    attempt.invalidate()
+                }) { error in
+                    if mode == 0 { XCTAssertEqual(error as? GatewayAuthorityError, .unavailableRegistration) }
+                    else { XCTAssertEqual(error as? GatewayRecoveryAttemptError, mode == 3 ? .stopped : .invalidClock) }
+                }
+                XCTAssertEqual(checkpoints, mode == 3 ? 1 : 0)
+                XCTAssertNil(attempt.reconciliationResult)
+                XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration)?.revision }, mode == 3 ? 0 : nil)
             }
         }
     }
