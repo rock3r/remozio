@@ -40,7 +40,7 @@ Receipt reads bound both blobs before decoding and cross-check their scope, requ
 
 The consumption receipt retains its event metadata when audit history is pruned. There is no ledger eviction or winner reset API. `maximumConsumptions` and decision CBOR limits are required configuration. Invalid decisions do not consume capacity. Reaching capacity fails before either write; this count limit is not a disk reservation or a lifecycle storage guarantee. Safe ledger retention and admission reservations remain separate work.
 
-Schema version 2 introduced the ledger; version 3 adds [durable outcomes](consumption-outcomes.md). Existing version 1 or 2 stores require the explicit migration described in [the connection contract](journal-database.md). The migration preserves history, creates no historical consumption rows, and grants no authority continuity. Version 1 shipped only the gated audit foundation. This migration must never be used to repair a lost production ledger.
+Schema version 2 introduced the ledger; version 3 adds [durable outcomes](consumption-outcomes.md). Existing version 1, 2, or 3 stores require the explicit migration described in [the connection contract](journal-database.md). The migration preserves history, creates no historical consumption rows, and grants no authority continuity. Version 1 shipped only the gated audit foundation. This migration must never be used to repair a lost production ledger.
 
 ## Evidence and remaining integration
 

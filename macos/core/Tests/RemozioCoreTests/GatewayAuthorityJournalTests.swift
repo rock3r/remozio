@@ -1,0 +1,331 @@
+import CryptoKit
+import Darwin
+import Foundation
+import RemozioProtocol
+import SQLite3
+import XCTest
+@testable import RemozioCore
+
+final class GatewayAuthorityJournalTests: XCTestCase {
+    private let key = P256.Signing.PrivateKey()
+    private let clockEpoch = UUID()
+    private enum Failure: Error { case injected }
+    private func id(_ n: UInt8, count: Int = 16) -> Data { Data(repeating: n, count: count) }
+    private var limits: CBORLimits { get throws { try .init(maxBytes: 16384, maxDepth: 8, maxItems: 512) } }
+    private func trust(active: Bool = true, phone: UInt8 = 6, epoch: UInt8 = 7, tag: UInt8 = 6) throws -> GatewayAuthorityTrust {
+        try .init(registration: GatewayRegistrationIdentity(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4),
+            lifecycleEpoch: id(5), rootPublicKey: key.publicKey.x963Representation),
+            enrollment: GatewayPhoneEnrollment(phoneID: id(phone), epoch: id(epoch), tag: id(tag, count: 32), active: active), active: true)
+    }
+    private func moment(_ value: UInt64 = 100, epoch: UUID? = nil) -> AuthorityMoment { .init(epoch: epoch ?? clockEpoch, milliseconds: value) }
+    private func sign(_ candidate: GatewayTokenCandidate) throws -> Data {
+        try key.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1, canonicalPayload: candidate.encode(limits: limits),
+            payloadLimits: limits, inputLimits: limits)).rawRepresentation
+    }
+    private func sign(_ activation: GatewayMappingActivation) throws -> Data {
+        try key.signature(for: GatewayRecipientSigningInput.make(wireVersion: 1, kind: .activation,
+            canonicalPayload: activation.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation
+    }
+    private func open(_ fixture: Fixture, initialize: Bool = false, maximum: Int = 20, enabled: Bool = true,
+                      migrate: Int64? = nil, epoch: UUID? = nil) throws -> JournalDatabase {
+        try JournalDatabase(lease: fixture.lease(), macID: id(2), accountID: id(3), recordLimits: limits,
+            descriptorLimits: limits, decisionLimits: limits, maximumConsumptions: 20, busyMilliseconds: 100,
+            initialize: initialize, migrateFromVersion: migrate,
+            gatewayPolicy: enabled ? GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits,
+                maximumControls: maximum, candidateLifetimeMillis: 1000, clockEpoch: epoch ?? clockEpoch) : nil)
+    }
+    private func setup(_ fixture: Fixture, maximum: Int = 20) throws -> JournalDatabase {
+        let db = try open(fixture, initialize: true, maximum: maximum)
+        try db.write { try $0.configureGatewayAuthority(trust().registration) }
+        return db
+    }
+    private func prepare(_ db: JournalDatabase, head: UInt64 = 0, token: String = "synthetic-token", wall: UInt64 = 1000,
+                         now: UInt64 = 100, trusted: GatewayAuthorityTrust? = nil, peer: UInt8 = 6) throws -> GatewayAuthorityEnvelope {
+        let trust = try trusted ?? self.trust()
+        return try db.write {
+            try $0.prepareGatewayCandidate(registrationToken: token, authenticatedPhoneID: id(peer), authenticatedEnrollmentEpoch: trust.enrollment.epoch,
+                trust: trust, expectedHead: head, nowUnixMillis: wall, now: moment(now), sign: sign)
+        }
+    }
+    private func candidate(_ envelope: GatewayAuthorityEnvelope) throws -> GatewayTokenCandidate {
+        try .decode(envelope.canonicalPayload, limits: limits)
+    }
+    private func proof(_ envelope: GatewayAuthorityEnvelope) throws -> Data {
+        try GatewayTokenProof(binding: candidate(envelope).binding).encode(limits: limits)
+    }
+    private func consume(_ db: JournalDatabase, _ envelope: GatewayAuthorityEnvelope, head: UInt64 = 1,
+                         wall: UInt64 = 1010, now: UInt64 = 110, peer: UInt8 = 6,
+                         trusted: GatewayAuthorityTrust? = nil, proofBytes: Data? = nil) throws -> GatewayAuthorityEnvelope {
+        let trust = try trusted ?? self.trust()
+        return try db.write {
+            try $0.consumeGatewayProof(canonicalProof: proofBytes ?? proof(envelope), authenticatedPhoneID: id(peer), authenticatedEnrollmentEpoch: trust.enrollment.epoch,
+                trust: trust, expectedHead: head, nowUnixMillis: wall, now: moment(now), sign: sign)
+        }
+    }
+
+    func testCandidateProofAndActivationShareDurableControlHead() throws {
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        XCTAssertEqual(first.kind, 1); XCTAssertEqual(first.revision, 1)
+        let candidate = try candidate(first)
+        XCTAssertEqual(candidate.binding.tokenDigest, Data(SHA256.hash(data: Data("synthetic-token".utf8))))
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        XCTAssertEqual(try db.read { try $0.pendingGatewayControl(operationID: first.operationID, trust: trust(), nowUnixMillis: 1000, now: moment()) }?.signature, first.signature)
+        let activation = try consume(db, first)
+        XCTAssertEqual(activation.kind, 2); XCTAssertEqual(activation.revision, 2)
+        XCTAssertEqual(try GatewayMappingActivation.decode(activation.canonicalPayload, limits: limits).binding, candidate.binding)
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_root_candidates_v1 WHERE consumed IS NOT NULL"), "1")
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_outbox_v1"), "2")
+        XCTAssertNil(try db.read { try $0.pendingGatewayControl(operationID: first.operationID, trust: trust(), nowUnixMillis: 1010, now: moment(110)) })
+        XCTAssertEqual(try db.read { try $0.pendingGatewayControl(operationID: activation.operationID, trust: trust(), nowUnixMillis: 1010, now: moment(110)) }?.signature, activation.signature)
+        XCTAssertThrowsError(try consume(db, first, head: 2)) { XCTAssertEqual($0 as? GatewayAuthorityError, .alreadyConsumed) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+        XCTAssertEqual(String(reflecting: activation), "GatewayAuthorityEnvelope(redacted)")
+    }
+
+    func testWrongPeerWrongProofAndRevokedTrustNeverCallSigner() throws {
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        for trusted in [try trust(active: false), try trust(epoch: 8), try trust(phone: 9)] {
+            XCTAssertThrowsError(try consume(db, first, trusted: trusted))
+        }
+        XCTAssertThrowsError(try consume(db, first, peer: 9))
+        let other = try GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5),
+            phoneID: id(6), enrollmentEpoch: id(7), candidateID: candidate(first).binding.candidateID,
+            tokenDigest: candidate(first).binding.tokenDigest, challenge: id(99, count: 32), enrollmentTag: id(6, count: 32))
+        var signed = false
+        XCTAssertThrowsError(try db.write {
+            try $0.consumeGatewayProof(canonicalProof: GatewayTokenProof(binding: other).encode(limits: limits), authenticatedPhoneID: id(6),
+                authenticatedEnrollmentEpoch: id(7), trust: trust(), expectedHead: 1, nowUnixMillis: 1010, now: moment(110),
+                sign: { value in signed = true; return try sign(value) })
+        })
+        XCTAssertFalse(signed)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        _ = try consume(db, first)
+    }
+
+    func testNewTokenChoiceSupersedesOldProofAndOutboxWithoutActivatingAnything() throws {
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db), second = try prepare(db, head: 1, token: "rotated")
+        XCTAssertThrowsError(try consume(db, first, head: 2)) { XCTAssertEqual($0 as? GatewayAuthorityError, .superseded) }
+        XCTAssertThrowsError(try db.read { try $0.pendingGatewayControl(operationID: first.operationID, trust: trust(), nowUnixMillis: 1010, now: moment(110)) })
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_root_candidates_v1 WHERE consumed IS NOT NULL"), "0")
+        _ = try consume(db, second, head: 2)
+    }
+
+    func testStorageFailureRollsBackProofOutboxAndHeadTogether() throws {
+        for trigger in ["BEFORE INSERT ON gateway_outbox_v1", "BEFORE UPDATE ON gateway_root_candidates_v1", "BEFORE UPDATE ON gateway_authority_v1"] {
+            let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+            try fixture.sql("CREATE TRIGGER reject_write \(trigger) BEGIN SELECT RAISE(ABORT,'fixture'); END")
+            XCTAssertThrowsError(try consume(db, first))
+            XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_root_candidates_v1 WHERE consumed IS NOT NULL"), "0")
+            XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+            try fixture.sql("DROP TRIGGER reject_write")
+            _ = try consume(db, first)
+        }
+    }
+
+    func testSwallowedMutationFailureStillRollsBackOtherJournalWrites() throws {
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        XCTAssertThrowsError(try db.write {
+            _ = try? $0.consumeGatewayProof(canonicalProof: proof(first), authenticatedPhoneID: id(9), authenticatedEnrollmentEpoch: id(7),
+                trust: trust(), expectedHead: 1, nowUnixMillis: 1010, now: moment(110), sign: sign)
+            _ = try $0.prepareGatewayCandidate(registrationToken: "next", authenticatedPhoneID: id(6), authenticatedEnrollmentEpoch: id(7),
+                trust: trust(), expectedHead: 1, nowUnixMillis: 1010, now: moment(110), sign: sign)
+        }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        _ = try consume(db, first)
+    }
+
+    func testExpiredAndRestartedCandidatesRequireFreshNonceFromCurrentDesiredState() throws {
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        XCTAssertThrowsError(try consume(db, first, wall: 2000, now: 1100)) { XCTAssertEqual($0 as? GatewayAuthorityError, .expired) }
+        try db.close()
+        let nextEpoch = UUID(), reopened = try open(fixture, epoch: nextEpoch)
+        XCTAssertThrowsError(try reopened.read {
+            try $0.pendingGatewayControl(operationID: first.operationID, trust: trust(), nowUnixMillis: 2000, now: moment(100, epoch: nextEpoch))
+        }) { XCTAssertEqual($0 as? GatewayAuthorityError, .expired) }
+        let fresh = try reopened.write {
+            try $0.renewDesiredGatewayCandidate(trust: trust(), expectedHead: 1, nowUnixMillis: 2000, now: moment(100, epoch: nextEpoch), sign: sign)
+        }
+        XCTAssertNotEqual(try candidate(fresh).binding.challenge, try candidate(first).binding.challenge)
+        XCTAssertNotEqual(try candidate(fresh).binding.candidateID, try candidate(first).binding.candidateID)
+        XCTAssertEqual(fresh.registrationToken, first.registrationToken)
+        XCTAssertEqual(fresh.revision, 2)
+        XCTAssertEqual(try candidate(fresh).expiresAtUnixMillis, 3000)
+    }
+
+    func testBadSignatureCapacityAndWrongHeadCannotCommit() throws {
+        let fixture = try Fixture(), db = try setup(fixture, maximum: 2), first = try prepare(db)
+        XCTAssertThrowsError(try db.write {
+            try $0.consumeGatewayProof(canonicalProof: proof(first), authenticatedPhoneID: id(6), authenticatedEnrollmentEpoch: id(7),
+                trust: trust(), expectedHead: 1, nowUnixMillis: 1010, now: moment(110), sign: { _ in Data(repeating: 0, count: 64) })
+        }) { XCTAssertEqual($0 as? GatewayAuthorityError, .invalidSignature) }
+        _ = try consume(db, first)
+        XCTAssertThrowsError(try prepare(db, head: 2, now: 110)) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+        XCTAssertThrowsError(try prepare(db, head: 1, now: 110)) { XCTAssertEqual($0 as? GatewayAuthorityError, .headMismatch) }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testDisabledReadOnlyAndEscapedTransactionNeverWrite() throws {
+        let fixture = try Fixture(), disabled = try open(fixture, initialize: true, enabled: false)
+        XCTAssertThrowsError(try disabled.write { try $0.configureGatewayAuthority(trust().registration) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .disabled) }
+        try disabled.close()
+        let db = try open(fixture)
+        XCTAssertThrowsError(try db.read { try $0.configureGatewayAuthority(trust().registration) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
+        let escaped = try db.write { $0 }
+        XCTAssertThrowsError(try escaped.configureGatewayAuthority(trust().registration)) { XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction) }
+        try db.write { try $0.configureGatewayAuthority(trust().registration) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+    }
+
+    func testAuthorityControlsDriveTheRealGatewayCandidateAndActivationChecks() throws {
+        let fixture = try Fixture(), root = try setup(fixture), first = try prepare(root), trusted = try trust()
+        let gateway = try fixture.gateway(identity: trusted.registration, limits: limits, epoch: clockEpoch)
+        func gatewayTrust(_ head: UInt64) throws -> GatewayCandidateTrust {
+            let r = trusted.registration
+            return try GatewayCandidateTrust(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID, gatewayID: r.gatewayID,
+                lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey, active: true, revision: UUID(),
+                appliedControlRevision: head, enrollment: trusted.enrollment)
+        }
+        _ = try gateway.admitCandidate(canonicalPayload: first.canonicalPayload, signature: first.signature, wireVersion: 1,
+            registrationToken: XCTUnwrap(first.registrationToken), trust: gatewayTrust(0), nowUnixMillis: 1000, now: moment())
+        XCTAssertNil(try gateway.activeMapping(trust: gatewayTrust(1)))
+        let snapshot = try gatewayTrust(1)
+        let reservation = try gateway.reserveProbe(candidateOperationID: first.operationID, trust: snapshot, nowUnixMillis: 1000, now: moment())
+        let probe = try gateway.takeProbe(reservation, trust: snapshot, nowUnixMillis: 1000, now: moment())
+        let binding = try candidate(first).binding
+        XCTAssertEqual(probe.payload.challenge, binding.challenge)
+        XCTAssertEqual(probe.payload.candidateID, binding.candidateID)
+        try gateway.finishProbe(reservation, outcome: .accepted, now: moment())
+        // This fixture stands in for receipt through the authenticated phone channel, not proof of that channel's implementation.
+        let activation = try consume(root, first)
+        _ = try gateway.applyRecipient(canonicalPayload: activation.canonicalPayload, signature: activation.signature, wireVersion: 1,
+            kind: .activation, trust: gatewayTrust(1), nowUnixMillis: 1010, now: moment(110))
+        XCTAssertEqual(try gateway.activeMapping(trust: gatewayTrust(2))?.registrationToken, first.registrationToken)
+        let retry = try gateway.applyRecipient(canonicalPayload: activation.canonicalPayload, signature: activation.signature, wireVersion: 1,
+            kind: .activation, trust: gatewayTrust(2), nowUnixMillis: 1010, now: moment(110))
+        XCTAssertFalse(retry.inserted)
+    }
+
+    func testKnownSchemaThreeMigrationPreservesAuditIdentityAndRequiresExplicitChoice() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+            0: .unsigned(1), 1: .bytes(id(2)), 2: .bytes(id(3)), 3: .bytes(id(40)),
+            4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+        ]), limits: limits), limits: limits)
+        _ = try db.write { try $0.createEpoch(descriptor) }
+        try db.close()
+        try fixture.sql("DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3")
+        XCTAssertThrowsError(try open(fixture))
+        let migrated = try open(fixture, migrate: 3)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "4")
+        XCTAssertNotNil(try migrated.read { try $0.epoch(id(40)) })
+        XCTAssertThrowsError(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unconfigured) }
+        try migrated.write { try $0.configureGatewayAuthority(trust().registration) }
+        XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+    }
+
+    func testFailedSchemaThreeMigrationLeavesVersionAndOldTablesIntact() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        try db.close()
+        try fixture.sql("DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3; CREATE TABLE gateway_outbox_v1(conflict INTEGER)")
+        XCTAssertThrowsError(try open(fixture, migrate: 3))
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "3")
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM sqlite_schema WHERE name='gateway_authority_v1'"), "0")
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM sqlite_schema WHERE name='consumption_outcomes_v1'"), "1")
+        try fixture.sql("DROP TABLE gateway_outbox_v1")
+        let recovered = try open(fixture, migrate: 3)
+        try recovered.close()
+    }
+
+    func testCorruptHeadTokenConsumptionAndRestoredDesiredPointerRetireOwner() throws {
+        for mutation in ["UPDATE gateway_authority_v1 SET head=zeroblob(8)",
+                         "UPDATE gateway_outbox_v1 SET signature=zeroblob(64)",
+                         "UPDATE gateway_outbox_v1 SET payload=x'01'",
+                         "UPDATE gateway_outbox_v1 SET token=x'616263' WHERE kind=1",
+                         "UPDATE gateway_root_candidates_v1 SET consumed=NULL"] {
+            let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+            _ = try consume(db, first)
+            try fixture.sql(mutation)
+            XCTAssertThrowsError(try consume(db, first, head: 2)) { XCTAssertEqual($0 as? GatewayAuthorityError, .corruptData) }
+            XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+        }
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        _ = try prepare(db, head: 1)
+        let oldID = try candidate(first).binding.candidateID.map { String(format: "%02x", $0) }.joined()
+        try fixture.sql("UPDATE gateway_desired_tokens_v1 SET candidate=x'\(oldID)'")
+        XCTAssertThrowsError(try consume(db, first, head: 2)) { XCTAssertEqual($0 as? GatewayAuthorityError, .corruptData) }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testWallAndMonotonicExpiryAreIndependentAndBadClockRetiresOwner() throws {
+        for (wall, now): (UInt64, UInt64) in [(2000, 100), (1000, 1100), (999, 100)] {
+            let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+            XCTAssertThrowsError(try consume(db, first, wall: wall, now: now)) { XCTAssertEqual($0 as? GatewayAuthorityError, .expired) }
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        }
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        XCTAssertThrowsError(try consume(db, first, now: 99)) { XCTAssertEqual($0 as? GatewayAuthorityError, .invalidClock) }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testCandidateCreationFailureNeverReplacesCurrentDesiredToken() throws {
+        let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
+        try fixture.sql("CREATE TRIGGER reject_head BEFORE UPDATE ON gateway_authority_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try prepare(db, head: 1, token: "uncommitted"))
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
+        try fixture.sql("DROP TRIGGER reject_head")
+        let fresh = try db.write { try $0.renewDesiredGatewayCandidate(trust: trust(), expectedHead: 1, nowUnixMillis: 1000, now: moment(), sign: sign) }
+        XCTAssertEqual(fresh.registrationToken, first.registrationToken)
+        XCTAssertThrowsError(try prepare(db, head: 2, token: "contains space")) { XCTAssertEqual($0 as? GatewayAuthorityError, .invalidToken) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+    }
+
+    private final class Fixture {
+        let root: URL
+        var directory: String { root.appendingPathComponent("store").path }
+        var path: String { directory + "/journal.sqlite" }
+        init() throws {
+            guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.injected }
+            defer { free(canonical) }
+            root = URL(fileURLWithPath: String(cString: canonical)).appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "journal.sqlite"] {
+                let fd = Darwin.open(directory + "/" + name, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw Failure.injected }; Darwin.close(fd)
+            }
+        }
+        deinit { try? FileManager.default.removeItem(at: root) }
+        func lease() throws -> ProtectedJournalLease { try .init(anchor: root.path, relativeDirectory: "store", owner: getuid()) }
+        func gateway(identity: GatewayRegistrationIdentity, limits: CBORLimits, epoch: UUID) throws -> GatewayDatabase {
+            let directory = root.appendingPathComponent("gateway").path
+            try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "gateway.sqlite"] {
+                let fd = Darwin.open(directory + "/" + name, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw Failure.injected }; Darwin.close(fd)
+            }
+            return try GatewayDatabase(lease: ProtectedGatewayLease(anchor: root.path, relativeDirectory: "gateway", serviceUID: geteuid(), ancestorUID: geteuid()),
+                identity: identity, payloadLimits: limits, signingLimits: limits, maximumOperations: 20,
+                maximumPendingPerEnrollment: 5, maximumLifetimeMillis: 1000, clockEpoch: epoch, busyMilliseconds: 100,
+                initialize: true, probePolicy: GatewayProbePolicy(maximumAttempts: 2, minimumRetryDelayMillis: 50, maximumTTLSeconds: 60))
+        }
+        func sql(_ sql: String) throws {
+            try connection { db in guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw Failure.injected } }
+        }
+        func scalar(_ sql: String) throws -> String? {
+            try connection { db in
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { throw Failure.injected }
+                defer { sqlite3_finalize(stmt) }
+                guard sqlite3_step(stmt) == SQLITE_ROW else { throw Failure.injected }
+                return sqlite3_column_text(stmt, 0).map { String(cString: $0) }
+            }
+        }
+        private func connection<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+            var db: OpaquePointer?
+            guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw Failure.injected }
+            defer { sqlite3_close(db) }
+            return try body(db)
+        }
+    }
+}
