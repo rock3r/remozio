@@ -37,7 +37,7 @@ public final class JournalDatabase {
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -55,7 +55,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 4) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 5) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -155,8 +155,9 @@ public final class JournalDatabase {
             try consumption.createSchema()
             try consumption.createOutcomeSchema()
             try GatewayAuthorityJournal.createSchema(db!)
+            try GatewayAuthorityJournal.createRevocationSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=4")
+            try exec("PRAGMA user_version=5")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -168,8 +169,9 @@ public final class JournalDatabase {
             try validateIdentity(macID: macID, accountID: accountID, version: version)
             if version == 1 { try consumption.createSchema() }
             if version < 3 { try consumption.createOutcomeSchema() }
-            try GatewayAuthorityJournal.createSchema(db!)
-            try exec("PRAGMA user_version=4")
+            if version < 4 { try GatewayAuthorityJournal.createSchema(db!) }
+            try GatewayAuthorityJournal.createRevocationSchema(db!)
+            try exec("PRAGMA user_version=5")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -182,7 +184,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 4) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 5) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -205,6 +207,7 @@ public final class JournalDatabase {
                         "SELECT candidate,phone,enrollment,operation,run,started,deadline,consumed FROM main.gateway_root_candidates_v1 LIMIT 0",
                         "SELECT phone,candidate FROM main.gateway_desired_tokens_v1 LIMIT 0"]
         }
+        if version >= 5 { queries.append("SELECT operation,revision,phone,enrollment,payload,signature,run,started,deadline FROM main.gateway_revocations_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -359,6 +362,25 @@ public final class JournalTransaction {
     public func pendingGatewayControl(operationID: Data, trust: GatewayAuthorityTrust,
                                       nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
         try withGateway(write: false) { try $0.pending(operationID: operationID, trust: trust, wall: nowUnixMillis, now: now) }
+    }
+
+    /// Protected enrollment removal only. Append the enrollment audit event in this same transaction.
+    /// Repeating this operation refreshes the delivery control; it never removes the retained revocation.
+    public func revokeGatewayEnrollment(trust: GatewayAuthorityTrust, expectedHead: UInt64,
+                                        nowUnixMillis: UInt64, now: AuthorityMoment,
+                                        sign: (GatewayPhoneRevocation) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) { try $0.revoke(trust: trust, expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign) }
+    }
+
+    /// Historical revocation survives control expiry and process restart. It does not prove a gateway acknowledgment.
+    public func gatewayEnrollmentRevoked(trust: GatewayAuthorityTrust) throws -> Bool {
+        try withGateway(write: false) { try $0.revoked(trust: trust) }
+    }
+
+    /// This path accepts inactive enrollment state so a removal can still reach the gateway.
+    public func pendingGatewayRevocation(operationID: Data, trust: GatewayAuthorityTrust,
+                                         nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        try withGateway(write: false) { try $0.pendingRevocation(operationID: operationID, trust: trust, wall: nowUnixMillis, now: now) }
     }
 
     public func createEpoch(_ descriptor: AuditEpochDescriptor) throws -> AuditEpochWriter {
