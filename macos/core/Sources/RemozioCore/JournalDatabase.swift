@@ -443,22 +443,21 @@ public final class JournalTransaction {
     public func setLocalRoutingMode(_ mode: RoutingMode, expectedRevision: UInt64, eventID: Data, receiptTimeMs: UInt64?,
                                     writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> RoutingState {
         try withRouting(write: true) { routing in
-            let trust = try approvalTrustSnapshot()
             let state = try routing.setLocal(mode, expected: expectedRevision)
             try routingEvent(phone: nil, eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer,
-                expectedHead: expectedAuditHead, trust: trust)
+                expectedHead: expectedAuditHead, scope: routing.scope)
             return state
         }
     }
 
-    private func routingEnrollment(phone: Data, epoch: Data, revision: UUID) throws -> (ApprovalTrustSnapshot, StoredApprovalEnrollment) {
+    private func routingEnrollment(phone: Data, epoch: Data, revision: UUID) throws -> StoredApprovalEnrollment {
         try withEnrollment(write: false) { ledger in
             let trust = try ledger.snapshot()
             guard trust.revision == revision else { throw EnrollmentJournalError.staleRevision }
             guard let enrollment = try ledger.all().first(where: {
                 $0.approval.phoneID == phone && $0.epoch == epoch && $0.approval.active
             }) else { throw EnrollmentJournalError.unavailableEnrollment }
-            return (trust, enrollment)
+            return enrollment
         }
     }
 
@@ -466,7 +465,7 @@ public final class JournalTransaction {
     public func issueRoutingChallenge(authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data, expectedTrustRevision: UUID,
                                       expectedRoutingRevision: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> RoutingAwayControl {
         try withRouting(write: true) { routing in
-            let (_, enrollment) = try routingEnrollment(phone: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch, revision: expectedTrustRevision)
+            let enrollment = try routingEnrollment(phone: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch, revision: expectedTrustRevision)
             return try routing.issue(enrollment: enrollment, expected: expectedRoutingRevision, wall: nowUnixMillis, now: now)
         }
     }
@@ -476,20 +475,20 @@ public final class JournalTransaction {
                                  expectedTrustRevision: UUID, nowUnixMillis: UInt64, now: AuthorityMoment,
                                  eventID: Data, writer: AuditEpochWriter, expectedAuditHead: UInt64) throws -> RoutingChange {
         try withRouting(write: true) { routing in
-            let (trust, enrollment) = try routingEnrollment(phone: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch, revision: expectedTrustRevision)
+            let enrollment = try routingEnrollment(phone: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch, revision: expectedTrustRevision)
             let result = try routing.apply(payload: canonicalPayload, signature: signature, enrollment: enrollment, wall: nowUnixMillis, now: now)
             if result.inserted {
                 try routingEvent(phone: authenticatedPhoneID, eventID: eventID, receiptTimeMs: nowUnixMillis,
-                    writer: writer, expectedHead: expectedAuditHead, trust: trust)
+                    writer: writer, expectedHead: expectedAuditHead, scope: routing.scope)
             }
             return result
         }
     }
 
     private func routingEvent(phone: Data?, eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter,
-                               expectedHead: UInt64, trust: ApprovalTrustSnapshot) throws {
+                               expectedHead: UInt64, scope: (macID: Data, accountID: Data)) throws {
         guard expectedHead < UInt64.max else { throw AuditJournalError.headMismatch }
-        let event = try AuditEventMetadata(eventID: eventID, macID: trust.macID, accountID: trust.accountID, journalEpoch: writer.epoch,
+        let event = try AuditEventMetadata(eventID: eventID, macID: scope.macID, accountID: scope.accountID, journalEpoch: writer.epoch,
             sequence: expectedHead + 1, requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: receiptTimeMs,
             kind: .routingChanged, category: .authority, action: nil, decisionPhoneID: phone,
             authentication: phone == nil ? .localUser : .decisionKey, outcome: .accepted, reason: .none, droppedEventCount: nil, peerDeviceID: nil)

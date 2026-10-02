@@ -60,6 +60,37 @@ final class RoutingJournalTests: XCTestCase {
         XCTAssertThrowsError(try body(), file: file, line: line) { XCTAssertEqual($0 as? RoutingJournalError, error, file: file, line: line) }
     }
 
+    func testLocalModesNeedNoApprovalSetupInNewOrMigratedJournal() throws {
+        for migrate in [false, true] {
+            let f = try Fixture()
+            var db = try open(f, initialize: true)
+            if migrate {
+                try db.close()
+                try f.sql("DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; PRAGMA user_version=6")
+                db = try open(f, migrate: 6)
+            }
+            let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(3)),
+                4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+            ]), limits: limits), limits: limits)
+            let writer = try db.write { try $0.createEpoch(descriptor) }
+            for (index, mode) in [RoutingMode.present, .away, .automatic].enumerated() {
+                XCTAssertEqual(try local(db, mode, writer: writer, revision: UInt64(index), head: UInt64(index)),
+                    RoutingState(mode: mode, revision: UInt64(index + 1)))
+            }
+            XCTAssertThrowsError(try db.read { try $0.approvalTrustSnapshot() }) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .unconfigured)
+            }
+            let rows = try db.read { try $0.page(epoch: id(3), after: 0, maximumRecords: 10, maximumBytes: 16384).canonicalRecords }
+            XCTAssertEqual(rows.count, 3)
+            for row in rows {
+                let event = try AuditEventMetadata.decode(row, limits: limits)
+                XCTAssertEqual(event.macID, id(1)); XCTAssertEqual(event.accountID, id(2))
+                XCTAssertEqual(event.kind, .routingChanged); XCTAssertEqual(event.authentication, .localUser)
+            }
+        }
+    }
+
     func testModesPersistAndPhoneRetryNeverOverridesLaterLocalChoice() throws {
         let f = try Fixture(), (db, writer, trust) = try setup(f)
         XCTAssertEqual(try db.read { try $0.routingState() }, RoutingState(mode: .automatic, revision: 0))

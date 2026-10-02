@@ -56,6 +56,8 @@ final class RoutingJournal {
             """, nil, nil, nil)
         guard rc == SQLITE_OK else { throw JournalDatabaseError.storage(rc) }
     }
+    var scope: (macID: Data, accountID: Data) { (mac, account) }
+
     func state() throws -> RoutingState {
         try statement("SELECT mode,revision FROM main.routing_state_v1 WHERE id=1", []) {
             guard sqlite3_step($0) == SQLITE_ROW else { throw RoutingJournalError.corruptData }

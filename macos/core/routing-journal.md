@@ -13,7 +13,8 @@ The controller must expose these configurable limits through the agreed settings
 
 The protected local control surface can call `setLocalRoutingMode` with Automatic, Present, or Away.
 The host must authenticate that local caller. This entry point must never become a phone or transport RPC.
-It advances the routing revision and writes a metadata-only audit event in the same transaction.
+Local choices do not require phone enrollment or approval-authority setup. Their audit scope comes from the protected journal identity.
+Each choice advances the routing revision and writes a metadata-only audit event in the same transaction.
 A stale expected revision changes nothing. Selecting the current mode still records an explicit new choice.
 
 ```mermaid
