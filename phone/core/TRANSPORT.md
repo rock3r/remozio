@@ -25,7 +25,7 @@ The engine checks the peer certificate's validity and public key. It requires TL
 - Treat abrupt EOF as failure. A TLS close notification reports peer closure, never a request result.
 - Close the carrier and discard its queued batches when the engine closes or fails. Do not retry an uncertain decision automatically.
 
-The initial handshake has a caller-selected cumulative byte budget, up to 1 MiB. Each working buffer is fixed at 65,536 bytes. These are transport bounds; they do not change application capture limits.
+The initial handshake has a caller-selected cumulative byte budget, up to 1 MiB. It counts consumed input and emitted output before authentication. Application records that share a carrier chunk do not consume that budget. Each working buffer is fixed at 65,536 bytes. These are transport bounds; they do not change application capture limits.
 
 Calls serialize engine operations. Delegated key tasks run synchronously and can block inside the platform provider. Run the component off the UI thread. Host deadlines cannot guarantee interruption of a provider key operation.
 

@@ -147,6 +147,10 @@ class TLSInteropTest {
     }
 
     @Test fun engineExchangesFragmentedRecordsWithTheNativePeer(): Unit = Fixture().use { f ->
+        for (receiveChunkSize in listOf(1, 32_768)) engineExchange(f, receiveChunkSize)
+    }
+
+    private fun engineExchange(f: Fixture, receiveChunkSize: Int) {
         Relay(f.port).use { relay ->
             f.engine().use { engine ->
                 Socket("127.0.0.1", relay.port).use { socket ->
@@ -158,7 +162,7 @@ class TLSInteropTest {
                         batch.plaintext.forEach { plaintext.write(it.copyBytes()) }
                     }
                     fun receive() {
-                        val buffer = ByteArray(173)
+                        val buffer = ByteArray(receiveChunkSize)
                         val count = socket.inputStream.read(buffer)
                         if (count < 0) { engine.endOfInput(); error("Unexpected EOF") }
                         deliver(engine.receive(buffer.copyOf(count)))

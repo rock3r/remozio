@@ -89,7 +89,6 @@ class PinnedTLSClient(
         check(currentState == TLSClientState.HANDSHAKING || currentState == TLSClientState.OPEN)
         return guarded {
             if (bytes.size > MAX_CHUNK_BYTES || bytes.size > incoming.remaining()) throw SSLException("TLS input limit")
-            countHandshake(bytes.size)
             incoming.put(bytes)
             pump()
         }
@@ -140,6 +139,7 @@ class PinnedTLSClient(
                 incoming.flip()
                 try { tls.unwrap(incoming, decoded) } finally { incoming.compact() }
             }
+            if (!wrap) countHandshake(result.bytesConsumed())
             if (outgoing.position() > 0) {
                 countHandshake(outgoing.position())
                 encrypted += bytes(outgoing)
