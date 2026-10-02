@@ -1,7 +1,7 @@
 # Durable routing choices
 
 `RoutingJournal` stores the selected mode for one protected Mac/account journal.
-Schema 7 adds the mode, its unsigned revision, and retained phone operations. Explicit migrations accept schemas 1 through 6.
+Schema 7 introduced the mode, its unsigned revision, and retained phone operations. Schema 8 preserves them and adds gateway acknowledgments. Explicit migrations accept schemas 1 through 7.
 A new store starts in Automatic at revision zero. Migration preserves enrollment, gateway, audit, and consumption state.
 Manual choices survive restart. Routing never changes approval policy or authorizes an action.
 

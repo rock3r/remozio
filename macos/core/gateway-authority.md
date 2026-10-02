@@ -92,8 +92,8 @@ A complete backup rollback still needs the independent continuity witness; these
 
 ## Schema and service integration
 
-Root journal schema 7 retains gateway and [approval enrollment state](enrollment-journal.md) and adds [routing state](routing-journal.md).
-Known migrations from versions 1 through 6 require the explicit source version. They preserve existing audit and consumption state.
+Root journal schema 8 retains gateway, [approval enrollment](enrollment-journal.md), and [routing state](routing-journal.md). It adds historical gateway acknowledgments.
+Known migrations from versions 1 through 7 require the explicit source version. They preserve existing audit and consumption state.
 A migration does not derive enrollment or gateway authority from audit records. Failed migration rolls back its table and version changes.
 The separate gateway database remains at schema 3.
 
@@ -104,7 +104,7 @@ Neither a constructor nor a supplied phone ID proves authentication. These metho
 The host may append metadata-only audit events in the same journal transaction. Tokens and challenges must never enter audit records.
 
 The [enrollment journal](enrollment-journal.md) now owns approval keys and combines enrollment removal with the gateway outbox.
-Authenticated enrollment setup, gateway acknowledgments, counter reconciliation, and scheduling remain integration work.
+Authenticated enrollment setup, acknowledgment service wiring, counter reconciliation, and scheduling remain integration work.
 The retained row limit is a storage bound; no history pruning or whole-backup recovery is implemented here.
 Do not report registration as healthy until the actual gateway and phone flow provides the required evidence.
 
@@ -117,3 +117,35 @@ Removal tests cover late proofs, stale active trust, old epochs, restart, expiry
 The phone channel is a fixture in that test. It does not establish that authenticated transport or real FCM delivery works.
 
 Public enrollment-bound token tests cover stored tags, exact epochs, removal, re-enrollment, inactive registration, wrong scope, restart renewal, and swallowed failures.
+
+## Retained gateway acknowledgments
+
+The root passes a `VerifiedGatewayHead` from its protected [query owner](../../docs/experiments/gateway-head-replies.md) to `acknowledgeGatewayHead`.
+The transaction checks the pinned registration and compares the reported control with its retained local operation, revision, kind, and canonical body.
+Both signatures were already verified by the query owner. Equivalent valid ECDSA signatures need not have identical bytes.
+Only a known control can become the highest retained acknowledgment. The row contains its revision and operation ID, never a token.
+
+| Result | Stored acknowledgment | Host meaning |
+| --- | --- | --- |
+| `recorded` | Advances to the known reported control | Historical acknowledgment committed |
+| `alreadyRecorded` | Unchanged | Idempotent repeat |
+| `olderThanRecorded` | Unchanged | An older known response cannot lower the recorded revision |
+| `missingLocalHistory` | Unchanged | Reconcile missing history before enabling affected authority or publishing mappings |
+| `conflictingLocalHistory` | Unchanged | Reconcile the conflicting signed control under the trust recovery rules |
+
+The root checks receipt consistency before classifying a reply as older. A conflicting old receipt is not treated as harmless reordering.
+The API does not infer why a known older head arrived. It can reflect reordered replies or a gateway recovery problem.
+The stored acknowledgment is historical. It does not assert current connectivity, current phone delivery, or a rollback-free gateway.
+
+An acknowledgment never changes the authority counter, desired token, enrollment, revocation, or outbox.
+Unknown signed revocations require the host's trust recovery path; this API neither imports them nor permits ignoring them.
+The host must reconcile that result before admitting affected phone operations. The acknowledgment API alone does not enforce that service gate.
+Counter drift still needs sufficient signed history. The latest receipt alone cannot prove that an omitted intermediate control was delivery-only.
+A missing-history result therefore does not implement automatic counter repair or require a new phone prompt.
+
+The row survives restart. Schema-seven migration starts with no acknowledgment; it does not infer one from stored controls.
+Storage failure rolls back the change. Corrupt retained acknowledgment references retire the database owner.
+The host can append metadata-only audit events in the same transaction; service-level audit policy remains integration work.
+
+Seven additional tests connect real root and gateway databases through fresh signed replies.
+They cover all receipt kinds, replay and reordering, missing delivery and revocation history, conflicting controls, scope isolation, write failures, corruption, reopen, and migration.

@@ -55,7 +55,7 @@ final class JournalDatabaseTests: XCTestCase {
         }
         try fixture.sql("PRAGMA user_version=99")
         XCTAssertThrowsError(try open(fixture))
-        try fixture.sql("PRAGMA user_version=7")
+        try fixture.sql("PRAGMA user_version=8")
         let reopened = try open(fixture)
         XCTAssertNotNil(try reopened.read { try $0.epoch(id(3)) })
         try reopened.close()
