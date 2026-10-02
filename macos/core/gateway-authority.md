@@ -50,10 +50,48 @@ Historical signatures, token digests, counters, desired pointers, and proof-cons
 Known inconsistency or a clock regression retires the journal owner. These checks do not detect restoration of a complete, internally consistent backup.
 The independent continuity witness remains required before the root publishes controls or accepts phone operations.
 
+## Durable phone removal
+
+`revokeGatewayEnrollment` signs one phone epoch removal with the pinned root key.
+The signed row is both a permanent local revocation and a gateway delivery control.
+Its insertion, matching desired-token removal, and shared counter advance commit together.
+The host can append the enrollment audit event in that same transaction.
+No result may be published before the transaction commits and continuity is established.
+
+```mermaid
+flowchart LR
+    Remove[Authorized phone removal] --> Commit[Commit signed revocation, desired-token removal, counter and audit]
+    Commit --> Reject[Reject late proofs and token renewal for that epoch]
+    Commit --> Deliver[Send signed revocation to gateway]
+    Deliver --> Clear[Gateway clears matching mapping and pending candidates]
+    Restart[Restart or delivery expiry] --> Retained[Retained epoch remains revoked]
+    Retained --> Refresh[Sign a fresh removal control after continuity checks]
+    Refresh --> Deliver
+```
+
+Candidate creation, proof consumption, renewal, and pending candidate delivery consult the retained revocation.
+A stale caller snapshot that still says “active” cannot bypass it.
+Removal targets the exact phone epoch. It preserves other phones and a newly enrolled epoch of the same phone.
+The protected host must still establish that new enrollment through the separate administrator flow.
+This API does not enroll devices or replace approval trust with gateway state.
+
+`gatewayEnrollmentRevoked` returns historical local state, including after delivery expiry and restart.
+`pendingGatewayRevocation` allows an inactive enrollment so removal can still reach the gateway.
+It returns only the latest control for that epoch, within its original wall and process deadlines.
+Old controls cannot be sent after reopening. Repeating the removal creates a fresh signed control without restoring any authority.
+The existing candidate lifetime also bounds each removal control's delivery window; the local revocation has no expiry.
+Recovery of this retained removal needs no new biometric prompt. The initial removal still requires the agreed authorization.
+
+Candidate, activation, and revocation rows share the control counter and storage limit.
+A capacity or storage error rolls back the whole removal. The host must report failure, never a completed removal.
+No pruning or acknowledgment compaction exists yet. A production host must handle this limit before enrollment removal is exposed.
+Signatures and indexed metadata are checked when read. Detected corruption retires the journal owner.
+A complete backup rollback still needs the independent continuity witness; these rows do not replace it.
+
 ## Schema and service integration
 
-Root journal schema 4 adds the registration, candidate, desired-token, and outbox tables.
-Known migrations from versions 1, 2, and 3 require the explicit source version. They preserve existing audit and consumption state.
+Root journal schema 5 adds signed revocation rows to the schema 4 registration, candidate, desired-token, and outbox tables.
+Known migrations from versions 1, 2, 3, and 4 require the explicit source version. They preserve existing audit and consumption state.
 A migration does not derive enrollment or gateway authority from audit records. Failed migration rolls back its table and version changes.
 The separate gateway database remains at schema 3.
 
@@ -62,7 +100,7 @@ It must provide the non-exportable root signer and establish continuity before p
 Neither a constructor nor a supplied phone ID proves authentication. These methods are not exposed as network endpoints.
 The host may append metadata-only audit events in the same journal transaction. Tokens and challenges must never enter audit records.
 
-Durable enrollment changes, revocation outbox entries, authenticated gateway acknowledgments, counter reconciliation, and scheduling remain integration work.
+Durable enrollment creation, approval-key ownership, authenticated gateway acknowledgments, counter reconciliation, and scheduling remain integration work.
 The retained row limit is a storage bound; no history pruning or whole-backup recovery is implemented here.
 Do not report registration as healthy until the actual gateway and phone flow provides the required evidence.
 
@@ -70,5 +108,6 @@ Do not report registration as healthy until the actual gateway and phone flow pr
 
 Tests use protected normal-user SQLite fixtures and ephemeral signing keys. They perform no privileged installation or phone interaction.
 They exercise atomic writes, injected failures, superseded proofs, expiry, restart renewal, signature checks, row limits, migration, and corrupted state.
-A local integration test passes the stored candidate and activation through the real gateway database and its provider-probe lifecycle.
+A local integration test passes the stored candidate, activation, and revocation through the real gateway database and its provider-probe lifecycle.
+Removal tests cover late proofs, stale active trust, old epochs, restart, expiry, audit atomicity, failed migrations, and storage faults.
 The phone channel is a fixture in that test. It does not establish that authenticated transport or real FCM delivery works.
