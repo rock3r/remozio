@@ -32,8 +32,9 @@ class RequestStatusPresentationTest {
             statusHeadline(snapshot(RequestPhase.EXPIRED, RequestStatusReason.TARGET_TIMED_OUT)))
         assertEquals(StatusHeadline.AUTHORIZATION_EXPIRED,
             statusHeadline(snapshot(RequestPhase.EXPIRED, RequestStatusReason.AUTHORIZATION_EXPIRED)))
-        assertEquals(StatusHeadline.DISAPPEARED,
-            statusHeadline(snapshot(RequestPhase.CANCELLED, RequestStatusReason.TARGET_DISAPPEARED)))
+        for (phase in listOf(RequestPhase.UNKNOWN, RequestPhase.CANCELLED)) {
+            assertEquals(StatusHeadline.DISAPPEARED, statusHeadline(snapshot(phase, RequestStatusReason.TARGET_DISAPPEARED)))
+        }
     }
 
     @Test fun uncertainExecutionRemainsUnknownAfterRestartOrElapsedEstimate() {

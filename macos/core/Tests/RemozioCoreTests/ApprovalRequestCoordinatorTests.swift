@@ -243,6 +243,21 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertEqual(try events(db, writer).last?.reason, .targetTimedOut)
     }
 
+    func testOwnedQueuedAndDisappearedStatesRoundTripThroughStatusCodec() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        for disappeared in [false, true] {
+            if disappeared { _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(), receiptTimeMs: nil) }
+            let state = try owner.state(requestID: request.requestID)
+            let status = try RequestStatusPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
+                requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
+                revision: state.revision, phase: state.phase, reason: disappeared ? .targetDisappeared : .none,
+                observationID: id(40), observedAgeMs: 10, authorizationRemainingMs: disappeared ? nil : 90,
+                estimatedLifetimeMs: nil, lateObservation: false, terminalAgeMs: disappeared ? 10 : nil, decisionPhoneID: nil)
+            XCTAssertEqual(try RequestStatusPayload.decode(status.encode(limits: limits), limits: limits), status)
+        }
+    }
+
     private final class Fixture {
         let root: URL
         var path: String { root.appendingPathComponent("store/journal.sqlite").path }

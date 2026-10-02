@@ -42,7 +42,7 @@ Admission publishes the payload only after creation metadata commits. It does no
 
 `consumedRequest` retains the original binding while the phase is Authorized or Executing. It is data for the executor's separate target and checkpoint checks, never permission to dispatch. Expiry cannot rewrite an already consumed action. Terminal transitions release the coordinator's capture reference. The host must also release any copies held by adapters or transport queues.
 
-`state` returns local observed metadata. It is not a signed status message or a freshness guarantee. The host drives deadline evaluation even without phone traffic, reconciles terminal state to all devices, and withdraws queued work. When using `PendingRequestDelivery`, obtain a fresh owned snapshot before its dispatch boundary; never reuse a pre-consumption snapshot.
+`state` returns local observed metadata with a positive revision suitable for a status payload. It is not a signed status message or a freshness guarantee. The host drives deadline evaluation even without phone traffic, reconciles terminal state to all devices, and withdraws queued work. When using `PendingRequestDelivery`, obtain a fresh owned snapshot before its dispatch boundary; never reuse a pre-consumption snapshot.
 
 The configured request count includes terminal metadata until `forgetTerminal` removes it. The capture byte limit includes Authorized and Executing requests until their terminal outcome. Forgetting cannot remove a live request or its durable consumption receipt. New admission always creates a new ID and challenge.
 
@@ -66,7 +66,7 @@ A new coordinator starts empty. Journal history and old consumption receipts can
 
 ## Evidence and remaining gates
 
-Thirteen normal-user tests use the real protected journal and disposable P-256 keys. They cover fresh bindings, metadata privacy, presentation, first-decision ownership, current enrollment, decline, deadline enforcement, target loss, journal failures, outcome retention, memory limits, and restart.
+Fourteen normal-user tests use the real protected journal and disposable P-256 keys. They cover fresh bindings, metadata privacy, presentation, first-decision ownership, current enrollment, decline, deadline enforcement, target loss, journal failures, outcome retention, memory limits, and restart.
 
 Swift and Kotlin test every lifecycle state/event pair against the same fixture, including pending target loss. No action is executed and no real credential, provider, or phone is used.
 

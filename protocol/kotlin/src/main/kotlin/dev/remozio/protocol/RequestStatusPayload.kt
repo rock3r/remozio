@@ -10,7 +10,8 @@ enum class RequestStatusReason(val tag: ULong) {
         VERIFIED_RESULT -> phase == RequestPhase.SUCCEEDED || phase == RequestPhase.FAILED
         OUTCOME_UNAVAILABLE -> phase == RequestPhase.UNKNOWN
         DECLINED -> phase == RequestPhase.DECLINED
-        USER_CANCELLED, TARGET_DISAPPEARED, NO_DISPATCH_PROVED -> phase == RequestPhase.CANCELLED
+        TARGET_DISAPPEARED -> phase == RequestPhase.UNKNOWN || phase == RequestPhase.CANCELLED
+        USER_CANCELLED, NO_DISPATCH_PROVED -> phase == RequestPhase.CANCELLED
         AUTHORIZATION_EXPIRED, TARGET_TIMED_OUT -> phase == RequestPhase.EXPIRED
         AUTHORITY_RESTARTED -> phase == RequestPhase.CANCELLED || phase == RequestPhase.UNKNOWN
     }
@@ -44,6 +45,8 @@ class RequestStatusPayload(
         ensure(revision > 0u && reason.permits(phase), RequestStatusFailure.INVALID_STATE)
         val pending = phase == RequestPhase.QUEUED || phase == RequestPhase.PRESENTED
         ensure(!pending || decisionPhoneID == null, RequestStatusFailure.INVALID_STATE)
+        ensure(!(phase == RequestPhase.UNKNOWN && reason == RequestStatusReason.TARGET_DISAPPEARED) ||
+            decisionPhoneID == null, RequestStatusFailure.INVALID_STATE)
         ensure(pending == (authorizationRemainingMs != null), RequestStatusFailure.INVALID_TIMING)
         ensure(estimatedLifetimeMs == null || estimatedLifetimeMs > 0u, RequestStatusFailure.INVALID_TIMING)
         ensure(phase.isTerminal == (terminalAgeMs != null), RequestStatusFailure.INVALID_TIMING)

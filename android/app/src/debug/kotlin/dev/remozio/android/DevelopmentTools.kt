@@ -60,7 +60,7 @@ internal fun DevelopmentTools() {
 private fun sampleStatus(scene: SampleScene): TrackedRequestStatus {
     val phase = when (scene) {
         SampleScene.EXPIRED -> RequestPhase.EXPIRED
-        SampleScene.DISAPPEARED -> RequestPhase.CANCELLED
+        SampleScene.DISAPPEARED -> RequestPhase.UNKNOWN
         SampleScene.UNKNOWN -> RequestPhase.UNKNOWN
         else -> RequestPhase.PRESENTED
     }

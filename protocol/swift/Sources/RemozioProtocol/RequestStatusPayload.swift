@@ -11,7 +11,8 @@ public enum RequestStatusReason: UInt64, CaseIterable, Sendable {
         case .verifiedResult: phase == .succeeded || phase == .failed
         case .outcomeUnavailable: phase == .unknown
         case .declined: phase == .declined
-        case .userCancelled, .targetDisappeared, .noDispatchProved: phase == .cancelled
+        case .targetDisappeared: phase == .unknown || phase == .cancelled
+        case .userCancelled, .noDispatchProved: phase == .cancelled
         case .authorizationExpired, .targetTimedOut: phase == .expired
         case .authorityRestarted: phase == .cancelled || phase == .unknown
         }
@@ -48,7 +49,8 @@ public struct RequestStatusPayload: Equatable, Sendable {
               requestDigest.count == 32, challenge.count == 32,
               decisionPhoneID == nil || decisionPhoneID?.count == 16 else { throw RequestStatusError.invalidBytes }
         let pending = phase == .queued || phase == .presented
-        guard revision > 0, reason.permits(phase), !pending || decisionPhoneID == nil else {
+        guard revision > 0, reason.permits(phase), !pending || decisionPhoneID == nil,
+              !(phase == .unknown && reason == .targetDisappeared) || decisionPhoneID == nil else {
             throw RequestStatusError.invalidState
         }
         guard pending == (authorizationRemainingMs != nil),

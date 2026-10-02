@@ -172,6 +172,21 @@ class RequestStatusTrackerTest {
         observe(pending, status(revision = 2u, phase = RequestPhase.CANCELLED, reason = RequestStatusReason.TARGET_DISAPPEARED, deciding = null))
     }
 
+    @Test fun pendingDisappearanceIsUnknownAndCannotHideConsumedOutcome() {
+        val pending = tracker()
+        observe(pending, status(phase = RequestPhase.PRESENTED))
+        observe(pending, status(revision = 2u, phase = RequestPhase.UNKNOWN, reason = RequestStatusReason.TARGET_DISAPPEARED, deciding = null))
+        assertEquals(RequestPhase.UNKNOWN, pending.snapshot(time(100u))!!.status.phase)
+        rejected(StatusRejection.INVALID_TRANSITION) { observe(pending, status(revision = 3u, phase = RequestPhase.PRESENTED)) }
+        for (phase in listOf(RequestPhase.AUTHORIZED, RequestPhase.EXECUTING)) {
+            val consumed = tracker()
+            observe(consumed, status(phase = phase, deciding = null))
+            rejected(StatusRejection.INVALID_TRANSITION) {
+                observe(consumed, status(revision = 2u, phase = RequestPhase.UNKNOWN, reason = RequestStatusReason.TARGET_DISAPPEARED, deciding = null))
+            }
+        }
+    }
+
     @Test fun saturatesArithmeticAndRetainsNoAuthorityFromAnEstimate() {
         val tracker = tracker()
         observe(tracker, status(age = ULong.MAX_VALUE - 10u, remaining = ULong.MAX_VALUE, estimate = ULong.MAX_VALUE))

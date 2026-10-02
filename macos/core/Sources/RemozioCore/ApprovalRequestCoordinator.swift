@@ -108,7 +108,7 @@ public final class ApprovalRequestCoordinator {
                 reason: .none, receiptTimeMs: receiptTimeMs)
         }
         entries[payload.requestID] = Entry(state: ApprovalRequestState(requestID: payload.requestID, phase: .queued,
-            revision: 0, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
+            revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
             retained: retained, category: category, byteCount: bytes)
         retainedBytes += bytes
         return payload
