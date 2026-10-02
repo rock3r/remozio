@@ -858,7 +858,8 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     private func verifiedHead(_ controls: [GatewayAuthorityEnvelope]) throws -> VerifiedGatewayHead {
         try gatewayEvidence(controls).0
     }
-    private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil, includeBoundary: Bool = true) throws -> (VerifiedGatewayHead, VerifiedGatewayHistory?) {
+    private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil, includeBoundary: Bool = true,
+                                 maximumRecords: Int = 16, collect: Bool = true, onPage: ((VerifiedGatewayControlHistory) -> Void)? = nil) throws -> (VerifiedGatewayHead, VerifiedGatewayHistory?) {
         let f = try Fixture(), trusted = try trust()
         let gateway = try f.gateway(identity: trusted.registration, limits: limits, epoch: clockEpoch)
         defer { try? gateway.close() }
@@ -886,10 +887,155 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         guard let after else { return (head, nil) }
         let lowerBound = after == 0 || !includeBoundary ? after : after - 1
         let collector = try GatewayHistoryCollector(head: head, afterRevision: lowerBound)
-        let historyQuery = try owner.makeHistoryQuery(afterRevision: lowerBound, throughRevision: head.evidence.revision, now: moment(111))
+        let historyQuery = try owner.makeHistoryQuery(afterRevision: lowerBound, throughRevision: head.evidence.revision, maximumRecords: maximumRecords, now: moment(111))
         let historyReply = try gateway.controlHistoryReply(canonicalQuery: historyQuery) { try gatewayKey.signature(for: $0).rawRepresentation }
         let page = try owner.acceptHistory(historyReply, now: moment(112))
-        return (head, try XCTUnwrap(collector.accept(page)))
+        onPage?(page)
+        return (head, collect ? try XCTUnwrap(collector.accept(page)) : nil)
+    }
+
+    private func recoveryPage(_ controls: [GatewayAuthorityEnvelope], maximum: Int = 16) throws -> (VerifiedGatewayHead, VerifiedGatewayControlHistory) {
+        var page: VerifiedGatewayControlHistory?
+        let evidence = try gatewayEvidence(controls, after: 0, maximumRecords: maximum, collect: false, onPage: { page = $0 })
+        return (evidence.0, try XCTUnwrap(page))
+    }
+    private func applyEvidence(_ db: JournalDatabase, _ page: VerifiedGatewayControlHistory, revision: UUID,
+                               writer: AuditEpochWriter, head: UInt64 = 1) throws -> GatewayTrustEvidenceRecovery {
+        try db.write { try $0.recoverGatewayTrust(from: page, expectedTrustRevision: revision,
+            receiptTimeMs: 1020, writer: writer, expectedAuditHead: head) }
+    }
+
+    func testVerifiedHeadAppliesRemovalBeforeHistoryCollectionAndPageRetryAddsNoEvent() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source)
+        let activation = try consume(source, first), removal = try revoke(source, head: 2)
+        let (head, page) = try recoveryPage([first, activation, removal])
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, onWriter: { writer = $0 })
+        let audit = try XCTUnwrap(writer)
+        let result = try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+            receiptTimeMs: 1020, writer: audit, expectedAuditHead: 1) }
+        XCTAssertEqual(result.auditHead, 2); XCTAssertEqual(result.changedPhoneIDs, [id(6)])
+        XCTAssertTrue(result.restrictedPhoneIDs.isEmpty)
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+        XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(trust().registration) })
+        let retry = try applyEvidence(db, page, revision: result.trustRevision, writer: audit, head: 2)
+        XCTAssertEqual(retry.trustRevision, result.trustRevision); XCTAssertEqual(retry.auditHead, 2)
+        XCTAssertTrue(retry.changedPhoneIDs.isEmpty)
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        let history = try XCTUnwrap(collector.accept(page))
+        XCTAssertEqual(try recover(db, history, revision: retry.trustRevision, local: 0).disposition, .reconciled)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 3)
+    }
+
+    func testVerifiedPageCombinesUnknownTrustAndRemovalWithSequentialAuditEvents() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source)
+        let activation = try consume(source, first), removal = try revoke(source, head: 2)
+        let (_, page) = try recoveryPage([first, activation, removal])
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, tag: 99, onWriter: { writer = $0 })
+        let result = try applyEvidence(db, page, revision: revision, writer: XCTUnwrap(writer))
+        XCTAssertEqual(result.auditHead, 3); XCTAssertEqual(result.changedPhoneIDs, [id(6)])
+        XCTAssertEqual(result.restrictedPhoneIDs, [id(6)])
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        XCTAssertFalse(try db.read { try XCTUnwrap($0.approvalEnrollments().first).approval.active })
+        XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+        let records = try db.read { try $0.page(epoch: id(20), after: 1, maximumRecords: 2, maximumBytes: 16384).canonicalRecords }
+        let events = try records.map { try AuditEventMetadata.decode($0, limits: limits) }
+        XCTAssertEqual(events.map(\.sequence), [2, 3]); XCTAssertEqual(events.map(\.reason), [.bindingMismatch, .revoked])
+        XCTAssertEqual(Set(events.map(\.eventID)).count, 2)
+        let retry = try applyEvidence(db, page, revision: result.trustRevision, writer: XCTUnwrap(writer), head: 3)
+        XCTAssertEqual(retry.auditHead, 3); XCTAssertTrue(retry.changedPhoneIDs.isEmpty)
+        XCTAssertEqual(retry.restrictedPhoneIDs, [id(6)])
+        try db.close()
+        let reopened = try open(f)
+        XCTAssertEqual(try reopened.read { try $0.approvalTrustRestrictions() }, [id(6)])
+        XCTAssertEqual(try reopened.read { try $0.epoch(id(20))?.head }, 3)
+    }
+
+    func testHistoryGapDoesNotPreventVerifiedRemovalFromRestrictingAuthority() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture)
+        _ = try prepare(source)
+        let removal = try revoke(source, head: 1)
+        let (head, page) = try recoveryPage([removal])
+        XCTAssertFalse(page.page.coversRequestedRange)
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, onWriter: { writer = $0 })
+        let result = try applyEvidence(db, page, revision: revision, writer: XCTUnwrap(writer))
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        XCTAssertThrowsError(try collector.accept(page)) { XCTAssertEqual($0 as? GatewayHistoryCollectionError, .incompleteHistory) }
+        XCTAssertEqual(result.auditHead, 2); XCTAssertEqual(result.changedPhoneIDs, [id(6)])
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+        XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(trust().registration) })
+    }
+
+    func testPartialPageAppliesRestrictionWithoutWaitingForLaterPages() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source)
+        let activation = try consume(source, first), removal = try revoke(source, head: 2)
+        let (head, page) = try recoveryPage([first, activation, removal], maximum: 2)
+        XCTAssertTrue(page.page.hasMore)
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, tag: 99, onWriter: { writer = $0 })
+        let result = try applyEvidence(db, page, revision: revision, writer: XCTUnwrap(writer))
+        XCTAssertEqual(result.auditHead, 2); XCTAssertEqual(result.restrictedPhoneIDs, [id(6)])
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        XCTAssertNil(try collector.accept(page))
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+    }
+
+    func testLaterReceiptFailureRollsBackEarlierRestrictionAndAuditThenAllowsRetry() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source), removal = try revoke(source, head: 1)
+        let (_, page) = try recoveryPage([first, removal])
+        let f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, tag: 99, onWriter: { writer = $0 })
+        try f.sql("CREATE TRIGGER reject_later BEFORE INSERT ON gateway_recovered_revocations_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try applyEvidence(db, page, revision: revision, writer: XCTUnwrap(writer)))
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().enrollments.count }, 1)
+        XCTAssertTrue(try db.read { try $0.approvalTrustRestrictions().isEmpty })
+        XCTAssertFalse(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+        XCTAssertEqual(try db.read { try $0.epoch(id(20))?.head }, 1)
+        try f.sql("DROP TRIGGER reject_later")
+        let result = try applyEvidence(db, page, revision: revision, writer: XCTUnwrap(writer))
+        XCTAssertEqual(result.auditHead, 3); XCTAssertEqual(result.restrictedPhoneIDs, [id(6)])
+    }
+
+    func testEvidenceRecoveryValidatesRevisionAndWriteModeEvenForEmptyHead() throws {
+        let head = try verifiedHead([]), f = try Fixture(), db = try setup(f)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, onWriter: { writer = $0 })
+        let audit = try XCTUnwrap(writer)
+        let result = try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+            receiptTimeMs: nil, writer: audit, expectedAuditHead: 1) }
+        XCTAssertEqual(result.trustRevision, revision); XCTAssertEqual(result.auditHead, 1)
+        XCTAssertTrue(result.changedPhoneIDs.isEmpty)
+        XCTAssertThrowsError(try db.read { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+            receiptTimeMs: nil, writer: audit, expectedAuditHead: 1) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
+        XCTAssertThrowsError(try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: UUID(),
+            receiptTimeMs: nil, writer: audit, expectedAuditHead: 1) }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        XCTAssertThrowsError(try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+            receiptTimeMs: nil, writer: audit, expectedAuditHead: 0) }) { XCTAssertEqual($0 as? AuditJournalError, .headMismatch) }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testEmptyHeadWithAnotherPinnedRegistrationCannotRecoverTrust() throws {
+        let head = try verifiedHead([]), f = try Fixture(), db = try open(f, initialize: true)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, onWriter: { writer = $0 })
+        let r = try trust().registration
+        let other = try GatewayRegistrationIdentity(ownerID: id(99), macID: r.macID, accountID: r.accountID,
+            gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey)
+        try db.write { try $0.configureGatewayAuthority(other) }
+        XCTAssertThrowsError(try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+            receiptTimeMs: nil, writer: XCTUnwrap(writer), expectedAuditHead: 1) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .wrongScope) }
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
     }
 
     func testKnownAcknowledgmentsPersistWithoutChangingAuthorityOrReplayingControls() throws {

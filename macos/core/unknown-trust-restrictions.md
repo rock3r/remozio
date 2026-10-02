@@ -72,3 +72,5 @@ Independent administrator repair is not implemented by this API. No ordinary pho
 Repair must establish current trust from authenticated evidence and complete the independent checkpoint before restoring authority.
 The product must preserve pairing when that evidence supports it. This primitive does not force key deletion or re-pairing.
 No real enrollment, device approval, privileged installation, or end-to-end test was performed.
+
+The host can apply a verified head or page through [verified recovery evidence](verified-recovery-evidence.md) before checking history continuity.

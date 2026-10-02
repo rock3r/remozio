@@ -85,6 +85,16 @@ public struct GatewayTrustRestrictionResult: Sendable {
     public let trustRevision: UUID
 }
 
+/// Committed local recovery state, not permission to reopen admission before continuity checkpointing.
+public struct GatewayTrustEvidenceRecovery: Sendable {
+    public let trustRevision: UUID
+    public let auditHead: UInt64
+    /// Changes in this call, not the complete set of phones without authority.
+    public let changedPhoneIDs: Set<Data>
+    /// Phones awaiting administrator repair. Ordinary revoked epochs are reflected in the trust snapshot instead.
+    public let restrictedPhoneIDs: Set<Data>
+}
+
 /// Private table owner. Every call runs within the journal owner's transaction and protected writer lease.
 final class GatewayAuthorityJournal {
     private let db: OpaquePointer
