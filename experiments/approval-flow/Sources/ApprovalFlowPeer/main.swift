@@ -1,7 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
-import RemozioCore
+@testable import RemozioCore
 import RemozioProtocol
 
 // Synthetic peer only: stdin is the test controller, not an enrollment or network interface.

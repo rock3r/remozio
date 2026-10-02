@@ -60,3 +60,5 @@ The [gateway delivery coordinator](gateway-delivery.md) connects durable probe a
 The [authority gateway journal](gateway-authority.md) consumes token proofs and retains signed controls in one protected transaction.
 
 Phone epoch removal now commits a permanent gateway revocation, its signed delivery control, and the shared counter together. See [authority gateway state](gateway-authority.md).
+
+The [enrollment journal](enrollment-journal.md) owns approval keys and combines removal, gateway revocation, and audit writes. Public consumption checks stored trust within the same transaction.
