@@ -80,3 +80,6 @@ Gateway key provisioning, HTTP or XPC wiring, history collection, and recovery p
 Eight new tests use the real protected gateway database and disposable signing keys.
 They cover all control kinds, pagination, missing revisions, new controls arriving during a query, both signatures, replay, invalid ranges, duplicate records, protocol versions, query limits, expiry, unsigned revisions, and restart.
 The tests run without a network endpoint, provider credentials, a phone, or a privileged service.
+
+The [bounded history collector](gateway-history-collection.md) now checks continuity across pages and anchors completion to the authenticated head.
+Root storage reconciliation remains separate.

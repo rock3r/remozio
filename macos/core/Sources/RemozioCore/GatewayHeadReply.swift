@@ -22,8 +22,9 @@ public struct GatewayHeadReply: Sendable, CustomStringConvertible, CustomDebugSt
 public struct VerifiedGatewayHead: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let evidence: GatewayHeadEvidence
     public let receivedAt: AuthorityMoment
-    fileprivate init(evidence: GatewayHeadEvidence, receivedAt: AuthorityMoment) {
-        self.evidence = evidence; self.receivedAt = receivedAt
+    let queryOwnerID: UUID
+    fileprivate init(evidence: GatewayHeadEvidence, receivedAt: AuthorityMoment, queryOwnerID: UUID) {
+        self.evidence = evidence; self.receivedAt = receivedAt; self.queryOwnerID = queryOwnerID
     }
     public var description: String { "VerifiedGatewayHead(redacted)" }
     public var debugDescription: String { description }
@@ -32,6 +33,7 @@ public struct VerifiedGatewayHead: Sendable, CustomStringConvertible, CustomDebu
 /// Root-side query owner. Serialize all calls with local trust changes; discard it when either pin changes.
 /// Neither the transport nor a reply may supply its registration identity or gateway key.
 public final class GatewayHeadQueryOwner {
+    private let queryOwnerID = UUID()
     private let registration: GatewayRegistrationIdentity
     private let gatewayKey: P256.Signing.PublicKey
     private let clockEpoch: UUID
@@ -109,7 +111,7 @@ public final class GatewayHeadQueryOwner {
         let receipt = try GatewayHeadWire.receipt(kind: kind, payload: payload, signature: rootSignature,
             revision: revision, registration: registration)
         pending.removeValue(forKey: nonce)
-        return VerifiedGatewayHead(evidence: GatewayHeadEvidence(registration: registration, revision: revision, receipt: receipt), receivedAt: now)
+        return VerifiedGatewayHead(evidence: GatewayHeadEvidence(registration: registration, revision: revision, receipt: receipt), receivedAt: now, queryOwnerID: queryOwnerID)
     }
 
     public func acceptHistory(_ reply: GatewayControlHistoryReply, now: AuthorityMoment) throws -> VerifiedGatewayControlHistory {
@@ -145,7 +147,7 @@ public final class GatewayHeadQueryOwner {
         pending.removeValue(forKey: nonce)
         let page = GatewayControlHistoryPage(registration: registration, afterRevision: range.after, throughRevision: range.through,
             records: records, hasMore: more)
-        return VerifiedGatewayControlHistory(page: page, receivedAt: now)
+        return VerifiedGatewayControlHistory(page: page, receivedAt: now, queryOwnerID: queryOwnerID)
     }
 
     /// Trust changes, service shutdown, or key replacement invalidate every in-flight query.
