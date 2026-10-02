@@ -44,7 +44,39 @@ Admission publishes the payload only after creation metadata commits. It does no
 
 `state` returns local observed metadata with a positive revision suitable for a status payload. It retains the reason, terminal time, deciding phone, and request bindings after capture release. Reconciliation can construct status without retaining a separate outcome description. Terminal time stays fixed. The wire terminal age is that time minus the first-observed time, not the elapsed time since completion. It is not a signed status message or a freshness guarantee. The host drives deadline evaluation even without phone traffic, reconciles terminal state to all devices, and withdraws queued work. Use `reconcileDelivery` after every owner transition and before transport work. It reads current owner state, commits elapsed expiry, and closes deliveries after capture release. Apply its withdrawals to queued and started retry tasks before discarding a closed delivery owner. Call it before `forgetTerminal`; forgotten requests cannot be reconciled. Storage or clock errors prohibit transport work and require the host to stop affected delivery tasks.
 
-Before the first transport write, obtain a fresh pending snapshot and use `PendingRequestDelivery.beginDelivery` under the same serialization boundary. Never reuse a pre-consumption snapshot.
+Before the first transport write, call `handoffDelivery` under the root owner's serialization boundary.
+Prepare asynchronous resources first. The method rereads current owner state and protected journal trust, then calls the synchronous transport callback.
+A resolved request returns withdrawals from retained metadata, even after capture release. Elapsed expiry must commit before it can return those withdrawals.
+Storage or clock failure prevents the callback from running. A stale caller snapshot cannot substitute for this read.
+
+```mermaid
+sequenceDiagram
+    participant Host as Serialized root host
+    participant Owner as Request coordinator
+    participant Store as Protected journal
+    participant Transport as Prepared local transport
+    Host->>Owner: Handoff queued identity with fresh presence and time
+    Owner->>Store: Check lease, current enrollment, and expiry commit
+    alt Resolved, expired, or revoked
+        Owner-->>Host: No handoff; apply withdrawals
+    else Current and routed to phones
+        Owner->>Transport: Synchronously accept exact delivery identity
+        alt Backpressure; nothing accepted
+            Transport-->>Owner: False
+            Owner-->>Host: Keep queued with original deadline
+        else Ownership accepted
+            Transport-->>Owner: True
+            Owner-->>Host: Mark first handoff complete
+        end
+    end
+```
+
+The callback must not await, reenter either owner, or mutate authority state.
+Return false only when no bytes or work were accepted. After accepting ownership, return true even if later delivery fails.
+A refused handoff can retry with the original identity and deadline. An accepted identity cannot start a second first handoff.
+The receiving queue then owns bounded retries and must receive subsequent withdrawals and routing changes.
+Always apply the returned update, including when `delivery` is nil. Acceptance is not provider acceptance, phone receipt, or action authorization.
+This method does not install an IPC endpoint, invoke the asynchronous gateway actor, or replace target validation by the host.
 
 `ApprovalRequestState.statusPayload` preserves the v1 wire contract. Internal Unknown with target disappearance projects to Cancelled/target-disappeared, which existing phones render as “No longer available · reason unknown.” The owner remains Unknown. The host supplies a separate increasing observation revision, original observation ID, and current authority time, then authenticates the response. Reusing the lifecycle revision for a changed time sample is not valid. A future different wire form requires capability or schema negotiation.
 

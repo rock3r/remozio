@@ -346,6 +346,114 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
     }
 
+    private func routing(_ mode: RoutingMode = .away) throws -> PresenceRouting {
+        var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
+        return router.evaluate(mode: mode, snapshot: .init(), now: .init(epoch: clock, milliseconds: 110))
+    }
+
+    private func queuedDelivery(_ owner: ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, PendingRequestDelivery, PhoneRequestDelivery) {
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let delivery = try PendingRequestDelivery(request: owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil))
+        let queued = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
+            routing: routing(), now: now(), receiptTimeMs: nil) { _ in true }
+        return (request, delivery, try XCTUnwrap(queued.active.first))
+    }
+
+    func testHandoffBackpressureKeepsOriginalIdentityAndAcceptsOnlyOnce() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        var attempts: [PhoneRequestDelivery] = []
+        let refused = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(120), receiptTimeMs: nil) { attempts.append($0); return false }
+        XCTAssertNil(refused.delivery); XCTAssertTrue(refused.update.dispatched.isEmpty)
+        XCTAssertEqual(refused.update.active, [queued])
+        let accepted = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(150), receiptTimeMs: nil) { attempts.append($0); return true }
+        XCTAssertEqual(accepted.delivery, queued); XCTAssertEqual(accepted.update.dispatched, [queued])
+        XCTAssertEqual(attempts, [queued, queued])
+        let duplicate = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(160), receiptTimeMs: nil) { _ in XCTFail("Already handed off"); return true }
+        XCTAssertNil(duplicate.delivery); XCTAssertEqual(duplicate.update.dispatched, [queued])
+        XCTAssertEqual(try events(db, writer).map(\.kind), [.enrollmentAdded, .requestCreated])
+    }
+
+    func testHandoffRechecksPresenceAfterPreparationWithoutLosingQueuedWork() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        let local = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(.present), now: now(120), receiptTimeMs: nil) { _ in XCTFail("Now local"); return true }
+        XCTAssertNil(local.delivery); XCTAssertEqual(local.update.active, [queued])
+        XCTAssertTrue(local.update.withdrawn.isEmpty); XCTAssertTrue(local.update.dispatched.isEmpty)
+        let resumed = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(130), receiptTimeMs: nil) { XCTAssertEqual($0, queued); return true }
+        XCTAssertEqual(resumed.delivery, queued)
+    }
+
+    func testHandoffRechecksJournalRevocationAfterPreparation() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+        _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: id(5), epoch: id(9), expectedTrustRevision: revision,
+            eventID: id(31), receiptTimeMs: nil, writer: writer, expectedAuditHead: 2) }
+        let result = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(120), receiptTimeMs: nil) { _ in XCTFail("Stale trust"); return true }
+        XCTAssertNil(result.delivery); XCTAssertEqual(result.update.withdrawn, [queued])
+        XCTAssertTrue(result.update.active.isEmpty)
+    }
+
+    func testHandoffClosesFromCurrentOwnerAfterResolutionAndCaptureRelease() throws {
+        for decline in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            let (request, delivery, queued) = try queuedDelivery(owner)
+            let (body, signature) = try decision(request, decline: decline)
+            _ = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: id(5),
+                authenticatedEnrollmentEpoch: id(9), now: now(120), receiptTimeMs: nil)
+            let result = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+                routing: routing(), now: now(130), receiptTimeMs: nil) { _ in XCTFail("Already resolved"); return true }
+            XCTAssertNil(result.delivery); XCTAssertEqual(result.update.withdrawn, [queued])
+            XCTAssertEqual(result.update.closure, .requestPhase(decline ? .declined : .authorized))
+        }
+    }
+
+    func testHandoffExpiryCommitsBeforeWithdrawalAndStorageFailureNeverSends() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        try fixture.sql("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(200), receiptTimeMs: nil) { _ in XCTFail("Expiry commit failed"); return true })
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
+        try fixture.sql("DROP TRIGGER fail_audit")
+        let result = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(200), receiptTimeMs: nil) { _ in XCTFail("Expired"); return true }
+        XCTAssertNil(result.delivery); XCTAssertEqual(result.update.withdrawn, [queued])
+        XCTAssertEqual(result.update.closure, .requestPhase(.expired))
+        XCTAssertEqual(try events(db, writer).filter { $0.kind == .expired }.count, 1)
+    }
+
+    func testHandoffRejectsUnknownIdentityAndMismatchedController() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        let unknown = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: UUID(),
+            routing: routing(), now: now(120), receiptTimeMs: nil) { _ in XCTFail("Unknown identity"); return true }
+        XCTAssertNil(unknown.delivery); XCTAssertEqual(unknown.update.active, [queued])
+        let other = try owner.admit(draft(), now: now(120), receiptTimeMs: nil)
+        let mismatched = try owner.handoffDelivery(requestID: other.requestID, delivery: delivery, deliveryID: queued.id,
+            routing: routing(), now: now(130), receiptTimeMs: nil) { _ in XCTFail("Wrong request controller"); return true }
+        XCTAssertNil(mismatched.delivery); XCTAssertEqual(mismatched.update.withdrawn, [queued])
+        XCTAssertEqual(mismatched.update.closure, .requestChanged)
+    }
+
+    func testHandoffClockDiscontinuityAndClosedJournalCannotReachTransport() throws {
+        for close in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            let (request, delivery, queued) = try queuedDelivery(owner)
+            if close { try db.close() }
+            let time = close ? now(120) : AuthorityMoment(epoch: UUID(), milliseconds: 120)
+            XCTAssertThrowsError(try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+                routing: routing(), now: time, receiptTimeMs: nil) { _ in XCTFail("Unavailable authority"); return true })
+        }
+    }
+
     private final class Fixture {
         let root: URL
         var path: String { root.appendingPathComponent("store/journal.sqlite").path }

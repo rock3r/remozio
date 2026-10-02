@@ -206,17 +206,37 @@ public final class ApprovalRequestCoordinator {
     public func reconcileDelivery(requestID: Data, delivery: PendingRequestDelivery, routing: PresenceRouting,
                                   now: AuthorityMoment, receiptTimeMs: UInt64?,
                                   enqueue: (PhoneRequestDelivery) -> Bool) throws -> RequestDeliveryUpdate {
-        try checkClock(now)
-        var current = try state(requestID: requestID)
-        if (current.phase == .queued || current.phase == .presented) && now.milliseconds >= current.deadlineMilliseconds {
-            current = try retirePending(requestID: requestID, reason: .deadlineElapsed, now: now, receiptTimeMs: receiptTimeMs)
-        }
+        let current = try deliveryState(requestID: requestID, now: now, receiptTimeMs: receiptTimeMs)
         guard current.phase == .queued || current.phase == .presented else {
             return delivery.close(current: current, routing: routing, now: now)
         }
         guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
         let trust = try database.read { try $0.requestDeliveryTrust() }
         return delivery.reconcile(current: retained, routing: routing, trust: trust, now: now, enqueue: enqueue)
+    }
+
+    /// Recheck current request and journal trust immediately before the first transport handoff.
+    /// Prepare asynchronous resources first. The callback must not await, reenter, or mutate authority state.
+    /// Return false only if no bytes or work were accepted. Always apply the returned withdrawals, even without a delivery.
+    public func handoffDelivery(requestID: Data, delivery: PendingRequestDelivery, deliveryID: UUID,
+                                routing: PresenceRouting, now: AuthorityMoment, receiptTimeMs: UInt64?,
+                                accept: (PhoneRequestDelivery) -> Bool) throws -> RequestDeliveryDispatch {
+        let current = try deliveryState(requestID: requestID, now: now, receiptTimeMs: receiptTimeMs)
+        guard current.phase == .queued || current.phase == .presented else {
+            return RequestDeliveryDispatch(delivery: nil, update: delivery.close(current: current, routing: routing, now: now))
+        }
+        guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
+        let trust = try database.read { try $0.requestDeliveryTrust() }
+        return delivery.handoff(id: deliveryID, current: retained, routing: routing, trust: trust, now: now, accept: accept)
+    }
+
+    private func deliveryState(requestID: Data, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> ApprovalRequestState {
+        try checkClock(now)
+        var current = try state(requestID: requestID)
+        if (current.phase == .queued || current.phase == .presented) && now.milliseconds >= current.deadlineMilliseconds {
+            current = try retirePending(requestID: requestID, reason: .deadlineElapsed, now: now, receiptTimeMs: receiptTimeMs)
+        }
+        return current
     }
 
     /// Original binding for the root executor's separate checkpoint and target checks. This snapshot grants no dispatch permission.
