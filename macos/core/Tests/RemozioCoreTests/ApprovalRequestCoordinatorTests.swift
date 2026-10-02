@@ -98,13 +98,17 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     func testRetiringPendingRequestPreventsEvenValidSignedDecisions() throws {
-        for (reason, expected) in [(PendingRequestRetirement.cancelled, RequestPhase.cancelled), (.targetTimedOut, .expired), (.targetDisappeared, .unknown), (.authorityRestart, .cancelled)] {
+        for (reason, expected, statusReason) in [(PendingRequestRetirement.cancelled, RequestPhase.cancelled, RequestStatusReason.userCancelled), (.targetTimedOut, .expired, .targetTimedOut), (.targetDisappeared, .unknown, .targetDisappeared), (.authorityRestart, .cancelled, .authorityRestarted)] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
             let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
             XCTAssertEqual(try owner.retirePending(requestID: request.requestID, reason: reason, now: now(), receiptTimeMs: nil).phase, expected)
             XCTAssertThrowsError(try consume(owner, request))
             XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
             XCTAssertThrowsError(try owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil))
+            let state = try owner.state(requestID: request.requestID)
+            XCTAssertEqual(state.reason, statusReason)
+            XCTAssertEqual(state.terminalAt, now())
+            XCTAssertNil(state.decisionPhoneID)
             if reason == .targetDisappeared { XCTAssertEqual(try events(db, writer).last?.reason, .targetDisappeared) }
         }
     }
@@ -114,6 +118,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
         XCTAssertThrowsError(try consume(owner, request, time: 200)) { XCTAssertEqual($0 as? ApprovalCoordinatorError, .expired) }
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).reason, .authorizationExpired)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).terminalAt, now(200))
         XCTAssertThrowsError(try owner.pendingRequest(requestID: request.requestID, now: now(201), receiptTimeMs: nil))
         XCTAssertEqual(try events(db, writer).filter { $0.kind == .expired }.count, 1)
         XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
@@ -160,6 +166,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let unknown = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 1, event: .loseOutcome, now: now(230), receiptTimeMs: nil)
         XCTAssertEqual(unknown.phase, .unknown)
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .unknown)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).reason, .outcomeUnavailable)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).terminalAt, now(230))
+        XCTAssertEqual(try owner.state(requestID: request.requestID).decisionPhoneID, id(5))
         XCTAssertThrowsError(try owner.recordOutcome(requestID: request.requestID, expectedRevision: 2, event: .verifySuccess, now: now(240), receiptTimeMs: nil))
         XCTAssertThrowsError(try owner.consumedRequest(requestID: request.requestID, now: now(240)))
         try owner.forgetTerminal(requestID: request.requestID)
@@ -175,6 +184,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         _ = try consume(owner, request)
         XCTAssertThrowsError(try owner.forgetTerminal(requestID: request.requestID))
         _ = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .proveNoDispatch, now: now(), receiptTimeMs: nil)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).reason, .noDispatchProved)
         try owner.forgetTerminal(requestID: request.requestID)
         let replacement = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
         XCTAssertNotEqual(replacement.requestID, request.requestID)
@@ -217,6 +227,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil)
         XCTAssertEqual(receipt.event.outcome, .noDispatch)
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .declined)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).reason, .declined)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).decisionPhoneID, id(5))
         XCTAssertThrowsError(try owner.consumedRequest(requestID: request.requestID, now: now()))
         XCTAssertThrowsError(try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch, now: now(), receiptTimeMs: nil))
     }
@@ -249,11 +261,13 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         for disappeared in [false, true] {
             if disappeared { _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(), receiptTimeMs: nil) }
             let state = try owner.state(requestID: request.requestID)
-            let status = try RequestStatusPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
-                requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
-                revision: state.revision, phase: state.phase, reason: disappeared ? .targetDisappeared : .none,
-                observationID: id(40), observedAgeMs: 10, authorizationRemainingMs: disappeared ? nil : 90,
-                estimatedLifetimeMs: nil, lateObservation: false, terminalAgeMs: disappeared ? 10 : nil, decisionPhoneID: nil)
+            let status = try RequestStatusPayload(macID: state.macID, accountID: state.accountID, requestID: state.requestID,
+                requestDigest: state.requestDigest, challenge: state.challenge,
+                revision: state.revision, phase: state.phase, reason: state.reason,
+                observationID: id(40), observedAgeMs: 120 - state.firstObservedAt.milliseconds,
+                authorizationRemainingMs: state.phase.isTerminal ? nil : state.deadlineMilliseconds - 120,
+                estimatedLifetimeMs: nil, lateObservation: false,
+                terminalAgeMs: state.terminalAt.map { 120 - $0.milliseconds }, decisionPhoneID: state.decisionPhoneID)
             XCTAssertEqual(try RequestStatusPayload.decode(status.encode(limits: limits), limits: limits), status)
         }
     }

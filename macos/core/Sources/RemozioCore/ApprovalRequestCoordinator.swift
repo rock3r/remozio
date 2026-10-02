@@ -31,6 +31,13 @@ public struct ApprovalRequestDraft: Sendable {
 
 /// Local state observation. It is not a signed status response or an execution permit.
 public struct ApprovalRequestState: Equatable, Sendable {
+    public let macID: Data
+    public let accountID: Data
+    public let requestDigest: Data
+    public let challenge: Data
+    public let reason: RequestStatusReason
+    public let terminalAt: AuthorityMoment?
+    public let decisionPhoneID: Data?
     public let requestID: Data
     public let phase: RequestPhase
     public let revision: UInt64
@@ -91,7 +98,7 @@ public final class ApprovalRequestCoordinator {
             requestID: random(16), challenge: random(32), requiredFeatures: draft.requiredFeatures,
             createdUnixMilliseconds: draft.createdUnixMilliseconds, expiresUnixMilliseconds: draft.expiresUnixMilliseconds,
             canonicalCapture: draft.capture, permittedActions: draft.actions, bodyLimits: requestLimits, captureLimits: captureLimits)
-        _ = try payload.requestDigest(bodyLimits: requestLimits, signingLimits: signingLimits)
+        let digest = try payload.requestDigest(bodyLimits: requestLimits, signingLimits: signingLimits)
         let bytes = try payload.encode(limits: requestLimits).count
         guard bytes <= maximumRetainedBytes - retainedBytes, entries[payload.requestID] == nil else {
             throw ApprovalCoordinatorError.capacityExceeded
@@ -107,7 +114,8 @@ public final class ApprovalRequestCoordinator {
             try append(tx, requestID: payload.requestID, category: category, kind: .requestCreated, outcome: .pending,
                 reason: .none, receiptTimeMs: receiptTimeMs)
         }
-        entries[payload.requestID] = Entry(state: ApprovalRequestState(requestID: payload.requestID, phase: .queued,
+        entries[payload.requestID] = Entry(state: ApprovalRequestState(macID: mac, accountID: account, requestDigest: digest, challenge: payload.challenge,
+            reason: .none, terminalAt: nil, decisionPhoneID: nil, requestID: payload.requestID, phase: .queued,
             revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
             retained: retained, category: category, byteCount: bytes)
         retainedBytes += bytes
@@ -129,7 +137,7 @@ public final class ApprovalRequestCoordinator {
     public func markPresented(requestID: Data, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> ApprovalRequestState {
         let retained = try pending(requestID, now: now, receiptTimeMs: receiptTimeMs)
         if retained.phase == .presented { return try state(requestID: requestID) }
-        return try replace(requestID, phase: RequestLifecycle.transition(from: retained.phase, event: .present))
+        return try replace(requestID, phase: RequestLifecycle.transition(from: retained.phase, event: .present), reason: .none, now: now)
     }
 
     /// A Mac-observed pending lifecycle change. A phone decline must use its signed decision instead.
@@ -138,22 +146,22 @@ public final class ApprovalRequestCoordinator {
         try checkClock(now)
         guard let entry = entries[requestID], let retained = entry.retained,
               retained.phase == .queued || retained.phase == .presented else { throw ApprovalCoordinatorError.notPending }
-        let event: RequestEvent, auditReason: AuditReason
+        let event: RequestEvent, auditReason: AuditReason, statusReason: RequestStatusReason
         switch reason {
-        case .cancelled: event = .cancel; auditReason = .userCancelled
+        case .cancelled: event = .cancel; auditReason = .userCancelled; statusReason = .userCancelled
         case .deadlineElapsed:
             guard now.milliseconds >= retained.deadlineMilliseconds else { throw ApprovalCoordinatorError.invalidDraft }
-            event = .expire; auditReason = .authorizationExpired
-        case .targetTimedOut: event = .expire; auditReason = .targetTimedOut
-        case .targetDisappeared: event = .loseTarget; auditReason = .targetDisappeared
-        case .authorityRestart: event = .restartAuthority; auditReason = .authorityRestarted
+            event = .expire; auditReason = .authorizationExpired; statusReason = .authorizationExpired
+        case .targetTimedOut: event = .expire; auditReason = .targetTimedOut; statusReason = .targetTimedOut
+        case .targetDisappeared: event = .loseTarget; auditReason = .targetDisappeared; statusReason = .targetDisappeared
+        case .authorityRestart: event = .restartAuthority; auditReason = .authorityRestarted; statusReason = .authorityRestarted
         }
         let phase = try RequestLifecycle.transition(from: retained.phase, event: event)
         let kind: AuditEventKind = phase == .expired ? .expired : phase == .unknown ? .unknownOutcome : .cancelled
         let outcome: AuditOutcome = phase == .expired ? .expired : phase == .unknown ? .unresolved : .noDispatch
         try database.write { try append($0, requestID: requestID, category: entry.category, kind: kind,
             outcome: outcome, reason: auditReason, receiptTimeMs: receiptTimeMs) }
-        return try replace(requestID, phase: phase)
+        return try replace(requestID, phase: phase, reason: statusReason, now: now)
     }
 
     /// The authenticated channel supplies phone and epoch. Incoming decision bytes never supply trusted enrollment or retained state.
@@ -172,7 +180,8 @@ public final class ApprovalRequestCoordinator {
                 expectedTrustRevision: trust.approval.revision, now: now, eventID: random(16), receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedHead: head(tx), requestLimits: requestLimits, signingLimits: signingLimits)
         }
-        _ = try replace(decision.requestID, phase: receipt.event.outcome == .noDispatch ? .declined : .authorized)
+        _ = try replace(decision.requestID, phase: receipt.event.outcome == .noDispatch ? .declined : .authorized,
+            reason: receipt.event.outcome == .noDispatch ? .declined : .none, now: now, decisionPhoneID: receipt.decision.phoneID)
         return receipt
     }
 
@@ -202,7 +211,15 @@ public final class ApprovalRequestCoordinator {
             try tx.transitionConsumption(requestID: requestID, expectedRevision: expectedRevision, event: event,
                 eventID: random(16), receiptTimeMs: receiptTimeMs, writer: writer, expectedHead: head(tx))
         }
-        _ = try replace(requestID, phase: outcome.phase)
+        let reason: RequestStatusReason
+        switch outcome.phase {
+        case .executing: reason = .none
+        case .succeeded, .failed: reason = .verifiedResult
+        case .unknown: reason = outcome.event.reason == .authorityRestarted ? .authorityRestarted : .outcomeUnavailable
+        case .cancelled: reason = .noDispatchProved
+        default: throw ConsumptionOutcomeError.corruptData
+        }
+        _ = try replace(requestID, phase: outcome.phase, reason: reason, now: now)
         return outcome
     }
 
@@ -225,9 +242,13 @@ public final class ApprovalRequestCoordinator {
         return retained
     }
 
-    private func replace(_ id: Data, phase: RequestPhase) throws -> ApprovalRequestState {
+    private func replace(_ id: Data, phase: RequestPhase, reason: RequestStatusReason, now: AuthorityMoment,
+                         decisionPhoneID: Data? = nil) throws -> ApprovalRequestState {
         guard var entry = entries[id] else { throw ApprovalCoordinatorError.unknownRequest }
-        entry.state = ApprovalRequestState(requestID: id, phase: phase, revision: entry.state.revision + 1,
+        entry.state = ApprovalRequestState(macID: entry.state.macID, accountID: entry.state.accountID,
+            requestDigest: entry.state.requestDigest, challenge: entry.state.challenge, reason: reason,
+            terminalAt: phase.isTerminal ? now : nil, decisionPhoneID: decisionPhoneID ?? entry.state.decisionPhoneID,
+            requestID: id, phase: phase, revision: entry.state.revision + 1,
             firstObservedAt: entry.state.firstObservedAt, deadlineMilliseconds: entry.state.deadlineMilliseconds)
         if !phase.isTerminal {
             guard let old = entry.retained else { throw ApprovalCoordinatorError.notPending }
