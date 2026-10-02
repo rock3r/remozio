@@ -1,7 +1,7 @@
 # Durable routing choices
 
 `RoutingJournal` stores the selected mode for one protected Mac/account journal.
-Schema 7 introduced the mode, its unsigned revision, and retained phone operations. Schema 8 preserves them and adds gateway acknowledgments. Explicit migrations accept schemas 1 through 7.
+Schema 7 introduced the mode, its unsigned revision, and retained phone operations. Schema 9 preserves them and retains gateway acknowledgments. It adds recovered delivery receipts. Explicit migrations accept schemas 1 through 8.
 A new store starts in Automatic at revision zero. Migration preserves enrollment, gateway, audit, and consumption state.
 Manual choices survive restart. Routing never changes approval policy or authorizes an action.
 
@@ -74,3 +74,5 @@ Shared Swift and Kotlin audit fixtures cover both new tags. They do not permit u
 Tests use private normal-user fixtures, synthetic enrollment, and ephemeral P-256 keys.
 They cover races, exact signed bindings, revocation, expiry, restart, replay, persistent modes, atomic failures, transaction scope, capacity, corruption, and migration.
 No privileged service, real phone, or provider is contacted.
+
+See [gateway history recovery](gateway-history-recovery.md) for transactional counter repair and its trust boundary.

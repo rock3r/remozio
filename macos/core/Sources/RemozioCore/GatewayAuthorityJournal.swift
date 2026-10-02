@@ -66,6 +66,17 @@ public struct GatewayAcknowledgmentResult: Sendable {
     public let reportedRevision: UInt64
 }
 
+public enum GatewayHistoryRecoveryDisposition: Sendable, Equatable {
+    case reconciled, localHeadChanged, requiresTrustRecovery, conflictingLocalHistory
+}
+
+/// Historical recovery only. A non-reconciled result cannot authorize publication or restore phone authority.
+public struct GatewayHistoryRecoveryResult: Sendable {
+    public let disposition: GatewayHistoryRecoveryDisposition
+    public let localRevision: UInt64
+    public let reportedRevision: UInt64
+}
+
 /// Private table owner. Every call runs within the journal owner's transaction and protected writer lease.
 final class GatewayAuthorityJournal {
     private let db: OpaquePointer
@@ -125,6 +136,62 @@ final class GatewayAuthorityJournal {
             ) STRICT;
             """, nil, nil, nil)
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+    }
+
+    static func createReconciledSchema(_ db: OpaquePointer) throws {
+        let result = sqlite3_exec(db, """
+            CREATE TABLE main.gateway_reconciled_controls_v1(
+                operation BLOB PRIMARY KEY CHECK(length(operation)=16), revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8),
+                kind INTEGER NOT NULL CHECK(kind IN (1,2)), candidate BLOB NOT NULL CHECK(length(candidate)=16),
+                payload BLOB NOT NULL, signature BLOB NOT NULL CHECK(length(signature)=64)
+            ) STRICT, WITHOUT ROWID;
+            """, nil, nil, nil)
+        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+    }
+
+    func reconcile(_ history: VerifiedGatewayHistory, enrollments: [StoredApprovalEnrollment],
+                   now: AuthorityMoment) throws -> GatewayHistoryRecoveryResult {
+        let identity = history.head.evidence.registration, local = try head(identity)
+        func result(_ disposition: GatewayHistoryRecoveryDisposition) -> GatewayHistoryRecoveryResult {
+            GatewayHistoryRecoveryResult(disposition: disposition, localRevision: local,
+                reportedRevision: history.head.evidence.revision)
+        }
+        try clock(now)
+        guard history.receivedAt.epoch == now.epoch, history.receivedAt.milliseconds <= now.milliseconds else {
+            throw GatewayAuthorityError.invalidClock
+        }
+        guard local == history.afterRevision else { return result(.localHeadChanged) }
+        var bindings: [GatewayTokenBinding] = []
+        for record in history.records {
+            let binding: GatewayTokenBinding
+            switch record {
+            case .candidate(let value): binding = value.candidate.binding
+            case .recipient(let value):
+                guard case .activation(let activation) = value.control else { return result(.requiresTrustRecovery) }
+                binding = activation.binding
+            }
+            guard enrollments.contains(where: {
+                $0.approval.phoneID == binding.phoneID && $0.epoch == binding.enrollmentEpoch && $0.notificationTag == binding.enrollmentTag
+            }) else { return result(.requiresTrustRecovery) }
+            guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
+            guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
+            bindings.append(binding)
+        }
+        guard local <= UInt64(policy.maximumControls),
+              UInt64(history.records.count) <= UInt64(policy.maximumControls) - local else {
+            throw GatewayAuthorityError.capacityExceeded
+        }
+        for (record, binding) in zip(history.records, bindings) {
+            let kind: UInt64
+            switch record { case .candidate: kind = 1; case .recipient: kind = 2 }
+            try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",
+                [record.operationID, uint(record.revision), binding.candidateID, record.canonicalPayload, record.signature]) { try done($0) }
+        }
+        // Retain desired token material, but retire every old candidate and proof in the same transaction.
+        try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16)", []) { try done($0) }
+        try advance(from: local, to: history.head.evidence.revision)
+        guard try acknowledge(history.head).disposition == .recorded else { throw GatewayAuthorityError.corruptData }
+        return result(.reconciled)
     }
 
     func acknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
@@ -190,7 +257,7 @@ final class GatewayAuthorityJournal {
             guard previous == encoded else { throw GatewayAuthorityError.wrongScope }
             return
         }
-        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)", []) {
+        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)", []) {
             guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
         }
         try statement("INSERT INTO main.gateway_authority_v1 VALUES(1,?,?)", [encoded, uint(0)]) { try done($0) }
@@ -202,13 +269,13 @@ final class GatewayAuthorityJournal {
             guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.unconfigured }
             guard try blob($0, 0, maximum: 512) == identity.encode() else { throw GatewayAuthorityError.wrongScope }
             let value = try unsigned(blob($0, 1, maximum: 8))
-            let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)", []) { stmt -> UInt64 in
+            let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)", []) { stmt -> UInt64 in
                 guard sqlite3_step(stmt) == SQLITE_ROW, let count = UInt64(exactly: sqlite3_column_int64(stmt, 0)) else { throw GatewayAuthorityError.corruptData }
                 return count
             }
             guard value == count else { throw GatewayAuthorityError.corruptData }
             if value > 0 {
-                try statement("SELECT operation,revision FROM main.gateway_outbox_v1 UNION ALL SELECT operation,revision FROM main.gateway_revocations_v1 ORDER BY revision DESC LIMIT 1", []) { stmt in
+                try statement("SELECT operation,revision FROM main.gateway_outbox_v1 UNION ALL SELECT operation,revision FROM main.gateway_revocations_v1 UNION ALL SELECT operation,revision FROM main.gateway_reconciled_controls_v1 ORDER BY revision DESC LIMIT 1", []) { stmt in
                     guard sqlite3_step(stmt) == SQLITE_ROW, let latest = try envelope(blob(stmt, 0, maximum: 16), identity: identity),
                           latest.revision == value else { throw GatewayAuthorityError.corruptData }
                 }
@@ -304,6 +371,11 @@ final class GatewayAuthorityJournal {
         try authenticate(phone: trust.enrollment.phoneID, epoch: trust.enrollment.epoch, trust: trust)
         try clock(now); _ = try head(trust.registration)
         guard let envelope = try envelope(operationID, identity: trust.registration) else { return nil }
+        let recovered = try statement("SELECT count(*) FROM main.gateway_reconciled_controls_v1 WHERE operation=?", [operationID]) {
+            guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }
+            return sqlite3_column_int64($0, 0) != 0
+        }
+        if recovered { return nil }
         guard envelope.kind != 3 else { throw GatewayAuthorityError.wrongScope }
         let candidateID: Data
         if envelope.kind == 1 { candidateID = try storedCandidate(envelope.canonicalPayload).binding.candidateID }
@@ -457,7 +529,7 @@ final class GatewayAuthorityJournal {
     private func envelope(_ operation: Data, identity: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
         guard operation.count == 16 else { throw GatewayAuthorityError.wrongScope }
         if let revoked = try revocation(operation, identity: identity) { return revoked.envelope }
-        return try statement("SELECT revision,kind,candidate,payload,signature,token FROM main.gateway_outbox_v1 WHERE operation=?", [operation]) {
+        return try statement("SELECT revision,kind,candidate,payload,signature,token,0 FROM main.gateway_outbox_v1 WHERE operation=? UNION ALL SELECT revision,kind,candidate,payload,signature,NULL,1 FROM main.gateway_reconciled_controls_v1 WHERE operation=?", [operation, operation]) {
             let result = sqlite3_step($0)
             if result == SQLITE_DONE { return nil }
             guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
@@ -482,7 +554,8 @@ final class GatewayAuthorityJournal {
             guard valid, identity.matches(binding), storedOperation == operation, storedRevision == revision,
                   try blob($0, 2, maximum: 16) == binding.candidateID else { throw GatewayAuthorityError.corruptData }
             let token = sqlite3_column_type($0, 5) == SQLITE_NULL ? nil : try String(data: blob($0, 5, maximum: 16384), encoding: .utf8)
-            guard (kind == 1) == (token != nil) else { throw GatewayAuthorityError.corruptData }
+            let recovered = sqlite3_column_int64($0, 6) == 1
+            guard recovered ? token == nil : (kind == 1) == (token != nil) else { throw GatewayAuthorityError.corruptData }
             if let token {
                 guard !token.isEmpty, token.utf8.allSatisfy({ (33...126).contains($0) }) else { throw GatewayAuthorityError.corruptData }
             }
@@ -500,7 +573,7 @@ final class GatewayAuthorityJournal {
     }
 
     private func capacity() throws {
-        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)", []) { stmt in
+        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)", []) { stmt in
             guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }; return sqlite3_column_int64(stmt, 0)
         }
         guard count < policy.maximumControls else { throw GatewayAuthorityError.capacityExceeded }

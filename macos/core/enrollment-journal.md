@@ -75,10 +75,12 @@ The caller-supplied phone-trust overloads are internal fixture paths. Push regis
 
 ## Schema and evidence
 
-Root journal schema 8 retains authority policy, enrollment tables, and routing state. It adds gateway acknowledgments. Explicit migrations accept source versions 1 through 7.
+Root journal schema 9 retains authority policy, enrollment tables, and routing state. It retains gateway acknowledgments and adds recovered delivery receipts. Explicit migrations accept source versions 1 through 8.
 Existing audit, consumption, and gateway state survive migration. No migration creates enrollment authority from those records.
 A restored complete backup still needs the independent continuity witness. A valid local database alone does not prove freshness.
 
 Tests cover both removal/consumption orders, another phone winning after removal, restart, same-phone re-enrollment, replacement rollback,
 gateway/audit atomicity, stale revisions, invalid keys, storage faults, malformed data, read-only access, and explicit migration.
 All tests use normal-user protected fixtures and synthetic keys. No actual enrollment, privileged installation, or phone biometric operation runs.
+
+See [gateway history recovery](gateway-history-recovery.md) for transactional counter repair and its trust boundary.

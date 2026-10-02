@@ -46,5 +46,6 @@ They cover multiple pages including a revocation, gaps, owner changes, wrong ran
 They also cover a validly signed conflicting head, signature re-signing, exact byte limits, count limits, explicit invalidation, clock ordering, and unsigned revisions.
 
 This change does not write recovered root history, repair counters, replay controls, or add a transport endpoint.
-Root adoption and current desired-token renewal remain separate implementation work.
+[Root history recovery](../../macos/core/gateway-history-recovery.md) now provides transactional delivery-only adoption and retires stale candidates.
+The host must integrate it with continuity checks, trust recovery, and current desired-token renewal.
 No live credentials, remote services, device installation, or hardware approval was used.

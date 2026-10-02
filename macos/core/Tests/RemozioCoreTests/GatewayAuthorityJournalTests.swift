@@ -232,10 +232,10 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         ]), limits: limits), limits: limits)
         _ = try db.write { try $0.createEpoch(descriptor) }
         try db.close()
-        try fixture.sql("DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3")
+        try fixture.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 3)
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "8")
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "9")
         XCTAssertNotNil(try migrated.read { try $0.epoch(id(40)) })
         XCTAssertThrowsError(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unconfigured) }
         try migrated.write { try $0.configureGatewayAuthority(trust().registration) }
@@ -245,7 +245,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     func testFailedSchemaThreeMigrationLeavesVersionAndOldTablesIntact() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         try db.close()
-        try fixture.sql("DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3; CREATE TABLE gateway_outbox_v1(conflict INTEGER)")
+        try fixture.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; DROP TABLE gateway_desired_tokens_v1; DROP TABLE gateway_root_candidates_v1; DROP TABLE gateway_outbox_v1; DROP TABLE gateway_authority_v1; PRAGMA user_version=3; CREATE TABLE gateway_outbox_v1(conflict INTEGER)")
         XCTAssertThrowsError(try open(fixture, migrate: 3))
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "3")
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM sqlite_schema WHERE name='gateway_authority_v1'"), "0")
@@ -453,7 +453,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     func testSchemaFourMigrationPreservesCandidateAndAddsNoRevocation() throws {
         let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
         try db.close()
-        try fixture.sql("DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; PRAGMA user_version=4")
+        try fixture.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1; PRAGMA user_version=4")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 4)
         XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
@@ -461,7 +461,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         let fresh = try migrated.write { try $0.renewDesiredGatewayCandidate(trust: trust(), expectedHead: 1,
             nowUnixMillis: 1000, now: moment(), sign: sign) }
         XCTAssertEqual(fresh.registrationToken, first.registrationToken)
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "8")
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "9")
     }
 
     func testFailedSchemaFourMigrationKeepsVersionAndExistingControls() throws {
@@ -471,12 +471,185 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertThrowsError(try open(fixture, migrate: 4))
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "4")
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
-        try fixture.sql("DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1")
+        try fixture.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; DROP TABLE gateway_revocations_v1")
         let migrated = try open(fixture, migrate: 4)
         XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
     }
 
+    private func enrollForRecovery(_ db: JournalDatabase, tag: UInt8 = 6, empty: Bool = false) throws -> UUID {
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let capabilities = ContractCapabilities(contracts: [contract: []])
+        let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+        if empty { return revision }
+        let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+            0: .unsigned(1), 1: .bytes(id(2)), 2: .bytes(id(3)), 3: .bytes(id(20)),
+            4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+        ]), limits: limits), limits: limits)
+        let writer = try db.write { try $0.createEpoch(descriptor) }
+        let value = try StoredApprovalEnrollment(epoch: id(7), notificationTag: id(tag, count: 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(6), active: true, capabilities: capabilities, keys: [
+                EnrolledApprovalKey(id: id(11), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                EnrolledApprovalKey(id: id(12), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            ]))
+        return try db.write { try $0.addApprovalEnrollment(value, expectedTrustRevision: revision,
+            eventID: id(21), receiptTimeMs: 1000, writer: writer, expectedAuditHead: 0) }
+    }
+
+    private func lostDelivery(_ db: JournalDatabase) throws -> [GatewayAuthorityEnvelope] {
+        var controls: [GatewayAuthorityEnvelope] = []
+        do {
+            try db.write { tx in
+                let trusted = try trust()
+                let next = try tx.prepareGatewayCandidate(registrationToken: "lost-remote-token", authenticatedPhoneID: id(6),
+                    authenticatedEnrollmentEpoch: id(7), trust: trusted, expectedHead: 1, nowUnixMillis: 1010, now: moment(110), sign: sign)
+                controls.append(next)
+                controls.append(try tx.consumeGatewayProof(canonicalProof: proof(next), authenticatedPhoneID: id(6),
+                    authenticatedEnrollmentEpoch: id(7), trust: trusted, expectedHead: 2, nowUnixMillis: 1010, now: moment(110), sign: sign))
+                throw Failure.injected
+            }
+        } catch Failure.injected { }
+        return controls
+    }
+
+    private func recover(_ db: JournalDatabase, _ history: VerifiedGatewayHistory, revision: UUID) throws -> GatewayHistoryRecoveryResult {
+        try db.write { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: true,
+            expectedTrustRevision: revision, now: moment(120)) }
+    }
+
+    func testCompleteDeliveryRecoveryRetiresOldProofAndRenewsOnlyLocalDesiredToken() throws {
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+        let first = try prepare(db, token: "current-local-token"), lost = try lostDelivery(db)
+        let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
+        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .reconciled)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 3)
+        XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration) }?.revision, 3)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot() }.revision, revision)
+        for entry in lost {
+            XCTAssertNil(try db.read { try $0.pendingGatewayControl(operationID: entry.operationID,
+                trust: trust(), nowUnixMillis: 1020, now: moment(120)) })
+        }
+        XCTAssertThrowsError(try consume(db, first, head: 3, wall: 1020, now: 120)) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .expired)
+        }
+        let fresh = try db.write { try $0.renewDesiredGatewayCandidate(phoneID: id(6), enrollmentEpoch: id(7),
+            registration: trust().registration, registrationActive: true, expectedTrustRevision: revision,
+            expectedHead: 3, nowUnixMillis: 1020, now: moment(120), sign: sign) }
+        XCTAssertEqual(fresh.revision, 4); XCTAssertEqual(fresh.registrationToken, "current-local-token")
+        XCTAssertNotEqual(try candidate(fresh).binding.challenge, try candidate(first).binding.challenge)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "2")
+        try db.close()
+        let reopened = try open(f)
+        XCTAssertEqual(try reopened.read { try $0.gatewayAuthorityHead(trust().registration) }, 4)
+        XCTAssertEqual(try reopened.read { try $0.gatewayAcknowledgment(trust().registration) }?.revision, 3)
+    }
+
+    func testRecoveryRejectsUnknownEnrollmentAndChangedTagsWithoutAdoption() throws {
+        for empty in [true, false] {
+            let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db, tag: 99, empty: empty)
+            let first = try prepare(db), lost = try lostDelivery(db)
+            let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
+            XCTAssertEqual(try recover(db, history, revision: revision).disposition, .requiresTrustRecovery)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+            XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(trust().registration) })
+        }
+    }
+
+    func testRecoveredRevocationCannotUseDeliveryOnlyCounterRepair() throws {
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), candidate = try prepare(source), removal = try revoke(source, head: 1)
+        let history = try XCTUnwrap(gatewayEvidence([candidate, removal], after: 0).1)
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .requiresTrustRecovery)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+    }
+
+    func testRecoveryRechecksLocalCounterTrustRevisionRegistrationAndTransactionMode() throws {
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+        let first = try prepare(db), lost = try lostDelivery(db)
+        let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
+        XCTAssertThrowsError(try recover(db, history, revision: UUID())) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        XCTAssertThrowsError(try db.write { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: false,
+            expectedTrustRevision: revision, now: moment(120)) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableRegistration) }
+        XCTAssertThrowsError(try db.read { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: true,
+            expectedTrustRevision: revision, now: moment(120)) }) { XCTAssertEqual($0 as? JournalDatabaseError, .readOnly) }
+        _ = try prepare(db, head: 1, now: 120)
+        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .localHeadChanged)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
+    }
+
+    func testRecoveryRollsBackReceiptsCounterAcknowledgmentAndCandidateRetirementTogether() throws {
+        for target in ["gateway_reconciled_controls_v1", "gateway_root_candidates_v1", "gateway_authority_v1", "gateway_acknowledgment_v1"] {
+            let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+            let first = try prepare(db), lost = try lostDelivery(db)
+            let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
+            let event = target == "gateway_root_candidates_v1" || target == "gateway_authority_v1" ? "UPDATE" : "INSERT"
+            try f.sql("CREATE TRIGGER reject_recovery BEFORE \(event) ON \(target) BEGIN SELECT RAISE(ABORT,'fixture'); END")
+            XCTAssertThrowsError(try recover(db, history, revision: revision))
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+            XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+            XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(trust().registration) })
+            XCTAssertNotNil(try db.read { try $0.pendingGatewayControl(operationID: first.operationID,
+                trust: trust(), nowUnixMillis: 1020, now: moment(120)) })
+            try f.sql("DROP TRIGGER reject_recovery")
+            XCTAssertEqual(try recover(db, history, revision: revision).disposition, .reconciled)
+        }
+    }
+
+    func testRecoveryCapacityFailureDoesNotPartiallyAdoptHistory() throws {
+        let f = try Fixture(), db = try setup(f, maximum: 2), revision = try enrollForRecovery(db)
+        let first = try prepare(db)
+        let sourceFixture = try Fixture(), source = try setup(sourceFixture), remote = try prepare(source), lost = try lostDelivery(source)
+        let history = try XCTUnwrap(gatewayEvidence([remote] + lost, after: 1).1)
+        XCTAssertThrowsError(try recover(db, history, revision: revision)) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, first.revision)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+    }
+
+    func testRecoveryRejectsAnOperationAlreadyRetainedAtAnotherRevision() throws {
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db), first = try prepare(db)
+        let original = try candidate(first)
+        let reused = try GatewayTokenCandidate(binding: original.binding, revision: 2, operationID: first.operationID,
+            issuedAtUnixMillis: original.issuedAtUnixMillis, expiresAtUnixMillis: original.expiresAtUnixMillis)
+        let envelope = try GatewayAuthorityEnvelope(kind: 1, operationID: first.operationID, revision: 2,
+            canonicalPayload: reused.encode(limits: limits), signature: sign(reused), registrationToken: first.registrationToken)
+        let history = try XCTUnwrap(gatewayEvidence([envelope], after: 1).1)
+        XCTAssertEqual(try recover(db, history, revision: revision).disposition, .conflictingLocalHistory)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+    }
+
+    func testRecoveredReceiptCorruptionRetiresTheStorageOwner() throws {
+        let f = try Fixture(), db = try setup(f), revision = try enrollForRecovery(db)
+        let first = try prepare(db), lost = try lostDelivery(db)
+        let history = try XCTUnwrap(gatewayEvidence([first] + lost, after: 1).1)
+        _ = try recover(db, history, revision: revision)
+        try f.sql("UPDATE gateway_reconciled_controls_v1 SET signature=zeroblob(64)")
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(trust().registration) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .corruptData)
+        }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testSchemaEightMigrationPreservesDesiredStateAndStartsWithoutRecoveredHistory() throws {
+        let f = try Fixture(), db = try setup(f), first = try prepare(db)
+        try db.close()
+        try f.sql("DROP TABLE gateway_reconciled_controls_v1; PRAGMA user_version=8")
+        XCTAssertThrowsError(try open(f))
+        let migrated = try open(f, migrate: 8)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), "9")
+        XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_reconciled_controls_v1"), "0")
+        let fresh = try migrated.write { try $0.renewDesiredGatewayCandidate(trust: trust(), expectedHead: 1,
+            nowUnixMillis: 1020, now: moment(120), sign: sign) }
+        XCTAssertEqual(fresh.registrationToken, first.registrationToken)
+    }
+
     private func verifiedHead(_ controls: [GatewayAuthorityEnvelope]) throws -> VerifiedGatewayHead {
+        try gatewayEvidence(controls).0
+    }
+    private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil) throws -> (VerifiedGatewayHead, VerifiedGatewayHistory?) {
         let f = try Fixture(), trusted = try trust()
         let gateway = try f.gateway(identity: trusted.registration, limits: limits, epoch: clockEpoch)
         defer { try? gateway.close() }
@@ -500,7 +673,13 @@ final class GatewayAuthorityJournalTests: XCTestCase {
             gatewayPublicKey: gatewayKey.publicKey.x963Representation, clockEpoch: clockEpoch)
         let query = try owner.makeQuery(now: moment(110))
         let reply = try gateway.headReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
-        return try owner.accept(reply, now: moment(111))
+        let head = try owner.accept(reply, now: moment(111))
+        guard let after else { return (head, nil) }
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: after)
+        let historyQuery = try owner.makeHistoryQuery(afterRevision: after, throughRevision: head.evidence.revision, now: moment(111))
+        let historyReply = try gateway.controlHistoryReply(canonicalQuery: historyQuery) { try gatewayKey.signature(for: $0).rawRepresentation }
+        let page = try owner.acceptHistory(historyReply, now: moment(112))
+        return (head, try XCTUnwrap(collector.accept(page)))
     }
 
     func testKnownAcknowledgmentsPersistWithoutChangingAuthorityOrReplayingControls() throws {
@@ -605,10 +784,10 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     func testSchemaSevenMigrationStartsWithUnknownAcknowledgmentAndPreservesControlHistory() throws {
         let f = try Fixture(), db = try setup(f), first = try prepare(db)
         try db.close()
-        try f.sql("DROP TABLE gateway_acknowledgment_v1; PRAGMA user_version=7")
+        try f.sql("DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; PRAGMA user_version=7")
         XCTAssertThrowsError(try open(f))
         let migrated = try open(f, migrate: 7)
-        XCTAssertEqual(try f.scalar("PRAGMA user_version"), "8")
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), "9")
         XCTAssertEqual(try migrated.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
         XCTAssertNil(try migrated.read { try $0.gatewayAcknowledgment(trust().registration) })
         let result = try migrated.write { try $0.acknowledgeGatewayHead(verifiedHead([first])) }

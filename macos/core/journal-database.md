@@ -21,7 +21,7 @@ flowchart TD
 
 ## Startup and scope
 
-The public factory requires the existing root-owned layout described in [the lease contract](journal-lease.md). It does not provision files or install a service. Existing stores require application ID `0x524D5A4F`, schema version 6, one matching Mac/account identity, and the required audit, consumption, outcome and gateway-control columns. These checks precede changes to persistent journal mode.
+The public factory requires the existing root-owned layout described in [the lease contract](journal-lease.md). It does not provision files or install a service. Existing stores require application ID `0x524D5A4F`, schema version 9, one matching Mac/account identity, and the required audit, consumption, outcome and gateway-control columns. These checks precede changes to persistent journal mode.
 
 Explicit `initialize: true` is setup only. It requires an empty preprovisioned file and creates all tables atomically. Wrong scope, unknown versions, missing tables, and malformed stores fail without reset. Explicit migration accepts source versions 1, 2, 3, 4, or 5 and advances to version 6 in one transaction. Version 1 also adds consumption tables; versions 1 and 2 also add outcome tables. Versions below 4 add the [authority gateway tables](gateway-authority.md). Versions below 5 add signed phone revocations. Every migration adds [approval enrollment tables](enrollment-journal.md) and preserves existing data. Migration grants no authority continuity and derives no trust from audit history. Setup and migration cannot be combined; the supplied source version must match the store.
 
