@@ -79,7 +79,7 @@ class AndroidPushWakeReceiver(
     private val clockEpoch: Long,
 ) {
     fun receive(data: Map<String, String>): WakeReceipt = router.receive(data,
-        ElapsedInstant(clockEpoch, SystemClock.elapsedRealtime().toULong()), notifications::post)
+        { ElapsedInstant(clockEpoch, SystemClock.elapsedRealtime().toULong()) }, notifications::post)
 
     fun remove(enrollment: WakeEnrollment): Boolean {
         if (!router.remove(enrollment)) return false

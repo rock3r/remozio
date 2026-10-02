@@ -26,7 +26,7 @@ A bounded cache suppresses duplicate hints. Cache eviction and expiry may permit
 
 Enrollment capacity, remembered tags, duplicate lifetime, hint capacity, alert spacing, and notification timeout are explicit configuration inputs. This change selects no product defaults. Exhausted enrollment/tag capacity rejects registration rather than evicting trusted state. The future persistent enrollment owner must manage restoration and retired tags across process windows.
 
-Clock regression or an epoch change closes this process owner and invalidates reservations. It does not delete persistent pairing. Restore a fresh owner from trusted enrollment records. Callbacks are synchronous and must not reenter the router or perform network work under its lock.
+The router samples the supplied clock under the same lock as receipt processing. Concurrent callbacks cannot reverse clock observations. Clock regression or an epoch change closes this process owner and invalidates reservations. It does not delete persistent pairing. Restore a fresh owner from trusted enrollment records. Callbacks are synchronous and must not reenter the router or perform network work under its lock.
 
 ## Android adapter
 

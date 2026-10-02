@@ -83,9 +83,10 @@ class PushWakeRouter(
 
     /** Attempt the generic notification before exposing new fetch demand, even when notifications are disabled. */
     @Synchronized
-    fun receive(data: Map<String, String>, now: ElapsedInstant,
+    fun receive(data: Map<String, String>, clock: () -> ElapsedInstant,
                 notify: (WakeEnrollment, Boolean) -> WakeNotificationResult): WakeReceipt {
         if (closed) return WakeReceipt(WakeReception.CLOSED)
+        val now = clock()
         val previous = lastTime
         if (previous != null && (now.epoch != previous.epoch || now.milliseconds < previous.milliseconds)) {
             close()

@@ -12,29 +12,29 @@ class PushWakeRouterTest {
         r.add(bytes(mac), bytes(account), bytes(4), bytes(tag, 32))
     private fun wake(e: WakeEnrollment, id: Int = 1) = PushData.Wake(bytes(id, 32), e.notificationTag.copyBytes()).encode()
     private fun receive(r: PushWakeRouter, e: WakeEnrollment, id: Int = 1, time: ULong = 0uL) =
-        r.receive(wake(e, id), ElapsedInstant(1, time)) { _, _ -> WakeNotificationResult.POSTED }
+        r.receive(wake(e, id), { ElapsedInstant(1, time) }) { _, _ -> WakeNotificationResult.POSTED }
 
     @Test fun untrustedFieldsAndChallengesNeverScheduleRequestFetches() {
         val r = router(); val e = add(r)
         var calls = 0
         val notify: (WakeEnrollment, Boolean) -> WakeNotificationResult = { _, _ -> calls++; WakeNotificationResult.POSTED }
-        assertEquals(WakeReception.MALFORMED, r.receive(wake(e) + ("endpoint" to "attacker"), ElapsedInstant(1, 0uL), notify).reception)
-        assertEquals(WakeReception.UNKNOWN_ENROLLMENT, r.receive(PushData.Wake(bytes(1, 32), bytes(9, 32)).encode(), ElapsedInstant(1, 0uL), notify).reception)
-        assertEquals(WakeReception.TOKEN_CHALLENGE, r.receive(PushData.TokenChallenge(bytes(8), bytes(7, 32), e.notificationTag.copyBytes()).encode(), ElapsedInstant(1, 0uL), notify).reception)
+        assertEquals(WakeReception.MALFORMED, r.receive(wake(e) + ("endpoint" to "attacker"), { ElapsedInstant(1, 0uL) }, notify).reception)
+        assertEquals(WakeReception.UNKNOWN_ENROLLMENT, r.receive(PushData.Wake(bytes(1, 32), bytes(9, 32)).encode(), { ElapsedInstant(1, 0uL) }, notify).reception)
+        assertEquals(WakeReception.TOKEN_CHALLENGE, r.receive(PushData.TokenChallenge(bytes(8), bytes(7, 32), e.notificationTag.copyBytes()).encode(), { ElapsedInstant(1, 0uL) }, notify).reception)
         assertEquals(0, calls); assertNull(r.beginFetch(e))
     }
 
     @Test fun notificationPrecedesDemandAndFailureStillAllowsFetch() {
         for (result in WakeNotificationResult.entries) {
             val r = router(); val e = add(r)
-            val receipt = r.receive(wake(e), ElapsedInstant(1, 0uL)) { selected, alert ->
+            val receipt = r.receive(wake(e), { ElapsedInstant(1, 0uL) }) { selected, alert ->
                 assertSame(e, selected); assertTrue(alert); assertNull(r.beginFetch(e)); result
             }
             assertEquals(result, receipt.notification)
             assertNotNull(r.beginFetch(e))
         }
         val r = router(); val e = add(r)
-        assertEquals(WakeNotificationResult.FAILED, r.receive(wake(e), ElapsedInstant(1, 0uL)) { _, _ -> error("platform failed") }.notification)
+        assertEquals(WakeNotificationResult.FAILED, r.receive(wake(e), { ElapsedInstant(1, 0uL) }) { _, _ -> error("platform failed") }.notification)
         assertNotNull(r.beginFetch(e))
     }
 
@@ -69,7 +69,7 @@ class PushWakeRouterTest {
         val r = router(); val a = add(r); val b = add(r, mac = 5, tag = 6)
         val alerts = mutableListOf<Boolean>()
         fun post(e: WakeEnrollment, id: Int, time: ULong, result: WakeNotificationResult = WakeNotificationResult.POSTED) =
-            r.receive(wake(e, id), ElapsedInstant(1, time)) { _, alert -> alerts += alert; result }
+            r.receive(wake(e, id), { ElapsedInstant(1, time) }) { _, alert -> alerts += alert; result }
         post(a, 1, 0uL, WakeNotificationResult.PERMISSION_DENIED)
         post(a, 2, 1uL); post(a, 3, 2uL); post(b, 1, 2uL); post(a, 4, 11uL)
         post(a, 4, 12uL)
@@ -99,11 +99,27 @@ class PushWakeRouterTest {
         for (bad in listOf(ElapsedInstant(2, 10uL), ElapsedInstant(1, 9uL))) {
             val r = router(); val e = add(r); receive(r, e, time = 10uL)
             val flight = requireNotNull(r.beginFetch(e))
-            assertEquals(WakeReception.INVALID_CLOCK, r.receive(wake(e), bad) { _, _ -> error("must not notify") }.reception)
+            assertEquals(WakeReception.INVALID_CLOCK, r.receive(wake(e), { bad }) { _, _ -> error("must not notify") }.reception)
             assertFalse(r.isCurrent(flight)); assertNull(r.beginFetch(e))
             assertEquals(WakeReception.CLOSED, receive(r, e, time = 11uL).reception)
             assertThrows(IllegalStateException::class.java) { add(r, tag = 9) }
         }
+    }
+
+    @Test fun concurrentReceiptsSampleClockInsideTheRouterLock() {
+        val r = router(); val e = add(r)
+        val ticks = java.util.concurrent.atomic.AtomicLong()
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+        try {
+            val jobs = (1..100).map { id -> pool.submit<WakeReceipt> {
+                r.receive(wake(e, id), {
+                    assertTrue(Thread.holdsLock(r))
+                    ElapsedInstant(1, ticks.incrementAndGet().toULong())
+                }) { _, _ -> WakeNotificationResult.POSTED }
+            } }
+            jobs.forEach { assertEquals(WakeReception.ACCEPTED, it.get(5, java.util.concurrent.TimeUnit.SECONDS).reception) }
+            assertNotNull(r.beginFetch(e))
+        } finally { pool.shutdownNow() }
     }
 
     @Test fun enrollmentBoundsRejectWithoutEvictingAndInputsAreCopied() {
