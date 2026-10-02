@@ -34,7 +34,9 @@ final class EnrollmentJournalTests: XCTestCase {
         try JournalDatabase(lease: fixture.lease(), macID: id(1), accountID: id(2), recordLimits: limits, descriptorLimits: limits,
             decisionLimits: limits, maximumConsumptions: 20, busyMilliseconds: 100, initialize: initialize, migrateFromVersion: migrate,
             gatewayPolicy: GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: maximum,
-                candidateLifetimeMillis: 1000, clockEpoch: clock))
+                candidateLifetimeMillis: 1000, clockEpoch: clock),
+            routingPolicy: RoutingJournalPolicy(clockEpoch: clock, challengeLifetimeMillis: 1000, maximumOperations: 20,
+                payloadLimits: limits, signingLimits: limits))
     }
     private func setup(_ fixture: Fixture, maximum: Int = 50) throws -> (JournalDatabase, AuditEpochWriter, UUID) {
         let db = try open(fixture, initialize: true, maximum: maximum)
@@ -212,7 +214,7 @@ final class EnrollmentJournalTests: XCTestCase {
     func testExplicitSchemaFiveMigrationKeepsAuditAndStartsUnconfigured() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         _ = try db.write { try $0.createEpoch(descriptor()) }; try db.close()
-        try fixture.sql("DROP TABLE gateway_recovered_revocations_v1; DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; PRAGMA user_version=5")
+        try fixture.sql("DROP TABLE gateway_trust_restrictions_v1; DROP TABLE gateway_recovered_revocations_v1; DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; PRAGMA user_version=5")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 5)
         XCTAssertNotNil(try migrated.read { try $0.epoch(id(3)) })
@@ -256,7 +258,7 @@ final class EnrollmentJournalTests: XCTestCase {
         _ = try add(db, writer: writer, revision: empty); try db.close()
         try fixture.sql("PRAGMA user_version=5")
         XCTAssertThrowsError(try open(fixture, migrate: 5))
-        try fixture.sql("PRAGMA user_version=10")
+        try fixture.sql("PRAGMA user_version=11")
         let reopened = try open(fixture)
         XCTAssertEqual(try reopened.read { try $0.approvalEnrollments().count }, 1)
         XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 1)
@@ -628,12 +630,229 @@ final class EnrollmentJournalTests: XCTestCase {
     func testSchemaNineMigrationPreservesEnrollmentAndStartsWithoutRecoveredRevocations() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
         try db.close()
-        try f.sql("DROP TABLE gateway_recovered_revocations_v1; PRAGMA user_version=9")
+        try f.sql("DROP TABLE gateway_trust_restrictions_v1; DROP TABLE gateway_recovered_revocations_v1; PRAGMA user_version=9")
         XCTAssertThrowsError(try open(f))
         let migrated = try open(f, migrate: 9)
         XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().revision }, revision)
         XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().enrollments.count }, 1)
         XCTAssertEqual(try migrated.read { try $0.epoch(id(3))?.head }, 1)
+    }
+
+    private func trustEvidence(kind: GatewayTrustEvidenceKind = .candidate, phone: UInt8 = 5, epoch: UInt8 = 10,
+                               tag: UInt8 = 5, operation: UInt8 = 90, registration: GatewayRegistrationIdentity? = nil) throws -> (Data, Data) {
+        let r = try registration ?? identity()
+        let binding = try GatewayTokenBinding(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID,
+            gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch, phoneID: id(phone), enrollmentEpoch: id(epoch),
+            candidateID: id(91), tokenDigest: id(92, count: 32), challenge: id(93, count: 32), enrollmentTag: id(tag, count: 32))
+        switch kind {
+        case .candidate:
+            let value = try GatewayTokenCandidate(binding: binding, revision: 99, operationID: id(operation), issuedAtUnixMillis: 100, expiresAtUnixMillis: 200)
+            return try (value.encode(limits: limits), signCandidate(value))
+        case .activation:
+            let value = try GatewayMappingActivation(binding: binding, revision: 99, operationID: id(operation), issuedAtUnixMillis: 100, expiresAtUnixMillis: 200)
+            let payload = try value.encode(limits: limits)
+            return try (payload, rootKey.signature(for: GatewayRecipientSigningInput.make(wireVersion: 1, kind: .activation,
+                canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)).rawRepresentation)
+        }
+    }
+    private func restrictTrust(_ db: JournalDatabase, writer: AuditEpochWriter, revision: UUID, head: UInt64 = 1,
+                               kind: GatewayTrustEvidenceKind = .candidate, evidence: (Data, Data)? = nil) throws -> GatewayTrustRestrictionResult {
+        let evidence = try evidence ?? trustEvidence(kind: kind)
+        return try db.write { try $0.restrictUnknownGatewayTrust(kind: kind, canonicalPayload: evidence.0, signature: evidence.1,
+            registration: identity(), expectedTrustRevision: revision, eventID: id(UInt8(100 + head)), receiptTimeMs: 5000,
+            writer: writer, expectedAuditHead: head) }
+    }
+
+    func testUnknownTrustRestrictionPreservesPairingButBlocksActionsTokensAndRoutingAfterRestart() throws {
+        for kind in [GatewayTrustEvidenceKind.candidate, .activation] {
+            let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+            try db.write { try $0.configureGatewayAuthority(identity()) }
+            let old = try db.read { try XCTUnwrap($0.approvalEnrollments().first) }
+            let candidate = try tokenCandidate(db, revision: revision)
+            let result = try restrictTrust(db, writer: writer, revision: revision, kind: kind)
+            XCTAssertEqual(result.disposition, .restricted); XCTAssertNotEqual(result.trustRevision, revision)
+            XCTAssertEqual(try db.read { try $0.approvalTrustRestrictions() }, [id(5)])
+            XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+            let retained = try db.read { try XCTUnwrap($0.approvalEnrollments().first) }
+            XCTAssertTrue(retained.approval.active)
+            XCTAssertEqual(retained.identityPublicKey, old.identityPublicKey)
+            XCTAssertEqual(retained.approval.keys.map(\.publicKey), old.approval.keys.map(\.publicKey))
+            XCTAssertThrowsError(try db.write { try consume($0, writer: writer, revision: result.trustRevision, head: 2) }) {
+                XCTAssertEqual($0 as? DecisionVerificationError, .unavailableEnrollment)
+            }
+            XCTAssertThrowsError(try activate(db, envelope: candidate, revision: result.trustRevision)) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .recoveryRequired)
+            }
+            XCTAssertThrowsError(try tokenCandidate(db, revision: result.trustRevision, head: 1)) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .recoveryRequired)
+            }
+            XCTAssertThrowsError(try db.write { try $0.issueRoutingChallenge(authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(9),
+                expectedTrustRevision: result.trustRevision, expectedRoutingRevision: 0, nowUnixMillis: 1000, now: moment()) }) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .recoveryRequired)
+            }
+            let stale = try GatewayAuthorityTrust(registration: identity(), enrollment:
+                GatewayPhoneEnrollment(phoneID: id(5), epoch: id(9), tag: id(5, count: 32), active: true), active: true)
+            XCTAssertThrowsError(try db.read { try $0.pendingGatewayControl(operationID: candidate.operationID,
+                trust: stale, nowUnixMillis: 1000, now: moment()) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableEnrollment) }
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 1)
+            XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(identity()) })
+            let record = try db.read { try XCTUnwrap($0.page(epoch: id(3), after: 1, maximumRecords: 1, maximumBytes: 16384).canonicalRecords.first) }
+            let event = try AuditEventMetadata.decode(record, limits: limits)
+            XCTAssertEqual(event.kind, .recovery); XCTAssertEqual(event.authentication, .system)
+            XCTAssertEqual(event.outcome, .unresolved); XCTAssertEqual(event.reason, .bindingMismatch)
+            XCTAssertEqual(event.peerDeviceID, id(5))
+            try db.close()
+            let reopened = try open(f)
+            XCTAssertEqual(try reopened.read { try $0.approvalTrustRestrictions() }, [id(5)])
+            XCTAssertTrue(try reopened.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+            XCTAssertEqual(try reopened.read { try $0.approvalTrustSnapshot().revision }, result.trustRevision)
+        }
+    }
+
+    func testKnownHistoryDoesNotRestrictAndReplayCannotClearUnknownTrustRestriction() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let known = try trustEvidence(epoch: 9)
+        let result = try restrictTrust(db, writer: writer, revision: revision, evidence: known)
+        XCTAssertEqual(result.disposition, .knownHistory); XCTAssertEqual(result.trustRevision, revision)
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 1)
+        let changed = try restrictTrust(db, writer: writer, revision: revision, evidence: trustEvidence(epoch: 9, tag: 99))
+        XCTAssertEqual(changed.disposition, .restricted)
+        for evidence in [try trustEvidence(epoch: 9, tag: 99), known, try trustEvidence(operation: 94)] {
+            let retry = try restrictTrust(db, writer: writer, revision: changed.trustRevision, head: 2, evidence: evidence)
+            XCTAssertEqual(retry.disposition, .alreadyRestricted); XCTAssertEqual(retry.trustRevision, changed.trustRevision)
+        }
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 2)
+        XCTAssertEqual(try db.read { try $0.approvalTrustRestrictions() }, [id(5)])
+    }
+
+    func testTrustRestrictionWithdrawsOnlyAffectedPhoneAndAllowsAnotherWinner() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f), otherKey = P256.Signing.PrivateKey()
+        let first = try add(db, writer: writer, revision: empty)
+        let revision = try add(db, writer: writer, revision: first, head: 1, phone: 8, epoch: 11, signingKey: otherKey)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let request = try request(), pending = try PendingRequestDelivery(request: request)
+        let routing = PresenceRouting(destination: .phones, reason: .manualAway, detectionLimited: false)
+        XCTAssertEqual(pending.reconcile(current: request, routing: routing, trust: try db.read { try $0.requestDeliveryTrust() }, now: moment()) { _ in true }.active.count, 2)
+        let result = try restrictTrust(db, writer: writer, revision: revision, head: 2)
+        let update = pending.reconcile(current: request, routing: routing, trust: try db.read { try $0.requestDeliveryTrust() }, now: moment()) { _ in
+            XCTFail("No new delivery"); return true
+        }
+        XCTAssertEqual(update.withdrawn.map { $0.recipient.phoneID }, [id(5)])
+        XCTAssertEqual(update.active.map { $0.recipient.phoneID }, [id(8)])
+        XCTAssertEqual(try db.write { try consume($0, writer: writer, revision: result.trustRevision, head: 3, phone: 8, signingKey: otherKey) }.decision.phoneID, id(8))
+    }
+
+    func testExplicitRemovalRemainsAvailableAndEnrollmentCannotBypassRestriction() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let restricted = try restrictTrust(db, writer: writer, revision: revision)
+        let removed = try remove(db, writer: writer, revision: restricted.trustRevision, head: 2, gateway: gatewayRemoval())
+        XCTAssertNotNil(removed.gatewayControl)
+        XCTAssertFalse(try db.read { try XCTUnwrap($0.approvalEnrollments().first).approval.active })
+        XCTAssertThrowsError(try add(db, writer: writer, revision: removed.revision, head: 3, epoch: 12, signingKey: P256.Signing.PrivateKey())) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .recoveryRequired)
+        }
+        XCTAssertEqual(try db.read { try $0.approvalTrustRestrictions() }, [id(5)])
+    }
+
+    func testUnknownPhoneEvidenceCannotEnrollOrConsumeAuthorityAndRetryWorksAtCapacity() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let first = try restrictTrust(db, writer: writer, revision: empty, head: 0)
+        let second = try restrictTrust(db, writer: writer, revision: first.trustRevision, head: 1,
+            evidence: trustEvidence(phone: 8, operation: 94))
+        XCTAssertThrowsError(try restrictTrust(db, writer: writer, revision: second.trustRevision, head: 2,
+            evidence: trustEvidence(phone: 9, operation: 95))) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
+        XCTAssertEqual(try restrictTrust(db, writer: writer, revision: second.trustRevision, head: 2).disposition, .alreadyRestricted)
+        XCTAssertThrowsError(try add(db, writer: writer, revision: second.trustRevision, head: 2)) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .recoveryRequired)
+        }
+        XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 2)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
+    }
+
+    func testTrustRestrictionRejectsWrongSignaturesScopeRevisionAndReadOnlyCalls() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        let evidence = try trustEvidence()
+        XCTAssertThrowsError(try restrictTrust(db, writer: writer, revision: revision, evidence: (evidence.0, id(0, count: 64)))) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .invalidSignature)
+        }
+        XCTAssertThrowsError(try restrictTrust(db, writer: writer, revision: empty)) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        let r = try identity(), wrong = try GatewayRegistrationIdentity(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID,
+            gatewayID: r.gatewayID, lifecycleEpoch: id(99), rootPublicKey: r.rootPublicKey)
+        XCTAssertThrowsError(try restrictTrust(db, writer: writer, revision: revision, evidence: trustEvidence(registration: wrong))) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .wrongScope)
+        }
+        XCTAssertThrowsError(try db.read { try $0.restrictUnknownGatewayTrust(kind: .candidate, canonicalPayload: evidence.0, signature: evidence.1,
+            registration: identity(), expectedTrustRevision: revision, eventID: id(100), receiptTimeMs: nil, writer: writer, expectedAuditHead: 1) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        XCTAssertTrue(try db.read { try $0.approvalTrustRestrictions().isEmpty })
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+    }
+
+    func testTrustRestrictionRollsBackMarkerCandidateRetirementRevisionAndAuditTogether() throws {
+        for (table, operation) in [("gateway_trust_restrictions_v1", "INSERT"), ("gateway_root_candidates_v1", "UPDATE"),
+                                   ("approval_authority_v1", "UPDATE"), ("audit_records_v1", "INSERT")] {
+            let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+            try db.write { try $0.configureGatewayAuthority(identity()) }
+            let candidate = try tokenCandidate(db, revision: revision)
+            try f.sql("CREATE TRIGGER reject_restriction BEFORE \(operation) ON \(table) BEGIN SELECT RAISE(ABORT,'fixture'); END")
+            XCTAssertThrowsError(try restrictTrust(db, writer: writer, revision: revision))
+            XCTAssertTrue(try db.read { try $0.approvalTrustRestrictions().isEmpty })
+            XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+            XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 1)
+            XCTAssertNotNil(try db.read { try $0.pendingGatewayControl(operationID: candidate.operationID, phoneID: id(5), enrollmentEpoch: id(9),
+                registration: identity(), registrationActive: true, expectedTrustRevision: revision, nowUnixMillis: 1000, now: moment()) })
+            try f.sql("DROP TRIGGER reject_restriction")
+            XCTAssertEqual(try restrictTrust(db, writer: writer, revision: revision).disposition, .restricted)
+        }
+    }
+
+    func testKnownInactiveHistoryDoesNotCreateRestrictionAndStoredProofCorruptionCannotRestoreAuthority() throws {
+        for corrupt in [false, true] {
+            let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+            try db.write { try $0.configureGatewayAuthority(identity()) }
+            if !corrupt {
+                let removed = try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval())
+                XCTAssertEqual(try restrictTrust(db, writer: writer, revision: removed.revision, head: 2, evidence: trustEvidence(epoch: 9)).disposition, .knownHistory)
+                XCTAssertTrue(try db.read { try $0.approvalTrustRestrictions().isEmpty })
+            } else {
+                _ = try restrictTrust(db, writer: writer, revision: revision)
+                let r = try identity(), wrong = try GatewayRegistrationIdentity(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID,
+                    gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+                let wrongTrust = try GatewayAuthorityTrust(registration: wrong, enrollment:
+                    GatewayPhoneEnrollment(phoneID: id(5), epoch: id(9), tag: id(5, count: 32), active: true), active: true)
+                XCTAssertThrowsError(try db.write { try $0.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: id(5),
+                    authenticatedEnrollmentEpoch: id(9), trust: wrongTrust, expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: signCandidate) }) {
+                    XCTAssertEqual($0 as? GatewayAuthorityError, .wrongScope)
+                }
+                try f.sql("UPDATE gateway_trust_restrictions_v1 SET signature=zeroblob(64)")
+                XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+                let stale = try GatewayAuthorityTrust(registration: identity(), enrollment:
+                    GatewayPhoneEnrollment(phoneID: id(5), epoch: id(9), tag: id(5, count: 32), active: true), active: true)
+                XCTAssertThrowsError(try db.write { try $0.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: id(5),
+                    authenticatedEnrollmentEpoch: id(9), trust: stale, expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: signCandidate) }) {
+                    XCTAssertEqual($0 as? GatewayAuthorityError, .corruptData)
+                }
+                XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+            }
+        }
+    }
+
+    func testSchemaTenMigrationPreservesKeysAuditAndStartsWithoutRestrictions() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
+        try db.close()
+        try f.sql("DROP TABLE gateway_trust_restrictions_v1; PRAGMA user_version=10")
+        XCTAssertThrowsError(try open(f))
+        let migrated = try open(f, migrate: 10)
+        XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().revision }, revision)
+        XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().enrollments.count }, 1)
+        XCTAssertEqual(try migrated.read { try $0.epoch(id(3))?.head }, 1)
+        XCTAssertTrue(try migrated.read { try $0.approvalTrustRestrictions().isEmpty })
     }
 
     private final class Fixture {
