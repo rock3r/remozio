@@ -1,0 +1,19 @@
+{
+  "recorded_at": "2026-10-02T23:07:55.960363+00:00",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+  "architecture": "arm64",
+  "inner_transport": "JDK 21 JSSE to macOS Network.framework TLS 1.3",
+  "outer_transport": "HTTPS WebSocket, OkHttp and MockWebServer 5.5.0",
+  "network_scope": "IPv4 loopback only",
+  "tests": [
+    "validOuterTLSDoesNotOverrideTheInnerMacPin",
+    "outerCarrierTrustFailureDoesNotReachTheInnerPeer",
+    "authenticatedWebSocketRelayCannotAlterInnerTraffic",
+    "innerTLSCrossesAnIndependentlyAuthenticatedWebSocketCarrier"
+  ],
+  "result": "passed",
+  "cloudflare_tested": false,
+  "android_device_tested": false,
+  "hardware_keys_tested": false,
+  "production_transport_selected": false
+}
