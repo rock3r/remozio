@@ -76,7 +76,8 @@ The protected host must still establish that new enrollment through the separate
 This API does not enroll devices or replace approval trust with gateway state.
 
 `gatewayEnrollmentRevoked` returns historical local state, including after delivery expiry and restart.
-`pendingGatewayRevocation` allows an inactive enrollment so removal can still reach the gateway.
+`pendingGatewayRevocation` requires an active gateway registration. It allows an inactive enrollment so removal can still reach the gateway.
+An inactive gateway does not erase the local revocation or prevent recording a removal.
 It returns only the latest control for that epoch, within its original wall and process deadlines.
 Old controls cannot be sent after reopening. Repeating the removal creates a fresh signed control without restoring any authority.
 The existing candidate lifetime also bounds each removal control's delivery window; the local revocation has no expiry.

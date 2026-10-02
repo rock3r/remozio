@@ -323,6 +323,19 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 2)
     }
 
+    func testInactiveGatewaySuppressesRemovalDeliveryWithoutClearingRevocation() throws {
+        let fixture = try Fixture(), db = try setup(fixture), trusted = try trust(active: false)
+        let inactive = GatewayAuthorityTrust(registration: trusted.registration, enrollment: trusted.enrollment, active: false)
+        let removal = try revoke(db, head: 0, trusted: inactive)
+        XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: inactive) })
+        XCTAssertThrowsError(try db.read { try $0.pendingGatewayRevocation(operationID: removal.operationID, trust: inactive,
+            nowUnixMillis: 1010, now: moment(110)) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableRegistration) }
+        XCTAssertEqual(try db.read { try $0.pendingGatewayRevocation(operationID: removal.operationID, trust: trusted,
+            nowUnixMillis: 1010, now: moment(110)) }?.signature, removal.signature)
+        XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trusted) })
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trusted.registration) }, 1)
+    }
+
     func testRevocationSurvivesExpiryAndRestartAndRefreshesOnlyRemoval() throws {
         let fixture = try Fixture(), db = try setup(fixture)
         let removal = try revoke(db, head: 0)

@@ -4,7 +4,7 @@ import RemozioProtocol
 import SQLite3
 
 public enum GatewayAuthorityError: Error, Equatable {
-    case disabled, invalidConfiguration, unconfigured, wrongScope, unavailableEnrollment, invalidToken
+    case disabled, invalidConfiguration, unconfigured, wrongScope, unavailableEnrollment, unavailableRegistration, invalidToken
     case headMismatch, capacityExceeded, corruptData, invalidSignature, invalidClock, expired, superseded, alreadyConsumed
 }
 
@@ -272,6 +272,7 @@ final class GatewayAuthorityJournal {
 
     func pendingRevocation(operationID: Data, trust: GatewayAuthorityTrust, wall: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
         try clock(now); _ = try head(trust.registration)
+        guard trust.active else { throw GatewayAuthorityError.unavailableRegistration }
         guard let entry = try revocation(operationID, identity: trust.registration) else { return nil }
         guard entry.value.binding.phoneID == trust.enrollment.phoneID,
               entry.value.binding.enrollmentEpoch == trust.enrollment.epoch else { throw GatewayAuthorityError.wrongScope }
