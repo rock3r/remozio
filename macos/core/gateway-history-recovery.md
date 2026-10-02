@@ -89,3 +89,6 @@ Production service recovery and authority restriction remain integration work.
 See [unknown trust restrictions](unknown-trust-restrictions.md) for durable phone restrictions that preserve pairing records.
 
 The host can apply a verified head or page through [verified recovery evidence](verified-recovery-evidence.md) before checking history continuity.
+
+[Gateway recovery attempts](gateway-recovery-attempt.md) now drive acknowledgment or counter reconciliation after collection.
+Their completion result waits for the host's independent checkpoint and effective-trust refresh.

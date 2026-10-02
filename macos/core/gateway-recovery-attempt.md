@@ -49,10 +49,40 @@ The collector includes the local boundary receipt when the initial local revisio
 
 The result contains either a verified head at or below the initial local revision, or a complete verified history.
 Neither result authorizes mapping publication or phone operations.
-A head result still needs `acknowledgeGatewayHead` to check the retained local receipt.
-A history result still needs `reconcileGatewayDeliveryHistory`, using `expectedLocalRevision` and a fresh trust snapshot.
+Call `reconcile` after collection, with the current protected registration activity and a fresh monotonic time.
+The owner checks the initial local counter and reads current enrollment trust in one journal transaction.
+It uses `acknowledgeGatewayHead` for a head result and `reconcileGatewayDeliveryHistory` for complete history.
+
+```mermaid
+flowchart TD
+    E[Completed evidence] --> C{Local counter still matches?}
+    C -->|No| Q[Report localHeadChanged and start another attempt]
+    C -->|Yes| R[Check retained receipt or reconcile complete history]
+    R -->|Missing, conflicting, or unknown trust| F[Report failure without checkpoint callback]
+    R -->|Success| D[Commit acknowledgment or repaired counter]
+    D --> P[Retain pendingReconciliationCheckpoint]
+    P --> K[Check current state and run host checkpoint and refresh]
+    K -->|Transient failure| P
+    K -->|State changed| S[Stop without reporting success]
+    K -->|Success| O[Expose reconciliationResult]
+    O --> N[Host can prepare fresh controls from current desired state]
+```
+
+A storage failure retains the collected evidence for retry and leaves no partial repair.
+A failed host checkpoint retains the committed resolution. Retrying it does not repeat the database repair.
+The owner compares the trust revision, audit head, control counter, and acknowledgment before and after the callback.
+Concurrent changes require a fresh attempt. Cancellation cannot undo a committed repair.
+The callback must not mutate the journal, reenter the owner, or publish controls.
+
+`reconciliationResult` exposes a successful disposition only after the host checkpoint and refresh succeed.
+The resolution includes the current local counter, reported gateway counter, acknowledgment, and phones awaiting administrator repair.
 A local counter change requires another attempt. Unknown trust restrictions still require independent administrator repair.
-Checkpoint any reconciliation writes before renewing current desired state with fresh controls.
+A complete history cannot reactivate revoked or restricted phones.
+
+Fresh candidate renewal remains a separate root operation after successful checkpointing.
+It must recheck current registration, enrollment, and counter state, and use the retained local desired token.
+It must never reuse a recovered candidate, proof, or removal control. Checkpoint new controls before dispatch.
+An acknowledged head can be behind the local counter; it is historical evidence, not proof of current gateway synchronization.
 
 Invalidate the attempt when registration activity or either pinned key changes.
 The service must authenticate transport callers, enforce admission gates, and schedule bounded retries.
@@ -65,6 +95,8 @@ Synthetic tests exercise signed gateway replies, real journal transactions, pagi
 They cover storage and checkpoint retries, query expiry, replay, bad signatures, reentrancy, cancellation, and trust drift.
 They verify restrictions survive history gaps and collection limits, and that unknown trust remains restricted after complete collection.
 They also cover shared boundary inclusion, conflicting local history, counter drift, and clock replacement.
+Reconciliation tests cover current desired-token renewal, storage rollback, checkpoint retries, missing history, and unknown trust.
+They verify counter and acknowledgment drift, inactive registration, reentrancy, cancellation, and monotonic-clock checks.
 The wire protocol and database schema remain unchanged.
 
 Protected service wiring, the independent witness, and real-device end-to-end checks remain separate work.

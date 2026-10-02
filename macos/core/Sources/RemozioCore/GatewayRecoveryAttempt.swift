@@ -1,13 +1,28 @@
 import Foundation
 
 public enum GatewayRecoveryAttemptError: Error, Equatable {
-    case invalidConfiguration, wrongPhase, localStateChanged, stopped
+    case invalidConfiguration, wrongPhase, localStateChanged, invalidClock, stopped
 }
 
 /// Historical results only. Neither case grants authority or permits publishing a mapping.
 public enum GatewayRecoveryCollection: Sendable {
     case head(VerifiedGatewayHead)
     case history(VerifiedGatewayHistory)
+}
+
+public enum GatewayRecoveryDisposition: Sendable, Equatable {
+    case acknowledged, reconciled, localHeadChanged, missingLocalHistory, conflictingLocalHistory, requiresTrustRecovery
+}
+
+/// Local reconciliation state. Even successful delivery recovery does not restore approval authority.
+public struct GatewayRecoveryResolution: Sendable {
+    public let disposition: GatewayRecoveryDisposition
+    public let trustRevision: UUID
+    public let auditHead: UInt64
+    public let localRevision: UInt64
+    public let reportedRevision: UInt64
+    public let acknowledgment: GatewayAcknowledgment?
+    public let restrictedPhoneIDs: Set<Data>
 }
 
 /// One serialized root-side attempt, constructed after independent authority continuity checks.
@@ -17,6 +32,11 @@ public final class GatewayRecoveryAttempt {
     public private(set) var result: GatewayRecoveryCollection?
     /// A committed restriction awaiting the host's independent checkpoint and delivery refresh.
     public private(set) var pendingCheckpoint: GatewayTrustEvidenceRecovery?
+    /// Present only while committed reconciliation awaits the host checkpoint and delivery refresh.
+    public private(set) var pendingReconciliationCheckpoint: GatewayRecoveryResolution?
+    /// A successful disposition appears here only after checkpoint and refresh complete.
+    public private(set) var reconciliationResult: GatewayRecoveryResolution?
+    private var reconciliationMoment: AuthorityMoment?
     private let database: JournalDatabase
     private let writer: AuditEpochWriter
     private let registration: GatewayRegistrationIdentity
@@ -133,10 +153,88 @@ public final class GatewayRecoveryAttempt {
         if result != nil { queries.invalidate() }
     }
 
+    /// Reconcile completed evidence against current local state, then checkpoint before reporting success.
+    /// The trusted host supplies registration activity and an idempotent checkpoint and refresh operation.
+    /// The callback must not mutate the journal or reenter this owner.
+    /// Neither the callback nor a successful result may publish old controls or reopen approval authority.
+    @discardableResult
+    public func reconcile(registrationActive: Bool, now: AuthorityMoment,
+                          checkpointAndRefresh: (GatewayRecoveryResolution) throws -> Void) throws -> GatewayRecoveryResolution {
+        guard !stopped else { throw GatewayRecoveryAttemptError.stopped }
+        guard let result, !processing, reconciliationResult == nil else { throw GatewayRecoveryAttemptError.wrongPhase }
+        guard registrationActive else { invalidate(); throw GatewayAuthorityError.unavailableRegistration }
+        let head: VerifiedGatewayHead
+        switch result { case .head(let value): head = value; case .history(let value): head = value.head }
+        let received: AuthorityMoment
+        switch result { case .head(let value): received = value.receivedAt; case .history(let value): received = value.receivedAt }
+        let previous = reconciliationMoment ?? received
+        guard now.epoch == previous.epoch, now.milliseconds >= previous.milliseconds else {
+            invalidate(); throw GatewayRecoveryAttemptError.invalidClock
+        }
+        reconciliationMoment = now
+        processing = true
+        defer { processing = false }
+        if pendingReconciliationCheckpoint == nil {
+            let resolution = try database.write { tx in
+                let trust = try tx.approvalTrustSnapshot()
+                let local = try tx.gatewayAuthorityHead(registration)
+                let disposition: GatewayRecoveryDisposition
+                if local != expectedLocalRevision {
+                    disposition = .localHeadChanged
+                } else {
+                    switch result {
+                    case .head(let verified):
+                        switch try tx.acknowledgeGatewayHead(verified).disposition {
+                        case .recorded, .alreadyRecorded, .olderThanRecorded: disposition = .acknowledged
+                        case .missingLocalHistory: disposition = .missingLocalHistory
+                        case .conflictingLocalHistory: disposition = .conflictingLocalHistory
+                        }
+                    case .history(let history):
+                        switch try tx.reconcileGatewayDeliveryHistory(history, registrationActive: registrationActive,
+                            expectedTrustRevision: trust.revision, expectedLocalRevision: expectedLocalRevision, now: now).disposition {
+                        case .reconciled: disposition = .reconciled
+                        case .localHeadChanged: disposition = .localHeadChanged
+                        case .requiresTrustRecovery: disposition = .requiresTrustRecovery
+                        case .conflictingLocalHistory: disposition = .conflictingLocalHistory
+                        }
+                    }
+                }
+                guard let epoch = try tx.epoch(writer.epoch) else { throw AuditJournalError.unavailableEpoch }
+                return GatewayRecoveryResolution(disposition: disposition, trustRevision: trust.revision, auditHead: epoch.head,
+                    localRevision: try tx.gatewayAuthorityHead(registration), reportedRevision: head.evidence.revision,
+                    acknowledgment: try tx.gatewayAcknowledgment(registration), restrictedPhoneIDs: try tx.approvalTrustRestrictions())
+            }
+            guard resolution.disposition == .acknowledged || resolution.disposition == .reconciled else {
+                reconciliationResult = resolution
+                return resolution
+            }
+            pendingReconciliationCheckpoint = resolution
+        }
+        guard let checkpoint = pendingReconciliationCheckpoint else { throw GatewayRecoveryAttemptError.wrongPhase }
+        try validateReconciliationCheckpoint(checkpoint)
+        try checkpointAndRefresh(checkpoint)
+        guard !stopped else { throw GatewayRecoveryAttemptError.stopped }
+        try validateReconciliationCheckpoint(checkpoint)
+        pendingReconciliationCheckpoint = nil
+        reconciliationResult = checkpoint
+        return checkpoint
+    }
+
+    private func validateReconciliationCheckpoint(_ checkpoint: GatewayRecoveryResolution) throws {
+        let matches = try database.read { tx in
+            try tx.gatewayAuthorityHead(registration) == checkpoint.localRevision &&
+                tx.approvalTrustSnapshot().revision == checkpoint.trustRevision &&
+                tx.epoch(writer.epoch)?.head == checkpoint.auditHead &&
+                tx.gatewayAcknowledgment(registration) == checkpoint.acknowledgment
+        }
+        guard matches else { invalidate(); throw GatewayRecoveryAttemptError.localStateChanged }
+    }
+
     /// Stops transport and collection. It never rolls back restrictions already committed to the journal.
     public func invalidate() {
         stopped = true; queries.invalidate(); collector?.invalidate()
         pending = nil; pendingCheckpoint = nil; result = nil; queryInFlight = false
+        pendingReconciliationCheckpoint = nil; reconciliationResult = nil
     }
 
     private func requireActive() throws {
