@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 
 public enum FCMError: Error, Equatable {
     case invalidConfiguration, invalidToken, invalidWake, responseTooLarge, invalidResponse, network
@@ -74,7 +75,25 @@ public struct FCMWakeSender: Sendable {
         return try classify(reply, validateOnly: validateOnly, now: Date())
     }
 
+    /// Token probes use normal priority because they do not produce a user-visible notification.
+    public func send(_ probe: FCMTokenProbe, accessToken: FCMAccessToken, validateOnly: Bool = false) async throws -> FCMDeliveryResult {
+        try Task.checkCancellation()
+        let reply = try await transport.send(request(probe, accessToken: accessToken, validateOnly: validateOnly))
+        try Task.checkCancellation()
+        return try classify(reply, validateOnly: validateOnly, now: Date())
+    }
+
     func request(_ wake: FCMWake, accessToken: FCMAccessToken, validateOnly: Bool) throws -> URLRequest {
+        let data = try PushData.wake(PushWake(identifier: wake.identifier, enrollmentTag: wake.enrollmentTag)).encode()
+        return try request(registrationToken: wake.registrationToken, data: data, ttl: wake.ttlSeconds,
+            priority: wake.priority, accessToken: accessToken, validateOnly: validateOnly)
+    }
+    func request(_ probe: FCMTokenProbe, accessToken: FCMAccessToken, validateOnly: Bool) throws -> URLRequest {
+        try request(registrationToken: probe.registrationToken, data: PushData.tokenChallenge(probe.payload).encode(), ttl: probe.ttlSeconds,
+            priority: .normal, accessToken: accessToken, validateOnly: validateOnly)
+    }
+    private func request(registrationToken: String, data: [String: String], ttl: UInt32, priority: FCMPriority,
+                         accessToken: FCMAccessToken, validateOnly: Bool) throws -> URLRequest {
         let url = URL(string: "https://fcm.googleapis.com/v1/projects/\(project)/messages:send")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -82,9 +101,8 @@ public struct FCMWakeSender: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "validate_only": validateOnly,
-            "message": ["token": wake.registrationToken,
-                "data": ["wake_v1": wake.identifier.base64EncodedString(), "enrollment_v1": wake.enrollmentTag.base64EncodedString()],
-                "android": ["priority": wake.priority.rawValue, "ttl": "\(wake.ttlSeconds)s", "restricted_package_name": packageName]],
+            "message": ["token": registrationToken, "data": data,
+                "android": ["priority": priority.rawValue, "ttl": "\(ttl)s", "restricted_package_name": packageName]],
         ], options: [.sortedKeys])
         return request
     }

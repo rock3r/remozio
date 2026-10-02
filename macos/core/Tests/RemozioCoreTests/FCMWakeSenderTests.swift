@@ -1,8 +1,83 @@
 import Foundation
+import CryptoKit
+import RemozioProtocol
 @testable import RemozioCore
 import XCTest
 
 final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
+    private let probeEpoch = UUID()
+    private func verifiedProbeCandidate() throws -> VerifiedGatewayCandidate {
+        let key = P256.Signing.PrivateKey(), limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
+        func id(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
+        let binding = try GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5),
+            phoneID: id(6), enrollmentEpoch: id(7), candidateID: id(8), tokenDigest: Data(SHA256.hash(data: Data("synthetic-registration".utf8))),
+            challenge: id(9, 32), enrollmentTag: id(10, 32))
+        let candidate = try GatewayTokenCandidate(binding: binding, revision: 1, operationID: id(11), issuedAtUnixMillis: 1_000_000, expiresAtUnixMillis: 1_060_000)
+        let payload = try candidate.encode(limits: limits)
+        let input = try GatewayTokenCandidateSigningInput.make(wireVersion: 1, canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
+        let trust = try GatewayCandidateTrust(ownerID: binding.ownerID, macID: binding.macID, accountID: binding.accountID,
+            gatewayID: binding.gatewayID, lifecycleEpoch: binding.lifecycleEpoch, rootPublicKey: key.publicKey.x963Representation,
+            active: true, revision: UUID(), appliedControlRevision: 0,
+            enrollment: GatewayPhoneEnrollment(phoneID: binding.phoneID, epoch: binding.enrollmentEpoch, tag: binding.enrollmentTag, active: true))
+        return try GatewayCandidateVerifier.verify(canonicalCandidate: payload, signature: key.signature(for: input).rawRepresentation,
+            wireVersion: 1, registrationToken: "synthetic-registration", trust: trust, nowUnixMillis: 1_000_000,
+            now: AuthorityMoment(epoch: probeEpoch, milliseconds: 100), maximumLifetimeMillis: 60_000, payloadLimits: limits, signingLimits: limits)
+    }
+    private func probe(_ candidate: VerifiedGatewayCandidate? = nil, wall: UInt64 = 1_000_000,
+                       moment: UInt64 = 100, maximumTTL: UInt32 = 300, epoch: UUID? = nil) throws -> FCMTokenProbe {
+        try FCMTokenProbe(candidate: candidate ?? verifiedProbeCandidate(), nowUnixMillis: wall,
+            now: AuthorityMoment(epoch: epoch ?? probeEpoch, milliseconds: moment), maximumTTLSeconds: maximumTTL)
+    }
+
+    func testProbeContainsOnlyBoundOpaqueChallengeAtNormalPriority() throws {
+        let candidate = try verifiedProbeCandidate(), probe = try probe(candidate)
+        let request = try sender("fixture-probe").request(probe, accessToken: token(), validateOnly: false)
+        let root = try body(request), message = try XCTUnwrap(root["message"] as? [String: Any])
+        XCTAssertEqual(Set(root.keys), ["message", "validate_only"])
+        XCTAssertEqual(Set(message.keys), ["token", "data", "android"])
+        XCTAssertEqual(message["token"] as? String, "synthetic-registration")
+        let data = try XCTUnwrap(message["data"] as? [String: String])
+        XCTAssertEqual(Set(data.keys), ["candidate_v1", "token_challenge_v1", "enrollment_v1"])
+        guard case let .tokenChallenge(parsed) = try PushData.decode(data) else { return XCTFail() }
+        XCTAssertEqual(parsed.candidateID, candidate.candidate.binding.candidateID)
+        XCTAssertEqual(parsed.challenge, candidate.candidate.binding.challenge)
+        XCTAssertEqual(parsed.enrollmentTag, candidate.candidate.binding.enrollmentTag)
+        XCTAssertEqual(message["android"] as? [String: String], ["ttl": "60s", "priority": "NORMAL", "restricted_package_name": "dev.remozio.android"])
+        XCTAssertEqual(String(reflecting: probe), "FCMTokenProbe(redacted)")
+    }
+
+    func testProbeTTLUsesTheShorterRemainingDeadlineAndRoundsDown() throws {
+        let candidate = try verifiedProbeCandidate()
+        XCTAssertEqual(try probe(candidate, maximumTTL: 5).ttlSeconds, 5)
+        XCTAssertEqual(try probe(candidate, maximumTTL: 0).ttlSeconds, 0)
+        XCTAssertEqual(try probe(candidate, moment: 5_100).ttlSeconds, 55)
+        XCTAssertEqual(try probe(candidate, wall: 1_059_000).ttlSeconds, 1)
+        XCTAssertEqual(try probe(candidate, moment: 60_099).ttlSeconds, 0)
+        XCTAssertEqual(try probe(candidate, wall: 1_059_999).ttlSeconds, 0)
+    }
+
+    func testProbeRejectsExpiredCandidatesAndClockChanges() throws {
+        let candidate = try verifiedProbeCandidate()
+        XCTAssertThrowsError(try probe(candidate, moment: 60_100))
+        XCTAssertThrowsError(try probe(candidate, wall: 1_060_000))
+        XCTAssertThrowsError(try probe(candidate, wall: 999_999))
+        XCTAssertThrowsError(try probe(candidate, moment: 99))
+        XCTAssertThrowsError(try probe(candidate, epoch: UUID()))
+        XCTAssertThrowsError(try probe(candidate, maximumTTL: 2_419_201))
+    }
+
+    func testProbeSendUsesBoundedTransportAndReportsOnlyProviderAcceptance() async throws {
+        let probe = try probe(), client = try sender("fixture-probe-send")
+        let accepted = try await client.send(probe, accessToken: token())
+        let validated = try await client.send(probe, accessToken: token(), validateOnly: true)
+        XCTAssertEqual(accepted, .accepted); XCTAssertEqual(validated, .validated)
+        let request = try XCTUnwrap(FCMFixtureProtocol.requests.last("fixture-probe-send"))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer synthetic-oauth-token")
+        XCTAssertEqual(FCMFixtureProtocol.requests.count("fixture-probe-send"), 2)
+        do { _ = try await sender("fixture-network-error").send(probe, accessToken: token()); XCTFail("Expected network failure") }
+        catch { XCTAssertEqual(error as? FCMError, .network) }
+    }
+
     private func sender(_ project: String = "fixture-success") throws -> FCMWakeSender {
         try FCMWakeSender(project: project, packageName: "dev.remozio.android",
             transport: FCMHTTPTransport(timeoutSeconds: 5, protocolClasses: [FCMFixtureProtocol.self]))

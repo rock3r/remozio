@@ -71,3 +71,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Gateway token registration](gateway-token-registration.md) defines candidate probes, bound phone receipts, and the separate gateway signature domain.
 
 [Gateway recipient controls](gateway-recipient-controls.md) define separate signed activation and phone-epoch revocation claims.
+
+[Opaque push data](push-data.md) separates approval wake-ups from provider-only token challenges in Swift and Kotlin.
