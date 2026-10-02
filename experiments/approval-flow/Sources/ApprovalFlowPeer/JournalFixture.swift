@@ -5,6 +5,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import SQLite3
 @testable import RemozioCore
 import RemozioProtocol
 
@@ -48,11 +49,11 @@ final class JournalFixture {
         database = next; writer = nextWriter
     }
 
-    func snapshot() throws -> [String: String] {
+    func snapshot(requestID: Data) throws -> [String: String] {
         try database.read { transaction in
             guard let epoch = try transaction.epoch(writer.epoch) else { throw HarnessError.invalidState }
             var fields = ["epoch": hex(writer.epoch), "head": String(epoch.head)]
-            if let outcome = try transaction.consumptionOutcome(requestID: id(3)) {
+            if let outcome = try transaction.consumptionOutcome(requestID: requestID) {
                 fields["consumed"] = "true"
                 fields["winner"] = hex(outcome.receipt.decision.phoneID)
                 fields["phase"] = outcome.phase.rawValue
@@ -62,6 +63,29 @@ final class JournalFixture {
             } else { fields["consumed"] = "false" }
             return fields
         }
+    }
+
+    func withAuditFailure<T>(_ enabled: Bool, operation: () throws -> T) throws -> T {
+        guard enabled else { return try operation() }
+        try sql("CREATE TRIGGER synthetic_audit_failure BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'synthetic'); END")
+        let result = Result { try operation() }
+        try sql("DROP TRIGGER synthetic_audit_failure")
+        switch result {
+        case .success: throw HarnessError.invalidState
+        case .failure(let error):
+            if case AuditJournalError.storage(let code) = error, code & 0xff == SQLITE_CONSTRAINT {
+                throw HarnessError.injectedPrecommitFailure
+            }
+            throw error
+        }
+    }
+
+    private func sql(_ text: String) throws {
+        var connection: OpaquePointer?
+        let result = sqlite3_open(root + "/journal/journal.sqlite", &connection)
+        defer { if let connection { sqlite3_close(connection) } }
+        guard result == SQLITE_OK, let connection else { throw HarnessError.invalidState }
+        guard sqlite3_exec(connection, text, nil, nil, nil) == SQLITE_OK else { throw HarnessError.invalidState }
     }
 
     private static func open(root: String, limits: CBORLimits, initialize: Bool) throws -> JournalDatabase {

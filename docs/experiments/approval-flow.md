@@ -1,11 +1,11 @@
 # Synthetic approval flow
 
-This harness joins the native Swift authority verifier with the Kotlin request owner used by Android. It exchanges real canonical request, decision, and status bodies with P-256 signatures. It uses child-process pipes, synthetic identities, and an invented command capture. It never executes the captured command.
+This harness joins the native Swift request coordinator with the Kotlin request owner used by Android. It exchanges real canonical request, decision, and status bodies with P-256 signatures. It uses child-process pipes, synthetic identities, and an invented command capture. It never executes the captured command.
 
 ```mermaid
 sequenceDiagram
     participant C as Kotlin test controller
-    participant M as Swift fake authority
+    participant M as Swift request owner
     participant A as Phone session A
     participant B as Phone session B
     C->>M: Provision disposable test keys and capture
@@ -13,7 +13,7 @@ sequenceDiagram
     M->>B: Same signed request and status
     A->>M: Signed decision arrives first
     B->>M: Competing signed decision
-    M->>M: Verify A; commit consumption and audit event
+    M->>M: Check stored enrollment; commit A and its audit event
     M-->>B: Reject unavailable request
     M->>A: Signed status names accepted phone
     M->>B: Same signed status
@@ -44,22 +44,30 @@ The controller creates a private temporary parent directory and passes it as the
 
 The test controller generates disposable Mac and phone keys in memory. It supplies the Mac private scalar through the private test-control pipe, and pins the corresponding public key independently of the peer's response. The Swift peer signs through CryptoKit; Kotlin signs through the host JDK. No key is written to a fixture or included in a release app.
 
-This bootstrap is test provisioning, not a pairing protocol or a production trust channel. Control messages for revocation, clock changes, and outcome loss exist only in the harness. A key labelled Biometric in this fixture is an ordinary disposable test key. These checks do not prove Android Keystore protection, biometric consent, Secure Enclave custody, or application signatures.
+This bootstrap is test provisioning, not a pairing protocol or a production trust channel. Control messages for revocation, clock changes, target disappearance, and outcome loss exist only in the harness. The fixture provisions two durable enrollments with distinct decision and biometric keys. Each decision also carries private test-channel identity and epoch fields; the owner checks these separately from the signed decision. These fields are controller assertions, not authenticated transport evidence. A key labelled Biometric in this fixture is an ordinary disposable test key. These checks do not prove Android Keystore protection, biometric consent, Secure Enclave custody, or application signatures.
 
-The peer keeps one request in memory and serializes input from its pipe. It calls the real `JournalDatabase` consumption transaction, which verifies the decision and commits consumption with its audit event. It publishes Accepted only after the write returns successfully. Outcome transitions use the same store and publish status only after commit. The harness queues both phone decisions before reading either response and repeats with each arrival order.
+The peer serializes input from its pipe. `ApprovalRequestCoordinator` admits the validated capture, generates request bindings, retains the capture, consumes decisions, and records outcomes. Admission follows two enrollment audit events and creates its own event. Accepted is published only after the write returns successfully. The harness queues both phone decisions before reading either response and repeats with each arrival order.
 
-Fault controls throw inside the transaction callback after its mutations, before the outer commit. These prove rollback and publication ordering for callback failure. They do not simulate physical disk failure or an ambiguous commit. Unsigned snapshots expose journal metadata only to the private test controller; they are not the audit transport protocol.
+The same owner reconciles `PendingRequestDelivery` after revocation, consumption, expiry, and disappearance. Its synchronous callback simulates local queue acceptance for both phones. Tests inspect active and withdrawn queue identities through counts; no notification or transport task starts. Terminal closure discards the delivery owner so it also releases its capture reference.
 
-The reopen control closes and reopens the database in the same process, then creates a fresh audit epoch linked to the previous head. It discards the retained capture. Consumed requests without a terminal outcome receive an explicit authority-restart observation and become Unknown. Existing terminal outcomes remain unchanged. An unconsumed pending request becomes Cancelled without reconstructing its capture.
+Live statuses come from `ApprovalRequestState.statusPayload` with a separate observation revision. Disappearance remains Unknown internally and uses the compatible v1 Cancelled/target-disappeared form on the wire. Refreshes advance observed age while retaining the age at the terminal transition. A fresh phone session can reconcile the signed terminal snapshot and clear its capture.
 
-This is a journal lifecycle simulation, not process-crash recovery. Disposable keys, the synthetic clock, status revision, and cached request identity remain in memory. It does not implement production startup continuity, durable admission coordination, rollback protection, checkpoint verification, or a dispatch permit.
+Fault controls install a temporary SQLite trigger that rejects the audit insert inside the real transaction. The fixture removes the trigger after the operation and identifies the expected constraint error. These prove rollback and publication ordering for an audit-write failure. They do not simulate physical disk failure or an ambiguous commit. Unsigned snapshots expose journal metadata only to the private test controller; they are not the audit transport protocol.
+
+The reopen control closes and reopens the database in the same process, then creates a fresh audit epoch linked to the previous head. It discards the retained capture. Consumed requests without a terminal outcome receive an explicit authority-restart observation and become Unknown. Existing terminal outcomes remain unchanged. An unconsumed pending request is cancelled and audited before closing the old journal. A new, empty coordinator never reconstructs its capture. The private controller retains only status metadata for the ongoing test session; post-reopen status simulation remains separate from the live owner.
+
+This is a journal lifecycle simulation, not process-crash recovery. Disposable keys, the synthetic clock, status revision, and cached request identity remain in memory. It does not implement production startup continuity, admission storage reservations, rollback protection, checkpoint verification, or a dispatch permit.
 
 Unknown comes from an explicit outcome-loss or authority-restart observation. It is not inferred from a timeout. The success control is also a synthetic observation: no command or UI action occurs.
 
 ## Cases
 
-Thirteen integration tests cover:
+Seventeen integration tests cover:
 
+- Each admission generates fresh request IDs and challenges and commits its creation event.
+- A wrong channel identity or enrollment epoch cannot consume an otherwise valid decision.
+- Disappearance closes both delivery queues and clears both phone captures. Reconnect preserves terminal timing and cannot restore controls.
+- A decision-key decline closes delivery and cannot be overridden by a later command approval.
 - Either phone wins when its valid decision arrives first; a competing decision and a replay cannot win again.
 - Both phone sessions accept the same signed status, retain the winning phone, and clear captures on Unknown. Replayed pending status cannot restore details.
 - Revoking one phone rejects its decision while leaving the other able to decide.
@@ -94,6 +102,6 @@ The phone fixture uses the real `AuditSyncSession` and `EncryptedAuditCache`, a 
 
 The separate [audit peer](audit-flow.md) retains synthetic restoration and unavailable-history cases. Those cases still use invented history and are not production recovery evidence.
 
-Transport authentication, encrypted channels, fresh request synchronization after reconnect, persistent trust, durable admission coordination, checkpoint and rollback witnesses, real device keys, and target execution remain outside this experiment. The harness establishes interoperability of the current production codecs and verifiers, not completion of the full approval product.
+Transport authentication, encrypted channels, production enrollment, admission storage reserves, checkpoint and rollback witnesses, real device keys, and target execution remain outside this experiment. Enrollment records persist in this disposable store; their provisioning is controlled test setup. Signed reconnect snapshots prove phone reconciliation, not network freshness or session authentication. The harness establishes interoperability of the current production codecs and verifiers, not completion of the full approval product.
 
 The Kotlin peer signs with standard `SHA256withECDSA` DER output. The shared strict P-256 converter produces the 64-byte wire signature consumed by the Swift verifier. This exercises the format conversion needed by Android Keystore without claiming hardware-backed signing on the host JVM.
