@@ -115,6 +115,13 @@ class PushWakeRouter(
         return WakeReceipt(WakeReception.ACCEPTED, enrollment, notification)
     }
 
+    @Synchronized
+    internal fun pendingFetches(): List<WakeEnrollment> = entries.values
+        .filter { it.pending && it.flight == null }.map { it.enrollment }
+
+    @Synchronized
+    internal fun contains(enrollment: WakeEnrollment): Boolean = entries[scope(enrollment)]?.enrollment === enrollment
+
     /** One complete-pending-set fetch per enrollment. Other Macs can fetch independently. */
     @Synchronized
     fun beginFetch(enrollment: WakeEnrollment): WakeFetch? {
