@@ -764,6 +764,171 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertNil(try migrated.probeProgress(candidateOperationID: id(1)))
     }
 
+    private func headOwner(_ gatewayKey: P256.Signing.PrivateKey, lifetime: UInt64 = 100, maximum: Int = 8) throws -> GatewayHeadQueryOwner {
+        try GatewayHeadQueryOwner(registration: identity(), gatewayPublicKey: gatewayKey.publicKey.x963Representation,
+            clockEpoch: epoch, lifetimeMillis: lifetime, maximumQueries: maximum)
+    }
+    private func headMoment(_ ms: UInt64) -> AuthorityMoment { AuthorityMoment(epoch: epoch, milliseconds: ms) }
+    private func headFails(_ expected: GatewayHeadReplyError, _ action: () throws -> Any,
+                           file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try action(), file: file, line: line) {
+            XCTAssertEqual($0 as? GatewayHeadReplyError, expected, file: file, line: line)
+        }
+    }
+    private func resignHead(_ original: GatewayHeadReply, key: P256.Signing.PrivateKey,
+                            change: (inout [UInt64: CBORValue]) throws -> Void) throws -> GatewayHeadReply {
+        let limits = try CBORLimits(maxBytes: 70_000, maxDepth: 8, maxItems: 128)
+        guard case var .map(fields) = try DeterministicCBOR.decode(original.canonicalPayload, limits: limits) else { fatalError() }
+        try change(&fields)
+        let payload = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        return GatewayHeadReply(canonicalPayload: payload,
+            signature: try key.signature(for: Data("Remozio/GatewayHeadReply/v1\u{0}".utf8) + payload).rawRepresentation)
+    }
+
+    func testFreshHeadRepliesCoverEmptyCandidateActivationAndRevocation() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        func verify(_ revision: UInt64, kind: UInt64) throws {
+            let query = try owner.makeQuery(now: headMoment(revision + 1))
+            let reply = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+            let accepted = try owner.accept(reply, now: headMoment(revision + 2))
+            XCTAssertEqual(accepted.evidence.revision, revision)
+            XCTAssertEqual(accepted.evidence.registration, try identity())
+            XCTAssertEqual(accepted.receivedAt.milliseconds, revision + 2)
+            switch accepted.evidence.receipt {
+            case .candidate: XCTAssertEqual(kind, 1)
+            case .recipient(let receipt): XCTAssertEqual(receipt.kind.rawValue, kind)
+            case nil: XCTAssertEqual(kind, 0)
+            }
+            XCTAssertNil(reply.canonicalPayload.range(of: Data(token.utf8)))
+            XCTAssertEqual(String(reflecting: reply), "GatewayHeadReply(redacted)")
+            XCTAssertEqual(String(reflecting: accepted), "VerifiedGatewayHead(redacted)")
+        }
+        try verify(0, kind: 0)
+        let candidate = try candidate(); _ = try admit(db, candidate); try verify(1, kind: 1)
+        _ = try activate(db, activation(candidate), head: 1); try verify(2, kind: 2)
+        _ = try revoke(db); try verify(3, kind: 3)
+        XCTAssertEqual(try db.head(), 3)
+    }
+
+    func testHeadRepliesAreSingleUseAndBoundToOneOwnerQuery() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        let owner = try headOwner(gateway), other = try headOwner(gateway)
+        let first = try owner.makeQuery(now: headMoment(1)), second = try owner.makeQuery(now: headMoment(1))
+        XCTAssertNotEqual(first, second)
+        let reply = try db.headReply(canonicalQuery: first) { try gateway.signature(for: $0).rawRepresentation }
+        _ = try other.makeQuery(now: headMoment(1))
+        headFails(.unknownQuery) { try other.accept(reply, now: headMoment(2)) }
+        _ = try owner.accept(reply, now: headMoment(2))
+        headFails(.unknownQuery) { try owner.accept(reply, now: headMoment(2)) }
+        let next = try db.headReply(canonicalQuery: second) { try gateway.signature(for: $0).rawRepresentation }
+        _ = try owner.accept(next, now: headMoment(2))
+        headFails(.unknownQuery) { try headOwner(gateway).accept(next, now: headMoment(2)) }
+    }
+
+    func testHeadReplyRequiresGatewayPinDomainAndUntamperedBytes() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        let owner = try headOwner(gateway), query = try owner.makeQuery(now: headMoment(1))
+        let wrong = try db.headReply(canonicalQuery: query) { try key.signature(for: $0).rawRepresentation }
+        headFails(.invalidSignature) { try owner.accept(wrong, now: headMoment(2)) }
+        let correct = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        let raw = GatewayHeadReply(canonicalPayload: correct.canonicalPayload,
+            signature: try gateway.signature(for: correct.canonicalPayload).rawRepresentation)
+        headFails(.invalidSignature) { try owner.accept(raw, now: headMoment(2)) }
+        var tampered = correct.canonicalPayload; tampered[tampered.count - 1] ^= 1
+        headFails(.invalidSignature) { try owner.accept(GatewayHeadReply(canonicalPayload: tampered, signature: correct.signature), now: headMoment(2)) }
+        headFails(.invalidSignature) { try owner.accept(GatewayHeadReply(canonicalPayload: correct.canonicalPayload, signature: Data()), now: headMoment(2)) }
+        _ = try owner.accept(correct, now: headMoment(2))
+    }
+
+    func testGatewaySignatureCannotForgeRootReceiptOrHead() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db)
+        let owner = try headOwner(gateway), query = try owner.makeQuery(now: headMoment(1))
+        let reply = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        for (field, value) in [(UInt64(4), CBORValue.unsigned(999)), (5, .unsigned(3)), (7, .bytes(Data(repeating: 1, count: 64)))] {
+            let forged = try resignHead(reply, key: gateway) { $0[field] = value }
+            headFails(.invalidReceipt) { try owner.accept(forged, now: headMoment(2)) }
+        }
+        let unrelated = try candidate(revision: 1, phone: 9)
+        let foreignKey = P256.Signing.PrivateKey()
+        let bytes = try unrelated.encode(limits: limits)
+        let input = try GatewayTokenCandidateSigningInput.make(wireVersion: 1, canonicalPayload: bytes, payloadLimits: limits, inputLimits: limits)
+        let forged = try resignHead(reply, key: gateway) { fields in
+            fields[6] = .bytes(bytes); fields[7] = .bytes(try foreignKey.signature(for: input).rawRepresentation)
+        }
+        headFails(.invalidReceipt) { try owner.accept(forged, now: headMoment(2)) }
+        _ = try owner.accept(reply, now: headMoment(2))
+    }
+
+    func testHeadScopeVersionAndExactFieldsAreCheckedAfterGatewaySignature() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        let owner = try headOwner(gateway), query = try owner.makeQuery(now: headMoment(1))
+        let reply = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        let wrongScope = try resignHead(reply, key: gateway) { $0[2] = .bytes(try identity(owner: 9).encode()) }
+        headFails(.wrongScope) { try owner.accept(wrongScope, now: headMoment(2)) }
+        let future = try resignHead(reply, key: gateway) { $0[0] = .unsigned(2) }
+        headFails(.unsupportedVersion) { try owner.accept(future, now: headMoment(2)) }
+        let extra = try resignHead(reply, key: gateway) { $0[8] = .unsigned(1) }
+        headFails(.invalidMessage) { try owner.accept(extra, now: headMoment(2)) }
+        let emptyWithReceipt = try resignHead(reply, key: gateway) { $0[7] = .bytes(Data([1])) }
+        headFails(.invalidReceipt) { try owner.accept(emptyWithReceipt, now: headMoment(2)) }
+        _ = try owner.accept(reply, now: headMoment(2))
+    }
+
+    func testHeadQueryExpiryCapacityAndInvalidation() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        let owner = try headOwner(gateway, lifetime: 10, maximum: 1)
+        let query = try owner.makeQuery(now: headMoment(1))
+        headFails(.capacityExceeded) { try owner.makeQuery(now: headMoment(2)) }
+        let reply = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        headFails(.expired) { try owner.accept(reply, now: headMoment(11)) }
+        headFails(.unknownQuery) { try owner.accept(reply, now: headMoment(11)) }
+        _ = try owner.makeQuery(now: headMoment(11))
+        _ = try owner.makeQuery(now: headMoment(21)) // Expired slots are reclaimed without a reply.
+        owner.invalidate()
+        headFails(.stopped) { try owner.makeQuery(now: headMoment(21)) }
+        headFails(.stopped) { try owner.accept(reply, now: headMoment(21)) }
+        XCTAssertThrowsError(try headOwner(gateway, lifetime: 0))
+        XCTAssertThrowsError(try headOwner(gateway, maximum: 65))
+    }
+
+    func testHeadQueryClockDiscontinuityStopsOwnerAndOverflowCannotIssueQuery() throws {
+        let gateway = P256.Signing.PrivateKey()
+        for next in [headMoment(9), AuthorityMoment(epoch: UUID(), milliseconds: 10)] {
+            let owner = try headOwner(gateway)
+            _ = try owner.makeQuery(now: headMoment(10))
+            headFails(.invalidClock) { try owner.makeQuery(now: next) }
+            headFails(.stopped) { try owner.makeQuery(now: headMoment(11)) }
+        }
+        let owner = try headOwner(gateway)
+        headFails(.invalidClock) { try owner.makeQuery(now: headMoment(UInt64.max)) }
+    }
+
+    func testWrongQueryScopeAndClosedDatabaseNeverReachSigner() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        let foreign = try GatewayHeadQueryOwner(registration: identity(owner: 9), gatewayPublicKey: gateway.publicKey.x963Representation, clockEpoch: epoch)
+        let query = try foreign.makeQuery(now: headMoment(1))
+        var calls = 0
+        headFails(.wrongScope) { try db.headReply(canonicalQuery: query) { _ in calls += 1; return Data(repeating: 0, count: 64) } }
+        XCTAssertThrowsError(try db.headReply(canonicalQuery: Data(repeating: 0, count: 1025)) { _ in calls += 1; return Data() })
+        try db.close()
+        XCTAssertThrowsError(try db.headReply(canonicalQuery: query) { _ in calls += 1; return Data() })
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testAuthenticatedHistoricalReceiptRemainsEvidenceAfterExpiryAndReopen() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db); try db.close()
+        let reopened = try open(fixture), owner = try headOwner(gateway)
+        let query = try owner.makeQuery(now: headMoment(50_000))
+        let reply = try reopened.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+        let accepted = try owner.accept(reply, now: headMoment(50_001))
+        XCTAssertEqual(accepted.evidence.revision, 1)
+        XCTAssertNil(try reopened.activeMapping(trust: trust(head: 1)))
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
+    }
+
     private final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }
