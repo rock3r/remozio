@@ -66,3 +66,5 @@ The [enrollment journal](enrollment-journal.md) owns approval keys and combines 
 The [routing journal](routing-journal.md) persists local modes and validates one-time Away controls against current stored enrollment.
 
 [Pending request handoff](pending-delivery.md) preserves request timing, deduplicates per-enrollment delivery, and rechecks presence before the first transport write.
+
+The [approval request coordinator](approval-coordinator.md) owns live request bindings and serializes their lifecycle with durable decision consumption.

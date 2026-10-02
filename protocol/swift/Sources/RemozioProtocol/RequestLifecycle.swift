@@ -14,7 +14,7 @@ public enum RequestPhase: String, CaseIterable, Sendable {
 
 public enum RequestEvent: String, CaseIterable, Sendable {
     case present, authorize, decline, cancel, expire, beginDispatch
-    case verifySuccess, verifyFailure, loseOutcome, restartAuthority, proveNoDispatch
+    case verifySuccess, verifyFailure, loseOutcome, restartAuthority, proveNoDispatch, loseTarget
 }
 
 public enum LifecycleError: String, Error, Equatable { case terminal, invalidTransition }
@@ -29,6 +29,7 @@ public enum RequestLifecycle {
         case (.queued, .decline), (.presented, .decline): return .declined
         case (.queued, .cancel), (.presented, .cancel): return .cancelled
         case (.queued, .expire), (.presented, .expire): return .expired
+        case (.queued, .loseTarget), (.presented, .loseTarget): return .unknown
         case (.authorized, .beginDispatch): return .executing
         case (.authorized, .proveNoDispatch): return .cancelled
         case (.executing, .verifySuccess): return .succeeded

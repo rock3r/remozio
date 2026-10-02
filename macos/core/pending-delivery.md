@@ -47,3 +47,5 @@ Discard the controller after applying its terminal withdrawals. Its retained req
 Tests cover local-to-phone handoff, multiple phones, unchanged age and expiry, noisy presence changes, queue failure, and the dispatch recheck. They cover consumption, revocation, replacement, compatibility, clock changes, capacity, and a real protected-journal enrollment snapshot.
 
 This component does not install presence observers, run a transport, write handoff audit events, or implement the local command approval surface. Those service integrations and physical-device acceptance checks remain required. No real credentials, provider calls, or target actions are used by these tests.
+
+The approval request owner exposes `reconcileDelivery` for pending and completed requests. It closes queued and started deliveries from retained metadata after capture release. Apply withdrawals before forgetting terminal owner state.

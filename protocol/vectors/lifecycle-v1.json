@@ -8,6 +8,8 @@
   ["presented", "cancel", "cancelled"],
   ["queued", "expire", "expired"],
   ["presented", "expire", "expired"],
+  ["queued", "loseTarget", "unknown"],
+  ["presented", "loseTarget", "unknown"],
   ["authorized", "beginDispatch", "executing"],
   ["authorized", "proveNoDispatch", "cancelled"],
   ["executing", "verifySuccess", "succeeded"],

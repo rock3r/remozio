@@ -7,7 +7,7 @@ final class RequestLifecycleTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let rows = try JSONDecoder().decode([[String]].self, from: Data(contentsOf: root.appendingPathComponent("vectors/lifecycle-v1.json")))
-        XCTAssertEqual(rows.count, 19)
+        XCTAssertEqual(rows.count, 21)
         var expected: [String: RequestPhase] = [:]
         for row in rows {
             XCTAssertEqual(row.count, 3)

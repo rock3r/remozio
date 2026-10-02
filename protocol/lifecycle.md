@@ -18,6 +18,8 @@ stateDiagram-v2
     presented --> declined: decline
     queued --> cancelled: cancel or root restart
     presented --> cancelled: cancel or root restart
+    queued --> unknown: target disappears
+    presented --> unknown: target disappears
     queued --> expired: established expiry
     presented --> expired: established expiry
 ```
@@ -43,6 +45,8 @@ The first valid decision accepted by the Mac wins. A later competing decision ge
 ## Evidence and time
 
 `expire` is valid only before consumption. The caller must establish expiry from a trusted deadline or an observed target timeout. An estimated 1Password deadline, target disappearance, or missed notification is not proof of expiry. Original first-seen age and authoritative deadlines must survive transport reconnects. Deadline comparisons must include sleep and must not use phone wall-clock timestamps.
+
+`loseTarget` records Unknown when a pending target disappears without an established result. It never authorizes a retry or changes a consumed request.
 
 `beginDispatch` marks entry into the uncertain side-effect boundary, not proof that a click or child process started. Loss of acknowledgment after consumption becomes Unknown. An execution timeout cannot turn into Expired.
 

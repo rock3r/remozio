@@ -141,6 +141,27 @@ public final class PendingRequestDelivery {
             withdrawn: update.withdrawn, closure: update.closure, capacityLimitedRecipients: update.capacityLimitedRecipients))
     }
 
+    /// Called by the serialized request owner after a request leaves its pending phase.
+    func close(current: ApprovalRequestState, routing: PresenceRouting, now: AuthorityMoment) -> RequestDeliveryUpdate {
+        if closure == nil {
+            let payload = original.payload
+            if current.requestID != payload.requestID || current.macID != payload.macID || current.accountID != payload.accountID ||
+                current.challenge != payload.challenge || current.firstObservedAt != original.admittedAt ||
+                current.deadlineMilliseconds != original.deadlineMilliseconds { closure = .requestChanged }
+            else if now.epoch != original.admittedAt.epoch || now.milliseconds < lastTime { closure = .invalidClock }
+            else { closure = .requestPhase(current.phase) }
+        }
+        lastTime = max(lastTime, now.milliseconds)
+        var withdrawn: [PhoneRequestDelivery] = []
+        for recipient in Array(entries.keys) {
+            guard var entry = entries[recipient], !entry.retired else { continue }
+            if entry.enqueued { withdrawn.append(entry.delivery) }
+            entry.retired = true; entries[recipient] = entry
+        }
+        return RequestDeliveryUpdate(routing: routing, active: [], dispatched: [], newlyEnqueued: [],
+            withdrawn: sorted(withdrawn), closure: closure, capacityLimitedRecipients: [])
+    }
+
     private func dispatched() -> [PhoneRequestDelivery] {
         sorted(entries.values.filter { $0.enqueued && $0.dispatched && !$0.retired }.map(\.delivery))
     }
