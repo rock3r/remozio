@@ -351,6 +351,17 @@ public final class GatewayDatabase {
     }
 
     /// Reserve before transport. This commits the attempt count but does not expose a provider message.
+    /// Check before OAuth or pacing without consuming an attempt or exposing the registration token.
+    func checkProbeCandidate(candidateOperationID: Data, trust: GatewayCandidateTrust,
+                             nowUnixMillis: UInt64, now: AuthorityMoment) throws {
+        guard probePolicy != nil else { throw GatewayProbeError.disabled }
+        guard candidateOperationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
+        try transaction(write: true) {
+            try checkClock(now)
+            _ = try probeMaterial(operation: candidateOperationID, trust: trust, wall: nowUnixMillis, now: now)
+        }
+    }
+
     public func reserveProbe(candidateOperationID: Data, trust: GatewayCandidateTrust,
                              nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayProbeReservation {
         guard let policy = probePolicy else { throw GatewayProbeError.disabled }

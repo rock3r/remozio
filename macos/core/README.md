@@ -54,3 +54,5 @@ The [gateway storage lease](gateway-storage-lease.md) protects the dedicated pus
 The [gateway database](gateway-database.md) commits candidate records and control revisions together, retains signed retry receipts, and clears pending tokens after restart.
 
 [Gateway probe attempts](gateway-probe-attempts.md) provide durable reservations, a single-use dispatch handoff and bounded retry outcomes.
+
+The [gateway delivery coordinator](gateway-delivery.md) connects durable probe attempts to OAuth and bounded, cancellable FCM delivery.
