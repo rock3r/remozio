@@ -77,6 +77,14 @@ public struct GatewayHistoryRecoveryResult: Sendable {
     public let reportedRevision: UInt64
 }
 
+public enum GatewayTrustEvidenceKind: UInt64, Sendable { case candidate = 1, activation = 2 }
+public enum GatewayTrustRestrictionDisposition: Sendable, Equatable { case knownHistory, restricted, alreadyRestricted }
+public struct GatewayTrustRestrictionResult: Sendable {
+    public let phoneID: Data
+    public let disposition: GatewayTrustRestrictionDisposition
+    public let trustRevision: UUID
+}
+
 /// Private table owner. Every call runs within the journal owner's transaction and protected writer lease.
 final class GatewayAuthorityJournal {
     private let db: OpaquePointer
@@ -200,6 +208,7 @@ final class GatewayAuthorityJournal {
                     continue
                 }
             }
+            guard try !trustRestricted(phone: binding.phoneID, identity: identity) else { return result(.requiresTrustRecovery) }
             guard enrollments.contains(where: {
                 $0.approval.phoneID == binding.phoneID && $0.epoch == binding.enrollmentEpoch && $0.notificationTag == binding.enrollmentTag
             }) else { return result(.requiresTrustRecovery) }
@@ -230,6 +239,71 @@ final class GatewayAuthorityJournal {
         try advance(from: local, to: history.head.evidence.revision)
         guard try acknowledge(history.head).disposition == .recorded else { throw GatewayAuthorityError.corruptData }
         return result(.reconciled)
+    }
+
+    static func createTrustRestrictionsSchema(_ db: OpaquePointer) throws {
+        let result = sqlite3_exec(db, """
+            CREATE TABLE main.gateway_trust_restrictions_v1(
+                phone BLOB PRIMARY KEY CHECK(length(phone)=16), kind INTEGER NOT NULL CHECK(kind IN (1,2)),
+                operation BLOB NOT NULL UNIQUE CHECK(length(operation)=16), payload BLOB NOT NULL,
+                signature BLOB NOT NULL CHECK(length(signature)=64)
+            ) STRICT, WITHOUT ROWID;
+            """, nil, nil, nil)
+        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+    }
+
+    private func trustEvidence(kind: GatewayTrustEvidenceKind, payload: Data, signature: Data,
+                               identity: GatewayRegistrationIdentity) throws -> (GatewayTokenBinding, Data) {
+        let binding: GatewayTokenBinding, operation: Data, valid: Bool
+        switch kind {
+        case .candidate:
+            let value = try GatewayTokenCandidate.decode(payload, limits: policy.payloadLimits)
+            binding = value.binding; operation = value.operationID
+            valid = try GatewayTokenCandidateSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: 1,
+                canonicalPayload: payload, payloadLimits: policy.payloadLimits, inputLimits: policy.signingLimits)
+        case .activation:
+            let value = try GatewayMappingActivation.decode(payload, limits: policy.payloadLimits)
+            binding = value.binding; operation = value.operationID
+            valid = try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: 1,
+                kind: .activation, canonicalPayload: payload, payloadLimits: policy.payloadLimits, inputLimits: policy.signingLimits)
+        }
+        guard valid else { throw GatewayAuthorityError.invalidSignature }
+        guard identity.matches(binding) else { throw GatewayAuthorityError.wrongScope }
+        return (binding, operation)
+    }
+
+    func trustRestricted(phone: Data, identity: GatewayRegistrationIdentity) throws -> Bool {
+        try statement("SELECT kind,operation,payload,signature FROM main.gateway_trust_restrictions_v1 WHERE phone=?", [phone]) {
+            let result = sqlite3_step($0)
+            if result == SQLITE_DONE { return false }
+            guard result == SQLITE_ROW, let raw = UInt64(exactly: sqlite3_column_int64($0, 0)),
+                  let kind = GatewayTrustEvidenceKind(rawValue: raw) else { throw GatewayAuthorityError.corruptData }
+            do {
+                let (binding, operation) = try trustEvidence(kind: kind, payload: blob($0, 2, maximum: policy.payloadLimits.maxBytes),
+                    signature: blob($0, 3, maximum: 64), identity: identity)
+                guard binding.phoneID == phone, try blob($0, 1, maximum: 16) == operation else { throw GatewayAuthorityError.corruptData }
+            } catch { throw GatewayAuthorityError.corruptData }
+            return true
+        }
+    }
+
+    func restrictUnknownTrust(kind: GatewayTrustEvidenceKind, payload: Data, signature: Data,
+                              identity: GatewayRegistrationIdentity, enrollments: [StoredApprovalEnrollment]) throws -> (Data, GatewayTrustRestrictionDisposition) {
+        _ = try head(identity)
+        let (binding, operation) = try trustEvidence(kind: kind, payload: payload, signature: signature, identity: identity)
+        let phone = binding.phoneID
+        if try trustRestricted(phone: phone, identity: identity) { return (phone, .alreadyRestricted) }
+        if enrollments.contains(where: { $0.approval.phoneID == phone && $0.epoch == binding.enrollmentEpoch && $0.notificationTag == binding.enrollmentTag }) {
+            return (phone, .knownHistory)
+        }
+        try capacity()
+        try statement("SELECT count(*) FROM main.gateway_trust_restrictions_v1", []) {
+            guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) < 1024 else { throw GatewayAuthorityError.capacityExceeded }
+        }
+        try statement("INSERT INTO main.gateway_trust_restrictions_v1 VALUES(?,\(kind.rawValue),?,?,?)",
+            [phone, operation, payload, signature]) { try done($0) }
+        try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16) WHERE phone=?", [phone]) { try done($0) }
+        return (phone, .restricted)
     }
 
     static func createRecoveredRevocationsSchema(_ db: OpaquePointer) throws {
@@ -361,7 +435,7 @@ final class GatewayAuthorityJournal {
             guard previous == encoded else { throw GatewayAuthorityError.wrongScope }
             return
         }
-        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)", []) {
+        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)", []) {
             guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
         }
         try statement("INSERT INTO main.gateway_authority_v1 VALUES(1,?,?)", [encoded, uint(0)]) { try done($0) }
@@ -680,7 +754,7 @@ final class GatewayAuthorityJournal {
     }
 
     private func capacity(additional: Int = 1) throws {
-        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)", []) { stmt in
+        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)", []) { stmt in
             guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }; return sqlite3_column_int64(stmt, 0)
         }
         guard additional > 0, count <= policy.maximumControls, additional <= policy.maximumControls - Int(count) else { throw GatewayAuthorityError.capacityExceeded }
@@ -694,7 +768,7 @@ final class GatewayAuthorityJournal {
         try scope(trust.registration)
         guard trust.active, trust.enrollment.active else { throw GatewayAuthorityError.unavailableEnrollment }
         guard phone == trust.enrollment.phoneID, epoch == trust.enrollment.epoch else { throw GatewayAuthorityError.wrongScope }
-        guard try !revoked(trust: trust) else { throw GatewayAuthorityError.unavailableEnrollment }
+        guard try !revoked(trust: trust), try !trustRestricted(phone: phone, identity: trust.registration) else { throw GatewayAuthorityError.unavailableEnrollment }
     }
     private func scope(_ identity: GatewayRegistrationIdentity) throws {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }

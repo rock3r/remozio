@@ -4,7 +4,7 @@ import RemozioProtocol
 import SQLite3
 
 public enum EnrollmentJournalError: Error, Equatable {
-    case unconfigured, alreadyConfigured, invalidState, staleRevision, unavailableEnrollment, reusedIdentity, capacityExceeded, corruptData, gatewayRequired
+    case unconfigured, alreadyConfigured, invalidState, staleRevision, unavailableEnrollment, reusedIdentity, capacityExceeded, corruptData, gatewayRequired, recoveryRequired
 }
 
 /// Protected setup input. The host must verify administrator authorization and the phone enrollment proof first.
@@ -151,11 +151,26 @@ final class EnrollmentJournal {
                 let allowed = Set(try EnrollmentEncoding.capabilities(policy.allowed).contracts.keys)
                 guard policy.version == 1, policy.allowed.allSatisfy({ $0.features.isEmpty }),
                       allowed.isSubset(of: Set(capabilities.contracts.keys)) else { throw EnrollmentJournalError.corruptData }
+                let restricted = try restrictedPhones()
                 return try ApprovalTrustSnapshot(macID: mac, accountID: account, revision: revision,
-                    authorityCapabilities: capabilities, allowedContracts: allowed, enrollments: all().filter { $0.approval.active }.map(\.approval))
+                    authorityCapabilities: capabilities, allowedContracts: allowed, enrollments: all().filter { $0.approval.active && !restricted.contains($0.approval.phoneID) }.map(\.approval))
             } catch { throw EnrollmentJournalError.corruptData }
         }
     }
+
+    func restrictedPhones() throws -> Set<Data> {
+        try statement("SELECT phone FROM main.gateway_trust_restrictions_v1 LIMIT 1025", []) {
+            var phones: Set<Data> = []
+            while true {
+                let result = sqlite3_step($0)
+                if result == SQLITE_DONE { return phones }
+                guard result == SQLITE_ROW, phones.count < maximumRows else { throw EnrollmentJournalError.corruptData }
+                let phone = try blob($0, 0)
+                guard phone.count == 16, phones.insert(phone).inserted else { throw EnrollmentJournalError.corruptData }
+            }
+        }
+    }
+    func advanceForRestriction(expected: UUID) throws -> UUID { try require(expected); return try advance(expected) }
 
     func all() throws -> [StoredApprovalEnrollment] {
         try statement("SELECT phone,epoch,active,body FROM main.approval_enrollments_v1 ORDER BY phone,epoch LIMIT 1025", []) {
@@ -176,6 +191,7 @@ final class EnrollmentJournal {
 
     func add(_ enrollment: StoredApprovalEnrollment, expected: UUID) throws -> UUID {
         try require(expected)
+        guard try !restrictedPhones().contains(enrollment.approval.phoneID) else { throw EnrollmentJournalError.recoveryRequired }
         guard enrollment.approval.active else { throw EnrollmentJournalError.invalidState }
         let previous = try all()
         guard previous.count < maximumRows else { throw EnrollmentJournalError.capacityExceeded }

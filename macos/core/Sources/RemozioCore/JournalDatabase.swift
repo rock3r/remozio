@@ -41,7 +41,7 @@ public final class JournalDatabase {
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9 || migrateFromVersion == 10,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -59,7 +59,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 10) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 11) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -183,8 +183,9 @@ public final class JournalDatabase {
             try GatewayAuthorityJournal.createAcknowledgmentSchema(db!)
             try GatewayAuthorityJournal.createReconciledSchema(db!)
             try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!)
+            try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=10")
+            try exec("PRAGMA user_version=11")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -202,8 +203,9 @@ public final class JournalDatabase {
             if version < 7 { try RoutingJournal.createSchema(db!) }
             if version < 8 { try GatewayAuthorityJournal.createAcknowledgmentSchema(db!) }
             if version < 9 { try GatewayAuthorityJournal.createReconciledSchema(db!) }
-            try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!)
-            try exec("PRAGMA user_version=10")
+            if version < 10 { try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!) }
+            try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!)
+            try exec("PRAGMA user_version=11")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -216,7 +218,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 10) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 11) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -251,6 +253,7 @@ public final class JournalDatabase {
         if version >= 8 { queries.append("SELECT id,revision,operation FROM main.gateway_acknowledgment_v1 LIMIT 0") }
         if version >= 9 { queries.append("SELECT operation,revision,kind,candidate,payload,signature FROM main.gateway_reconciled_controls_v1 LIMIT 0") }
         if version >= 10 { queries.append("SELECT phone,enrollment,operation,payload,signature FROM main.gateway_recovered_revocations_v1 LIMIT 0") }
+        if version >= 11 { queries.append("SELECT phone,kind,operation,payload,signature FROM main.gateway_trust_restrictions_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -421,6 +424,41 @@ public final class JournalTransaction {
         }
     }
 
+    /// Root-signed unknown trust history restricts this phone without deleting pairing or enrollment records.
+    /// The host closes affected admission until this transaction and its independent checkpoint commit.
+    public func restrictUnknownGatewayTrust(kind: GatewayTrustEvidenceKind, canonicalPayload: Data, signature: Data,
+                                           registration: GatewayRegistrationIdentity, expectedTrustRevision: UUID,
+                                           eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter,
+                                           expectedAuditHead: UInt64) throws -> GatewayTrustRestrictionResult {
+        try withEnrollment(write: true) { ledger in
+            let snapshot = try ledger.snapshot()
+            guard snapshot.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            guard snapshot.macID == registration.macID, snapshot.accountID == registration.accountID else { throw GatewayAuthorityError.wrongScope }
+            let (phone, disposition) = try withGateway(write: true) {
+                try $0.restrictUnknownTrust(kind: kind, payload: canonicalPayload, signature: signature,
+                    identity: registration, enrollments: ledger.all())
+            }
+            var revision = expectedTrustRevision
+            if disposition == .restricted {
+                revision = try ledger.advanceForRestriction(expected: expectedTrustRevision)
+                guard expectedAuditHead < UInt64.max else { throw AuditJournalError.headMismatch }
+                let event = try AuditEventMetadata(eventID: eventID, macID: snapshot.macID, accountID: snapshot.accountID,
+                    journalEpoch: writer.epoch, sequence: expectedAuditHead + 1, requestID: nil, eventTimeMs: nil,
+                    authorityReceiptTimeMs: receiptTimeMs, kind: .recovery, category: .enrollment, action: nil,
+                    decisionPhoneID: nil, authentication: .system, outcome: .unresolved, reason: .bindingMismatch,
+                    droppedEventCount: nil, peerDeviceID: phone)
+                guard let owner else { throw JournalDatabaseError.expiredTransaction }
+                try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: expectedAuditHead)
+            }
+            return GatewayTrustRestrictionResult(phoneID: phone, disposition: disposition, trustRevision: revision)
+        }
+    }
+
+    /// Phones awaiting independent administrator repair. Retained pairing rows do not grant these phones authority.
+    public func approvalTrustRestrictions() throws -> Set<Data> {
+        try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.restrictedPhones() }
+    }
+
     private func enrollmentEvent(phone: Data, added: Bool, eventID: Data, receiptTimeMs: UInt64?, writer: AuditEpochWriter,
                                  expectedHead: UInt64, snapshot: ApprovalTrustSnapshot) throws {
         guard expectedHead < UInt64.max else { throw AuditJournalError.headMismatch }
@@ -496,6 +534,7 @@ public final class JournalTransaction {
         try withEnrollment(write: false) { ledger in
             let trust = try ledger.snapshot()
             guard trust.revision == revision else { throw EnrollmentJournalError.staleRevision }
+            guard try !ledger.restrictedPhones().contains(phone) else { throw EnrollmentJournalError.recoveryRequired }
             guard let enrollment = try ledger.all().first(where: {
                 $0.approval.phoneID == phone && $0.epoch == epoch && $0.approval.active
             }) else { throw EnrollmentJournalError.unavailableEnrollment }
@@ -624,6 +663,7 @@ public final class JournalTransaction {
             let snapshot = try ledger.snapshot()
             guard snapshot.macID == registration.macID, snapshot.accountID == registration.accountID else { throw GatewayAuthorityError.wrongScope }
             guard snapshot.revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            guard try !ledger.restrictedPhones().contains(phoneID) else { throw EnrollmentJournalError.recoveryRequired }
             guard let enrolled = try ledger.all().first(where: {
                 $0.approval.phoneID == phoneID && $0.epoch == epoch && $0.approval.active
             }) else { throw EnrollmentJournalError.unavailableEnrollment }
