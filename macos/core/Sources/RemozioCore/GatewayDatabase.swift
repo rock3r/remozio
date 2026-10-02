@@ -327,6 +327,22 @@ public final class GatewayDatabase {
         }
     }
 
+    /// Remove only the exact mapping rejected as UNREGISTERED by the provider. A late result cannot remove a rotated token.
+    /// This changes delivery state only; retain enrollment authority, signed receipts, and the control counter.
+    public func invalidateMapping(_ rejected: GatewayActiveMapping, trust: GatewayCandidateTrust) throws -> Bool {
+        try transaction(write: true) {
+            let binding = rejected.activation.binding
+            guard identity.matches(trust), trust.active, identity.matches(binding),
+                  binding.phoneID == trust.enrollment.phoneID, binding.enrollmentEpoch == trust.enrollment.epoch else {
+                throw GatewayDatabaseError.wrongScope
+            }
+            guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            try statement("DELETE FROM gateway_mappings_v2 WHERE phone=? AND enrollment=? AND operation=?",
+                [binding.phoneID, binding.enrollmentEpoch, rejected.activation.operationID]) { try done($0) }
+            return sqlite3_changes(db) == 1
+        }
+    }
+
     private func candidateReceipt(for activation: GatewayMappingActivation) throws -> GatewayCandidateReceipt {
         let operation: Data? = try statement("SELECT operation FROM gateway_candidates_v1 WHERE candidate=?", [activation.binding.candidateID]) {
             let rc = sqlite3_step($0)
