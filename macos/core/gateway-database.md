@@ -1,7 +1,7 @@
-# Gateway candidate database
+# Gateway control database
 
 `GatewayDatabase` owns the push service's private SQLite connection and uses its protected storage lease.
-It records candidate controls and the applied revision in one transaction. It has no provider dispatch or recipient activation API.
+It commits candidate admission, recipient activation and phone revocation with one shared revision. No method grants provider dispatch authority.
 
 ```mermaid
 flowchart TD
@@ -28,7 +28,7 @@ Constructing this value does not authenticate setup. Never source it from an inc
 
 Opening requires an existing file and the dedicated service's lease. SQLite uses `NOFOLLOW` without `CREATE`.
 Initialization is explicit and accepts only an empty store. Unknown schemas, mismatched identities and malformed stores fail without replacement.
-The connection uses a distinct application ID, schema 1, trusted schema disabled, foreign keys enabled, DELETE journaling, EXTRA synchronization and full filesystem synchronization.
+The connection uses a distinct application ID, schema 2, trusted schema disabled, foreign keys enabled, DELETE journaling, EXTRA synchronization and full filesystem synchronization.
 Attachments are disabled, extension loading must be omitted, and busy time and value sizes are bounded.
 No raw connection, statement or SQL callback escapes the owner.
 
@@ -40,17 +40,61 @@ The database cannot authenticate a caller-created snapshot or replace the future
 
 Admission authenticates the pinned root signature, current active enrollment and exact token digest.
 A new operation must also pass the candidate verifier's revision, issue-time, expiry and maximum-lifetime checks.
-The operation ID, candidate ID and challenge must be unique within retained records. Revisions retain their full unsigned range as big-endian blobs.
+Operation IDs and revisions share one namespace across candidates, activations and revocations. Candidate IDs and challenges remain unique within retained candidates.
+Revisions retain their full unsigned range as big-endian blobs. A retained revocation blocks new candidates for that phone epoch.
 
 Candidate insertion and head advancement commit together. A failed head update rolls back the insertion and its capacity use.
 The returned `inserted` flag distinguishes a new record from a historical retry. Neither result authorizes a provider attempt.
 A retry must match the original canonical payload and still authenticate against current trust and the submitted token.
 It returns the original signed receipt even after expiry, without restoring token material or advancing the head.
 
-The caller explicitly configures the total receipt bound, pending-candidate bound per enrollment, maximum issued lifetime and SQLite busy timeout.
+The caller explicitly configures the combined receipt bound, pending-candidate bound per enrollment, maximum issued lifetime and SQLite busy timeout.
 Capacity failure leaves the head and prior records unchanged. This layer does not evict replay evidence to make room.
 Receipt retention and admission-rate policy still need service integration; the pending bound is not a time-based rate limiter.
 Do not expose this API as a transport-controlled send-to-token endpoint.
+
+## Recipient application
+
+`applyRecipient` requires an explicit operation kind, pinned root signature, current registration and matching phone epoch.
+Each new control must advance the shared head and pass its own issue-time, expiry and lifetime checks.
+An identical retry returns the original signed receipt without repeating a mutation, even after expiry or revocation.
+Historical receipt retrieval does not restore an enrollment. Activation retries can acknowledge old history while that phone epoch is inactive.
+
+```mermaid
+flowchart TD
+    V[Verify signed control and current scope] --> D{Recorded operation?}
+    D -->|Identical| R[Return original receipt without mutation]
+    D -->|New| K{Control kind}
+    K -->|Activation| C[Match retained candidate and both original deadlines]
+    C --> M[Consume candidate and replace phone mapping]
+    K -->|Revocation| T[Retain signed receipt as epoch tombstone]
+    T --> X[Clear matching mapping and pending tokens]
+    M --> H[Commit receipt and shared head with all changes]
+    X --> H
+    H -. Failure .-> B[Roll back; preserve prior mapping and history]
+```
+
+Activation matches every retained candidate field and the exact token digest. The candidate must belong to this run and remain pending.
+Both its original wall expiry and fixed monotonic deadline must still hold. A newer activation envelope cannot extend either deadline.
+The candidate revision must exceed that of the phone's last activated candidate. A delayed older candidate cannot replace a newer mapping.
+Activation clears this phone's pending token references through the selected candidate revision. Newer pending candidates remain eligible.
+
+Revocation accepts a current root claim for an inactive enrollment too. The signed revocation receipt itself is the durable tombstone.
+It invalidates all pending candidates and the active mapping for that exact phone epoch in the same transaction.
+No later candidate or activation can clear it. Other phones and a separately authorized new enrollment epoch remain independent.
+The caller must obtain fresh enrollment authority from protected state; choosing a new epoch in a message does not create that authority.
+
+`activeMapping` checks current registration, head, active enrollment, tag and revocation state.
+It validates the activation receipt, original candidate receipt, latest activation and token digest before returning stored evidence.
+Active mappings survive restart; pending probes do not. Receipts include the provider challenge and must not become phone-fetchable metadata.
+
+## Schema migration
+
+The only supported migration is schema 1 to schema 2. The service controller must explicitly set `migrateLegacyStore` for this known transition.
+This is a storage API choice, not a new user confirmation. Normal product upgrades should select the known migration automatically.
+Migration checks the pinned identity and legacy layout, creates the recipient tables, and advances the schema version in one transaction.
+It preserves all candidate receipts and the shared head. Failure rolls back the schema changes without resetting history.
+Unknown versions still fail. Reopening after migration retires pending token references under the existing restart policy.
 
 ## Expiry and restart
 
@@ -69,15 +113,15 @@ Detected receipt corruption, lease failure or ambiguous commit retires the owner
 Tokens and challenge payloads never enter the audit journal through this API.
 The candidate control and receipt must not be exposed as phone-fetchable metadata: they contain the provider-only challenge.
 
-This component does not implement revocation controls, tombstones, proof consumption, final mapping controls, acknowledgments, reconciliation or the root outbox.
+This component does not implement phone proof consumption, acknowledgments, reconciliation or the root outbox.
 It does not install a service or provide a rollback witness. A restored database and valid old signatures do not establish current trust.
 The provider coordinator must add durable attempt tracking, current-trust checks and rate limits before sending probes.
-The active recipient mapping is untouched because this store has no mapping mutation API.
+A returned mapping is historical evidence, not permission to send. The coordinator must suspend delivery while a required state change cannot commit.
 
 ## Validation
 
-Thirteen database tests use real private SQLite files under a normal-user fixture lease.
+Twenty-eight database tests use real private SQLite files under a normal-user fixture lease.
 They cover atomic rollback, duplicate and conflicting controls, quotas, expiry, restart, unsigned revision boundaries, registration binding and failure cleanup.
-They also check signature corruption, clock changes, file replacement and malformed stores.
+They also check signature corruption, clock changes, file replacement, malformed stores, recipient transitions, migration and failure during mapping replacement.
 The ten candidate-verifier tests cover the shared authentication logic after its extraction for historical retries.
 No provider, device or privileged service is contacted.
