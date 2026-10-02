@@ -34,6 +34,31 @@ The router samples the supplied clock under the same lock as receipt processing.
 
 The adapter reports missing permission, disabled notifications, disabled channels, and platform failures. `POSTED` means Android accepted the call; it does not prove visibility or reading. Notification timeout is not request expiry. Removing an enrollment cancels its generic notification.
 
-The manifest declares notification permission. There is no startup permission prompt. The launcher, Firebase listener, enrollment persistence, token-challenge proof flow, authenticated fetch transport, and bounded background scheduling are not connected yet. This backend does not claim working push delivery. Device notification appearance, channel behavior, and background lifecycle remain for the Pixel session.
+The manifest declares notification permission. There is no startup permission prompt. The launcher, Firebase listener, enrollment persistence, token-challenge proof flow, and authenticated fetch transport are not connected yet. Android background work admission remains to be integrated. This backend does not claim working push delivery. Device notification appearance, channel behavior, and background lifecycle remain for the Pixel session.
 
 References: [Android notification permission](https://developer.android.com/develop/ui/compose/notifications/notification-permission), [notification channels](https://developer.android.com/develop/ui/compose/notifications/channels), and [FCM processing priority](https://firebase.google.com/docs/cloud-messaging/android-message-priority).
+
+## Fetch worker lifecycle
+
+`PhoneWakeScheduler` drains router demand in a caller-owned coroutine scope. Construct it with the same router as the Android receiver. The receiver signals after each wake and enrollment removal. Existing demand is drained when the scheduler starts. Signals coalesce; the router retains the actual work.
+
+```mermaid
+stateDiagram-v2
+    Queued --> Fetching: Slot available
+    Fetching --> Idle: Complete pending set fetched
+    Fetching --> Queued: Another wake arrived
+    Fetching --> Backoff: Failure or timeout
+    Backoff --> Queued: Retry interval elapsed
+    Fetching --> Cancelling: Enrollment removed
+    Cancelling --> Removed: Cleanup completed
+```
+
+Concurrency, timeout, and retry interval are explicit bounded settings. Failed fetches retain demand but release their slot during backoff. Other Macs can proceed even with a single slot. Repeated wakes do not bypass backoff. A cancelled worker keeps its slot until cleanup completes; removal invalidates its reservation immediately.
+
+The fetch adapter must authenticate the selected enrollment, fetch its complete pending set, and verify results before delivering them to request owners. Recheck the reservation around every await. A successful callback reports fetch completion only; it never implies user consent, a decision, or terminal request state.
+
+The scheduler uses a separate monotonic elapsed clock. Negative or regressing readings close this process owner. Parent cancellation or explicit close closes the router and cancels workers. `closeAndJoin` waits for cooperative cleanup before the host releases transport or key resources. A blocking, non-cooperative adapter can delay shutdown; it must supply cancellable network calls and bounded cleanup.
+
+Timers run only for active fetch timeouts and queued retry delays. Idle schedulers wait for a signal. This coroutine owner is not an Android background execution entitlement. The Firebase listener and Android work scheduler still need to acquire an allowed work window, restore trusted enrollments, and reconcile pending requests after process death.
+
+Tests use virtual time for retries and timeouts. They cover independent Macs, duplicate wakes, concurrency limits, removal, cancellation cleanup, shutdown, and clock failure. They do not contact a device or network.

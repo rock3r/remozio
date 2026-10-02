@@ -11,6 +11,7 @@ import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import dev.remozio.android.MainActivity
 import dev.remozio.android.R
+import dev.remozio.phone.push.PhoneWakeScheduler
 import dev.remozio.phone.push.PushWakeRouter
 import dev.remozio.phone.push.WakeEnrollment
 import dev.remozio.phone.push.WakeNotificationResult
@@ -72,17 +73,19 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
     }
 }
 
-/** Own alongside the process-local router. The provider listener must schedule bounded fetch work after receive returns. */
+/** Own alongside the same process-local router and scheduler, within an admitted Android work window. */
 class AndroidPushWakeReceiver(
     private val router: PushWakeRouter,
     private val notifications: AndroidWakeNotifications,
     private val clockEpoch: Long,
+    private val scheduler: PhoneWakeScheduler,
 ) {
     fun receive(data: Map<String, String>): WakeReceipt = router.receive(data,
-        { ElapsedInstant(clockEpoch, SystemClock.elapsedRealtime().toULong()) }, notifications::post)
+        { ElapsedInstant(clockEpoch, SystemClock.elapsedRealtime().toULong()) }, notifications::post).also { scheduler.signal() }
 
     fun remove(enrollment: WakeEnrollment): Boolean {
         if (!router.remove(enrollment)) return false
+        scheduler.signal()
         notifications.cancel(enrollment)
         return true
     }
