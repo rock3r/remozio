@@ -60,7 +60,7 @@ object AndroidBiometricKeys {
     }
 }
 
-internal class BiometricKeyMaterial(val key: PrivateKey, val inspection: BiometricKeyInspection)
+internal class BiometricKeyMaterial(val key: PrivateKey, val publicKey: PublicKey, val inspection: BiometricKeyInspection)
 
 internal fun loadBiometricKey(reference: EnrollmentKeyReference): BiometricKeyMaterial {
     require(reference.role == EnrollmentKeyRole.BIOMETRIC)
@@ -78,7 +78,7 @@ internal fun loadBiometricKey(reference: EnrollmentKeyReference): BiometricKeyMa
     val point = decisionPublicPoint(publicKey)
     require(MessageDigest.isEqual(reference.publicKey.copyBytes(), point))
     checkBiometricKeyOperation(key, publicKey)
-    return BiometricKeyMaterial(key, BiometricKeyInspection(security, info.isInvalidatedByBiometricEnrollment))
+    return BiometricKeyMaterial(key, publicKey, BiometricKeyInspection(security, info.isInvalidatedByBiometricEnrollment))
 }
 
 /** Initializes no data or prompt. Switching to verification releases the disposable signing operation. */

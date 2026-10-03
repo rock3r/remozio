@@ -333,4 +333,7 @@
     <string name="notification_test_blocked">No test was posted because notifications are blocked or unavailable. Review the status above.</string>
     <string name="notification_action_failed">The notification action could not complete. Try again or open Android settings.</string>
     <string name="notification_test_cleared">The local test notification was cleared.</string>
+    <string name="command_biometric_title">Approve command</string>
+    <string name="command_biometric_subtitle">Authorize the command you just reviewed</string>
+    <string name="command_biometric_cancel">Cancel</string>
 </resources>
