@@ -44,6 +44,11 @@ class PhoneEnrollment(
 
 enum class EnrollmentPhase { PREPARED, ACTIVE, REMOVED }
 class StoredPhoneEnrollment(val enrollment: PhoneEnrollment, val phase: EnrollmentPhase) {
+    /** Compares all connection material without exposing relay credentials. A display rename is not a trust change. */
+    fun sameConnectionAs(other: StoredPhoneEnrollment): Boolean =
+        (EnrollmentEncoding.encode(this) as CborValue.Fields).values.filterKeys { it != 5uL } ==
+            (EnrollmentEncoding.encode(other) as CborValue.Fields).values.filterKeys { it != 5uL }
+
     override fun toString() = "StoredPhoneEnrollment($phase)"
 }
 
