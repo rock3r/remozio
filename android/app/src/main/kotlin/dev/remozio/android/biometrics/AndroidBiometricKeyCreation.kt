@@ -26,10 +26,11 @@ object AndroidBiometricKeyCreation {
             ExclusiveFileOwner.acquire(File(directory, "creation.lock")).use {
                 val id = ByteArray(16).also(SecureRandom()::nextBytes)
                 val alias = "remozio.biometric.v1." + id.joinToString("") { "%02x".format(it) }
-                val point = createBiometricKey(PlatformBiometricKeys, alias)
-                val reference = EnrollmentKeyReference(EnrollmentKeyRole.BIOMETRIC, id, alias, point)
-                loadBiometricKey(reference)
-                return reference
+                return createValidatedBiometricKey(PlatformBiometricKeys, alias) { point ->
+                    val reference = EnrollmentKeyReference(EnrollmentKeyRole.BIOMETRIC, id, alias, point)
+                    loadBiometricKey(reference)
+                    reference
+                }
             }
         } catch (_: Exception) { throw BiometricIdentityUnavailable() }
     }
@@ -39,6 +40,7 @@ internal class BiometricStrongBoxUnavailable : Exception()
 internal interface BiometricKeyCreationBackend {
     fun contains(alias: String): Boolean
     fun generate(alias: String, strongBox: Boolean): ByteArray
+    fun delete(alias: String)
 }
 
 /** The caller holds the creation lock through generation and the subsequent custody check. */
@@ -52,7 +54,23 @@ internal fun createBiometricKey(backend: BiometricKeyCreationBackend, alias: Str
     }
 }
 
+/** Only a successfully generated, unpublished key is eligible for cleanup. The caller retains the creation lock. */
+internal fun <T> createValidatedBiometricKey(
+    backend: BiometricKeyCreationBackend,
+    alias: String,
+    validate: (ByteArray) -> T,
+): T {
+    val point = createBiometricKey(backend, alias)
+    try { return validate(point) }
+    catch (failure: Exception) {
+        try { backend.delete(alias) }
+        catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+        throw failure
+    }
+}
+
 private object PlatformBiometricKeys : BiometricKeyCreationBackend {
+    override fun delete(alias: String) { KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(alias) }
     override fun contains(alias: String) = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.containsAlias(alias)
     override fun generate(alias: String, strongBox: Boolean): ByteArray {
         val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)

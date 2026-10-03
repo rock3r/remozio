@@ -58,6 +58,8 @@ class BiometricKeyPolicyTest {
 
     private class Backend : BiometricKeyCreationBackend {
         var exists = false
+        var deleted = false
+        override fun delete(alias: String) { deleted = true; exists = false }
         var failure: Exception? = null
         var createsBeforeFailure = false
         val calls = mutableListOf<Boolean>()
@@ -88,6 +90,22 @@ class BiometricKeyPolicyTest {
         val unexpected = Backend().apply { failure = IllegalStateException("provider failure") }
         assertFails { createBiometricKey(unexpected, alias) }
         assertEquals(listOf(true), unexpected.calls)
+    }
+
+    @Test fun validationFailureDeletesOnlyTheNewlyGeneratedUnpublishedKey() {
+        val rejected = Backend()
+        assertFails { createValidatedBiometricKey(rejected, alias) { error("invalid custody") } }
+        assertTrue(rejected.deleted)
+        assertFalse(rejected.exists)
+        val accepted = Backend()
+        assertEquals("reference", createValidatedBiometricKey(accepted, alias) { "reference" })
+        assertFalse(accepted.deleted)
+        val existing = Backend().apply { exists = true }
+        assertFails { createValidatedBiometricKey(existing, alias) { "unreachable" } }
+        assertFalse(existing.deleted)
+        val uncertain = Backend().apply { failure = BiometricStrongBoxUnavailable(); createsBeforeFailure = true }
+        assertFails { createValidatedBiometricKey(uncertain, alias) { "unreachable" } }
+        assertFalse(uncertain.deleted)
     }
 
     @Test fun existingKeysAndOtherRoleAliasesNeverReachGeneration() {
