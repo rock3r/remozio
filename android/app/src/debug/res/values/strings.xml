@@ -19,7 +19,7 @@
     <string name="probe_deleted">Probe key deleted.</string>
     <string name="probe_stopped">Screen stopped. Any pending authentication was cancelled. Key operations may have completed; inspect the key.</string>
     <string name="probe_working">Working…</string>
-    <string name="probe_error">Experiment failed: %1$s. Inspect the key or delete and recreate it.</string>
+    <string name="probe_error">Experiment failed: %1$s. The probe did not delete an existing key.</string>
     <string name="probe_unprotected">FAIL: A new signature succeeded without authentication. Do not use this key for approvals.</string>
     <string name="probe_denied">PASS: The new signature required authentication.</string>
     <string name="probe_prompt_title">Sign disposable test data</string>
@@ -55,4 +55,5 @@
     <string name="adb_probe_denied">Android denied this connection. No ADB operation ran.</string>
     <string name="adb_probe_unavailable">The connection could not be checked. No ADB result is inferred.</string>
     <string name="adb_probe_result_scope">%1$s, port %2$d: %3$s</string>
+    <string name="probe_policy_error">The existing key does not match the probe policy. Signing remains blocked. Do not delete it while diagnosing this result.\n\n%1$s</string>
 </resources>
