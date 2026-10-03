@@ -1,6 +1,6 @@
 # Sideload update verification
 
-`apkUpdateVerifier(context)` creates the Android verifier. The update host must retain one instance and close each returned handle. The host is not connected to the launcher yet. This component does not discover releases, download files, or request installation.
+`apkUpdateVerifier(context)` creates the Android verifier. The update host must retain one instance and close each returned handle. The host is not connected to the launcher yet. The verifier does not discover releases or download files. The separate installer backend can submit verified bytes when a host supplies the required persistence and callback bindings.
 
 ```mermaid
 flowchart LR
@@ -10,7 +10,9 @@ flowchart LR
   Identity --> Binding[Recheck staged byte digest]
   Binding --> Handle[Verified APK handle]
   Handle --> Session[Copy and recheck bytes in uncommitted installer session]
-  Session --> Later[Future installer host]
+  Session --> Record[Durable commit-intent record]
+  Record --> Commit[PackageInstaller commit request]
+  Commit --> Confirm[Android user confirmation]
 ```
 
 ## Verification
@@ -35,6 +37,28 @@ Closing the handle deletes its staging file and releases the slot. A cleanup fai
 
 JVM tests cover identity policy, forward and reverse signer rotation, multiple signers, staging bounds, changed bytes, source failures, cancellation, and handle ownership. They inject the platform inspector. They do not prove Android's native signature verification or installer behavior.
 
-Release discovery, download policy, settings, user-facing update state, installer sessions, and production signing remain separate integration work. The Pixel session must verify tampered and incorrectly signed APKs, valid key rotation, installation refusal, cancellation, and preservation of app data and pairing keys. No real APK is installed by these tests.
+Release discovery, download policy, settings, user-facing update state, durable attempt storage, callback handling, and production signing remain separate integration work. The Pixel session must verify tampered and incorrectly signed APKs, valid key rotation, installation refusal, cancellation, and preservation of app data and pairing keys. No real APK is installed by these tests.
 
 Sources: [Android signature verification API](https://developer.android.com/reference/android/content/pm/PackageManager#getVerifiedSigningInfo(java.lang.String,int)), [signing history](https://developer.android.com/reference/android/content/pm/SigningInfo), and [the platform implementation](https://github.com/aosp-mirror/platform_frameworks_base/blob/main/core/java/android/content/pm/PackageManager.java).
+
+
+## Native installer handoff
+
+`UpdateInstaller.submit` coordinates a verified handle and the native `AndroidUpdateInstallBackend`. The backend creates a full-install session for the same package, preallocates the known size, and requires Android user confirmation. It does not uninstall the app or request data deletion. The manifest declares `REQUEST_INSTALL_PACKAGES`; no installation or permission prompt occurs at startup.
+
+The host must supply two bindings before this path can run:
+
+- A durable `recordCommitIntent` implementation. It must atomically store the session ID, package, and version before returning. A storage failure prevents commit.
+- A private status receiver bound to that session. Android requires a mutable `PendingIntent` for this callback on current targets. The host must use an explicit private component and validate the session binding. It must handle pending user action in the foreground and reconcile terminal results.
+
+Neither binding has a permissive default. The launcher does not instantiate this installer yet. The host must own one pending update, recover its durable record after process death, and reconcile its sessions before another attempt. The coordinator serializes calls while preparing and submitting; it does not replace that persistent ownership.
+
+Permission and concurrent-call rejection retain the verified handle. This lets the user return from installation settings without downloading the APK again. Once preparation begins, the coordinator owns the handle and closes it on exit. It checks the installed identity before creating a session and again after copying.
+
+The sequence is copy with cancellation checks, verify the digest, flush the original installer stream, close that stream, recheck eligibility, store commit intent, then commit. A failure before commit attempts to abandon the session. The backend also attempts abandonment if session setup fails. A platform cleanup failure can leave an orphan session; the future recovery host must inspect and reconcile sessions owned by Remozio. Resource cleanup errors cannot authorize a commit.
+
+`REQUESTED` means the commit call returned, not that installation succeeded. `UNKNOWN` means the call threw after entering the commit phase. That path neither abandons nor retries the potentially active installation. Cancellation can also prevent delivery of a result after commit, which is why the durable intent record is mandatory. Closing the client session releases its resources without inferring an installation result.
+
+JVM tests use a fake installer backend and real private staging files. They cover operation ordering, changed APK bytes, changed installed versions, permission round trips, write/flush/close failures, failed persistence, cancellation, and uncertain commit replies. Android user confirmation, callback delivery, package replacement, and data/key preservation remain untested until the Pixel session.
+
+Installer references: [session operations](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session) and [required user action](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)).
