@@ -17,7 +17,7 @@ The caller supplies the alias and expected local public key from trusted enrollm
 
 Aliases have the form `remozio.transport.v1.<32 lowercase hex digits>`. The suffix identifies a local key; it contains no account or device name.
 
-The loader requires a generated, non-exportable P-256 key in StrongBox or the trusted execution environment. It rejects software and unknown security levels. The key must permit SHA-256 signing, with no purpose other than signing or verification. Its certificate must be current and match the expected public key exactly.
+The loader requires a generated, non-exportable P-256 key in StrongBox or the trusted execution environment. It rejects software and unknown security levels. The key must permit SHA-256 and raw ECDSA signing (`DIGEST_NONE`), with no purpose other than signing or verification. Android TLS computes the digest before asking the hardware key to sign. Future provisioning must authorize both digests; the loader cannot modify an existing key. Its certificate must be current and match the expected public key exactly.
 
 Transport keys must not require authentication, presence, or confirmation for each use. Approval and credential keys remain separate. This loader rejects such keys instead of changing their policy. It reports the existing device-unlock requirement and does not change it.
 
@@ -37,4 +37,4 @@ JVM tests cover client-only selection, issuer constraints, certificate lifetime,
 
 These tests do not exercise Android Keystore, Conscrypt, or a physical Pixel. Hardware-backed TLS, locked-device behavior, key invalidation, and restart behavior still require the planned device session. No enrollment storage, native key generation, or app connection flow is enabled by this change.
 
-References: [KeyInfo](https://developer.android.com/reference/android/security/keystore/KeyInfo) and [X509ExtendedKeyManager](https://developer.android.com/reference/javax/net/ssl/X509ExtendedKeyManager).
+References: [TLS digest authorization](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setDigests(java.lang.String...)), [KeyInfo](https://developer.android.com/reference/android/security/keystore/KeyInfo) and [X509ExtendedKeyManager](https://developer.android.com/reference/javax/net/ssl/X509ExtendedKeyManager).

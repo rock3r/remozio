@@ -29,6 +29,7 @@ internal data class TransportKeyFacts(
     val keySize: Int,
     val purposes: Int,
     val sha256Allowed: Boolean,
+    val rawSigningAllowed: Boolean,
     val authenticationRequired: Boolean,
     val presenceRequired: Boolean,
     val confirmationRequired: Boolean,
@@ -41,7 +42,7 @@ internal fun transportKeySecurity(facts: TransportKeyFacts): TransportKeySecurit
         else -> throw TransportIdentityUnavailable()
     }
     val allowedPurposes = KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-    if (facts.origin != KeyProperties.ORIGIN_GENERATED || facts.keySize != 256 || !facts.sha256Allowed ||
+    if (facts.origin != KeyProperties.ORIGIN_GENERATED || facts.keySize != 256 || !facts.sha256Allowed || !facts.rawSigningAllowed ||
         facts.purposes and KeyProperties.PURPOSE_SIGN == 0 || facts.purposes and allowedPurposes.inv() != 0 ||
         facts.authenticationRequired || facts.presenceRequired || facts.confirmationRequired) throw TransportIdentityUnavailable()
     return security
@@ -62,9 +63,17 @@ object AndroidTransportIdentities {
             val info = KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
                 .getKeySpec(key, KeyInfo::class.java)
             require(info.keystoreAlias == alias)
-            val security = transportKeySecurity(TransportKeyFacts(info.securityLevel, info.origin, info.keySize,
-                info.purposes, KeyProperties.DIGEST_SHA256 in info.digests, info.isUserAuthenticationRequired,
-                info.isTrustedUserPresenceRequired, info.isUserConfirmationRequired))
+            val security = transportKeySecurity(TransportKeyFacts(
+                securityLevel = info.securityLevel,
+                origin = info.origin,
+                keySize = info.keySize,
+                purposes = info.purposes,
+                sha256Allowed = KeyProperties.DIGEST_SHA256 in info.digests,
+                rawSigningAllowed = KeyProperties.DIGEST_NONE in info.digests,
+                authenticationRequired = info.isUserAuthenticationRequired,
+                presenceRequired = info.isTrustedUserPresenceRequired,
+                confirmationRequired = info.isUserConfirmationRequired,
+            ))
             val stored = store.getCertificateChain(alias) ?: throw TransportIdentityUnavailable()
             require(stored.size in 1..8)
             val chain = stored.map { it as? X509Certificate ?: throw TransportIdentityUnavailable() }.toTypedArray()

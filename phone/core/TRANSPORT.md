@@ -35,7 +35,7 @@ Calls serialize engine operations. Delegated key tasks run synchronously and can
 
 `TLSInteropTest` exercises the engine against the native Swift loopback peer using disposable keys. It covers fragmented records, a large application frame, peer pin and ALPN rejection, handshake/input limits, abort, and abrupt EOF. The [direct WebSocket extension](../../docs/experiments/websocket-carrier.md#direct-phone-engine-extension) also feeds this engine without a local client bridge. The earlier socket experiments remain separate fixtures.
 
-The engine is a phone-core component, not a wired Android connection. The bounded framing layer is described below. HTTPS connection setup, a lifecycle owner that couples framing to TLS, current-enrollment integration, and an Android Keystore identity manager remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
+The engine is a phone-core component, not a wired Android connection. The bounded framing layer is described below. The [Android identity loader](../../android/transport-identity.md) now supplies an existing hardware-backed key through `ClientTLSKeyManager`. HTTPS connection setup, a lifecycle owner that couples framing to TLS, enrollment storage, and key creation remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
 
 ## Bounded WebSocket records
 

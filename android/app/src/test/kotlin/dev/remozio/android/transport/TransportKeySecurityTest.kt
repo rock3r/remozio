@@ -7,7 +7,7 @@ import kotlin.test.assertFailsWith
 
 class TransportKeySecurityTest {
     private val facts = TransportKeyFacts(KeyProperties.SECURITY_LEVEL_STRONGBOX, KeyProperties.ORIGIN_GENERATED,
-        256, KeyProperties.PURPOSE_SIGN, true, false, false, false)
+        256, KeyProperties.PURPOSE_SIGN, true, true, false, false, false)
 
     @Test fun acceptsGeneratedHardwareSigningKeys() {
         assertEquals(TransportKeySecurity.STRONGBOX, transportKeySecurity(facts))
@@ -15,6 +15,12 @@ class TransportKeySecurityTest {
             transportKeySecurity(facts.copy(securityLevel = KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT)))
         assertEquals(TransportKeySecurity.STRONGBOX,
             transportKeySecurity(facts.copy(purposes = KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)))
+    }
+
+    @Test fun rejectsSha256OnlyKeysWithoutRawTlsSigningAuthorization() {
+        assertFailsWith<TransportIdentityUnavailable> {
+            transportKeySecurity(facts.copy(rawSigningAllowed = false))
+        }
     }
 
     @Test fun rejectsSoftwareUnknownImportedAndIncompatibleKeys() {
