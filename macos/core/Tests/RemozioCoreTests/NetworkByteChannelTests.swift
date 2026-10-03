@@ -32,9 +32,9 @@ final class NetworkByteChannelTests: XCTestCase, @unchecked Sendable {
         func completeWrite(failed: Bool = false) { lock.withLock { write }?(failed) }
     }
 
-    private func opened() async throws -> (NetworkByteChannel, Driver) {
+    private func opened(cancellation: ChannelCancellation = ChannelCancellation()) async throws -> (NetworkByteChannel, Driver) {
         let driver = Driver()
-        let channel = NetworkByteChannel(driver: driver)
+        let channel = NetworkByteChannel(driver: driver, cancellation: cancellation)
         let start = Task { try await channel.start() }
         await fulfillment(of: [driver.started], timeout: 2)
         driver.emit(.ready)
@@ -113,6 +113,42 @@ final class NetworkByteChannelTests: XCTestCase, @unchecked Sendable {
         await fulfillment(of: [driver.receiving, driver.sending], timeout: 2)
         read.cancel()
         await expectFailure(read); await expectFailure(write)
+        XCTAssertEqual(driver.cancelCount, 1)
+    }
+
+    func testCancellationWinsBeforeAWriteCallbackEvenWithoutQueuedClose() async throws {
+        let cancellation = ChannelCancellation()
+        let (channel, driver) = try await opened(cancellation: cancellation)
+        let read = Task { try await channel.receive() }
+        let write = Task { try await channel.send(Data([1])) }
+        await fulfillment(of: [driver.receiving, driver.sending], timeout: 2)
+        cancellation.cancel()
+        driver.completeWrite()
+        await expectFailure(write); await expectFailure(read)
+        XCTAssertEqual(driver.cancelCount, 1)
+    }
+
+    func testCancellationWinsBeforeAReadCallbackEvenWithoutQueuedClose() async throws {
+        let cancellation = ChannelCancellation()
+        let (channel, driver) = try await opened(cancellation: cancellation)
+        let read = Task { try await channel.receive() }
+        let write = Task { try await channel.send(Data([1])) }
+        await fulfillment(of: [driver.receiving, driver.sending], timeout: 2)
+        cancellation.cancel()
+        driver.completeRead(Data([9]))
+        await expectFailure(read); await expectFailure(write)
+        XCTAssertEqual(driver.cancelCount, 1)
+    }
+
+    func testCancelledEOFFastPathCannotReturnSuccess() async throws {
+        let cancellation = ChannelCancellation()
+        let (channel, driver) = try await opened(cancellation: cancellation)
+        let read = Task { try await channel.receive() }
+        await fulfillment(of: [driver.receiving], timeout: 2)
+        driver.completeRead(nil, ended: true)
+        _ = try await read.value
+        cancellation.cancel()
+        await expectFailure(Task { try await channel.receive() })
         XCTAssertEqual(driver.cancelCount, 1)
     }
 

@@ -3,6 +3,19 @@ import Network
 
 public enum NetworkChannelError: Error { case invalidState, concurrentOperation, closed, failed, timedOut, invalidChunk }
 
+final class ChannelCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.withLock { cancelled = true } }
+    func ifActive(_ action: () -> Void) -> Bool {
+        lock.withLock {
+            guard !cancelled else { return false }
+            action()
+            return true
+        }
+    }
+}
+
 enum ByteConnectionEvent: Sendable { case ready, failed, cancelled }
 protocol ByteConnectionDriver: Sendable {
     func start(_ event: @escaping @Sendable (ByteConnectionEvent) -> Void)
@@ -55,6 +68,7 @@ public actor NetworkByteChannel {
     public static let maximumChunkBytes = 32_768
     private enum State { case new, starting, open, closed }
     private let driver: any ByteConnectionDriver
+    private let cancellation: ChannelCancellation
     private var state = State.new
     private var readEnded = false
     private var opening: CheckedContinuation<Void, Error>?
@@ -66,15 +80,20 @@ public actor NetworkByteChannel {
     /// Admission must verify the negotiated TLS profile. It must not block or perform network access.
     public init(connection: NWConnection, admission: @escaping @Sendable (NWConnection) -> Bool) {
         driver = NativeByteConnection(connection, admit: admission)
+        cancellation = ChannelCancellation()
     }
 
-    init(driver: any ByteConnectionDriver) { self.driver = driver }
+    init(driver: any ByteConnectionDriver, cancellation: ChannelCancellation = ChannelCancellation()) {
+        self.driver = driver
+        self.cancellation = cancellation
+    }
 
     deinit { deadline?.cancel(); driver.cancel() }
 
     public func start(timeoutMilliseconds: UInt64 = 15_000) async throws {
         guard state == .new, (1...60_000).contains(timeoutMilliseconds) else { throw NetworkChannelError.invalidState }
         try Task.checkCancellation()
+        let cancellation = cancellation
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 opening = continuation
@@ -84,9 +103,14 @@ public actor NetworkByteChannel {
                     catch { return }
                     await self?.openingExpired()
                 }
-                driver.start { [weak self] event in Task { await self?.changed(event) } }
+                if !cancellation.ifActive({
+                    driver.start { [weak self] event in Task { await self?.changed(event) } }
+                }) { finish(NetworkChannelError.closed) }
             }
-        } onCancel: { Task { await self.close() } }
+        } onCancel: {
+            cancellation.cancel()
+            Task { await self.close() }
+        }
         try Task.checkCancellation()
     }
 
@@ -95,15 +119,24 @@ public actor NetworkByteChannel {
         guard state == .open else { throw NetworkChannelError.closed }
         guard reading == nil else { throw NetworkChannelError.concurrentOperation }
         try Task.checkCancellation()
-        if readEnded { return nil }
+        if readEnded {
+            guard cancellation.ifActive({}) else { finish(NetworkChannelError.closed); throw NetworkChannelError.closed }
+            return nil
+        }
+        let cancellation = cancellation
         let data: Data? = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 reading = continuation
-                driver.receive { [weak self] data, ended, failed in
-                    Task { await self?.received(data, ended: ended, failed: failed) }
-                }
+                if !cancellation.ifActive({
+                    driver.receive { [weak self] data, ended, failed in
+                        Task { await self?.received(data, ended: ended, failed: failed) }
+                    }
+                }) { finish(NetworkChannelError.closed) }
             }
-        } onCancel: { Task { await self.close() } }
+        } onCancel: {
+            cancellation.cancel()
+            Task { await self.close() }
+        }
         try Task.checkCancellation()
         return data
     }
@@ -114,12 +147,18 @@ public actor NetworkByteChannel {
         guard writing == nil else { throw NetworkChannelError.concurrentOperation }
         guard (1...Self.maximumChunkBytes).contains(data.count) else { throw NetworkChannelError.invalidChunk }
         try Task.checkCancellation()
+        let cancellation = cancellation
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 writing = continuation
-                driver.send(data) { [weak self] failed in Task { await self?.sent(failed: failed) } }
+                if !cancellation.ifActive({
+                    driver.send(data) { [weak self] failed in Task { await self?.sent(failed: failed) } }
+                }) { finish(NetworkChannelError.closed) }
             }
-        } onCancel: { Task { await self.close() } }
+        } onCancel: {
+            cancellation.cancel()
+            Task { await self.close() }
+        }
         try Task.checkCancellation()
     }
 
@@ -135,10 +174,12 @@ public actor NetworkByteChannel {
         switch event {
         case .ready:
             guard state == .starting else { return }
-            state = .open
-            deadline?.cancel(); deadline = nil
-            let waiter = opening; opening = nil
-            waiter?.resume()
+            if !cancellation.ifActive({
+                state = .open
+                deadline?.cancel(); deadline = nil
+                let waiter = opening; opening = nil
+                waiter?.resume()
+            }) { finish(NetworkChannelError.closed) }
         case .failed: finish(NetworkChannelError.failed)
         case .cancelled: finish(NetworkChannelError.closed)
         }
@@ -148,21 +189,26 @@ public actor NetworkByteChannel {
         guard state == .open, let waiter = reading else { return }
         guard !failed, (data?.count ?? 0) <= Self.maximumChunkBytes,
               ended || !(data?.isEmpty ?? true) else { finish(NetworkChannelError.failed); return }
-        reading = nil
-        readEnded = ended
-        waiter.resume(returning: data?.isEmpty == false ? data : nil)
+        if !cancellation.ifActive({
+            reading = nil
+            readEnded = ended
+            waiter.resume(returning: data?.isEmpty == false ? data : nil)
+        }) { finish(NetworkChannelError.closed) }
     }
 
     private func sent(failed: Bool) {
         guard state == .open, let waiter = writing else { return }
         if failed { finish(NetworkChannelError.failed); return }
-        writing = nil
-        waiter.resume()
+        if !cancellation.ifActive({
+            writing = nil
+            waiter.resume()
+        }) { finish(NetworkChannelError.closed) }
     }
 
     private func finish(_ error: Error) {
         guard state != .closed else { return }
         state = .closed
+        cancellation.cancel()
         deadline?.cancel(); deadline = nil
         driver.cancel()
         let open = opening; opening = nil
