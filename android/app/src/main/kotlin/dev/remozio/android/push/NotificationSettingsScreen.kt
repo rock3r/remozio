@@ -35,11 +35,13 @@ internal fun NotificationSettingsScreen() {
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<LocalNotificationResult?>(null) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh++ }
-    val access by produceState<NotificationAccess?>(null, backend, lifecycle, refresh) {
+    val accessState = remember(backend, lifecycle, refresh) { mutableStateOf<NotificationAccess?>(null) }
+    val access by accessState
+    LaunchedEffect(accessState) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            value = null
-            try { value = withContext(Dispatchers.IO) { backend.read() }; awaitCancellation() }
-            finally { value = null }
+            accessState.value = null
+            try { accessState.value = withContext(Dispatchers.IO) { backend.read() }; awaitCancellation() }
+            finally { accessState.value = null }
         }
     }
     fun settings(channel: Boolean) {
