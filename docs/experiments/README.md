@@ -9,8 +9,8 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Swift build and XPC identity checks | [Measured with ad-hoc signing](macos-xpc.md) | macOS 26 and Developer ID repeats |
 | Single app and background services | [Bundle build and seals checked](macos-packaging.md) | SMAppService registration, protected placement, update replacement |
 | Keys and durable authority | [Disposable enclave signing and restoration measured](macos-key-custody.md) | Pre-login availability, code access, crash and rollback cases |
-| Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Independent witness, protected storage, physical durability, production recovery |
-| Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | User-selected execution contract; broader runtime coverage |
+| Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Protected local checkpoint, physical durability, production recovery |
+| Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | Accepted pathname/recheck contract; protected executor integration |
 | Streaming encrypted channel | [TLS](tls-channel.md) and [WebSocket carrier](websocket-carrier.md) harnesses | Android keys, Cloudflare integration, protected identities, and reconnect |
 | Native TLS key custody | [Disposable enclave identity and TLS exchange measured](macos-enclave-tls.md) | macOS 26 runtime, pre-login access, protected service identity, Android hardware peer |
 | Presence signals | [One-shot probe prepared](macos-presence.md) | GUI-session observations, remote desktop usability, lock and brightness support |
@@ -28,6 +28,10 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 5. Prompt adapters, Android approval flow, push, and ADB in separate vertical changes.
 
 Each PR records its checks and limits. An experiment result does not certify an untested configuration. Device-dependent end-to-end tests are reserved for the user's next available computer session.
+
+## Accepted limits
+
+The [2026-10-03 decisions](../design-decisions.md) exclude whole-Mac backup rollback and accept pathname execution after a final recheck. Other security and recovery requirements remain. Pixel checks come first; Mac service and session-state tests come last.
 
 ## Interactive session preparation
 

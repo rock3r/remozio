@@ -106,4 +106,4 @@ Sixteen normal-user tests use the real protected journal and disposable P-256 ke
 
 Swift and Kotlin test every lifecycle state/event pair against the same fixture, including pending target loss. No action is executed and no real credential, provider, or phone is used.
 
-Protected service hosting, authenticated transport, actual adapter validation, checkpoint and witness recovery, lifecycle storage reservations, deadline scheduling, and physical-device checks remain required before production admission or dispatch.
+Protected service hosting, authenticated transport, actual adapter validation, protected checkpoint recovery, lifecycle storage reservations, deadline scheduling, and physical-device checks remain required before production admission or dispatch.

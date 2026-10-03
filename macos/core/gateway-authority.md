@@ -49,7 +49,7 @@ Routine recovery needs no new phone biometric or operator prompt. The public ren
 
 Historical signatures, token digests, counters, desired pointers, and proof-consumption links are checked when read.
 Known inconsistency or a clock regression retires the journal owner. These checks do not detect restoration of a complete, internally consistent backup.
-The independent continuity witness remains required before the root publishes controls or accepts phone operations.
+Protected local checkpoint recovery remains required before the root publishes controls or accepts phone operations. The [accepted whole-Mac restore limit](../../docs/design-decisions.md#whole-mac-backup-rollback) removes the independent witness prerequisite for that threat.
 
 ## Durable phone removal
 
@@ -88,7 +88,7 @@ Candidate, activation, and revocation rows share the control counter and storage
 A capacity or storage error rolls back the whole removal. The host must report failure, never a completed removal.
 No pruning or acknowledgment compaction exists yet. A production host must handle this limit before enrollment removal is exposed.
 Signatures and indexed metadata are checked when read. Detected corruption retires the journal owner.
-A complete backup rollback still needs the independent continuity witness; these rows do not replace it.
+These rows cannot detect a complete, internally consistent backup rollback. Whole-Mac backup restoration is outside the accepted guarantee; ordinary crash recovery, retained-state validation and replay prevention remain required.
 
 ## Schema and service integration
 

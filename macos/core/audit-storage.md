@@ -49,6 +49,6 @@ Pruning requires an explicit retained boundary and expected head. It deletes rec
 
 Native tests use temporary SQLite files and in-memory databases. They cover shared consumption/audit commit and rollback, reopen, duplicate IDs, injected insert failures, automatic rollback, writer retirement, account isolation, full unsigned sequences, retention gaps, corrupt rows, and coherent concurrent reads. The retained page also passes the real signature builder.
 
-These tests do not certify power-loss durability or protected production storage. Lifecycle reservations, rejection aggregation, the combined authority checkpoint, independent rollback witness, startup recovery, and admission remain work for the authority owner. Do not connect this layer to real action dispatch before those gates pass. The tests use WAL only to exercise concurrent snapshots; they do not select production journal settings.
+These tests do not certify power-loss durability or protected production storage. Lifecycle reservations, rejection aggregation, the protected authority checkpoint, startup recovery, and admission remain work for the authority owner. Do not connect this layer to real action dispatch before those gates pass. The tests use WAL only to exercise concurrent snapshots; they do not select production journal settings.
 
 SQLite documents [transaction state](https://www.sqlite.org/c3ref/txn_state.html), [savepoint behavior](https://www.sqlite.org/lang_savepoint.html), and [automatic rollback detection](https://www.sqlite.org/c3ref/get_autocommit.html).

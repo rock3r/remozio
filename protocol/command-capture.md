@@ -79,7 +79,7 @@ Verify the issued request and its exact command/wire/schema contract before sele
 
 The phone must render every relevant signed value without letting a value create a fake label or row. Make controls, newlines, bidi characters, empty values, and invalid UTF-8 unambiguous. Keep readable details and expandable exact arguments; never replace the signed invocation with a cosmetic shell summary. Rationale must always be labelled unverified.
 
-The authority still must capture the OS values, bind the live caller and streams, recheck the target, and consume the decision durably. Hashes and file identities do not close the measured pathname-execution race. That execution contract remains a user decision.
+The authority still must capture the OS values, bind the live caller and streams, recheck the target, and consume the decision durably. Hashes and file identities do not close the measured pathname-execution race. The user accepted [pathname execution after a final recheck](../docs/design-decisions.md#command-execution-by-pathname), including the remaining race and mutable dependencies. Production execution remains unimplemented.
 
 ## Evidence and bounds
 

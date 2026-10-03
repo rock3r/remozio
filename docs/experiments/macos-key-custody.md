@@ -39,7 +39,7 @@ CI builds the executable but does not run the hardware probe. The normal local g
 | Access limited to authorized code | Developer ID, protected placement, and independent process tests |
 | Another Mac cannot restore a copied representation | Authorized two-Mac experiment |
 | Durable key storage survives updates | Keychain storage and service replacement experiments |
-| Backup rollback is detected | An independent continuity mechanism and crash/restore tests |
+| Ordinary restart and partial-state recovery | Protected local checkpoint and crash/recovery integration; [whole-Mac backup rollback is excluded](../design-decisions.md#whole-mac-backup-rollback) |
 
 Apple documents that [after-first-unlock accessibility](https://developer.apple.com/documentation/security/ksecattraccessibleafterfirstunlockthisdeviceonly) requires one unlock after restart. This candidate must not be assumed to satisfy the root authority's pre-login requirement. The experiment does not select the production accessibility policy.
 

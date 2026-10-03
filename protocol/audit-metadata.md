@@ -78,7 +78,7 @@ A phone decision is not Mac acceptance. Consumption is not dispatch. Dispatch is
 
 Authentication classes record evidence available to the authority. A biometric-key signature does not prove a particular person acted. Producers must not infer an authentication class from the mere existence of an event.
 
-The codec validates representation and field dependencies. The future journal writer must derive event/outcome combinations from real transitions and validated evidence. It must reserve lifecycle capacity, rate-limit rejection telemetry, and commit consumption with its audit event before dispatch. The independent rollback witness remains a separate gate.
+The codec validates representation and field dependencies. The future journal writer must derive event/outcome combinations from real transitions and validated evidence. It must reserve lifecycle capacity, rate-limit rejection telemetry, and commit consumption with its audit event before dispatch. Protected local checkpoint recovery remains required. The [accepted restore limit](../docs/design-decisions.md#whole-mac-backup-rollback) excludes whole-Mac backup restoration; it does not waive ordinary replay prevention or crash recovery.
 
 History batches need their own authenticated contract. They must bind Mac/account, epoch, immutable epoch-creation trust generation, sequence range, and retention boundary. This record does not replace that header, supply a cursor, or select current trust. Do not sign it under an existing approval purpose as a substitute for a history batch.
 
