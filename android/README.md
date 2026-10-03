@@ -123,3 +123,5 @@ The permission flow follows [Android's Compose guidance](https://developer.andro
 ## Biometric key custody
 
 The [biometric key component](../docs/android-biometric-keys.md) creates and inspects hardware-backed, per-use keys. The [command signer](../docs/android-command-biometrics.md) provides a request-bound native biometric prompt. Enrollment registration, launcher integration, and recovery remain pending. The debug probe alias remains separate.
+
+The [command connection owner](../docs/android-command-connection.md) assembles the enrolled Android identity, relay, pinned TLS, request inbox, and outgoing decision checks. Launcher and wake scheduling integration remain pending.
