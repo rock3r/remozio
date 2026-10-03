@@ -27,7 +27,7 @@ class EncryptedEnrollmentStoreTest {
     private fun cipher() = EnrollmentCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey(), 65_536)
     private fun identity(n: Int) = ByteArray(16) { n.toByte() }
     private fun spki() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair().public.encoded
-    private fun record(n: Int, scope: Int = n, reuse: PhoneEnrollment? = null): PhoneEnrollment {
+    private fun record(n: Int, scope: Int = n, reuse: PhoneEnrollment? = null, tag: ByteArray? = null): PhoneEnrollment {
         fun key(role: EnrollmentKeyRole): EnrollmentKeyReference {
             val publicKey = spki()
             return EnrollmentKeyReference(role, identity(n * 3 + role.ordinal),
@@ -38,7 +38,7 @@ class EncryptedEnrollmentStoreTest {
         return PhoneEnrollment(identity(n), identity(scope), identity(100), identity(n + 40), identity(n + 80),
             "Synthetic Mac $scope", spki().takeLast(65).toByteArray(), spki(),
             reuse?.transportKey ?: key(EnrollmentKeyRole.TRANSPORT), reuse?.decisionKey ?: key(EnrollmentKeyRole.DECISION),
-            reuse?.biometricKey ?: key(EnrollmentKeyRole.BIOMETRIC), ByteArray(32) { n.toByte() },
+            reuse?.biometricKey ?: key(EnrollmentKeyRole.BIOMETRIC), tag ?: ByteArray(32) { n.toByte() },
             RelayAccessCredential(endpoint, "synthetic-access-id", "synthetic-access-secret"))
     }
 
@@ -138,6 +138,31 @@ class EncryptedEnrollmentStoreTest {
             assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
             assertEquals(0, storage.writes)
         }
+    }
+
+    @Test fun enrollmentTagsCannotBeReusedAcrossMacsOrAfterRemoval() {
+        val storage = Storage(); val cipher = cipher(); val store = EncryptedEnrollmentStore.create(storage, cipher, 10)
+        val a = record(1); val duplicate = record(2, tag = a.enrollmentTag.copyBytes())
+        store.prepare(a, 0u); store.activate(a.recordID.copyBytes(), 1u)
+        assertFailsWith<IllegalArgumentException> { store.prepare(duplicate, 2u) }
+        assertFailsWith<IllegalArgumentException> { store.prepare(record(3, scope = 1, tag = a.enrollmentTag.copyBytes()), 2u) }
+        store.remove(a.recordID.copyBytes(), 2u)
+        assertFailsWith<IllegalArgumentException> { store.prepare(duplicate, 3u) }
+        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u),
+            1uL to CborValue.Unsigned(4u), 2uL to CborValue.ArrayValue(listOf(
+                EnrollmentEncoding.encode(StoredPhoneEnrollment(a, EnrollmentPhase.REMOVED)),
+                EnrollmentEncoding.encode(StoredPhoneEnrollment(duplicate, EnrollmentPhase.PREPARED)))))), CborLimits(65_536, 8, 1_000)))
+        assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
+    }
+
+    @Test fun configurationPreflightRejectsLimitsThatCannotInitializeTheArchive() {
+        for (size in 1..6) assertFailsWith<CborException> { EncryptedEnrollmentStore.validateConfiguration(10, size) }
+        EncryptedEnrollmentStore.validateConfiguration(10, 7)
+        val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val storage = Storage()
+        val store = EncryptedEnrollmentStore.create(storage, EnrollmentCipher(key, 7), 10)
+        assertEquals(0uL, store.snapshot().revision)
+        assertEquals(43, storage.bytes!!.size)
     }
 
     @Test fun snapshotsAndPublicKeyReferencesAreImmutableAndDescriptionsAreRedacted() {

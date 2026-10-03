@@ -138,8 +138,13 @@ class EncryptedEnrollmentStore private constructor(
                 return EncryptedEnrollmentStore(storage, cipher, maximumRecords, restored)
             } catch (_: Exception) { throw EnrollmentStoreUnavailable() }
         }
+        /** Run before provisioning any persistent key or file. The empty archive must fit. */
+        fun validateConfiguration(maximumRecords: Int, maximumPlaintextBytes: Int) {
+            require(maximumRecords in 1..1024 && maximumPlaintextBytes in 1..16_777_216)
+            encode(EnrollmentSnapshot(0u, emptyList()), CborLimits(maximumPlaintextBytes, 8, maximumRecords * 100 + 16))
+        }
         private fun limits(cipher: EnrollmentCipher, records: Int): CborLimits {
-            require(records in 1..1024)
+            validateConfiguration(records, cipher.maximumPlaintextBytes)
             return CborLimits(cipher.maximumPlaintextBytes, 8, records * 100 + 16)
         }
         private fun encode(state: EnrollmentSnapshot, limits: CborLimits) = DeterministicCbor.encode(CborValue.Fields(mapOf(
@@ -148,6 +153,7 @@ class EncryptedEnrollmentStore private constructor(
         )), limits)
         private fun validate(rows: List<StoredPhoneEnrollment>, maximumRecords: Int) {
             require(rows.size <= maximumRecords && rows.map { it.enrollment.recordID }.toSet().size == rows.size)
+            require(rows.map { it.enrollment.enrollmentTag }.toSet().size == rows.size)
             rows.filter { it.phase != EnrollmentPhase.REMOVED }.groupBy { it.enrollment.scope to it.phase }.values.forEach { require(it.size == 1) }
             val aliases = mutableMapOf<String, Pair<Pair<CborValue.Bytes, CborValue.Bytes>, EnrollmentKeyReference>>()
             val keyIDs = mutableMapOf<CborValue.Bytes, String>()

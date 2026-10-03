@@ -26,11 +26,13 @@ internal object AndroidEnrollmentStore {
 
     @WorkerThread
     fun open(context: Context, maximumRecords: Int, maximumPlaintextBytes: Int): EncryptedEnrollmentStore {
-        require(maximumRecords in 1..1024 && maximumPlaintextBytes in 1..16_777_216)
-        val directory = File(context.noBackupFilesDir, "enrollments")
+        EncryptedEnrollmentStore.validateConfiguration(maximumRecords, maximumPlaintextBytes)
+        val app = context.applicationContext
+        check(!app.isDeviceProtectedStorage)
+        val directory = File(app.noBackupFilesDir, "enrollments")
         if (!directory.isDirectory) {
             check(directory.mkdirs())
-            syncDirectory(context.noBackupFilesDir)
+            syncDirectory(app.noBackupFilesDir)
         }
         val storage = EnrollmentFile(File(directory, "state"))
         try {
@@ -71,13 +73,22 @@ internal object AndroidEnrollmentStore {
 }
 
 private class EnrollmentFile(private val file: File) : EnrollmentStorage {
-    private val lockFile = RandomAccessFile(File(file.path + ".lock"), "rw")
+    private val processLease = EnrollmentFileOwners.acquire(file.canonicalPath)
+    private val lockFile: RandomAccessFile
     private val lock: FileLock
     private val atomic = AtomicFile(file)
     private var closed = false
     init {
-        try { lock = lockFile.channel.tryLock() ?: throw EnrollmentStoreUnavailable() }
-        catch (failure: Exception) { lockFile.close(); throw failure }
+        var opened: RandomAccessFile? = null
+        try {
+            val channelOwner = RandomAccessFile(File(file.path + ".lock"), "rw")
+            opened = channelOwner
+            lock = channelOwner.channel.tryLock() ?: throw EnrollmentStoreUnavailable()
+            lockFile = channelOwner
+        } catch (failure: Exception) {
+            try { opened?.close() } finally { processLease.close() }
+            throw failure
+        }
     }
     fun hasArchive() = listOf(file, File(file.path + ".bak"), File(file.path + ".new")).any { it.exists() }
     @Synchronized override fun read(maximumBytes: Int): ByteArray? {
@@ -107,7 +118,10 @@ private class EnrollmentFile(private val file: File) : EnrollmentStorage {
         check(read(ciphertext.size)?.contentEquals(ciphertext) == true)
     }
     @Synchronized override fun close() {
-        if (!closed) { closed = true; try { lock.release() } finally { lockFile.close() } }
+        if (!closed) {
+            closed = true
+            try { lock.release() } finally { try { lockFile.close() } finally { processLease.close() } }
+        }
     }
 }
 

@@ -28,6 +28,8 @@ Activation requires the exact current record ID when replacing an active enrollm
 
 Private signing keys never enter the archive. Enrollment objects and snapshots have redacted descriptions and immutable collections or copied byte values. They contain confidential relay credentials; the host must not pass them directly to UI, telemetry, or logs.
 
+Enrollment tags are unique across all retained records, including removed ones. A replacement needs a fresh tag so retired push routes cannot collide.
+
 Aliases must match their key role. Keys for different purposes must differ. Records for different Mac/account pairs cannot share local key aliases, IDs, or public material. A replacement within the same pair can retain unchanged key references. This supports pairing continuity; it does not authorize key rotation.
 
 The setup owner must validate administrator authorization, phone biometric proof, current remote enrollment, and local key custody before activation. The store does not perform those checks or turn a transport key into approval authority.
@@ -52,11 +54,11 @@ Every mutation checks the current archive revision. Storage failure prevents fur
 
 Creation and opening are separate operations. Missing, malformed, incompatible, oversized, or unauthentic archives are never reset. Version 1 uses strict deterministic CBOR inside a purpose-bound AES-256-GCM envelope. Unknown fields, phases, and schemas fail. Each encryption uses the provider's fresh nonce and a 128-bit authentication tag.
 
-Storage limits are explicit caller inputs: at most 1,024 retained records and 16 MiB of plaintext. Removed records count toward the limit. No automatic pruning or product retention default is selected.
+Storage limits are explicit caller inputs: at most 1,024 retained records and 16 MiB of plaintext. Removed records count toward the limit. The empty archive must fit before the Android adapter creates any persistent key or file. No automatic pruning or product retention default is selected.
 
 ## Android storage
 
-`AndroidEnrollmentStore` retains the archive in `noBackupFilesDir/enrollments`. It holds an OS file lock for the lifetime of the owner. `AtomicFile` supplies replacement; file and directory synchronization and a read-back check precede publication. Directory synchronization uses Android's public `Os` APIs.
+`AndroidEnrollmentStore` retains the archive in `noBackupFilesDir/enrollments`. It holds an in-process reservation and an OS file lock for the lifetime of the owner. A second in-process open fails before opening another channel. This follows the [FileLock guidance](https://developer.android.com/reference/java/nio/channels/FileLock) about channel closure releasing process-wide locks. `AtomicFile` supplies replacement; file and directory synchronization and a read-back check precede publication. Directory synchronization uses Android's public `Os` APIs.
 
 A dedicated, non-exportable AES-256 Keystore key protects the archive. StrongBox is preferred; only explicit unavailability with no partial entry permits a TEE attempt. The loader checks hardware level, origin, alias, purposes, block mode, padding, and authentication requirements. It rejects software keys.
 
