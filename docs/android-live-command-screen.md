@@ -29,6 +29,10 @@ A synthetic experiment on Apple Silicon with macOS 27.0.1 reported `kern.argmax`
 
 Tests parse the measured large argument and collection counts without truncation. They also reject an oversized capture and verify protocol overhead capacity. The defaults do not promise support for unbounded ancestry, rationale, or other capture metadata.
 
+The application shares an 8 MiB canonical-capture budget and a 262,144 retained-element budget across all Mac connections. Each request also reserves metadata capacity. Parsed byte arrays add heap overhead beyond canonical bytes; the element budget bounds collection growth separately. One shared parsing monitor prevents concurrent request parsing from multiplying transient allocations. Individual decoder limits still bound that temporary parse.
+
+A signed terminal status releases capture capacity. Retirement or enrollment closure also releases metadata capacity. Duplicate requests reuse their reservation. At capacity, the app retains existing requests and shows a distinct capacity message. It does not silently evict pending requests or resend decisions. These accounting bounds are not a measured Android heap-size guarantee.
+
 ## Remaining integration
 
 Pairing setup must populate the archive before this screen can connect. It currently uses the enrolled relay; LAN preference and push wake delivery remain separate integration work. Capture-limit settings and distinct remote oversized-request reporting remain pending. Issue #132 still tracks capacity and storage recovery beyond the current generic connection error. Device end-to-end behavior remains unverified.

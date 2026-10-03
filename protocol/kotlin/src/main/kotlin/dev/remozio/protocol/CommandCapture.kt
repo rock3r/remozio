@@ -30,6 +30,7 @@ data class CapturedSubmission(val id: CborValue.Bytes, val nonce: CborValue.Byte
 class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits) {
     private val original: CborValue.Bytes
     val canonicalBytes: ByteArray get() = original.copyBytes()
+    val canonicalByteCount: Int get() = original.size
     val executable: CapturedExecutable
     val arguments: List<CborValue.Bytes>
     val directory: CapturedDirectory

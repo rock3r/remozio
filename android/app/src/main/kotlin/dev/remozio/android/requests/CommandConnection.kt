@@ -26,9 +26,10 @@ internal class CommandConnection(
     private val clock: () -> ElapsedInstant,
     maximumRequests: Int = 128,
     retired: RetiredCommandRequests? = null,
+    memoryBudget: CommandMemoryBudget? = null,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : AutoCloseable {
-    private val inbox = CommandRequestInbox(1, maximumRequests)
+    private val inbox = CommandRequestInbox(1, maximumRequests, memoryBudget)
     private val enrollment: CommandRequestEnrollment
     private val monitor = Any()
     private val running = Mutex()
@@ -69,6 +70,7 @@ internal class CommandConnection(
                 }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
+        catch (capacity: RequestCapacityException) { throw capacity }
         catch (_: Exception) { throw IOException("Command connection unavailable") }
         finally {
             synchronized(monitor) {

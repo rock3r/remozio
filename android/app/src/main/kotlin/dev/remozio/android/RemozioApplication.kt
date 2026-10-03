@@ -8,6 +8,7 @@ import dev.remozio.android.updates.androidUpdateHost
 import dev.remozio.android.requests.StoredCommandConnections
 import dev.remozio.android.requests.androidCommandConnection
 import dev.remozio.android.requests.commandRequestLimits
+import dev.remozio.phone.requests.CommandMemoryBudget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,10 +20,11 @@ class RemozioApplication : Application() {
     internal val macs by lazy {
         StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) }, enrollmentAccess = enrollmentAccess)
     }
+    private val commandMemory = CommandMemoryBudget(8_388_608, 262_144)
     internal val commands by lazy {
         StoredCommandConnections(
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
-            { androidCommandConnection(this, it, commandRequestLimits()) }, enrollmentAccess,
+            { androidCommandConnection(this, it, commandRequestLimits(), commandMemory) }, enrollmentAccess,
         )
     }
     internal val audits by lazy { androidStoredAuditReader(this, enrollmentAccess) }

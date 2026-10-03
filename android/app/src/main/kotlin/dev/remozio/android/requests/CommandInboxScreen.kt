@@ -17,6 +17,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import dev.remozio.android.R
 import dev.remozio.android.RemozioApplication
 import dev.remozio.android.enrollment.StoredMac
+import dev.remozio.phone.requests.RequestCapacityException
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.CommandRequestSnapshot
 import kotlinx.coroutines.CancellationException
@@ -44,6 +45,7 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: CommandEnrollmentUnavailable) { owner = null; selected = null; failure = R.string.commands_enrollment_unavailable }
             catch (_: CommandRegistryUnavailable) { owner = null; selected = null; failure = R.string.commands_storage_unavailable }
+            catch (_: RequestCapacityException) { failure = R.string.commands_capacity }
             catch (_: Exception) { failure = R.string.commands_connection_failed }
             awaitCancellation()
         }
