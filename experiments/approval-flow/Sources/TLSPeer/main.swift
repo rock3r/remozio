@@ -2,10 +2,11 @@ import Darwin
 import Foundation
 import Network
 import Security
+import RemozioCore
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerCertificate: String }
+struct Setup: Decodable { let peerPublicKey: String }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -17,7 +18,8 @@ final class Probe: @unchecked Sendable {
     let listener: NWListener
     var connections: [UUID: NWConnection] = [:]
 
-    init(identity: SecIdentity, peerCertificate: Data) throws {
+    init(identity: SecIdentity, peerPublicKey: Data) throws {
+        let peer = try PinnedTLSPeer(subjectPublicKeyInfo: peerPublicKey)
         let tls = NWProtocolTLS.Options()
         let options = tls.securityProtocolOptions
         guard let local = sec_identity_create(identity) else { throw ProbeError.invalidInput }
@@ -30,11 +32,7 @@ final class Probe: @unchecked Sendable {
         sec_protocol_options_add_tls_application_protocol(options, "remozio-experiment/1")
         sec_protocol_options_set_verify_block(options, { _, trust, complete in
             let reference = sec_trust_copy_ref(trust).takeRetainedValue()
-            guard let chain = SecTrustCopyCertificateChain(reference) as? [SecCertificate], let leaf = chain.first else {
-                complete(false); return
-            }
-            // The private controller supplies the exact disposable leaf pin. This is not a production PKI policy.
-            complete((SecCertificateCopyData(leaf) as Data) == peerCertificate)
+            complete(peer.accepts(reference))
         }, queue)
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
@@ -110,7 +108,7 @@ while true {
     encodedSetup.append(UInt8(byte))
 }
 let setup = try JSONDecoder().decode(Setup.self, from: encodedSetup)
-guard let peer = Data(base64Encoded: setup.peerCertificate), !peer.isEmpty, peer.count <= 8_192 else { throw ProbeError.invalidInput }
+guard let peer = Data(base64Encoded: setup.peerPublicKey), !peer.isEmpty, peer.count <= 8_192 else { throw ProbeError.invalidInput }
 let identityData = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
 guard identityData.count <= 65_536 else { throw ProbeError.invalidInput }
 var imported: CFArray?
@@ -118,7 +116,7 @@ let result = SecPKCS12Import(identityData as CFData, [kSecImportExportPassphrase
 guard result == errSecSuccess else { throw ProbeError.identityImport(result) }
 guard let items = imported as? [[String: Any]], let value = items.first?[kSecImportItemIdentity as String] else { throw ProbeError.invalidInput }
 let identity = value as! SecIdentity
-let probe = try Probe(identity: identity, peerCertificate: peer)
+let probe = try Probe(identity: identity, peerPublicKey: peer)
 probe.start()
 DispatchQueue.global().async {
     // The controller keeps this pipe open. EOF also handles controller crashes. No further commands are accepted.

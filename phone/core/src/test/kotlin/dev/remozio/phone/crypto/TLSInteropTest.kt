@@ -67,6 +67,14 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun expiredAndFutureClientCertificatesCannotReceiveAnEcho() {
+        for (startDate in listOf("-2d", "+2d")) Fixture(phoneStartDate = startDate).use { f ->
+            f.connect(f.port).use { socket ->
+                assertThrows(IOException::class.java) { socket.startHandshake(); exchange(socket, byteArrayOf(1)) }
+            }
+        }
+    }
+
     @Test fun downgradeAndWrongApplicationProtocolFail(): Unit = Fixture().use { f ->
         f.connect(f.port).use { socket ->
             socket.enabledProtocols = arrayOf("TLSv1.2")
@@ -304,7 +312,7 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -319,7 +327,7 @@ class TLSInteropTest {
                 child = ProcessBuilder(peer, mac.path.toString()).redirectError(directory.resolve("peer.log").toFile()).start()
                 process = child
                 process.outputStream.bufferedWriter().also {
-                    it.write("{\"peerCertificate\":\"" + Base64.getEncoder().encodeToString(phone.certificate.encoded) + "\"}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\"}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()
@@ -337,9 +345,11 @@ class TLSInteropTest {
         private fun generate(name: String): Identity {
             val path = directory.resolve("$name.p12")
             val keytool = Path.of(System.getProperty("java.home"), "bin", "keytool").toString()
-            val command = ProcessBuilder(keytool, "-genkeypair", "-alias", "fixture", "-keyalg", "EC", "-groupname", "secp256r1",
+            val arguments = mutableListOf(keytool, "-genkeypair", "-alias", "fixture", "-keyalg", "EC", "-groupname", "secp256r1",
                 "-dname", "CN=synthetic-$name", "-validity", "1", "-storetype", "PKCS12", "-keystore", path.toString(),
                 "-storepass", PASSWORD, "-keypass", PASSWORD, "-noprompt")
+            if (name == "phone" && phoneStartDate != null) arguments.addAll(listOf("-startdate", phoneStartDate))
+            val command = ProcessBuilder(arguments)
                 .redirectErrorStream(true).redirectOutput(directory.resolve("$name-keytool.log").toFile()).start()
             if (!command.waitFor(15, TimeUnit.SECONDS)) { command.destroyForcibly(); error("Synthetic certificate generation timed out") }
             check(command.exitValue() == 0) { "Synthetic certificate generation failed" }
