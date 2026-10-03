@@ -13,10 +13,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -48,13 +50,18 @@ class WebSocketRecordTransport(
     // Set the limit at construction, before the raw reader can consume its first header.
     private val raw = RawWebSocket(input, output, maximumMessageBytes.toLong(), true, parent.coroutineContext + owner, queues)
     private val session = DefaultWebSocketSession(raw, channelsConfig = queues)
+    private val sessionJob = requireNotNull(session.coroutineContext[Job])
 
     init {
         owner.invokeOnCompletion { release() }
         session.closeReason.invokeOnCompletion { release() }
-        requireNotNull(session.coroutineContext[Job]).invokeOnCompletion { owner.complete() }
+        sessionJob.invokeOnCompletion { owner.complete() }
         CoroutineScope(parent.coroutineContext + owner).launch(start = CoroutineStart.UNDISPATCHED) {
-            try { requireNotNull(session.coroutineContext[Job]).join() } finally { release() }
+            try { sessionJob.join() } finally {
+                sessionJob.cancel()
+                release()
+                withContext(NonCancellable) { sessionJob.join() }
+            }
         }
         session.start()
     }
@@ -98,12 +105,13 @@ class WebSocketRecordTransport(
     /** Abort immediately. The underlying close callback must be nonblocking and release the host connection. */
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            sessionJob.cancel()
             owner.cancel()
             release()
         }
     }
 
-    suspend fun closeAndJoin() { close(); owner.join() }
+    suspend fun closeAndJoin() { close(); sessionJob.join(); owner.join() }
 
     private fun release() {
         if (released.compareAndSet(false, true)) {

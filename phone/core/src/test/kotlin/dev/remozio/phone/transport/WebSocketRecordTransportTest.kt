@@ -6,15 +6,20 @@ import io.ktor.utils.io.readFully
 import io.ktor.utils.io.writeFully
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlin.coroutines.CoroutineContext
 import kotlin.test.assertFailsWith
 import org.junit.Assert.*
 import org.junit.Test
@@ -132,6 +137,37 @@ class WebSocketRecordTransportTest {
             assertFailsWith<IOException> { f.transport.receive() }
             f.transport.closeAndJoin()
             assertEquals(1, f.releases.get())
+        }
+    }
+
+    @Test fun closeAndJoinWaitsForDetachedLibraryJobs(): Unit = runTest {
+        val gate = DefaultSessionGate(StandardTestDispatcher(testScheduler))
+        val f = Fixture(CoroutineScope(coroutineContext + gate))
+        try {
+            assertTrue(gate.hasHeldTask())
+            val closer = async { f.transport.closeAndJoin() }
+            runCurrent()
+            assertFalse(closer.isCompleted)
+            gate.release()
+            closer.await()
+            assertEquals(1, f.releases.get())
+        } finally { gate.release(); f.transport.closeAndJoin() }
+    }
+
+    /** Hold the pinned library's default-session coordinator while raw transport jobs can stop. */
+    private class DefaultSessionGate(private val delegate: CoroutineDispatcher) : CoroutineDispatcher() {
+        private val held = mutableListOf<Pair<CoroutineContext, Runnable>>()
+        private var holding = true
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            if (holding && context[CoroutineName]?.name == "ws-default") held += context to block
+            else delegate.dispatch(context, block)
+        }
+        fun hasHeldTask(): Boolean = held.isNotEmpty()
+        fun release() {
+            holding = false
+            val tasks = held.toList()
+            held.clear()
+            tasks.forEach { (context, block) -> delegate.dispatch(context, block) }
         }
     }
 
