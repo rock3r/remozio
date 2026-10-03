@@ -16,7 +16,7 @@ func emit(_ fields: [String: Int]) {
 final class Probe: @unchecked Sendable {
     let queue = DispatchQueue(label: "dev.remozio.experiment.tls")
     let listener: NWListener
-    var connections: [UUID: NWConnection] = [:]
+    var connections: [UUID: NetworkByteChannel] = [:]
 
     init(identity: SecIdentity, peerPublicKey: Data) throws {
         let peer = try PinnedTLSPeer(subjectPublicKeyInfo: peerPublicKey)
@@ -56,47 +56,50 @@ final class Probe: @unchecked Sendable {
         listener.newConnectionHandler = { [self] connection in
             guard connections.count < 8 else { connection.cancel(); return }
             let id = UUID()
-            connections[id] = connection
-            connection.stateUpdateHandler = { [self, weak connection] state in
-                guard let connection else { return }
-                switch state {
-                case .ready:
-                    guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
-                          let name = sec_protocol_metadata_copy_negotiated_protocol(tls.securityProtocolMetadata) else { connection.cancel(); return }
-                    defer { free(UnsafeMutableRawPointer(mutating: name)) }
-                    guard String(cString: name) == "remozio-experiment/1",
-                          !sec_protocol_metadata_get_early_data_accepted(tls.securityProtocolMetadata) else { connection.cancel(); return }
-                    readFrame(connection)
-                case .failed, .cancelled: connections.removeValue(forKey: id)
-                default: break
-                }
+            let channel = NetworkByteChannel(connection: connection) { connection in
+                guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
+                      let name = sec_protocol_metadata_copy_negotiated_protocol(tls.securityProtocolMetadata) else { return false }
+                defer { free(UnsafeMutableRawPointer(mutating: name)) }
+                return String(cString: name) == "remozio-experiment/1"
+                    && sec_protocol_metadata_get_negotiated_tls_protocol_version(tls.securityProtocolMetadata) == .TLSv13
+                    && !sec_protocol_metadata_get_early_data_accepted(tls.securityProtocolMetadata)
             }
-            connection.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + 10) { [weak connection] in connection?.cancel() }
+            connections[id] = channel
+            Task {
+                do {
+                    try await channel.start(timeoutMilliseconds: 10_000)
+                    try await echoFrame(channel)
+                } catch { }
+                await channel.close()
+                queue.async { self.connections.removeValue(forKey: id) }
+            }
+            queue.asyncAfter(deadline: .now() + 10) { Task { await channel.close() } }
+
         }
         listener.start(queue: queue)
     }
 
-    func readExactly(_ connection: NWConnection, count: Int, buffer: Data = Data(), complete: @escaping @Sendable (Data) -> Void) {
-        guard count > buffer.count else { complete(buffer); return }
-        connection.receive(minimumIncompleteLength: 1, maximumLength: count - buffer.count) { [self] data, _, ended, error in
-            guard error == nil, let data, !data.isEmpty else { connection.cancel(); return }
-            let accumulated = buffer + data
-            if accumulated.count == count { complete(accumulated) }
-            else if ended { connection.cancel() }
-            else { readExactly(connection, count: count, buffer: accumulated, complete: complete) }
+    func echoFrame(_ channel: NetworkByteChannel) async throws {
+        var frame = Data()
+        while frame.count < 4 {
+            guard let chunk = try await channel.receive() else { throw ProbeError.invalidInput }
+            frame.append(chunk)
+        }
+        let length = frame.prefix(4).reduce(0) { ($0 << 8) | Int($1) }
+        guard length <= 65_536 else { throw ProbeError.invalidInput }
+        while frame.count < length + 4 {
+            guard let chunk = try await channel.receive() else { throw ProbeError.invalidInput }
+            frame.append(chunk)
+        }
+        guard frame.count == length + 4 else { throw ProbeError.invalidInput }
+        var offset = 0
+        while offset < frame.count {
+            let end = min(frame.count, offset + NetworkByteChannel.maximumChunkBytes)
+            try await channel.send(Data(frame[offset..<end]))
+            offset = end
         }
     }
 
-    func readFrame(_ connection: NWConnection) {
-        readExactly(connection, count: 4) { [self] header in
-            let length = header.reduce(0) { ($0 << 8) | Int($1) }
-            guard length <= 65_536 else { connection.cancel(); return }
-            readExactly(connection, count: length) { payload in
-                connection.send(content: header + payload, completion: .contentProcessed { _ in connection.cancel() })
-            }
-        }
-    }
 }
 
 #if !DEBUG

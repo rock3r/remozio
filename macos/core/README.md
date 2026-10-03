@@ -72,3 +72,5 @@ The [approval request coordinator](approval-coordinator.md) owns live request bi
 Portable setup files have a [bounded encrypted container](SETUP-FILES.md). A typed payload and metadata preview are available. Reading live configuration and protected import remain pending.
 
 The [TLS peer pin policy](pinned-tls-peer.md) validates enrolled P-256 keys and leaf certificate dates. The synthetic native listener uses it; production channel ownership remains pending.
+
+The [native byte channel](network-byte-channel.md) owns connection start, bounded I/O, cancellation, and cleanup. The TLS experiment uses it after pinned handshake admission.
