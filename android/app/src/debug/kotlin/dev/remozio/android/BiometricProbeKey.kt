@@ -49,13 +49,20 @@ internal object BiometricProbeKey {
         val key = checkNotNull(store().getKey(ALIAS, null) as? PrivateKey) { "Create the probe key first" }
         val info = KeyFactory.getInstance(key.algorithm, "AndroidKeyStore")
             .getKeySpec(key, KeyInfo::class.java)
-        check(info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX ||
-            info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT)
-        check(key.encoded == null && info.isUserAuthenticationRequired)
-        check(info.isUserAuthenticationRequirementEnforcedBySecureHardware)
-        check(info.userAuthenticationValidityDurationSeconds == -1)
-        check(info.userAuthenticationType == KeyProperties.AUTH_BIOMETRIC_STRONG)
-        check(info.isUnlockedDeviceRequired && !info.isInvalidatedByBiometricEnrollment)
+        val policy = BiometricProbePolicy(
+            hardwareBacked = info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX ||
+                info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT,
+            securityLevel = info.securityLevel,
+            nonExportable = key.encoded == null,
+            authenticationRequired = info.isUserAuthenticationRequired,
+            hardwareAuthentication = info.isUserAuthenticationRequirementEnforcedBySecureHardware,
+            validitySeconds = info.userAuthenticationValidityDurationSeconds,
+            authenticationType = info.userAuthenticationType,
+            strongBiometricType = KeyProperties.AUTH_BIOMETRIC_STRONG,
+            unlockedDeviceRequired = info.isUnlockedDeviceRequired,
+            invalidatedByEnrollment = info.isInvalidatedByBiometricEnrollment,
+        )
+        if (!policy.accepted) throw BiometricProbePolicyException(policy)
         return key
     }
 
@@ -66,7 +73,8 @@ internal object BiometricProbeKey {
         val publicKey = checkNotNull(store().getCertificate(ALIAS)).publicKey
         val fingerprint = MessageDigest.getInstance("SHA-256").digest(publicKey.encoded)
             .joinToString("") { "%02x".format(it) }
-        return "$level · P-256 · SHA-256\n$fingerprint"
+        return "$level · P-256 · SHA-256\n$fingerprint\n" +
+            "Enrollment retention is unproven. Reported invalidation: ${info.isInvalidatedByBiometricEnrollment}"
     }
 
     fun signature(): Signature = Signature.getInstance("SHA256withECDSA").apply { initSign(checkedKey()) }
