@@ -49,7 +49,8 @@ Run each detailed procedure linked below. Record a failed or unavailable case se
 | 2 | [Biometric probe](android-biometric-key.md) | Hardware policy, a fresh prompt per signature, cancellation and key continuity | A fresh signature succeeds without required authentication, or stale completion reports success |
 | 3 | [ADB endpoint probe](android-adb-endpoint.md) | Own-phone discovery, IPv4/IPv6 reachability, Wi-Fi-off behavior and cancellation | Unexpected destination, traffic beyond a connection attempt, or stale completion |
 | 4 | [XPC experiment](macos-xpc.md) | Six synthetic cases on the tested OS; temporary agent cleanup | Payload dispatch despite the handshake control, or cleanup failure |
-| 5 | [Enclave signing](macos-key-custody.md) and [TLS](macos-enclave-tls.md) | Disposable hardware signatures and pinned loopback TLS on the tested OS | Unexpected authentication UI, software fallback or a wrong pin accepted |
+| 5 | [Presence signals](macos-presence.md) | One-shot idle/display observations and their limits in the target GUI session | A candidate signal is treated as proof of human or remote presence |
+| 6 | [Enclave signing](macos-key-custody.md) and [TLS](macos-enclave-tls.md) | Disposable hardware signatures and pinned loopback TLS on the tested OS | Unexpected authentication UI, software fallback or a wrong pin accepted |
 
 The XPC test registers a temporary **per-user** LaunchAgent. Follow its cleanup procedure if interrupted. It does not register the root authority.
 

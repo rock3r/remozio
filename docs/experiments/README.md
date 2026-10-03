@@ -13,7 +13,8 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | User-selected execution contract; broader runtime coverage |
 | Streaming encrypted channel | [TLS](tls-channel.md) and [WebSocket carrier](websocket-carrier.md) harnesses | Android keys, Cloudflare integration, protected identities, and reconnect |
 | Native TLS key custody | [Disposable enclave identity and TLS exchange measured](macos-enclave-tls.md) | macOS 26 runtime, pre-login access, protected service identity, Android hardware peer |
-| UI adapters and presence | Needs interactive session | Authorized dialog fixtures and remote desktop states |
+| Presence signals | [One-shot probe prepared](macos-presence.md) | GUI-session observations, remote desktop usability, lock and brightness support |
+| UI adapters | Needs interactive session | Authorized dialog fixtures |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |
 | Android ADB bridge | [Endpoint probe prepared](android-adb-endpoint.md) | Discovery, Wi-Fi-off fallback, listener exposure, foreground lifetime, reconnect and Stop |
 | Setup exports and APK updates | Pending | Independent import, signature checks and retained pairing |
