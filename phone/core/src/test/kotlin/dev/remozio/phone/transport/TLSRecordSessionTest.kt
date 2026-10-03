@@ -4,6 +4,7 @@ import dev.remozio.protocol.CborValue
 import io.ktor.utils.io.ByteChannel
 import io.ktor.utils.io.writeFully
 import java.io.IOException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -23,17 +24,23 @@ class TLSRecordSessionTest {
     private class Engine : SessionTLSEngine {
         var closed = false
         var pauseNextWrite = false
+        var reads = 0
+        var firstWriteAtRead: Int? = null
         val writes = mutableListOf<ByteArray>()
         override fun start() = batch(TLSClientState.HANDSHAKING, encrypted = byteArrayOf(10, 11, 12, 13, 14))
-        override fun receive(bytes: ByteArray): TLSClientProgress = when (bytes[0].toInt()) {
+        override fun receive(bytes: ByteArray): TLSClientProgress {
+            reads++
+            return when (bytes[0].toInt()) {
             1 -> batch(TLSClientState.OPEN)
             2 -> batch(TLSClientState.OPEN, plain = byteArrayOf(42))
             3 -> batch(TLSClientState.PEER_CLOSED, plain = byteArrayOf(43))
             4 -> TLSClientProgress(TLSClientState.OPEN, 0, emptyList(), List(4) { CborValue.Bytes(byteArrayOf(it.toByte())) })
             else -> throw IOException("synthetic failure")
+            }
         }
         override fun send(bytes: ByteArray): TLSClientProgress {
             if (pauseNextWrite) { pauseNextWrite = false; return batch(TLSClientState.OPEN) }
+            if (firstWriteAtRead == null) firstWriteAtRead = reads
             val count = minOf(2, bytes.size)
             writes += bytes.copyOfRange(0, count)
             return TLSClientProgress(TLSClientState.OPEN, count, listOf(CborValue.Bytes(bytes.copyOfRange(0, count))), emptyList())
@@ -190,6 +197,33 @@ class TLSRecordSessionTest {
         session.send(byteArrayOf(7))
         session.closeAndJoin()
         assertTrue(engine.closed); assertEquals(1, releases)
+    }
+
+    @Test fun finalPlaintextSurvivesPeerCloseDuringAStalledWrite(): Unit = runTest {
+        val f = fixture(); open(f)
+        f.engine.pauseNextWrite = true
+        val writing = async { runCatching { f.session.send(byteArrayOf(9)) } }
+        runCurrent(); assertFalse(writing.isCompleted)
+        f.carrier.inbound.send(byteArrayOf(3)); runCurrent()
+        assertTrue(writing.await().exceptionOrNull() is IOException)
+        assertTrue(f.engine.writes.isEmpty())
+        assertFailsWith<IOException> { f.session.send(byteArrayOf(10)) }
+        assertContentEquals(byteArrayOf(43), f.session.receive())
+        assertNull(f.session.receive())
+        f.session.closeAndJoin()
+    }
+
+    @Test fun aReadyWriteGetsATurnUnderContinuousInput(): Unit = runTest {
+        val f = fixture(); open(f)
+        val readingBefore = f.engine.reads
+        val producer = launch(start = CoroutineStart.UNDISPATCHED) {
+            repeat(500) { f.carrier.inbound.send(byteArrayOf(1)) }
+        }
+        val writing = async(start = CoroutineStart.UNDISPATCHED) { f.session.send(byteArrayOf(9)) }
+        runCurrent(); writing.await()
+        assertTrue(assertNotNull(f.engine.firstWriteAtRead) <= readingBefore + 1)
+        producer.cancelAndJoin()
+        f.session.closeAndJoin()
     }
 
     @Test fun oversizedInputFailsWithoutPlaintext(): Unit = runTest {

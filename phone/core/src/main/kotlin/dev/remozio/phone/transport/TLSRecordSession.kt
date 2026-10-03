@@ -54,9 +54,11 @@ class TLSRecordSession internal constructor(
         dispatcher: CoroutineDispatcher = Dispatchers.IO,
     ) : this(parent, NativeSessionEngine(engine), carrier, handshakeTimeoutMillis, dispatcher)
 
+    private class PeerClosedWrite : IOException("TLS peer closed")
     private class Write(val bytes: ByteArray, val done: CompletableDeferred<Unit> = CompletableDeferred(), var offset: Int = 0)
     private val parentJob = requireNotNull(parent.coroutineContext[Job])
     private val aborted = AtomicBoolean(false)
+    private val peerClosed = AtomicBoolean(false)
     private val carrierClosed = AtomicBoolean(false)
     private val engineClosed = AtomicBoolean(false)
     private val opened = CompletableDeferred<Unit>()
@@ -76,7 +78,7 @@ class TLSRecordSession internal constructor(
         worker.invokeOnCompletion {
             // Also runs if the parent was cancelled before the lazy worker could enter its body.
             opened.completeExceptionally(rejected())
-            writes.cancel()
+            if (peerClosed.get() && !aborted.get()) rejectClosedWrites() else writes.cancel()
             input.cancel()
             if (it != null) abortBuffers()
             releaseCarrier()
@@ -96,6 +98,7 @@ class TLSRecordSession internal constructor(
         sendMutex.withLock {
             awaitOpen()
             checkActive()
+            if (peerClosed.get()) throw PeerClosedWrite()
             val write = Write(bytes.copyOf())
             writes.send(write)
             write.done.await()
@@ -144,7 +147,12 @@ class TLSRecordSession internal constructor(
                 current
             }
             var awaitingPeer = false
+            var preferWrite = false
             while (state != TLSClientState.PEER_CLOSED || pendingPlaintext.isNotEmpty()) {
+                if (state == TLSClientState.PEER_CLOSED) {
+                    activeWrite?.done?.completeExceptionally(PeerClosedWrite())
+                    activeWrite = null
+                }
                 val write = activeWrite
                 if (write != null && !awaitingPeer) {
                     checkActive()
@@ -152,6 +160,11 @@ class TLSRecordSession internal constructor(
                     require(batch.consumedPlaintextBytes in 0..(write.bytes.size - write.offset))
                     write.offset += batch.consumedPlaintextBytes
                     state = deliver(batch)
+                    if (state == TLSClientState.PEER_CLOSED) {
+                        write.done.completeExceptionally(PeerClosedWrite())
+                        activeWrite = null
+                        continue
+                    }
                     if (state != TLSClientState.OPEN) throw rejected()
                     if (write.offset == write.bytes.size) {
                         checkActive()
@@ -162,19 +175,25 @@ class TLSRecordSession internal constructor(
                         if (!awaitingPeer) continue
                     }
                 }
+                val writeFirst = preferWrite
                 select<Unit> {
+                    if (writeFirst && activeWrite == null && state == TLSClientState.OPEN) {
+                        writes.onReceive { activeWrite = it; preferWrite = false }
+                    }
                     if (pendingPlaintext.isNotEmpty()) {
                         plaintext.onSend(pendingPlaintext.first()) {
                             pendingPlaintextBytes -= pendingPlaintext.removeFirst().size
+                            preferWrite = true
                         }
                     } else if (state != TLSClientState.PEER_CLOSED) {
                         input.onReceiveCatching { next ->
                             state = consume(next.getOrNull(), next.exceptionOrNull() != null)
                             awaitingPeer = false
+                            preferWrite = true
                         }
                     }
-                    if (activeWrite == null && state == TLSClientState.OPEN) {
-                        writes.onReceive { activeWrite = it }
+                    if (!writeFirst && activeWrite == null && state == TLSClientState.OPEN) {
+                        writes.onReceive { activeWrite = it; preferWrite = false }
                     }
                 }
             }
@@ -183,8 +202,8 @@ class TLSRecordSession internal constructor(
         } catch (_: Exception) {
             abortBuffers()
         } finally {
-            activeWrite?.done?.completeExceptionally(rejected())
-            writes.cancel()
+            activeWrite?.done?.completeExceptionally(if (peerClosed.get() && !aborted.get()) PeerClosedWrite() else rejected())
+            if (peerClosed.get() && !aborted.get()) rejectClosedWrites() else writes.cancel()
             pendingPlaintext.clear()
             pendingPlaintextBytes = 0
             reader.cancel()
@@ -219,6 +238,10 @@ class TLSRecordSession internal constructor(
                 offset = end
             }
         }
+        if (batch.state == TLSClientState.PEER_CLOSED) {
+            peerClosed.set(true)
+            rejectClosedWrites()
+        }
         if (batch.state == TLSClientState.OPEN || batch.state == TLSClientState.PEER_CLOSED) opened.complete(Unit)
         for (value in batch.plaintext) {
             checkActive()
@@ -233,6 +256,14 @@ class TLSRecordSession internal constructor(
     private suspend fun checkActive() {
         kotlin.coroutines.coroutineContext.ensureActive()
         if (aborted.get() || parentJob.isCancelled) throw rejected()
+    }
+
+    private fun rejectClosedWrites() {
+        writes.close(PeerClosedWrite())
+        while (true) {
+            val queued = writes.tryReceive().getOrNull() ?: break
+            queued.done.completeExceptionally(PeerClosedWrite())
+        }
     }
 
     private fun abortBuffers() {
@@ -254,7 +285,8 @@ class TLSRecordSession internal constructor(
     private suspend fun <T> operation(block: suspend () -> T): T = try {
         kotlin.coroutines.coroutineContext.ensureActive()
         block()
-    } catch (cancelled: CancellationException) { close(); throw cancelled }
+    } catch (closed: PeerClosedWrite) { throw closed }
+    catch (cancelled: CancellationException) { close(); throw cancelled }
     catch (_: Exception) { close(); throw rejected() }
 
     private companion object { fun rejected() = IOException("TLS session closed") }
