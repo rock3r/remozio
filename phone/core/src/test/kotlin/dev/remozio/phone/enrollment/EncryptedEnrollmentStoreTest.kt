@@ -42,6 +42,28 @@ class EncryptedEnrollmentStoreTest {
             RelayAccessCredential(endpoint, "synthetic-access-id", "synthetic-access-secret"))
     }
 
+    @Test fun connectionComparisonIncludesEveryStoredFieldExceptTheDisplayName() {
+        val original = StoredPhoneEnrollment(record(1), EnrollmentPhase.ACTIVE)
+        val encoded = (EnrollmentEncoding.encode(original) as CborValue.Fields).values
+        assertTrue(original.sameConnectionAs(EnrollmentEncoding.decode(CborValue.Fields(encoded))))
+        val renamed = EnrollmentEncoding.decode(CborValue.Fields(encoded + (5uL to CborValue.Text("Renamed Mac"))))
+        assertTrue(original.sameConnectionAs(renamed))
+        val other = (EnrollmentEncoding.encode(StoredPhoneEnrollment(record(2), EnrollmentPhase.PREPARED)) as CborValue.Fields).values
+        for (field in encoded.keys - 5uL) {
+            if (encoded[field] == other[field]) continue
+            val changed = EnrollmentEncoding.decode(CborValue.Fields(encoded + (field to other.getValue(field))))
+            assertFalse(original.sameConnectionAs(changed), "Connection field $field must invalidate the owner")
+        }
+        val relay = (encoded.getValue(12uL) as CborValue.Fields).values
+        for ((field, replacement) in mapOf(0uL to CborValue.Text("different.example"),
+            1uL to CborValue.Unsigned(8443u), 2uL to CborValue.Text("/different"),
+            3uL to CborValue.Text("different-id"), 4uL to CborValue.Text("different-secret"))) {
+            val changed = EnrollmentEncoding.decode(CborValue.Fields(encoded +
+                (12uL to CborValue.Fields(relay + (field to replacement)))))
+            assertFalse(original.sameConnectionAs(changed))
+        }
+    }
+
     @Test fun preparationActivationAndRemovalSurviveRestartWithoutAffectingAnotherMac() {
         val storage = Storage(); val cipher = cipher()
         val store = EncryptedEnrollmentStore.create(storage, cipher, 10)
