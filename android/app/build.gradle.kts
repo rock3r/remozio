@@ -61,3 +61,9 @@ dependencies {
     testImplementation(kotlin("test-junit"))
     testImplementation("junit:junit:4.13.2")
 }
+
+val commandCaptureFixture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")
+tasks.withType<Test>().configureEach {
+    inputs.file(commandCaptureFixture)
+    systemProperty("remozio.test.commandCapture", commandCaptureFixture.asFile.absolutePath)
+}

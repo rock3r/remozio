@@ -75,3 +75,5 @@ The [sideload update verifier](updates.md) stages APKs privately, verifies their
 The [transport identity loader](transport-identity.md) validates an existing hardware-backed enrollment key and supplies its handle to the TLS client. Pairing, key creation, and native Pixel validation remain outstanding.
 
 The [phone enrollment store](../phone/core/ENROLLMENTS.md) has an Android adapter with a dedicated hardware encryption key and a no-backup atomic file. It is available to the future enrollment host and does not initialize on app startup.
+
+The [decision identity](decision-identity.md) creates and loads a separate hardware key for biometric-free choices. Its first signing adapter verifies an issued command and signs only an explicit permitted decline. App lifecycle and delivery integration remain outstanding.
