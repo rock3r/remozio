@@ -1,6 +1,7 @@
 package dev.remozio.android
 
 import android.os.Bundle
+import dev.remozio.android.enrollment.StoredMacList
 import dev.remozio.android.updates.UpdateStatusCard
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { RemozioTheme { EmptyMacsScreen() } }
+        setContent { RemozioTheme { MacsScreen() } }
     }
 }
 
@@ -50,7 +50,7 @@ internal fun RemozioTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun EmptyMacsScreen() {
+private fun MacsScreen() {
     Scaffold { insets ->
         Column(
             modifier = Modifier
@@ -69,12 +69,7 @@ private fun EmptyMacsScreen() {
                     style = MaterialTheme.typography.headlineLarge,
                     modifier = Modifier.semantics { heading() },
                 )
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(stringResource(R.string.no_macs_paired), style = MaterialTheme.typography.titleLarge)
-                        Text(stringResource(R.string.pairing_empty_description), style = MaterialTheme.typography.bodyLarge)
-                    }
-                }
+                StoredMacList()
                 UpdateStatusCard()
                 DevelopmentTools()
             }

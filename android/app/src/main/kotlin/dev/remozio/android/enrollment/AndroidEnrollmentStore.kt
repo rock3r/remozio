@@ -24,7 +24,15 @@ internal object AndroidEnrollmentStore {
     private const val KEY_ALIAS = "remozio.enrollment-storage.v1"
 
     @WorkerThread
-    fun open(context: Context, maximumRecords: Int, maximumPlaintextBytes: Int): EncryptedEnrollmentStore {
+    fun open(context: Context, maximumRecords: Int, maximumPlaintextBytes: Int): EncryptedEnrollmentStore =
+        checkNotNull(open(context, maximumRecords, maximumPlaintextBytes, createIfAbsent = true))
+
+    /** Inventory reads never provision a key or reset an archive. Null means both are absent. */
+    @WorkerThread
+    fun openExisting(context: Context, maximumRecords: Int, maximumPlaintextBytes: Int): EncryptedEnrollmentStore? =
+        open(context, maximumRecords, maximumPlaintextBytes, createIfAbsent = false)
+
+    private fun open(context: Context, maximumRecords: Int, maximumPlaintextBytes: Int, createIfAbsent: Boolean): EncryptedEnrollmentStore? {
         EncryptedEnrollmentStore.validateConfiguration(maximumRecords, maximumPlaintextBytes)
         val app = context.applicationContext
         check(!app.isDeviceProtectedStorage)
@@ -38,8 +46,9 @@ internal object AndroidEnrollmentStore {
             val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             val existingKey = store.containsAlias(KEY_ALIAS)
             val existingArchive = storage.hasArchive()
-            if (!existingKey && existingArchive) throw EnrollmentStoreUnavailable()
-            if (!existingKey) {
+            val mode = enrollmentOpenMode(existingKey, existingArchive, createIfAbsent)
+            if (mode == EnrollmentOpenMode.EMPTY) { storage.close(); return null }
+            if (mode == EnrollmentOpenMode.CREATE) {
                 try { generate(strongBox = true) }
                 catch (_: StrongBoxUnavailableException) {
                     check(!store.containsAlias(KEY_ALIAS))

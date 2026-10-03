@@ -3,6 +3,14 @@
     <string name="your_macs">Your Macs</string>
     <string name="no_macs_paired">No Macs paired</string>
     <string name="pairing_empty_description">Pair a Mac to see its requests and connection status here.</string>
+    <string name="macs_loading">Loading Macs…</string>
+    <string name="macs_unavailable">Saved Macs unavailable</string>
+    <string name="macs_unavailable_description">Remozio could not read its saved setup. Nothing has been reset.</string>
+    <string name="macs_retry">Try again</string>
+    <string name="macs_not_connected">Not connected</string>
+    <string name="macs_unknown_status">The current Mac status is unknown.</string>
+    <string name="macs_setup_incomplete">Setup incomplete</string>
+    <string name="macs_setup_incomplete_description">This saved setup has not been activated.</string>
     <string name="command_details">Command details</string>
     <string name="sample_command_title">Sample command</string>
     <string name="sample_command_notice">Static preview only. The times do not tick. This sample cannot run a command or approve a request.</string>
