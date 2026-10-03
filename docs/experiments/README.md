@@ -15,7 +15,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Native TLS key custody | [Disposable enclave identity and TLS exchange measured](macos-enclave-tls.md) | macOS 26 runtime, pre-login access, protected service identity, Android hardware peer |
 | UI adapters and presence | Needs interactive session | Authorized dialog fixtures and remote desktop states |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |
-| Android ADB bridge | Needs device session | Wi-Fi-off fallback, listener exposure, reconnect and Stop |
+| Android ADB bridge | [Endpoint probe prepared](android-adb-endpoint.md) | Discovery, Wi-Fi-off fallback, listener exposure, foreground lifetime, reconnect and Stop |
 | Setup exports and APK updates | Pending | Independent import, signature checks and retained pairing |
 
 ## PR sequence
