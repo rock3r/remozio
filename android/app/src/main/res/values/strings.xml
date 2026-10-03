@@ -336,4 +336,13 @@
     <string name="command_biometric_title">Approve command</string>
     <string name="command_biometric_subtitle">Authorize the command you just reviewed</string>
     <string name="command_biometric_cancel">Cancel</string>
+    <string name="command_action_approve">Approve with biometrics</string>
+    <string name="command_action_decline">Decline</string>
+    <string name="command_action_retry">Retry delivery</string>
+    <string name="command_action_preparing">Preparing your decision…</string>
+    <string name="command_action_biometric">Waiting for biometric confirmation…</string>
+    <string name="command_action_sending">Sending your decision…</string>
+    <string name="command_action_awaiting">Waiting for the Mac to confirm your decision.</string>
+    <string name="command_action_unavailable">This decision is unavailable. You can try again.</string>
+    <string name="command_action_uncertain">Delivery is uncertain. The Mac may have received your decision.</string>
 </resources>

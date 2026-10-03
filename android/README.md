@@ -34,7 +34,7 @@ The reusable inspection component renders the complete typed command capture. In
 
 Values use quoted display notation, not shell syntax. Control and format characters, bidi controls, line separators, and non-ASCII spaces are escaped. Malformed UTF-8 becomes explicit byte escapes instead of replacement characters. A toggle shows every original byte in hex, including empty values and distinct Unicode spellings. Neither view truncates values. Ordinary Unicode remains readable; this does not eliminate Unicode glyph confusables.
 
-Inspection state stays in composition memory and is not saved across process death. Closing details does not imply denial or cancellation. The authenticated session adapter supplies status and timing. Live enrollment identity, transport, and bound decision controls still need integration. The component alone establishes no trust in a capture.
+Inspection state stays in composition memory and is not saved across process death. Closing details does not imply denial or cancellation. The authenticated session adapter supplies status and timing. The optional enrollment-bound controls connect this inspector to biometric approval and no-biometric decline. Live enrollment and transport still need launcher integration. The component alone establishes no trust in a capture.
 
 Five Android-module JVM tests cover empty values, escaped syntax, controls, bidi, malformed UTF-8, Unicode spelling, full-byte round trips, and long values. Android unit tests now run in CI and the local PR gate. Build/lint checks do not establish layout, TalkBack reading order, large-font behavior, or sheet/dialog usability; those remain for the interactive Pixel session.
 

@@ -1,6 +1,10 @@
 package dev.remozio.android.biometrics
 
 import dev.remozio.android.decisions.decisionPublicPoint
+import dev.remozio.android.decisions.AndroidDecisionIdentity
+import dev.remozio.android.decisions.DecisionKeySecurity
+import dev.remozio.android.decisions.DecisionIdentityUnavailable
+import dev.remozio.android.requests.commandActionAvailability
 import dev.remozio.phone.requests.*
 
 import dev.remozio.phone.enrollment.*
@@ -149,6 +153,51 @@ class AndroidCommandBiometricsTest {
         val forged = CommandRequestSession.open(request.encode(bound), sign(request, attacker.private),
             request.macID, request.accountID, decisionPublicPoint(attacker.public as ECPublicKey), limits)
         assertFails { identity(forged) }
+    }
+
+    @Test fun sessionDeclineUsesOnlyTheDecisionKeyAndExactDisplayedBindings() {
+        val request = request()
+        val session = session(request); status(session, request)
+        AndroidDecisionIdentity(enrollment, decisionKey.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { identity ->
+            val message = identity.declineSession(session, time, limits)
+            val payload = DecisionPayload.decode(message.body.copyBytes(), bound)
+            assertEquals(decline, payload.action)
+            assertEquals(SigningPurpose.CANCELLATION, message.purpose)
+            assertContentEquals(request.requestDigest(bound, bound), payload.requestDigest)
+            assertContentEquals(request.challenge, payload.challenge)
+            assertContentEquals(enrollment.decisionKey.keyID.copyBytes(), payload.keyID)
+            assertTrue(ApprovalSignature.verify(message.signature.copyBytes(), enrollment.decisionKey.publicKey.copyBytes(),
+                1u, message.type, message.purpose, message.body.copyBytes(), bound, bound))
+            assertFalse(ApprovalSignature.verify(message.signature.copyBytes(), enrollment.biometricKey.publicKey.copyBytes(),
+                1u, message.type, message.purpose, message.body.copyBytes(), bound, bound))
+            session.close()
+            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(session, time, limits) }
+        }
+    }
+
+    @Test fun sessionDeclineRejectsAnotherAuthorityAndAnUnpermittedAction() {
+        val request = request()
+        val attacker = pair()
+        val forged = CommandRequestSession.open(request.encode(bound), sign(request, attacker.private), request.macID,
+            request.accountID, decisionPublicPoint(attacker.public as ECPublicKey), limits)
+        val executeOnly = request(actions = listOf(execute))
+        val session = session(executeOnly); status(session, executeOnly)
+        AndroidDecisionIdentity(enrollment, decisionKey.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { identity ->
+            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(forged, time, limits) }
+            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(session, time, limits) }
+        }
+    }
+
+    @Test fun controlsExposeOnlyPermittedPendingActionsForAnActiveEnrollment() {
+        val request = request(actions = listOf(decline))
+        val session = session(request)
+        val active = StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE)
+        assertFalse(commandActionAvailability(session, active, time).decline)
+        status(session, request)
+        assertTrue(commandActionAvailability(session, active, time).decline)
+        assertFalse(commandActionAvailability(session, active, time).execute)
+        assertFalse(commandActionAvailability(session, StoredPhoneEnrollment(enrollment, EnrollmentPhase.REMOVED), time).decline)
+        assertFalse(commandActionAvailability(session, active, ElapsedInstant(0, 60_000u)).decline)
     }
 
     @Test fun anotherEnrollmentCannotOwnTheDisplayedSession() {

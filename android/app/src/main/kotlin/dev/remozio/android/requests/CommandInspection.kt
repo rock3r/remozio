@@ -50,7 +50,7 @@ import dev.remozio.protocol.CommandInputKind
 import dev.remozio.protocol.EnvironmentSource
 import dev.remozio.protocol.StartedCommandDisconnect
 
-/** Inspection only. The caller must authenticate a live request before adding decision controls. */
+/** Renders a retained capture. Only the authenticated session integration supplies decision controls. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun CommandInspection(
@@ -61,6 +61,7 @@ internal fun CommandInspection(
     sample: Boolean = false,
     status: TrackedRequestStatus? = null,
     requestKey: Any? = null,
+    actions: (@Composable () -> Unit)? = null,
 ) {
     val pixels = LocalWindowInfo.current.containerSize
     val window = with(LocalDensity.current) { pixels.width.toDp() to pixels.height.toDp() }
@@ -71,14 +72,14 @@ internal fun CommandInspection(
             ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberBottomSheetState(
                 initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
             )) {
-                InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status, Modifier.heightIn(max = window.second * 0.9f))
+                InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status, Modifier.heightIn(max = window.second * 0.9f), actions = if (!sample && visibleCapture != null) actions else null)
             }
         } else {
             Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
                 Surface(
                     modifier = Modifier.padding(24.dp).widthIn(max = 720.dp).fillMaxWidth().heightIn(max = window.second * 0.9f),
                     shape = MaterialTheme.shapes.extraLarge,
-                ) { InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status) }
+                ) { InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status, actions = if (!sample && visibleCapture != null) actions else null) }
             }
         }
     }
@@ -89,6 +90,7 @@ private fun InspectionContent(
     capture: CommandCapture?, macName: String, accountName: String, sample: Boolean, onDismiss: () -> Unit,
     status: TrackedRequestStatus?,
     modifier: Modifier = Modifier,
+    actions: (@Composable () -> Unit)? = null,
 ) {
     var raw by remember { mutableStateOf(false) }
     Column(modifier.fillMaxWidth()) {
@@ -232,6 +234,7 @@ private fun InspectionContent(
                 }
             }
         }
+        actions?.invoke()
         TextButton(onClick = onDismiss, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(stringResource(R.string.close_details))
         }

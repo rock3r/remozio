@@ -4,6 +4,7 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import androidx.annotation.WorkerThread
 import dev.remozio.phone.enrollment.*
+import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.RequestLimits
 import dev.remozio.protocol.*
@@ -79,6 +80,30 @@ class AndroidDecisionIdentity internal constructor(
                 check(ApprovalSignature.verify(signature, enrollment.decisionKey.publicKey.copyBytes(), 1u,
                     ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, decision, limits.body, limits.signing))
                 return ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, decision, signature)
+            }
+        } catch (_: Exception) { throw DecisionIdentityUnavailable() }
+    }
+
+    /** Declines the retained displayed session without biometrics. The Mac remains authoritative for consumption. */
+    @WorkerThread
+    @Synchronized
+    fun declineSession(session: CommandRequestSession, now: ElapsedInstant, limits: RequestLimits): ApprovalMessage {
+        try {
+            val signingKey = key ?: throw DecisionIdentityUnavailable()
+            require(session.isBoundToAuthority(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),
+                enrollment.authorityPublicKey.copyBytes()))
+            return session.withPendingDecision(now, enrollment.phoneID.copyBytes(), enrollment.decisionKey.keyID.copyBytes(),
+                CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)) { payload ->
+                val body = payload.encode(limits.body)
+                val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                    initSign(signingKey)
+                    update(SigningInput.make(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body,
+                        limits.body, limits.signing))
+                    sign()
+                })
+                check(ApprovalSignature.verify(signature, enrollment.decisionKey.publicKey.copyBytes(), 1u,
+                    ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body, limits.body, limits.signing))
+                ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body, signature)
             }
         } catch (_: Exception) { throw DecisionIdentityUnavailable() }
     }
