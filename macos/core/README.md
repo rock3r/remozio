@@ -69,4 +69,4 @@ The [routing journal](routing-journal.md) persists local modes and validates one
 
 The [approval request coordinator](approval-coordinator.md) owns live request bindings and serializes their lifecycle with durable decision consumption.
 
-Portable setup files have a [bounded encrypted container](SETUP-FILES.md). Configuration export and protected import remain pending.
+Portable setup files have a [bounded encrypted container](SETUP-FILES.md). A typed payload and metadata preview are available. Reading live configuration and protected import remain pending.
