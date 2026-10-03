@@ -30,6 +30,8 @@ Each PR records its checks and limits. An experiment result does not certify an 
 
 ## Interactive session checklist
 
+Use the [interactive handoff](interactive-handoff.md) for the current capability map, ordered checks, evidence format and integration blockers.
+
 - Make the intended Apple signing identity available without exporting its private key.
 - Confirm a macOS 26 test host and supported Pixel running Android 17+.
 - Exercise service startup, lock/logout, reboot, and update replacement.
