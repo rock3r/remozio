@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
+internal data class ApkExpectation(val versionName: String, val size: Long)
+
 /** Own one verifier per update host. It permits one staged APK until its handle is closed. */
 internal class StagedApkVerifier(
     private val privateCache: File,
@@ -23,7 +25,7 @@ internal class StagedApkVerifier(
     private val occupied = AtomicBoolean()
 
     /** Takes ownership of [source], including on rejection or cancellation. */
-    suspend fun stage(source: InputStream): VerifiedApk {
+    suspend fun stage(source: InputStream, expectation: ApkExpectation? = null): VerifiedApk {
         var result: VerifiedApk? = null
         try {
             return withContext(Dispatchers.IO) {
@@ -42,6 +44,7 @@ internal class StagedApkVerifier(
                         val expected = digest.digest()
                         val candidate = inspector.verify(file)
                         checkUpdate(inspector.installed(), candidate, deviceSdk)
+                        if (expectation != null && (candidate.versionName != expectation.versionName || size != expectation.size)) throw UpdateRejected()
                         file.inputStream().use { input ->
                             val checked = MessageDigest.getInstance("SHA-256")
                             copyBounded(input, OutputStream.nullOutputStream(), maxBytes, checked) {

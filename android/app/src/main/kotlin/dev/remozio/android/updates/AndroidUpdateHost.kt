@@ -35,7 +35,7 @@ internal fun androidUpdateHost(context: Context, scope: CoroutineScope): UpdateH
         },
         { cleanUpdateStaging(staging) },
         { UpdateConfirmationNotifications(app).existing(it) != null },
-        Build.VERSION.SDK_INT,
+        Build.VERSION.SDK_INT, GitHubUpdates(), AndroidUpdatePreferences(app),
     )
     scope.launch { UpdateSignals.changes.collect { host.refresh().join() } }
     return host

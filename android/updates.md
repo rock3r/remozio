@@ -37,7 +37,7 @@ Closing the handle deletes its staging file and releases the slot. A cleanup fai
 
 JVM tests cover identity policy, forward and reverse signer rotation, multiple signers, staging bounds, changed bytes, source failures, cancellation, and handle ownership. They inject the platform inspector. They do not prove Android's native signature verification or installer behavior.
 
-Release discovery, download policy, settings, user-facing update state, callback handling, and production signing remain separate integration work. The Pixel session must verify tampered and incorrectly signed APKs, valid key rotation, installation refusal, cancellation, and preservation of app data and pairing keys. No real APK is installed by these tests.
+Production signing and release publication remain separate integration work. The application now connects release discovery, downloads, settings, state, and callbacks. The Pixel session must verify tampered and incorrectly signed APKs, valid key rotation, installation refusal, cancellation, and preservation of app data and pairing keys. No real APK is installed by these tests.
 
 Sources: [Android signature verification API](https://developer.android.com/reference/android/content/pm/PackageManager#getVerifiedSigningInfo(java.lang.String,int)), [signing history](https://developer.android.com/reference/android/content/pm/SigningInfo), and [the platform implementation](https://github.com/aosp-mirror/platform_frameworks_base/blob/main/core/java/android/content/pm/PackageManager.java).
 
@@ -97,7 +97,7 @@ An unresolved record survives reopening and prevents another reservation. Commit
 
 `AndroidUpdateRecordDatabase` uses native SQLite in `noBackupFilesDir`, with DELETE journaling and EXTRA synchronization. It checks the effective modes before use. Schema version 1 initializes only an empty database. Unknown versions, invalid fields, and corruption raise errors without deliberate database deletion or recreation. The host must surface an update recovery error without disabling normal approvals. A failed or uncertain storage commit cannot authorize native installation.
 
-JVM tests execute the shared SQL against SQLite through a test-only JDBC adapter. They cover reopening, rollback, concurrent reservations through separate connections, stale callbacks, early callbacks, terminal ordering, and invalid stored state. They do not prove Android filesystem durability under power loss. Native callbacks, session reconciliation, and the launcher owner remain integration work. The launcher status card opens the update record through its application owner.
+JVM tests execute the shared SQL against SQLite through a test-only JDBC adapter. They cover reopening, rollback, concurrent reservations through separate connections, stale callbacks, early callbacks, terminal ordering, and invalid stored state. They do not prove Android filesystem durability under power loss. The application owner connects native callbacks, session reconciliation, and the launcher status card. Their platform behavior still needs device validation.
 
 Storage references: [Android SQLite configuration](https://developer.android.com/reference/android/database/sqlite/SQLiteDatabase.OpenParams.Builder) and [test driver release](https://github.com/xerial/sqlite-jdbc/releases/tag/3.53.4.0).
 
@@ -109,9 +109,9 @@ A single bounded worker processes callbacks off the UI thread. Accepted terminal
 
 For pending user action, the receiver retains Android's confirmation intent inside an immutable `PendingIntent` targeting a private activity. The activity rechecks the current record before opening Android's confirmation screen. The receiver does not launch an activity in the background. A separate App updates notification channel gives the user an explicit entry point. Notifications can be disabled without changing the recorded installation phase.
 
-`UpdateConfirmationNotifications.existing` uses the fixed attempt identity and `FLAG_NO_CREATE` to retrieve an existing system token. It does not create a replacement confirmation or serialize an arbitrary intent to disk. The future foreground update UI can use this lookup even after its process restarts. Token retention is best effort: missing tokens, reboot, package replacement, and disabled-notification behavior need real-device evidence. A missing token must be shown as unavailable while the durable attempt remains unresolved. It must never trigger another installer commit automatically.
+`UpdateConfirmationNotifications.existing` uses the fixed attempt identity and `FLAG_NO_CREATE` to retrieve an existing system token. It does not create a replacement confirmation or serialize an arbitrary intent to disk. The foreground update UI uses this lookup, including after its process restarts. Token retention is best effort: missing tokens, reboot, package replacement, and disabled-notification behavior need real-device evidence. A missing token must be shown as unavailable while the durable attempt remains unresolved. It must never trigger another installer commit automatically.
 
-Parser tests cover canonical identities, wrong session IDs, preapproval rejection, terminal status mapping, and unknown codes. Existing SQLite tests cover callback ordering and stale attempts. Native broadcast isolation, notification taps, confirmation token recovery, and package replacement remain part of the Pixel session. The application owner and status card now use these callbacks. Release discovery and download UI remain unwired.
+Parser tests cover canonical identities, wrong session IDs, preapproval rejection, terminal status mapping, and unknown codes. Existing SQLite tests cover callback ordering and stale attempts. Native broadcast isolation, notification taps, confirmation token recovery, and package replacement remain part of the Pixel session. The application owner and status card now use these callbacks. The update card also provides release discovery and download controls.
 
 Callback references: [installer commit](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session#commit(android.content.IntentSender)) and [system-held PendingIntent tokens](https://developer.android.com/reference/android/app/PendingIntent).
 
@@ -128,4 +128,38 @@ Before a new attempt, recovery can abandon only owned, uncommitted sessions for 
 
 Staging uses a dedicated private `updates-v1` directory. Recovery removes only known updater directories and their `update.apk` files. It refuses symbolic links and unknown files instead of following or recursively deleting them. Cleanup failures gate new staging and expose a retry action. A failed discard retains its handle until cleanup succeeds.
 
-Shared SQLite and owner tests cover permission return, backend setup failure, preparation recovery, unacknowledged reservations, uncertain commits, callback refresh, cleanup retries, and link refusal. The Compose surface uses existing Material 3 Expressive controls with static status text and no custom transition. Large text, TalkBack, lifecycle timing, notification taps, and actual installer behavior still need the Pixel session. Release discovery and download acquisition remain the next integration step; this surface cannot fetch an APK yet.
+Shared SQLite and owner tests cover permission return, backend setup failure, preparation recovery, unacknowledged reservations, uncertain commits, callback refresh, cleanup retries, and link refusal. The Compose surface uses existing Material 3 Expressive controls with static status text and no custom transition. Large text, TalkBack, lifecycle timing, notification taps, and actual installer behavior still need the Pixel session. The release client supplies candidate APK streams to this owner.
+
+
+## Release checks and downloads
+
+The app checks the public `rock3r/remozio` GitHub repository without a token. Stable checks use the latest-release endpoint. Prerelease checks inspect the first 30 releases and select the highest newer semantic version that has an APK. Draft releases are excluded. An empty feed or missing APK produces no offer.
+
+```mermaid
+flowchart TD
+  Resume[App opens or resumes] --> Due{Automatic check due?}
+  Manual[Check for updates] --> Feed[Read bounded GitHub metadata]
+  Due -->|Yes| Feed
+  Feed --> Offer[Show version and download size]
+  Offer -->|User selects download| Download[Bounded HTTPS download]
+  Download --> Verify[Native signature and identity verification]
+  Verify --> Match[Match offered version and size]
+  Match --> Ready[Ready to install]
+  Ready -->|Separate user action| Installer[Existing installer flow]
+```
+
+Checks default to once per 24 hours when the app opens or resumes. Settings allow disabling them, selecting 1–168 hours, and including prereleases. Manual checks remain available. Failed checks also record their attempt time, so repeated resumes do not produce a retry loop. There is no background scheduler or automatic download in this implementation.
+
+Settings show whether values come from app defaults or this phone. Reset restores defaults. They persist in private preferences and do not alter pairing state. Shared setup-file defaults are not connected yet.
+
+Downloads use a fixed repository/tag/asset path rather than a feed-provided URL. Redirects require HTTPS and an explicit GitHub host allowlist. Connections have 10-second connect and 15-second read timeouts. Metadata has a 2 MiB limit, a nesting limit, and a 60-second elapsed budget. APK reads have a 256 MiB limit and a 30-minute elapsed budget. Elapsed and cancellation checks run between blocking operations; a blocked read can wait for its timeout. Platform DNS resolution is not guaranteed to obey that connect timeout.
+
+Cancel closes the stream and discards staging. A cleanup failure remains visible and blocks another download until resolved. Repeated download actions share the active job. Download completion never starts installation. Feed metadata is only a discovery hint: the APK must independently pass native signature, package, SDK, signer-continuity, and version-code checks. Its version name and byte count must also match the selected offer.
+
+### Release artifact contract
+
+Publish one standalone signed APK named `remozio-android.apk`. Use a three-part semantic version tag, optionally prefixed with `v`. The APK version name must equal the tag without that prefix. Each update must increase both semantic precedence and Android version code; build metadata alone does not make a newer offer. Debug builds cannot install the production package because their package IDs differ.
+
+HTTP fixture tests cover release selection, invalid metadata, redirects, limits, closure, and cancellation. Owner tests cover check intervals, explicit download/install separation, candidate mismatch, cancellation, and retry. No test downloads a public APK or contacts a device. Live GitHub/CDN transfer, Android networking, settings accessibility, and installation remain in the interactive validation checklist.
+
+API reference: [GitHub releases](https://docs.github.com/en/rest/releases/releases).
