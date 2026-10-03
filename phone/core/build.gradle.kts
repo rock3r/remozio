@@ -4,6 +4,7 @@ kotlin { jvmToolchain(21) }
 
 dependencies {
     implementation(project(":protocol-kotlin"))
+    implementation("io.ktor:ktor-websockets:3.6.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     testImplementation("org.bouncycastle:bcprov-jdk18on:1.86")
     testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
