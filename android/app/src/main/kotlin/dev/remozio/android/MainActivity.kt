@@ -4,6 +4,11 @@ import android.os.Bundle
 import dev.remozio.android.audit.AuditScreen
 import dev.remozio.android.push.NotificationSettingsScreen
 import dev.remozio.android.enrollment.StoredMacList
+import dev.remozio.android.enrollment.StoredMac
+import dev.remozio.android.requests.CommandInboxScreen
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import dev.remozio.android.updates.UpdateStatusCard
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -98,6 +103,12 @@ private fun RemozioScreen() {
 
 @Composable
 private fun MacsScreen() {
+    var selected by remember { mutableStateOf<StoredMac?>(null) }
+    selected?.let { mac ->
+        BackHandler { selected = null }
+        CommandInboxScreen(mac, onBack = { selected = null })
+        return
+    }
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -105,7 +116,7 @@ private fun MacsScreen() {
         Column(Modifier.widthIn(max = 720.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(24.dp)) {
             Text(stringResource(R.string.your_macs), style = MaterialTheme.typography.headlineLarge,
                 modifier = Modifier.semantics { heading() })
-            StoredMacList()
+            StoredMacList(onOpen = { selected = it })
             UpdateStatusCard()
             DevelopmentTools()
         }

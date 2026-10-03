@@ -32,7 +32,7 @@ import dev.remozio.android.RemozioApplication
 import kotlinx.coroutines.awaitCancellation
 
 @Composable
-internal fun StoredMacList() {
+internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
     val reader = (LocalContext.current.applicationContext as RemozioApplication).macs
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var retry by remember { mutableIntStateOf(0) }
@@ -71,6 +71,9 @@ internal fun StoredMacList() {
                         Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete else R.string.macs_not_connected),
                             style = MaterialTheme.typography.titleMedium)
                         Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete_description else R.string.macs_unknown_status))
+                        if (!mac.setupIncomplete) TextButton(onClick = { onOpen(mac) }) {
+                            Text(stringResource(R.string.commands_open))
+                        }
                     }
                 }
             }

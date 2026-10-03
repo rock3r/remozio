@@ -345,4 +345,19 @@
     <string name="command_action_awaiting">Waiting for the Mac to confirm your decision.</string>
     <string name="command_action_unavailable">This decision is unavailable. You can try again.</string>
     <string name="command_action_uncertain">Delivery is uncertain. The Mac may have received your decision.</string>
+    <string name="commands_open">View requests</string>
+    <string name="commands_back">Back to Macs</string>
+    <string name="commands_presence_unknown">Current Mac presence is unknown.</string>
+    <string name="commands_connecting">Connecting…</string>
+    <string name="commands_connected">Connected to the paired Mac</string>
+    <string name="commands_disconnected">Disconnected. Retained requests may have changed on the Mac.</string>
+    <string name="commands_reconnect">Reconnect</string>
+    <string name="commands_enrollment_unavailable">This pairing is no longer active. Return to the Mac list.</string>
+    <string name="commands_storage_unavailable">Request storage is unavailable. Unlock the phone and retry. Your pairing has not been reset.</string>
+    <string name="commands_connection_failed">The connection stopped. Check the Mac and network, then reconnect. No decision is resent automatically.</string>
+    <string name="commands_empty">No requests received in this session.</string>
+    <string name="commands_paired_account">Paired Mac account</string>
+    <string name="commands_request_number">Command request %1$d</string>
+    <string name="commands_waiting_status">Waiting for the Mac to confirm the request status.</string>
+    <string name="commands_review">Review request</string>
 </resources>

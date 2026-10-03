@@ -48,7 +48,7 @@ internal class CommandConnection(
 
     /** A foreground or wake owner runs this once per connection attempt. No automatic decision retry occurs. */
     suspend fun run() {
-        check(running.tryLock())
+        running.lock()
         var candidate: CommandConnectionWire? = null
         try {
             withContext(dispatcher) {

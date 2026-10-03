@@ -124,6 +124,20 @@ class CommandConnectionTest {
         assertFails { owner.run() }
     }
 
+    @Test fun reconnectWaitsForPreviousRunToReleaseItsWire() = runBlocking<Unit> {
+        val wires = mutableListOf<Wire>()
+        val owner = owner { _, _ -> Wire().also { wires += it } }
+        val first = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
+        val second = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
+        assertEquals(1, wires.size)
+        first.cancelAndJoin()
+        yield()
+        assertEquals(2, wires.size)
+        assertTrue(wires.first().closed)
+        assertEquals(CommandConnectionState.CONNECTED, owner.connectionState.value)
+        owner.close(); second.cancelAndJoin()
+    }
+
     @Test fun concurrentWritesSerializeAndClosureDoesNotReportSuccess() = runBlocking<Unit> {
         val wire = Wire(); lateinit var session: CommandRequestSession
         val owner = owner { _, enrollment -> wire.also { session = issued(enrollment) } }
