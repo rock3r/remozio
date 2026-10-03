@@ -9,12 +9,11 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.AtomicFile
 import androidx.annotation.WorkerThread
+import dev.remozio.android.storage.ExclusiveFileOwner
 import dev.remozio.phone.enrollment.*
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileNotFoundException
-import java.io.RandomAccessFile
-import java.nio.channels.FileLock
 import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -73,23 +72,9 @@ internal object AndroidEnrollmentStore {
 }
 
 private class EnrollmentFile(private val file: File) : EnrollmentStorage {
-    private val processLease = EnrollmentFileOwners.acquire(file.canonicalPath)
-    private val lockFile: RandomAccessFile
-    private val lock: FileLock
+    private val owner = ExclusiveFileOwner.acquire(File(file.path + ".lock"))
     private val atomic = AtomicFile(file)
     private var closed = false
-    init {
-        var opened: RandomAccessFile? = null
-        try {
-            val channelOwner = RandomAccessFile(File(file.path + ".lock"), "rw")
-            opened = channelOwner
-            lock = channelOwner.channel.tryLock() ?: throw EnrollmentStoreUnavailable()
-            lockFile = channelOwner
-        } catch (failure: Exception) {
-            try { opened?.close() } finally { processLease.close() }
-            throw failure
-        }
-    }
     fun hasArchive() = listOf(file, File(file.path + ".bak"), File(file.path + ".new")).any { it.exists() }
     @Synchronized override fun read(maximumBytes: Int): ByteArray? {
         check(!closed && maximumBytes > 0)
@@ -120,7 +105,7 @@ private class EnrollmentFile(private val file: File) : EnrollmentStorage {
     @Synchronized override fun close() {
         if (!closed) {
             closed = true
-            try { lock.release() } finally { try { lockFile.close() } finally { processLease.close() } }
+            owner.close()
         }
     }
 }
