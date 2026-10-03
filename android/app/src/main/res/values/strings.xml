@@ -141,4 +141,22 @@
     <string name="update_discard">Discard download</string>
     <string name="update_open_confirmation">Open Android confirmation</string>
     <string name="update_refresh_status">Refresh status</string>
+    <string name="update_check_error">Could not check GitHub for updates. Try again later.</string>
+    <string name="update_download_error">Download or verification failed. No update was installed.</string>
+    <string name="update_release_available">Release %1$s · %2$s</string>
+    <string name="update_download">Download and verify</string>
+    <string name="update_no_newer_release">No newer Android release was found.</string>
+    <string name="update_cancel_download">Cancel download</string>
+    <string name="update_check_now">Check for updates</string>
+    <string name="update_settings">Update settings</string>
+    <string name="update_settings_phone">Settings source: this phone</string>
+    <string name="update_settings_default">Settings source: app defaults</string>
+    <string name="update_automatic">Check on app open</string>
+    <string name="update_automatic_explanation">Check when you open or return to the app, after the interval below. Downloads start only when you ask.</string>
+    <string name="update_interval_hours">Minimum interval (hours)</string>
+    <string name="update_interval_range">From 1 to 168 hours</string>
+    <string name="update_prereleases">Include prereleases</string>
+    <string name="update_restore_defaults">Restore app defaults</string>
+    <string name="update_save_settings">Save</string>
+    <string name="update_cancel_settings">Cancel</string>
 </resources>
