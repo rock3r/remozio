@@ -84,6 +84,9 @@ class CommandRequestSession private constructor(
             requestDigest.copyBytes(), challenge.copyBytes(), phoneID, keyID, action))
     }
 
+    @Synchronized
+    internal fun isTerminal(): Boolean = !closure.value && capture == null
+
     /** Local invalidation is not an authority-signed terminal result. Old UI handles must stop displaying it. */
     @Synchronized
     override fun close() {

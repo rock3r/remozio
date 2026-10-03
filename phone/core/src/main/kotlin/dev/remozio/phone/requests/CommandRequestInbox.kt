@@ -6,12 +6,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** In-memory ownership errors. These are not remote request outcomes. */
-enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST, UNKNOWN_REQUEST }
+enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST, UNKNOWN_REQUEST, RETIRED_REQUEST }
 class InboxException(val reason: InboxRejection) : IllegalStateException(reason.name)
 
 /**
  * Local trusted code installs enrollment handles. Request delivery cannot create or replace enrollment.
- * Limits bound this in-memory window; no entry is silently evicted. This is not durable replay protection.
+ * Limits bound the live window. Configured retirement releases only persisted terminal handles, never active requests.
+ * The Mac still owns durable decision consumption and replay protection.
  */
 class CommandRequestInbox(private val maximumEnrollments: Int, private val maximumRequestsPerEnrollment: Int) : AutoCloseable {
     private data class Scope(val mac: CborValue.Bytes, val account: CborValue.Bytes)
@@ -22,12 +23,13 @@ class CommandRequestInbox(private val maximumEnrollments: Int, private val maxim
 
     /** IDs/key must come from completed trusted enrollment, never an incoming request or peer advertisement. */
     @Synchronized
-    fun add(macID: ByteArray, accountID: ByteArray, authorityKey: ByteArray, limits: RequestLimits): CommandRequestEnrollment {
+    fun add(macID: ByteArray, accountID: ByteArray, authorityKey: ByteArray, limits: RequestLimits,
+            retired: RetiredCommandRequests? = null): CommandRequestEnrollment {
         checkOpen()
         val scope = scope(macID, accountID)
         if (scope in enrollments) reject(InboxRejection.ALREADY_ENROLLED)
         if (enrollments.size >= maximumEnrollments) reject(InboxRejection.CAPACITY)
-        val enrollment = CommandRequestEnrollment(macID, accountID, authorityKey, limits, maximumRequestsPerEnrollment)
+        val enrollment = CommandRequestEnrollment(macID, accountID, authorityKey, limits, maximumRequestsPerEnrollment, retired)
         enrollments[scope] = enrollment
         return enrollment
     }
@@ -73,6 +75,7 @@ class CommandRequestInbox(private val maximumEnrollments: Int, private val maxim
 class CommandRequestEnrollment internal constructor(
     macID: ByteArray, accountID: ByteArray, authorityKey: ByteArray,
     internal val limits: RequestLimits, private val maximumRequests: Int,
+    private val retired: RetiredCommandRequests? = null,
 ) : AutoCloseable {
     val macID = CborValue.Bytes(macID)
     val accountID = CborValue.Bytes(accountID)
@@ -90,19 +93,33 @@ class CommandRequestEnrollment internal constructor(
     fun accept(body: ByteArray, signature: ByteArray): CommandRequestSession {
         if (closed) reject(InboxRejection.CLOSED)
         val candidate = CommandRequestSession.open(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits)
-        val existing = requests[candidate.identity]
-        if (existing != null) {
+        try {
+            val existing = requests[candidate.identity]
+            if (existing != null) {
+                candidate.close()
+                if (existing.requestDigest != candidate.requestDigest) reject(InboxRejection.CONFLICTING_REQUEST)
+                return existing
+            }
+            val remembered = retired?.lookup(candidate.identity.requestID.copyBytes())
+            if (remembered != null) {
+                if (!remembered.contentEquals(candidate.requestDigest.copyBytes())) reject(InboxRejection.CONFLICTING_REQUEST)
+                reject(InboxRejection.RETIRED_REQUEST)
+            }
+            if (requests.size >= maximumRequests) {
+                val terminal = if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() }
+                if (terminal == null) reject(InboxRejection.CAPACITY)
+                // Persist before removing the handle. A failed write leaves the visible window intact.
+                checkNotNull(retired).remember(terminal.key.requestID.copyBytes(), terminal.value.requestDigest.copyBytes())
+                requests.remove(terminal.key)
+                terminal.value.close()
+            }
+            requests[candidate.identity] = candidate
+            publishedSessions.value = Collections.unmodifiableList(requests.values.toList())
+            return candidate
+        } catch (failure: Throwable) {
             candidate.close()
-            if (existing.requestDigest != candidate.requestDigest) reject(InboxRejection.CONFLICTING_REQUEST)
-            return existing
+            throw failure
         }
-        if (requests.size >= maximumRequests) {
-            candidate.close()
-            reject(InboxRejection.CAPACITY)
-        }
-        requests[candidate.identity] = candidate
-        publishedSessions.value = Collections.unmodifiableList(requests.values.toList())
-        return candidate
     }
 
     /** Local ownership handoff only. Reconnect keeps the existing request window. */
@@ -124,13 +141,23 @@ class CommandRequestEnrollment internal constructor(
         val body = message.body.copyBytes()
         val signature = message.signature.copyBytes()
         when (message.type) {
-            ApprovalMessageType.REQUEST -> accept(body, signature)
+            ApprovalMessageType.REQUEST -> try { accept(body, signature) } catch (failure: InboxException) {
+                if (failure.reason != InboxRejection.RETIRED_REQUEST) throw failure
+            }
             ApprovalMessageType.STATUS -> {
                 val claim = RequestStatusPayload.decode(body, limits.status)
                 val key = CommandRequestIdentity(CborValue.Bytes(claim.macID), CborValue.Bytes(claim.accountID),
                     CborValue.Bytes(claim.requestID))
-                val session = requests[key] ?: reject(InboxRejection.UNKNOWN_REQUEST)
-                session.observe(body, signature, receivedAt)
+                val session = requests[key]
+                if (session != null) session.observe(body, signature, receivedAt)
+                else {
+                    val digest = retired?.lookup(claim.requestID) ?: reject(InboxRejection.UNKNOWN_REQUEST)
+                    require(claim.macID.contentEquals(macID.copyBytes()) && claim.accountID.contentEquals(accountID.copyBytes()) &&
+                        claim.requestDigest.contentEquals(digest))
+                    require(ApprovalSignature.verify(signature, authorityKey, 1u, ApprovalMessageType.STATUS, SigningPurpose.STATUS,
+                        body, limits.status, limits.signing))
+                    // Authenticated repeats cannot recreate a retired terminal request, even with an older phase.
+                }
             }
             ApprovalMessageType.DECISION -> throw IllegalArgumentException("Unexpected inbound decision")
         }
@@ -142,12 +169,14 @@ class CommandRequestEnrollment internal constructor(
 
     @Synchronized
     override fun close() {
+        if (closed) return
         closed = true
         receiver?.close()
         receiver = null
         requests.values.forEach { it.close() }
         requests.clear()
         publishedSessions.value = emptyList()
+        retired?.close()
     }
 }
 

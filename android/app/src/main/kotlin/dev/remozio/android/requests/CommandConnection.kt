@@ -25,6 +25,7 @@ internal class CommandConnection(
     private val open: suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire,
     private val clock: () -> ElapsedInstant,
     maximumRequests: Int = 128,
+    retired: RetiredCommandRequests? = null,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : AutoCloseable {
     private val inbox = CommandRequestInbox(1, maximumRequests)
@@ -42,7 +43,7 @@ internal class CommandConnection(
     init {
         require(record.phase == EnrollmentPhase.ACTIVE)
         val e = record.enrollment
-        enrollment = inbox.add(e.macID.copyBytes(), e.accountID.copyBytes(), e.authorityPublicKey.copyBytes(), limits)
+        enrollment = inbox.add(e.macID.copyBytes(), e.accountID.copyBytes(), e.authorityPublicKey.copyBytes(), limits, retired)
     }
 
     /** A foreground or wake owner runs this once per connection attempt. No automatic decision retry occurs. */
