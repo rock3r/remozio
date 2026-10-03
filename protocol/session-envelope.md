@@ -43,7 +43,7 @@ Negotiated metadata is an immutable snapshot, not an admission token. The enroll
 
 ## Evidence and remaining integration
 
-Swift and Kotlin tests share a canonical envelope example, including the full unsigned sequence range. Host tests cover fragmented headers, confirmation coalesced with application data, invalid session IDs, replay, invalid length headers, handshake deadlines, cancellation, and invalid configuration cleanup.
+Swift and Kotlin tests share a canonical envelope example, including the full unsigned sequence range. Host tests cover fragmented headers, chunks with nonzero collection indices, confirmation coalesced with application data, invalid session IDs, replay, invalid length headers, handshake deadlines, cancellation, and invalid configuration cleanup.
 
 The debug-only native TLS peer can run the actual Mac host with a fixed synthetic enrollment scope. Kotlin interoperability tests use the actual phone host through the existing local HTTPS/WebSocket relay. They exchange multiple session-bound payloads and reject a wrong enrollment scope. The fixture remains loopback-only, uses disposable keys, refuses root and release builds, and terminates when its controller pipe closes. It processes no real requests or decisions.
 

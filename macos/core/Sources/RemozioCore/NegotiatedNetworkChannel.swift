@@ -145,10 +145,11 @@ public actor NegotiatedNetworkChannel {
                     throw ApprovalChannelError.closed
                 }
                 guard (1...32_768).contains(next.count) else { throw ApprovalChannelError.invalidInput }
-                pending = Data(next); offset = 0
+                pending = next; offset = 0
             }
             let take = min(count - result.count, pending.count - offset)
-            result.append(pending[offset..<(offset + take)]); offset += take
+            let start = pending.index(pending.startIndex, offsetBy: offset)
+            result.append(pending[start..<pending.index(start, offsetBy: take)]); offset += take
         }
         return result
     }

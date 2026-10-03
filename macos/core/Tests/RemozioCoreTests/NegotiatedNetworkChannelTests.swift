@@ -13,13 +13,16 @@ final class NegotiatedNetworkChannelTests: XCTestCase, @unchecked Sendable {
         let fragment: Int
         let replay: Bool
         let wrongSession: Bool
+        let slicedChunks: Bool
+        var returnedNonzeroIndex = false
         var input: [Data] = []
         var output = Data()
         var phase = 0
         var closes = 0
         var received: Data?
         var openingTimeout: UInt64?
-        init(scope: ChannelScope, fragment: Int = 32_768, initial: Data? = nil, replay: Bool = false, wrongSession: Bool = false) throws {
+        init(scope: ChannelScope, fragment: Int = 32_768, initial: Data? = nil, replay: Bool = false, wrongSession: Bool = false, slicedChunks: Bool = false) throws {
+            self.slicedChunks = slicedChunks
             self.fragment = fragment; self.replay = replay; self.wrongSession = wrongSession
             let handshake = try ChannelNegotiation(local: ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 9, count: 32),
                 envelopeVersions: [1], requests: [], auditVersions: []), trustedMinimum: 1)
@@ -29,7 +32,13 @@ final class NegotiatedNetworkChannelTests: XCTestCase, @unchecked Sendable {
         }
         func awaitOpen(timeoutMilliseconds: UInt64) async throws { openingTimeout = timeoutMilliseconds }
         func receive() async throws -> Data? {
-            if !input.isEmpty { return input.removeFirst() }
+            if !input.isEmpty {
+                let chunk = input.removeFirst()
+                if !slicedChunks { return chunk }
+                let slice = (Data([0]) + chunk).dropFirst()
+                returnedNonzeroIndex = returnedNonzeroIndex || slice.startIndex != 0
+                return slice
+            }
             try await Task.sleep(for: .seconds(60)); return nil
         }
         func send(_ bytes: Data) async throws {
@@ -80,6 +89,20 @@ final class NegotiatedNetworkChannelTests: XCTestCase, @unchecked Sendable {
             let received = await phone.received; XCTAssertEqual(received, Data([1, 2, 3]))
             await channel.closeAndWait()
             do { _ = try await channel.negotiated(); XCTFail("Closed metadata must fail") } catch { }
+        }
+    }
+    func testFramesAcceptChunksWithNonzeroIndices() async throws {
+        for fragment in [1, 32_768] {
+            let phone = try Phone(scope: scope(), fragment: fragment, slicedChunks: true)
+            let channel = try await connect(phone)
+            let payload = try await channel.receive()
+            XCTAssertEqual(payload, Data([7, 8]))
+            try await channel.send(Data([1, 2, 3]))
+            let received = await phone.received
+            XCTAssertEqual(received, Data([1, 2, 3]))
+            let returnedNonzeroIndex = await phone.returnedNonzeroIndex
+            XCTAssertTrue(returnedNonzeroIndex)
+            await channel.closeAndWait()
         }
     }
     func testWrongSessionAndReplayCloseTheOwner() async throws {
