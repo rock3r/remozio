@@ -77,3 +77,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Phone routing controls](routing-away.md) define the separately signed Away-only command for an enrolled Mac/account.
 
 The [channel negotiation contract](channel-negotiation.md) binds bounded capability offers, fresh nonces, and version selection to one enrolled TLS connection.
+
+The [negotiated message hosts](session-envelope.md) preserve framing across the handshake and bind application payloads to session IDs and sequences.
