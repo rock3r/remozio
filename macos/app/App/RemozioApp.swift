@@ -36,6 +36,7 @@ struct RemozioApp: App {
 }
 
 private struct SetupOverview: View {
+    @State private var showingSetupPreview = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -55,6 +56,7 @@ private struct SetupOverview: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                 }
+                Button("Preview setup file…") { showingSetupPreview = true }
                 HStack {
                     SettingsLink()
                     Spacer()
@@ -66,6 +68,7 @@ private struct SetupOverview: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 440, minHeight: 340)
+        .sheet(isPresented: $showingSetupPreview) { SetupFilePreview() }
     }
 }
 
