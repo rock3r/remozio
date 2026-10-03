@@ -59,16 +59,4 @@ final class PinnedTLSPeerTests: XCTestCase {
         for data in badPins { XCTAssertThrowsError(try PinnedTLSPeer(subjectPublicKeyInfo: data)) }
     }
 
-    func testTrustAdapterUsesTheLeafRatherThanAnIntermediate() throws {
-        let peer = try PinnedTLSPeer(subjectPublicKeyInfo: fixture("peer.spki"))
-        let data = try fixture("peer.der")
-        let right = try XCTUnwrap(SecCertificateCreateWithData(nil, data as CFData))
-        let wrong = try XCTUnwrap(SecCertificateCreateWithData(nil, fixture("wrong.der") as CFData))
-        let (before, _) = try interval(data)
-        for (chain, accepted) in [([right, wrong], true), ([wrong, right], false)] {
-            var trust: SecTrust?
-            XCTAssertEqual(SecTrustCreateWithCertificates(chain as CFArray, SecPolicyCreateBasicX509(), &trust), errSecSuccess)
-            XCTAssertEqual(peer.accepts(try XCTUnwrap(trust), at: before.addingTimeInterval(1)), accepted)
-        }
-    }
 }

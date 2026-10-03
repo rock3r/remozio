@@ -30,9 +30,13 @@ final class Probe: @unchecked Sendable {
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
         sec_protocol_options_add_tls_application_protocol(options, "remozio-experiment/1")
-        sec_protocol_options_set_verify_block(options, { _, trust, complete in
-            let reference = sec_trust_copy_ref(trust).takeRetainedValue()
-            complete(peer.accepts(reference))
+        sec_protocol_options_set_verify_block(options, { metadata, _, complete in
+            var leaf: SecCertificate?
+            let accessible = sec_protocol_metadata_access_peer_certificate_chain(metadata) { certificate in
+                if leaf == nil { leaf = sec_certificate_copy_ref(certificate).takeRetainedValue() }
+            }
+            guard accessible, let leaf else { complete(false); return }
+            complete(peer.accepts(certificate: SecCertificateCopyData(leaf) as Data))
         }, queue)
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)

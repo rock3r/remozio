@@ -17,13 +17,7 @@ public struct PinnedTLSPeer: Sendable {
         publicKey = key.x963Representation
     }
 
-    /// Uses the presented leaf without invoking system CA trust or network certificate discovery.
-    public func accepts(_ trust: SecTrust, at date: Date = Date()) -> Bool {
-        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-              let leaf = chain.first else { return false }
-        return accepts(certificate: SecCertificateCopyData(leaf) as Data, at: date)
-    }
-
+    /// Checks a presented leaf without invoking system CA trust or network certificate discovery.
     public func accepts(certificate encoded: Data, at date: Date = Date()) -> Bool {
         guard date.timeIntervalSinceReferenceDate.isFinite,
               !encoded.isEmpty, encoded.count <= 8_192,
