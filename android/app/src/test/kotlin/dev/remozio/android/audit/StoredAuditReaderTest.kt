@@ -159,19 +159,23 @@ class StoredAuditReaderTest {
 
     @Test fun retainedAuthorityBindingsRetryOnlyAuthenticationMismatch() = runBlocking {
         val f = Fixture()
-        f.add(1, removed = true)
+        val former = f.add(1, removed = true).also { it.populate() }
         val current = f.add(2, mac = 1).also { it.populate() }
         val reader = f.reader()
         val result = assertIs<StoredAuditState.Ready>(reader.read())
         assertEquals(1, result.scopes.size)
         assertIs<CachedAuditContent.Loaded>(result.scopes.single().content)
-        assertEquals(2, current.opens)
-        assertEquals(2, current.closes)
-        current.bytes = byteArrayOf(1, 2, 3)
+        assertEquals(1, current.opens)
+        assertEquals(1, current.closes)
+        f.archives[current.record.macID] = former
+        assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().content)
+        assertEquals(2, former.opens)
+        assertEquals(2, former.closes)
+        former.bytes = byteArrayOf(1, 2, 3)
         assertSame(CachedAuditContent.Unavailable, assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().content)
-        assertEquals(3, current.opens)
-        assertEquals(3, current.closes)
-        assertEquals(0, current.writes)
+        assertEquals(3, former.opens)
+        assertEquals(3, former.closes)
+        assertEquals(0, former.writes + current.writes)
         f.enrollment.close()
     }
 

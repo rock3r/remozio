@@ -89,7 +89,8 @@ internal class StoredAuditReader(
 
     private suspend fun readScope(entries: List<StoredPhoneEnrollment>, maximumBytes: Int,
                                   category: AuditCategory?, outcome: AuditOutcome?): CachedAuditContent {
-        val bindings = entries.map { it.enrollment }.distinctBy { it.authorityPublicKey }
+        val bindings = entries.asReversed().sortedBy { it.phase != EnrollmentPhase.ACTIVE }
+            .map { it.enrollment }.distinctBy { it.authorityPublicKey }
         try {
             for (entry in bindings) {
                 currentCoroutineContext().ensureActive()
