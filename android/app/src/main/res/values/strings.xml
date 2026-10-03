@@ -115,4 +115,8 @@
     <string name="request_notification_channel">Request notifications</string>
     <string name="request_notification_channel_description">Generic notifications to check requests from your Macs.</string>
     <string name="request_notification_generic">Requests may be waiting. Open Remozio to check.</string>
+    <string name="update_notification_channel">App updates</string>
+    <string name="update_confirmation_ready">Tap to confirm the Remozio update.</string>
+    <string name="update_needs_attention">Open Remozio to check the pending update.</string>
+    <string name="update_confirmation_unavailable">This update confirmation is no longer available.</string>
 </resources>

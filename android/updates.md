@@ -100,3 +100,17 @@ An unresolved record survives reopening and prevents another reservation. Commit
 JVM tests execute the shared SQL against SQLite through a test-only JDBC adapter. They cover reopening, rollback, concurrent reservations through separate connections, stale callbacks, early callbacks, terminal ordering, and invalid stored state. They do not prove Android filesystem durability under power loss. Native callbacks, session reconciliation, and the launcher owner remain integration work. No update record is opened automatically by the launcher yet.
 
 Storage references: [Android SQLite configuration](https://developer.android.com/reference/android/database/sqlite/SQLiteDatabase.OpenParams.Builder) and [test driver release](https://github.com/xerial/sqlite-jdbc/releases/tag/3.53.4.0).
+
+## Private installer callbacks
+
+`updateStatusReceiver` binds the reserved attempt to its native session ID and returns an explicit mutable broadcast capability. The manifest receiver is not exported. Its fixed action and data URI contain the session ID and fresh nonce. The receiver rejects mismatched IDs, malformed identities, preapproval results, and unknown status codes. It also checks the stored package and phase. Free-form platform status messages are neither stored nor logged.
+
+A single bounded worker processes callbacks off the UI thread. Accepted terminal callbacks update the durable record before notification cleanup. Notification failures cannot turn installation success into failure. An unprocessed callback or storage failure leaves the prior record unresolved; the host must reconcile it. The receiver never commits, retries, or abandons an installation.
+
+For pending user action, the receiver retains Android's confirmation intent inside an immutable `PendingIntent` targeting a private activity. The activity rechecks the current record before opening Android's confirmation screen. The receiver does not launch an activity in the background. A separate App updates notification channel gives the user an explicit entry point. Notifications can be disabled without changing the recorded installation phase.
+
+`UpdateConfirmationNotifications.existing` uses the fixed attempt identity and `FLAG_NO_CREATE` to retrieve an existing system token. It does not create a replacement confirmation or serialize an arbitrary intent to disk. The future foreground update UI can use this lookup even after its process restarts. Token retention is best effort: missing tokens, reboot, package replacement, and disabled-notification behavior need real-device evidence. A missing token must be shown as unavailable while the durable attempt remains unresolved. It must never trigger another installer commit automatically.
+
+Parser tests cover canonical identities, wrong session IDs, preapproval rejection, terminal status mapping, and unknown codes. Existing SQLite tests cover callback ordering and stale attempts. Native broadcast isolation, notification taps, confirmation token recovery, and package replacement remain part of the Pixel session. Release discovery, download UI, and the update owner are not connected to the launcher yet.
+
+Callback references: [installer commit](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session#commit(android.content.IntentSender)) and [system-held PendingIntent tokens](https://developer.android.com/reference/android/app/PendingIntent).
