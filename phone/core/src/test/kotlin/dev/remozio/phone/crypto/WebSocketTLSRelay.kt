@@ -1,5 +1,8 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.phone.transport.RelayConnector
+import dev.remozio.phone.transport.RelayEndpoint
+import dev.remozio.phone.transport.WebSocketUpgrade
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.InetAddress
@@ -22,7 +25,7 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 
 /** Test carrier only: TLS records cross a local WSS endpoint with an independent outer certificate. */
-internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, bridgeClient: Boolean = true) : AutoCloseable {
+internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, bridgeClient: Boolean = true, connectorMode: Boolean = false) : AutoCloseable {
     private val server = MockWebServer()
     private val local = if (bridgeClient) ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")) else null
     val port: Int get() = requireNotNull(local).localPort
@@ -35,6 +38,8 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, 
     private val webSockets = CopyOnWriteArrayList<WebSocket>()
     private val serverWebSockets = CopyOnWriteArrayList<WebSocket>()
     private val client: OkHttpClient
+    val connector: RelayConnector
+    val endpoint: RelayEndpoint get() = RelayEndpoint("localhost", server.port, "/tls")
     @Volatile private var upstream: Socket? = null
 
     init {
@@ -44,6 +49,7 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, 
         val clientTrust = HandshakeCertificates.Builder().apply {
             addTrustedCertificate(if (trustOuter) outer.certificate else HeldCertificate.Builder().build().certificate)
         }.build()
+        connector = RelayConnector(clientTrust.sslSocketFactory())
         server.useHttps(serverKeys.sslSocketFactory())
         server.enqueue(MockResponse.Builder().webSocketUpgrade(object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -79,7 +85,7 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, 
                 webSocket.close(code, reason); runCatching { upstream?.close() }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { runCatching { upstream?.close() } }
-        }).build())
+        }).apply { if (connectorMode) addHeader("Sec-WebSocket-Protocol", WebSocketUpgrade.PROTOCOL) }.build())
         server.start(InetAddress.getByName("127.0.0.1"), 0)
         client = OkHttpClient.Builder().sslSocketFactory(clientTrust.sslSocketFactory(), clientTrust.trustManager)
             .connectTimeout(3, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()

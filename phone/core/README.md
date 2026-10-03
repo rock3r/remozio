@@ -1,6 +1,6 @@
 # Phone request core
 
-This Kotlin/JVM module owns authenticated command sessions and signed status tracking. The Android app uses these classes directly. They contain no Android platform APIs, socket I/O, approval controls, or embedded private keys. The audit core owns encrypted storage through caller-supplied adapters.
+This Kotlin/JVM module owns authenticated command sessions and signed status tracking. The Android app uses these classes directly. They contain no Android platform APIs, approval controls, or embedded private keys. The transport package owns the optional relay socket connection. The audit core owns encrypted storage through caller-supplied adapters.
 
 A session verifies a command against caller-supplied trusted enrollment identity. It retains the typed capture until a verified terminal status clears it. The status tracker preserves request bindings, revision ordering, outcome continuity, and elapsed-time bounds. The caller still owns enrollment invalidation and clock sampling.
 
@@ -28,6 +28,8 @@ The [TLS channel experiment](../../docs/experiments/tls-channel.md) adds a loopb
 
 The [WebSocket carrier extension](../../docs/experiments/websocket-carrier.md) keeps outer relay authentication separate from the inner Mac pin. OkHttp dependencies remain test-only.
 
-The [phone TLS engine](TRANSPORT.md) accepts ordered ciphertext without a local socket bridge. The host supplies an enrollment key manager and peer key pin. Carrier and Android hardware integration remain separate work.
+The [phone TLS engine](TRANSPORT.md) accepts ordered ciphertext without a local socket bridge. The host supplies an enrollment key manager and peer key pin. The relay connector supplies the outer carrier. Android hardware and enrollment integration remain separate work.
 
 `WebSocketRecordTransport` provides [bounded runtime framing](TRANSPORT.md#bounded-websocket-records) through Ktor WebSockets 3.6.0. Its host still owns authenticated HTTPS setup and enrollment lifecycle.
+
+The [relay connector](RELAY.md) authenticates outer HTTPS and validates the upgrade before bounded framing starts. Its host supplies trusted enrollment data and scoped Access credentials.
