@@ -15,3 +15,9 @@ The encrypted archive and repository pass host tests with disposable keys and a 
 - Confirm backup/transfer exclusion and verify that raw command text, credentials and UI captures never enter the archive or diagnostics.
 
 These checks do not establish protection against a rooted phone or restoration of an older complete encrypted archive. A cache never authorizes an action, rewrites Mac history or replaces independent trust recovery.
+
+## Cache ownership across local opens
+
+The audit cache and enrollment archive use `ExclusiveFileOwner`. It reserves the canonical lock path before opening any channel, then retains the OS lock until close. A rejected local open therefore cannot close a competing channel and accidentally release the original process-wide lock. Failed acquisition releases the reservation. Repeated close cannot release a replacement owner.
+
+A disposable JDK 21 probe on macOS reproduced the original hazard: a second process acquired the lock after a rejected second channel closed, while the original `FileLock.isValid` still returned true. JVM regression tests now check cross-process exclusion before and after a rejected second open, release after close, canonical paths, and acquisition failure. This evidence does not prove Android filesystem behavior; the Pixel check remains pending.

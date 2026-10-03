@@ -6,14 +6,13 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.util.AtomicFile
+import dev.remozio.android.storage.ExclusiveFileOwner
 import dev.remozio.phone.audit.*
 import dev.remozio.protocol.CborLimits
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
-import java.io.RandomAccessFile
-import java.nio.channels.FileLock
 import java.security.KeyStore
 import java.security.MessageDigest
 import javax.crypto.KeyGenerator
@@ -79,14 +78,9 @@ private object AuditCacheKey {
 
 /** Holds an OS file lock for the whole cache lifetime. AtomicFile itself provides no mutual exclusion. */
 private class AndroidAuditStorage(private val base: File) : AuditCiphertextStorage {
-    private val lockFile = RandomAccessFile(File(base.path + ".lock"), "rw")
-    private val lock: FileLock
+    private val owner = ExclusiveFileOwner.acquire(File(base.path + ".lock"))
     private val atomic = AtomicFile(base)
     private var closed = false
-    init {
-        try { lock = lockFile.channel.tryLock() ?: throw IOException("Audit cache already open") }
-        catch (failure: Throwable) { lockFile.close(); throw failure }
-    }
 
     @Synchronized
     fun hasArchive(): Boolean = listOf(base, File(base.path + ".bak"), File(base.path + ".new")).any { it.exists() }
@@ -131,7 +125,7 @@ private class AndroidAuditStorage(private val base: File) : AuditCiphertextStora
     override fun close() {
         if (!closed) {
             closed = true
-            try { lock.release() } finally { lockFile.close() }
+            owner.close()
         }
     }
 }
