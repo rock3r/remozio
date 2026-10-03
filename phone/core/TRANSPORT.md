@@ -33,6 +33,6 @@ Calls serialize engine operations. Delegated key tasks run synchronously and can
 
 ## Validation and remaining work
 
-`TLSInteropTest` exercises the engine against the native Swift loopback peer using disposable keys. It covers fragmented records, a large application frame, peer pin and ALPN rejection, handshake/input limits, abort, and abrupt EOF. The existing socket and WebSocket experiments remain separate fixtures.
+`TLSInteropTest` exercises the engine against the native Swift loopback peer using disposable keys. It covers fragmented records, a large application frame, peer pin and ALPN rejection, handshake/input limits, abort, and abrupt EOF. The [direct WebSocket extension](../../docs/experiments/websocket-carrier.md#direct-phone-engine-extension) also feeds this engine without a local client bridge. The earlier socket experiments remain separate fixtures.
 
-The engine is a phone-core component, not a wired Android connection. A direct WebSocket adapter, lifecycle owner, current-enrollment integration, and Android Keystore identity manager remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
+The engine is a phone-core component, not a wired Android connection. A runtime WebSocket adapter with verified parser limits, lifecycle owner, current-enrollment integration, and Android Keystore identity manager remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.

@@ -235,6 +235,57 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun engineUsesWebSocketDirectlyWithoutAClientSocketBridge(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port, bridgeClient = false).use { relay ->
+            f.engine().use { engine ->
+                EngineWebSocketFixture(relay, engine).use { driver ->
+                    driver.handshake()
+                    val payload = "synthetic-direct-engine-request".repeat(2_000).toByteArray()
+                    assertArrayEquals(payload, driver.exchange(payload))
+                    assertTrue(relay.outerAuthenticated.get())
+                    assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("synthetic-direct-engine-request"))
+                }
+            }
+        }
+    }
+
+    @Test fun directWebSocketCannotOverrideTheEnginePin(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port, bridgeClient = false).use { relay ->
+            f.engine(pin = f.phone.certificate).use { engine ->
+                EngineWebSocketFixture(relay, engine).use { driver ->
+                    assertThrows(IOException::class.java) { driver.handshake() }
+                    assertEquals(TLSClientState.FAILED, engine.state())
+                    assertTrue(relay.outerAuthenticated.get())
+                }
+            }
+        }
+    }
+
+    @Test fun directWebSocketRejectsOuterTrustFailureBeforeInnerBytes(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port, trustOuter = false, bridgeClient = false).use { relay ->
+            f.engine().use { engine ->
+                EngineWebSocketFixture(relay, engine).use { driver ->
+                    assertThrows(IOException::class.java) { driver.handshake() }
+                    assertFalse(relay.outerAuthenticated.get())
+                    assertEquals(0, relay.capture().size)
+                    assertEquals(TLSClientState.NEW, engine.state())
+                }
+            }
+        }
+    }
+
+    @Test fun directWebSocketTamperingCannotProduceAnEngineReply(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port, bridgeClient = false).use { relay ->
+            f.engine().use { engine ->
+                EngineWebSocketFixture(relay, engine).use { driver ->
+                    driver.handshake(); relay.tamper.set(true)
+                    assertThrows(IOException::class.java) { driver.exchange("synthetic-direct-tamper".toByteArray()) }
+                    assertTrue(relay.outerAuthenticated.get()); assertTrue(relay.changed.get())
+                }
+            }
+        }
+    }
+
     private fun exchange(socket: SSLSocket, payload: ByteArray): ByteArray {
         DataOutputStream(socket.outputStream).apply { writeInt(payload.size); write(payload); flush() }
         val input = DataInputStream(socket.inputStream)
