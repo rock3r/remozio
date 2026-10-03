@@ -1,6 +1,7 @@
 package dev.remozio.android
 
 import android.os.Bundle
+import dev.remozio.android.updates.UpdateStatusCard
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -74,6 +75,7 @@ private fun EmptyMacsScreen() {
                         Text(stringResource(R.string.pairing_empty_description), style = MaterialTheme.typography.bodyLarge)
                     }
                 }
+                UpdateStatusCard()
                 DevelopmentTools()
             }
         }

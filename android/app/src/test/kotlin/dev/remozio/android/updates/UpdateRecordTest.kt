@@ -1,7 +1,6 @@
 package dev.remozio.android.updates
 
 import java.nio.file.Files
-import java.sql.DriverManager
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlin.test.*
@@ -11,51 +10,6 @@ class UpdateRecordTest {
     private val pkg = "dev.remozio.android"
     private val attempt = InstallAttempt(7, pkg, 2)
 
-    private class Database(path: String) : UpdateRecordDatabase {
-        private val connection = DriverManager.getConnection("jdbc:sqlite:$path")
-        var failCommit = false
-        var failAfterCommit = false
-        init {
-            execute("PRAGMA journal_mode = DELETE")
-            execute("PRAGMA synchronous = EXTRA")
-            execute("PRAGMA busy_timeout = 5000")
-        }
-        @Synchronized override fun <T> transaction(block: () -> T): T {
-            execute("BEGIN IMMEDIATE")
-            var committed = false
-            try {
-                val result = block()
-                if (failCommit) error("Injected commit failure")
-                execute("COMMIT")
-                committed = true
-                if (failAfterCommit) error("Injected lost commit reply")
-                return result
-            } catch (error: Throwable) {
-                if (!committed) execute("ROLLBACK")
-                throw error
-            }
-        }
-        override fun execute(sql: String, vararg values: Any?) {
-            connection.prepareStatement(sql).use { statement ->
-                values.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
-                statement.execute()
-            }
-        }
-        override fun rows(sql: String): List<List<Any?>> = connection.createStatement().use { statement ->
-            statement.executeQuery(sql).use { result ->
-                buildList {
-                    while (result.next()) add(List(result.metaData.columnCount) { index ->
-                        when (val value = result.getObject(index + 1)) {
-                            is Int -> value.toLong()
-                            else -> value
-                        }
-                    })
-                }
-            }
-        }
-        override fun close() = connection.close()
-    }
-
     private fun withFile(test: (String) -> Unit) {
         val directory = Files.createTempDirectory("update-record-test")
         try { test(directory.resolve("record.sqlite").toString()) }
@@ -63,12 +17,12 @@ class UpdateRecordTest {
     }
 
     @Test fun reopensUnresolvedIntentAndRefusesAnotherAttempt() = withFile { path ->
-        val record = UpdateRecordStore(Database(path)).use { store ->
+        val record = UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             val record = store.reserve(pkg, 2)
             store.bind(record.nonce, 7)
             store.recordCommitIntent(record.nonce, attempt)
         }
-        UpdateRecordStore(Database(path)).use { store ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             assertEquals(record, store.snapshot())
             assertEquals(UpdatePhase.INTENT, record.phase)
             assertFails { store.reserve(pkg, 3) }
@@ -77,7 +31,7 @@ class UpdateRecordTest {
     }
 
     @Test fun rejectsUnboundAndStaleCallbacksAndKeepsFirstTerminalResult() = withFile { path ->
-        UpdateRecordStore(Database(path)).use { store ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             val first = store.reserve(pkg, 2)
             assertFalse(store.callback(first.nonce, 7, UpdatePhase.SUCCESS))
             store.bind(first.nonce, 7)
@@ -100,7 +54,7 @@ class UpdateRecordTest {
     }
 
     @Test fun callbackBeforeSubmissionReturnDoesNotRegress() = withFile { path ->
-        UpdateRecordStore(Database(path)).use { store ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             val record = store.reserve(pkg, 2)
             store.bind(record.nonce, 7)
             store.recordCommitIntent(record.nonce, attempt)
@@ -112,14 +66,14 @@ class UpdateRecordTest {
     }
 
     @Test fun uncertainSubmissionSurvivesReopenWithoutRetry() = withFile { path ->
-        val nonce = UpdateRecordStore(Database(path)).use { store ->
+        val nonce = UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             val record = store.reserve(pkg, 2)
             store.bind(record.nonce, 7)
             store.recordCommitIntent(record.nonce, attempt)
             store.submitted(record.nonce, InstallSubmission(attempt, InstallSubmissionState.UNKNOWN))
             record.nonce
         }
-        UpdateRecordStore(Database(path)).use { store ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             assertEquals(UpdatePhase.UNKNOWN, store.snapshot()!!.phase)
             assertFails { store.reserve(pkg, 3) }
             assertTrue(store.callback(nonce, 7, UpdatePhase.SUCCESS))
@@ -127,7 +81,7 @@ class UpdateRecordTest {
     }
 
     @Test fun failedCommitRollsBackAndDoesNotReturnPermissionToCommit() = withFile { path ->
-        val db = Database(path)
+        val db = UpdateRecordTestDatabase(path)
         UpdateRecordStore(db).use { store ->
             val record = store.reserve(pkg, 2)
             store.bind(record.nonce, 7)
@@ -141,11 +95,11 @@ class UpdateRecordTest {
             db.failCommit = false
             assertEquals(UpdatePhase.BOUND, store.snapshot()!!.phase)
         }
-        UpdateRecordStore(Database(path)).use { assertEquals(UpdatePhase.BOUND, it.snapshot()!!.phase) }
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { assertEquals(UpdatePhase.BOUND, it.snapshot()!!.phase) }
     }
 
     @Test fun lostStorageReplyKeepsIntentButDoesNotAuthorizeNativeCommit() = withFile { path ->
-        val db = Database(path)
+        val db = UpdateRecordTestDatabase(path)
         UpdateRecordStore(db).use { store ->
             val record = store.reserve(pkg, 2)
             store.bind(record.nonce, 7)
@@ -158,15 +112,15 @@ class UpdateRecordTest {
             assertFalse(nativeCommitCalled)
             db.failAfterCommit = false
         }
-        UpdateRecordStore(Database(path)).use { store ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             assertEquals(UpdatePhase.INTENT, store.snapshot()!!.phase)
             assertFails { store.reserve(pkg, 3) }
         }
     }
 
     @Test fun separateConnectionsReserveOnlyOnePendingAttempt() = withFile { path ->
-        UpdateRecordStore(Database(path)).use { first ->
-            UpdateRecordStore(Database(path)).use { second ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { first ->
+            UpdateRecordStore(UpdateRecordTestDatabase(path)).use { second ->
                 val executor = Executors.newFixedThreadPool(2)
                 try {
                     val start = CountDownLatch(1)
@@ -183,7 +137,7 @@ class UpdateRecordTest {
     }
 
     @Test fun refusesUnsupportedSchemaAndPreservesExistingData() = withFile { path ->
-        Database(path).use { db ->
+        UpdateRecordTestDatabase(path).use { db ->
             db.execute("CREATE TABLE future_state(value TEXT)")
             db.execute("INSERT INTO future_state VALUES('retain')")
             db.execute("PRAGMA user_version = 2")
@@ -192,8 +146,8 @@ class UpdateRecordTest {
         }
     }
 
-    @Test fun refusesUnversionedNonemptyDatabase() = withFile { path ->
-        Database(path).use { db ->
+    @Test fun refusesUnversionedNonemptyUpdateRecordTestDatabase() = withFile { path ->
+        UpdateRecordTestDatabase(path).use { db ->
             db.execute("CREATE TABLE other_state(value TEXT)")
             assertFails { UpdateRecordStore(db) }
             assertEquals(listOf(listOf(0L)), db.rows("PRAGMA user_version"))
@@ -205,7 +159,7 @@ class UpdateRecordTest {
             "nonce = 'bad'", "version_code = 'oops'", "version_code = 0",
             "session_id = 2147483648", "phase = 'FUTURE'", "phase = 'SUCCESS'",
         )
-        Database(path).use { db ->
+        UpdateRecordTestDatabase(path).use { db ->
             val store = UpdateRecordStore(db)
             val record = store.reserve(pkg, 2)
             for (mutation in mutations) {
@@ -219,7 +173,7 @@ class UpdateRecordTest {
     }
 
     @Test fun explicitPreIntentAbandonAllowsNewReservation() = withFile { path ->
-        UpdateRecordStore(Database(path)).use { store ->
+        UpdateRecordStore(UpdateRecordTestDatabase(path)).use { store ->
             val record = store.reserve(pkg, 2)
             store.abandonBeforeIntent(record.nonce)
             assertEquals(UpdatePhase.ABANDONED, store.snapshot()!!.phase)

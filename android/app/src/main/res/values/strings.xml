@@ -119,4 +119,26 @@
     <string name="update_confirmation_ready">Tap to confirm the Remozio update.</string>
     <string name="update_needs_attention">Open Remozio to check the pending update.</string>
     <string name="update_confirmation_unavailable">This update confirmation is no longer available.</string>
+    <string name="app_updates">App updates</string>
+    <string name="update_installed_version">Installed version: %1$s</string>
+    <string name="update_working">Working on the update…</string>
+    <string name="update_ready">A verified update is ready to install.</string>
+    <string name="update_recovering">Recovering an interrupted update preparation.</string>
+    <string name="update_outcome_unknown">The update outcome is unknown. Installation will not be repeated automatically.</string>
+    <string name="update_submitted">Update submitted to Android. Waiting for a result.</string>
+    <string name="update_awaiting_confirmation">Android needs your confirmation.</string>
+    <string name="update_succeeded">Android reported that the update succeeded.</string>
+    <string name="update_failed">Android reported that the update failed.</string>
+    <string name="update_abandoned">Update preparation stopped before installation.</string>
+    <string name="update_none_staged">No update is staged.</string>
+    <string name="update_ready_version">Verified version: %1$s</string>
+    <string name="update_operation_error">The update operation could not finish. Refresh its status before trying again.</string>
+    <string name="update_cleanup_needed">Temporary update files still need cleanup.</string>
+    <string name="update_retry_cleanup">Retry cleanup</string>
+    <string name="update_permission_explanation">Allow Remozio to install its verified updates. Your downloaded APK will be kept while you change this setting.</string>
+    <string name="update_allow_installation">Allow installation</string>
+    <string name="update_install">Install update</string>
+    <string name="update_discard">Discard download</string>
+    <string name="update_open_confirmation">Open Android confirmation</string>
+    <string name="update_refresh_status">Refresh status</string>
 </resources>

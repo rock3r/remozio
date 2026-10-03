@@ -64,7 +64,10 @@ class UpdateStatusReceiver : BroadcastReceiver() {
                     }
                 } catch (_: Exception) {
                     // Preserve the durable attempt. A storage or notification error cannot establish an outcome.
-                } finally { pending.finish() }
+                } finally {
+                    UpdateSignals.changes.tryEmit(Unit)
+                    pending.finish()
+                }
             }
         } catch (_: java.util.concurrent.RejectedExecutionException) { pending.finish() }
     }
