@@ -18,6 +18,7 @@ final class NegotiatedNetworkChannelTests: XCTestCase, @unchecked Sendable {
         var phase = 0
         var closes = 0
         var received: Data?
+        var openingTimeout: UInt64?
         init(scope: ChannelScope, fragment: Int = 32_768, initial: Data? = nil, replay: Bool = false, wrongSession: Bool = false) throws {
             self.fragment = fragment; self.replay = replay; self.wrongSession = wrongSession
             let handshake = try ChannelNegotiation(local: ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 9, count: 32),
@@ -26,7 +27,7 @@ final class NegotiatedNetworkChannelTests: XCTestCase, @unchecked Sendable {
             owner = handshake
             input = stride(from: 0, to: bytes.count, by: fragment).map { Data(bytes[$0..<min($0 + fragment, bytes.count)]) }
         }
-        func awaitOpen() async throws { }
+        func awaitOpen(timeoutMilliseconds: UInt64) async throws { openingTimeout = timeoutMilliseconds }
         func receive() async throws -> Data? {
             if !input.isEmpty { return input.removeFirst() }
             try await Task.sleep(for: .seconds(60)); return nil
@@ -110,6 +111,13 @@ final class NegotiatedNetworkChannelTests: XCTestCase, @unchecked Sendable {
         let task = Task { try await connect(phone) }; task.cancel()
         do { _ = try await task.value; XCTFail("Cancellation ignored") } catch { }
         let closes = await phone.closes; XCTAssertGreaterThan(closes, 0)
+    }
+    func testSelectedDeadlineAlsoAppliesToTLSOpening() async throws {
+        let phone = try Phone(scope: scope())
+        let channel = try await connect(phone, timeout: 60_000)
+        let openingTimeout = await phone.openingTimeout
+        XCTAssertEqual(openingTimeout, 60_000)
+        await channel.closeAndWait()
     }
     func testInvalidConfigurationClosesTransferredStream() async throws {
         let phone = try Phone(scope: scope())

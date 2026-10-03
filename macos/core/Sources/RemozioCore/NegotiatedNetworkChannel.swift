@@ -5,14 +5,14 @@ import RemozioProtocol
 public enum ApprovalChannelError: Error { case closed, invalidInput, timedOut, concurrentOperation }
 
 protocol ApprovalByteStream: Sendable {
-    func awaitOpen() async throws
+    func awaitOpen(timeoutMilliseconds: UInt64) async throws
     func send(_ bytes: Data) async throws
     func receive() async throws -> Data?
     func close() async
 }
 private struct NetworkApprovalStream: ApprovalByteStream {
     let channel: NetworkByteChannel
-    func awaitOpen() async throws { try await channel.start() }
+    func awaitOpen(timeoutMilliseconds: UInt64) async throws { try await channel.start(timeoutMilliseconds: timeoutMilliseconds) }
     func send(_ bytes: Data) async throws { try await channel.send(bytes) }
     func receive() async throws -> Data? { try await channel.receive() }
     func close() async { await channel.close() }
@@ -90,7 +90,7 @@ public actor NegotiatedNetworkChannel {
             }
             let result = try await withThrowingTaskGroup(of: NegotiatedChannel.self) { group in
                 group.addTask { try await self.performNegotiation(scope: scope, requests: requests, auditVersions: auditVersions,
-                    trustedMinimum: trustedMinimum) }
+                    trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds) }
                 group.addTask {
                     try await Task.sleep(for: .milliseconds(Int64(timeoutMilliseconds)))
                     throw ApprovalChannelError.timedOut
@@ -102,14 +102,14 @@ public actor NegotiatedNetworkChannel {
         } catch { await finish(); throw error }
     }
     private func performNegotiation(scope: ChannelScope, requests: [ChannelRequestCapability], auditVersions: Set<UInt64>,
-                                    trustedMinimum: UInt64) async throws -> NegotiatedChannel {
+                                    trustedMinimum: UInt64, timeoutMilliseconds: UInt64) async throws -> NegotiatedChannel {
         var nonce = Data(count: 32)
         let status = nonce.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         guard status == errSecSuccess else { throw ApprovalChannelError.invalidInput }
         let owner = try ChannelNegotiation(local: ChannelOffer(role: .mac, scope: scope, nonce: nonce, envelopeVersions: [1],
             requests: requests, auditVersions: auditVersions), trustedMinimum: trustedMinimum)
         defer { owner.close() }
-        try await stream.awaitOpen(); try active()
+        try await stream.awaitOpen(timeoutMilliseconds: timeoutMilliseconds); try active()
         let offer = try owner.offer()
         guard let peer = try await readFrame(maximum: 65_536) else { throw ApprovalChannelError.closed }
         try owner.receiveOffer(peer); try await writeFrame(offer)
