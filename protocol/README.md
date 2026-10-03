@@ -75,3 +75,5 @@ The [request status contract](request-status.md) separates signed lifecycle clai
 [Opaque push data](push-data.md) separates approval wake-ups from provider-only token challenges in Swift and Kotlin.
 
 [Phone routing controls](routing-away.md) define the separately signed Away-only command for an enrolled Mac/account.
+
+The [channel negotiation contract](channel-negotiation.md) binds bounded capability offers, fresh nonces, and version selection to one enrolled TLS connection.
