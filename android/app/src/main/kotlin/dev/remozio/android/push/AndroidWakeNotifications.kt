@@ -1,7 +1,6 @@
 package dev.remozio.android.push
 
 import android.Manifest
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -31,17 +30,14 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
         }
         if (!manager.areNotificationsEnabled()) return WakeNotificationResult.APP_DISABLED
         return try {
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID,
-                context.getString(R.string.request_notification_channel), NotificationManager.IMPORTANCE_HIGH).apply {
-                description = context.getString(R.string.request_notification_channel_description)
-            })
-            if (manager.getNotificationChannel(CHANNEL_ID)?.importance == NotificationManager.IMPORTANCE_NONE) {
+            RequestNotificationChannel.ensure(context, manager)
+            if (manager.getNotificationChannel(RequestNotificationChannel.ID)?.importance == NotificationManager.IMPORTANCE_NONE) {
                 return WakeNotificationResult.CHANNEL_DISABLED
             }
             // The intent opens the app only. No endpoint, request, decision, or approval action comes from a push.
             val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             val open = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            val notification = NotificationCompat.Builder(context, RequestNotificationChannel.ID)
                 .setSmallIcon(R.drawable.ic_launcher_monochrome)
                 .setContentTitle(context.getString(R.string.app_name))
                 .setContentText(context.getString(R.string.request_notification_generic))
@@ -68,7 +64,6 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
         enrollment.notificationTag.copyBytes().joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private companion object {
-        const val CHANNEL_ID = "pending_requests_v1"
         const val NOTIFICATION_ID = 1
     }
 }

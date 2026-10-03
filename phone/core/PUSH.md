@@ -34,7 +34,7 @@ The router samples the supplied clock under the same lock as receipt processing.
 
 The adapter reports missing permission, disabled notifications, disabled channels, and platform failures. `POSTED` means Android accepted the call; it does not prove visibility or reading. Notification timeout is not request expiry. Removing an enrollment cancels its generic notification.
 
-The manifest declares notification permission. There is no startup permission prompt. The launcher, Firebase listener, enrollment persistence, token-challenge proof flow, and authenticated fetch transport are not connected yet. Android background work admission remains to be integrated. This backend does not claim working push delivery. Device notification appearance, channel behavior, and background lifecycle remain for the Pixel session.
+The manifest declares notification permission. The launcher Settings screen now provides explicit permission setup, system settings links and a labelled local test on the request channel. There is no startup permission prompt. The Firebase listener, enrollment restoration, token-challenge proof flow, and authenticated fetch transport are not connected yet. Android background work admission remains to be integrated. This backend does not claim working push delivery. Device notification appearance, channel behavior, and background lifecycle remain for the Pixel session.
 
 References: [Android notification permission](https://developer.android.com/develop/ui/compose/notifications/notification-permission), [notification channels](https://developer.android.com/develop/ui/compose/notifications/channels), and [FCM processing priority](https://firebase.google.com/docs/cloud-messaging/android-message-priority).
 

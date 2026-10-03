@@ -20,7 +20,7 @@ Arrows show dependencies, not completed connections. Passing a component test do
 | Surface | Available now | Still missing |
 | --- | --- | --- |
 | Mac app | Window, menu, Settings, encrypted setup preview | Setup application, protected services, pairing and live approval routing |
-| Android app | Saved Mac list, cached audit navigation, update controls, debug previews and probes | Enrollment flow, live inventory, request actions and audit synchronization |
+| Android app | Saved Mac list, cached audit navigation, notification setup, update controls, debug previews and probes | Enrollment flow, live inventory, request actions and audit synchronization |
 | Transport | Native byte channels, pinned TLS, negotiation and synthetic relay checks | Production listeners, enrolled hardware peers and configured Cloudflare path |
 | Authority | Verified decisions and durable journal components | Protected host, independent rollback witness and real executor |
 | Push | Sender, delivery and phone notification components | App integration, configured credentials and physical delivery evidence |
@@ -45,7 +45,7 @@ Run each detailed procedure linked below. Record a failed or unavailable case se
 
 | Order | Check | What to establish | Stop condition |
 | --- | --- | --- | --- |
-| 1 | App surfaces | Mac window/menu/Settings; Android large text, TalkBack, sheets and dialogs | Inaccessible controls or misleading action/status text |
+| 1 | App surfaces | Mac window/menu/Settings; Android large text, TalkBack, sheets, dialogs and notification setup | Inaccessible controls or misleading action/status text |
 | 2 | [Biometric probe](android-biometric-key.md) | Hardware policy, a fresh prompt per signature, cancellation and key continuity | A fresh signature succeeds without required authentication, or stale completion reports success |
 | 3 | [ADB endpoint probe](android-adb-endpoint.md) | Own-phone discovery, IPv4/IPv6 reachability, Wi-Fi-off behavior and cancellation | Unexpected destination, traffic beyond a connection attempt, or stale completion |
 | 4 | [XPC experiment](macos-xpc.md) | Six synthetic cases on the tested OS; temporary agent cleanup | Payload dispatch despite the handshake control, or cleanup failure |
