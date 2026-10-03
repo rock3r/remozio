@@ -42,7 +42,8 @@ class WebSocketRecordTransport(
         incoming = bounded(queueCapacity)
         outgoing = bounded(queueCapacity)
     }
-    private val owner = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
+    private val parentJob = requireNotNull(parent.coroutineContext[Job])
+    private val owner = SupervisorJob(parentJob)
     private val closed = AtomicBoolean(false)
     private val released = AtomicBoolean(false)
     private val sendMutex = Mutex()
@@ -71,7 +72,7 @@ class WebSocketRecordTransport(
         require(ciphertext.size <= maximumMessageBytes) { "Split ciphertext into bounded messages" }
         try {
             sendMutex.withLock {
-                if (closed.get() || !owner.isActive) throw IOException("WebSocket transport closed")
+                if (closed.get() || parentJob.isCancelled || !owner.isActive) throw IOException("WebSocket transport closed")
                 session.send(Frame.Binary(true, ciphertext.copyOf()))
             }
         } catch (cancelled: CancellationException) { close(); throw cancelled }
@@ -81,11 +82,12 @@ class WebSocketRecordTransport(
     /** Drains messages that precede a peer close. Null is carrier EOF, not authenticated TLS closure. */
     suspend fun receive(): ByteArray? = try {
         receiveMutex.withLock {
-            if (closed.get()) throw IOException("WebSocket transport closed")
+            checkNotAborted()
             val result = select {
                 session.incoming.onReceiveCatching { it }
                 owner.onJoin { session.incoming.tryReceive() }
             }
+            checkNotAborted()
             if (result.isFailure && !result.isClosed) throw IOException("WebSocket transport stopped")
             if (result.isClosed) {
                 close()
@@ -112,6 +114,10 @@ class WebSocketRecordTransport(
     }
 
     suspend fun closeAndJoin() { close(); sessionJob.join(); owner.join() }
+
+    private fun checkNotAborted() {
+        if (closed.get() || parentJob.isCancelled || owner.isCancelled) throw IOException("WebSocket transport closed")
+    }
 
     private fun release() {
         if (released.compareAndSet(false, true)) {

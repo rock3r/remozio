@@ -122,6 +122,21 @@ class WebSocketRecordTransportTest {
         }
     }
 
+    @Test fun parentCancellationDiscardsBufferedMessages(): Unit = runTest {
+        for (peerClosed in listOf(false, true)) {
+            val parent = SupervisorJob(coroutineContext[Job])
+            Fixture(CoroutineScope(coroutineContext + parent)).use { f ->
+                f.input.writeFully(frame(0x82, byteArrayOf(1, 2)))
+                if (peerClosed) f.input.writeFully(frame(0x88, byteArrayOf(3, 0xe8.toByte())))
+                runCurrent()
+                parent.cancelAndJoin()
+                assertFailsWith<IOException> { f.transport.receive() }
+                f.transport.closeAndJoin()
+                assertEquals(1, f.releases.get())
+            }
+        }
+    }
+
     @Test fun oversizedSendCanBeSplitWithoutClosingTheChannel(): Unit = runTest {
         Fixture(this, limit = 4).use { f ->
             assertFailsWith<IllegalArgumentException> { f.transport.send(ByteArray(5)) }
