@@ -112,3 +112,12 @@ import dev.remozio.protocol.*
     AuditReason.PEER_DISCONNECTED -> R.string.audit_reason_peer_disconnected
     AuditReason.MANUAL_STOP -> R.string.audit_reason_manual_stop
 }
+
+@StringRes internal fun auditLabel(value: AuditEpochCause): Int = when (value) {
+    AuditEpochCause.INITIAL -> R.string.audit_epoch_initial
+    AuditEpochCause.RESTART -> R.string.audit_epoch_restart
+    AuditEpochCause.REPLACEMENT -> R.string.audit_epoch_replacement
+    AuditEpochCause.RECOVERY -> R.string.audit_epoch_recovery
+    AuditEpochCause.RESTORATION -> R.string.audit_epoch_restoration
+    AuditEpochCause.UNKNOWN -> R.string.audit_unknown
+}

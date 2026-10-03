@@ -267,7 +267,6 @@
     <string name="audit_independent_chain">Separate history chain. Its order relative to other chains is unknown.</string>
     <string name="audit_segment">History segment</string>
     <string name="audit_segment_unknown">The segment boundary is not recorded.</string>
-    <string name="audit_recovery_segment">This segment follows a restart, recovery or restoration. Earlier history may be incomplete.</string>
     <string name="audit_gap">Missing events after sequence %1$s through %2$s.</string>
     <string name="audit_retention_gap">The Mac reported this range below its retained boundary.</string>
     <string name="audit_no_matching">No matching events in this segment.</string>
@@ -301,4 +300,10 @@
     <string name="audit_timeline">Request timeline</string>
     <string name="audit_timeline_order">Oldest first within each connected history chain.</string>
     <string name="audit_mac_choice">%1$s\n%2$s</string>
+    <string name="audit_epoch_cause">Segment cause (reported)</string>
+    <string name="audit_epoch_initial">Initial journal</string>
+    <string name="audit_epoch_restart">Restart</string>
+    <string name="audit_epoch_replacement">Replacement</string>
+    <string name="audit_epoch_recovery">Recovery</string>
+    <string name="audit_epoch_restoration">Restoration</string>
 </resources>

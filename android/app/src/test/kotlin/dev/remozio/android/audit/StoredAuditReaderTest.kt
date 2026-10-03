@@ -233,6 +233,12 @@ class StoredAuditReaderTest {
         assertEquals(listOf("gap 8", "gap 5", "gap 2", "gap 0"), labels(auditRows(emptyList(), gaps, newestFirst = true)))
     }
 
+    @Test fun unknownEpochCauseNeverBecomesAKnownRecoveryExplanation() {
+        assertEquals(dev.remozio.android.R.string.audit_unknown, auditLabel(AuditEpochCause.UNKNOWN))
+        assertEquals(AuditEpochCause.entries.size, AuditEpochCause.entries.map(::auditLabel).toSet().size)
+        assertNotEquals(auditLabel(AuditEpochCause.REPLACEMENT), auditLabel(AuditEpochCause.RESTORATION))
+    }
+
     @Test fun unsupportedTimesAreAbsentInsteadOfOverflowingIntoPlausibleDates() {
         val utc = ZoneId.of("UTC")
         assertNull(auditTime(null, utc)); assertNull(auditTime(ULong.MAX_VALUE, utc))

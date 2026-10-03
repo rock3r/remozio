@@ -126,8 +126,7 @@ private fun LazyListScope.auditGroup(group: AuditHistoryGroup, onEvent: (AuditEv
                     HorizontalDivider()
                     Text(stringResource(R.string.audit_segment), style = MaterialTheme.typography.titleMedium)
                     AuditField(R.string.audit_epoch_id, auditID(epoch.epoch.copyBytes()))
-                    if (epoch.descriptor == null) Text(stringResource(R.string.audit_segment_unknown))
-                    else if (epoch.descriptor?.cause != AuditEpochCause.INITIAL) Text(stringResource(R.string.audit_recovery_segment))
+                    AuditEpochCauseField(epoch.descriptor?.cause)
                 }
             }
             if (epoch.records.isEmpty()) item { Text(stringResource(if (epoch.retainedRecordCount > 0) R.string.audit_no_matching else R.string.audit_no_events)) }
@@ -151,6 +150,12 @@ private fun LazyListScope.auditGroup(group: AuditHistoryGroup, onEvent: (AuditEv
             }
         }
     }
+}
+
+@Composable
+private fun AuditEpochCauseField(cause: AuditEpochCause?) {
+    if (cause == null) Text(stringResource(R.string.audit_segment_unknown))
+    else AuditField(R.string.audit_epoch_cause, stringResource(auditLabel(cause)))
 }
 
 @Composable
@@ -206,6 +211,7 @@ private fun AuditDetails(selection: AuditSelection, onDismiss: () -> Unit) {
                             item {
                                 HorizontalDivider()
                                 AuditField(R.string.audit_epoch_id, auditID(epoch.epoch.copyBytes()))
+                                AuditEpochCauseField(epoch.descriptor?.cause)
                             }
                             items(auditRows(epoch.records, epoch.gaps, newestFirst = false)) { row ->
                                 when (row) {
