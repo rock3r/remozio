@@ -73,3 +73,5 @@ The platform-independent request owner and tracker live in [phone-core](../phone
 The [sideload update verifier](updates.md) stages APKs privately, verifies their signatures and identity, and binds installer handoff to the verified bytes. A native installer backend now enforces verified copying and durable recording before commit. The application now owns pending update state and exposes installation, permission, cleanup, and confirmation controls. The launcher can check releases, download and verify a candidate, and then offer a separate install action. Update settings control foreground checks and prerelease discovery.
 
 The [transport identity loader](transport-identity.md) validates an existing hardware-backed enrollment key and supplies its handle to the TLS client. Pairing, key creation, and native Pixel validation remain outstanding.
+
+The [phone enrollment store](../phone/core/ENROLLMENTS.md) has an Android adapter with a dedicated hardware encryption key and a no-backup atomic file. It is available to the future enrollment host and does not initialize on app startup.
