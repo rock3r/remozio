@@ -1,6 +1,13 @@
 package dev.remozio.phone.crypto
 
-import dev.remozio.protocol.ChannelScope
+import dev.remozio.protocol.*
+import dev.remozio.phone.requests.*
+import java.io.File
+import java.security.KeyPairGenerator
+import java.security.Signature
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import kotlinx.coroutines.flow.first
 import dev.remozio.phone.transport.NegotiatedTLSChannel
 import dev.remozio.phone.transport.RelayAccessCredential
 import dev.remozio.phone.transport.EncryptedRecordTransport
@@ -360,6 +367,54 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun signedMessagesReachTheInboxThroughTheNegotiatedHttpsRelay(): Unit = Fixture(negotiate = true, commandMessages = true).use { f ->
+        val limits = CborLimits(32768, 32, 4096)
+        val key = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+        fun id(value: Int, count: Int = 16) = ByteArray(count) { value.toByte() }
+        fun scalar(n: java.math.BigInteger) = n.toByteArray().takeLast(32).toByteArray().let { ByteArray(32 - it.size) + it }
+        val point = (key.public as ECPublicKey).w
+        val authority = byteArrayOf(4) + scalar(point.affineX) + scalar(point.affineY)
+        val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
+        val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(1), id(2), id(8), id(9, 32),
+            emptySet(), 1000u, 61000u, capture, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), limits, limits)
+        fun message(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose): ByteArray {
+            val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                initSign(key.private); update(SigningInput.make(1u, type, purpose, body, limits, limits)); sign()
+            })
+            return ApprovalMessage(1u, type, purpose, body, signature).encode(limits.maxBytes)
+        }
+        val issued = message(request.encode(limits), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        val terminal = message(RequestStatusPayload(id(1), id(2), id(8), request.requestDigest(limits, limits), request.challenge,
+            2u, RequestPhase.EXPIRED, RequestStatusReason.AUTHORIZATION_EXPIRED, id(10), 60000u, null, null, false, 60000u, null).encode(limits),
+            ApprovalMessageType.STATUS, SigningPurpose.STATUS)
+        val enrollment = CommandRequestInbox(1, 4).add(id(1), id(2), authority, RequestLimits(limits, limits, limits, limits))
+        WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+            runBlocking {
+                withTimeout(10_000) {
+                    val carrier = relay.connector.connect(this, relay.endpoint,
+                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                    val session = TLSRecordSession(this, f.engine(), carrier, handshakeTimeoutMillis = 4_000)
+                    try {
+                        val channel = NegotiatedTLSChannel.connect(session, ChannelScope(id(1), id(2), id(3), id(4)),
+                            listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 65536, timeoutMillis = 4_000)
+                        try {
+                            val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4)) { ElapsedInstant(0, 100u) }
+                            val receiving = async { receiver.run() }
+                            channel.send(issued)
+                            val owner = enrollment.requestSessions.first { it.isNotEmpty() }.single()
+                            assertNotNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
+                            channel.send(terminal)
+                            owner.revisions.first { it == 2uL }
+                            assertNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
+                            assertEquals(RequestPhase.EXPIRED, owner.snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
+                            receiver.close(); receiving.await()
+                        } finally { channel.closeAndJoin() }
+                    } finally { session.closeAndJoin() }
+                }
+            }
+        }
+    }
+
     @Test fun negotiatedNativeHostRejectsWrongEnrollmentScope(): Unit = Fixture(negotiate = true).use { f ->
         runBlocking {
             withTimeout(8_000) {
@@ -462,7 +517,7 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -477,7 +532,7 @@ class TLSInteropTest {
                 child = ProcessBuilder(peer, mac.path.toString()).redirectError(directory.resolve("peer.log").toFile()).start()
                 process = child
                 process.outputStream.bufferedWriter().also {
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + "}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

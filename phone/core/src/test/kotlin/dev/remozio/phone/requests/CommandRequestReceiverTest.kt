@@ -1,0 +1,140 @@
+package dev.remozio.phone.requests
+
+import dev.remozio.protocol.*
+import java.io.File
+import java.io.IOException
+import java.security.KeyPairGenerator
+import java.security.Signature
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlin.test.*
+
+class CommandRequestReceiverTest {
+    private val bound = CborLimits(32768, 32, 4096)
+    private val limits = RequestLimits(bound, bound, bound, bound)
+    private val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
+    private fun id(value: Int, count: Int = 16) = ByteArray(count) { value.toByte() }
+    private fun scope(mac: Int = 1) = ChannelScope(id(mac), id(2), id(3), id(4))
+    private class Wire(override val scope: ChannelScope, override val supportsCommands: Boolean = true,
+                       override val maximumPayloadBytes: Int = 65536) : RequestMessageChannel {
+        val queue = Channel<ByteArray>(8)
+        var closed = false
+        override suspend fun receive() = queue.receiveCatching().getOrNull()
+        override fun close() { closed = true; queue.cancel() }
+    }
+    private inner class Mac(val identity: Int = 1) {
+        private val key = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
+        val publicKey: ByteArray get() = (key.public as ECPublicKey).w.let { point ->
+            fun scalar(n: java.math.BigInteger) = n.toByteArray().takeLast(32).toByteArray().let { ByteArray(32 - it.size) + it }
+            byteArrayOf(4) + scalar(point.affineX) + scalar(point.affineY)
+        }
+        val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(identity), id(2), id(5), id(6, 32),
+            emptySet(), 1000u, 61000u, capture, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), bound, bound)
+        fun envelope(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose): ByteArray {
+            val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                initSign(key.private); update(SigningInput.make(1u, type, purpose, body, bound, bound)); sign()
+            })
+            return ApprovalMessage(1u, type, purpose, body, signature).encode(bound.maxBytes)
+        }
+        fun issued() = envelope(request.encode(bound), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        fun status(terminal: Boolean = false) = envelope(RequestStatusPayload(id(identity), id(2), id(5), request.requestDigest(bound, bound),
+            request.challenge, if (terminal) 2u else 1u, if (terminal) RequestPhase.EXPIRED else RequestPhase.PRESENTED,
+            if (terminal) RequestStatusReason.AUTHORIZATION_EXPIRED else RequestStatusReason.NONE, id(7),
+            if (terminal) 60000u else 10u, if (terminal) null else 60000u, null, false, if (terminal) 60000u else null, null).encode(bound),
+            ApprovalMessageType.STATUS, SigningPurpose.STATUS)
+        fun enroll(inbox: CommandRequestInbox = CommandRequestInbox(2, 4)) = inbox.add(id(identity), id(2), publicKey, limits)
+    }
+    private fun bind(enrollment: CommandRequestEnrollment, wire: RequestMessageChannel, time: ULong = 100u) =
+        CommandRequestReceiver.bind(enrollment, wire, id(3), id(4)) { ElapsedInstant(0, time) }
+    private suspend fun deliver(enrollment: CommandRequestEnrollment, mac: Mac, vararg messages: ByteArray, time: ULong = 100u) {
+        val wire = Wire(scope(mac.identity))
+        messages.forEach { wire.queue.send(it) }; wire.queue.close()
+        bind(enrollment, wire, time).run()
+        assertTrue(wire.closed)
+    }
+    @Test fun reconnectPreservesTimersAndTerminalOwnersInObservableState() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        deliver(enrollment, mac, mac.issued(), mac.status())
+        val owner = enrollment.requestSessions.value.single()
+        assertSame(owner, enrollment.sessions().single())
+        val initial = owner.snapshot(ElapsedInstant(0, 100u)).status!!
+        assertTrue(initial.timing.deliveryDelayUnknown)
+        deliver(enrollment, mac, mac.issued(), mac.status(), time = 200u)
+        assertSame(owner, enrollment.requestSessions.value.single())
+        assertEquals(110uL, owner.snapshot(ElapsedInstant(0, 200u)).status!!.timing.ageLowerBoundMs)
+        deliver(enrollment, mac, mac.status(true), mac.issued(), time = 300u)
+        assertSame(owner, enrollment.requestSessions.value.single())
+        assertNull(owner.snapshot(ElapsedInstant(0, 300u)).capture)
+        assertEquals(RequestPhase.EXPIRED, owner.snapshot(ElapsedInstant(0, 300u)).status!!.status.phase)
+    }
+    @Test fun invalidSignatureAndCrossMacMessagesCannotPublishRequests() = runBlocking<Unit> {
+        val mac = Mac(); val other = Mac(8); val enrollment = mac.enroll()
+        val message = ApprovalMessage.decode(mac.issued(), bound.maxBytes)
+        val bad = ApprovalMessage(1u, message.type, message.purpose, message.body.copyBytes(), ByteArray(64)).encode(bound.maxBytes)
+        for (bytes in listOf(bad, other.issued())) {
+            assertFailsWith<IOException> { deliver(enrollment, mac, bytes) }
+            assertTrue(enrollment.requestSessions.value.isEmpty())
+        }
+    }
+    @Test fun statusesCannotCreateRequestsAndDecisionsCannotEnterPhoneInbox() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        assertFailsWith<IOException> { deliver(enrollment, mac, mac.status()) }
+        val decision = mac.envelope(byteArrayOf(0xa0.toByte()), ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION)
+        assertFailsWith<IOException> { deliver(enrollment, mac, decision) }
+        assertTrue(enrollment.sessions().isEmpty())
+    }
+    @Test fun replacementClosesOldSocketAndRejectsItsLateCallback() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<ByteArray>()
+        val oldWire = object : RequestMessageChannel {
+            override val scope = scope()
+            override val supportsCommands = true
+            override val maximumPayloadBytes = 65536
+            var closed = false
+            override suspend fun receive(): ByteArray? { entered.complete(Unit); return release.await() }
+            override fun close() { closed = true }
+        }
+        val old = bind(enrollment, oldWire)
+        val running = async { old.run() }
+        entered.await()
+        val replacement = Wire(scope()); val next = bind(enrollment, replacement)
+        assertTrue(oldWire.closed)
+        release.complete(mac.issued()); running.await()
+        assertTrue(enrollment.sessions().isEmpty()); assertFalse(replacement.closed)
+        replacement.queue.send(mac.issued()); replacement.queue.close(); next.run()
+        assertEquals(1, enrollment.sessions().size)
+    }
+    @Test fun removingOneMacClosesItsPendingReadAndKeepsOtherMacState() = runBlocking<Unit> {
+        val inbox = CommandRequestInbox(2, 4); val a = Mac(); val b = Mac(8)
+        val first = a.enroll(inbox); val second = b.enroll(inbox)
+        deliver(first, a, a.issued()); deliver(second, b, b.issued())
+        val captured = first.sessions().single()
+        val wire = Wire(scope()); val receiver = bind(first, wire)
+        val running = async(start = CoroutineStart.UNDISPATCHED) { receiver.run() }
+        assertTrue(inbox.remove(first)); running.await()
+        assertTrue(wire.closed); assertTrue(captured.closed.value); assertTrue(first.requestSessions.value.isEmpty())
+        assertFalse(second.sessions().single().closed.value)
+    }
+    @Test fun failedBindingClosesNewChannelWithoutDisplacingExistingReceiver() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        val current = Wire(scope()); val owner = bind(enrollment, current)
+        for (wrong in listOf(Wire(scope(8)), Wire(scope(), supportsCommands = false), Wire(scope(), maximumPayloadBytes = 10))) {
+            assertFails { bind(enrollment, wrong) }
+            assertTrue(wrong.closed); assertFalse(current.closed)
+        }
+        current.queue.send(mac.issued()); current.queue.close(); owner.run()
+        assertEquals(1, enrollment.sessions().size)
+    }
+    @Test fun cancellationClosesConnectionWithoutInventingTerminalOutcome() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        deliver(enrollment, mac, mac.issued(), mac.status())
+        val wire = Wire(scope()); val receiver = bind(enrollment, wire)
+        val running = launch(start = CoroutineStart.UNDISPATCHED) { receiver.run() }
+        running.cancelAndJoin()
+        assertTrue(wire.closed)
+        val snapshot = enrollment.sessions().single().snapshot(ElapsedInstant(0, 100u))
+        assertEquals(RequestPhase.PRESENTED, snapshot.status!!.status.phase); assertNotNull(snapshot.capture)
+    }
+}
