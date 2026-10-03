@@ -22,10 +22,10 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 
 /** Test carrier only: TLS records cross a local WSS endpoint with an independent outer certificate. */
-internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true) : AutoCloseable {
+internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, bridgeClient: Boolean = true) : AutoCloseable {
     private val server = MockWebServer()
-    private val local = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
-    val port: Int = local.localPort
+    private val local = if (bridgeClient) ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")) else null
+    val port: Int get() = requireNotNull(local).localPort
     val outerAuthenticated = AtomicBoolean(false)
     val tamper = AtomicBoolean(false)
     val changed = AtomicBoolean(false)
@@ -83,13 +83,12 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true) 
         server.start(InetAddress.getByName("127.0.0.1"), 0)
         client = OkHttpClient.Builder().sslSocketFactory(clientTrust.sslSocketFactory(), clientTrust.trustManager)
             .connectTimeout(3, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()
-        workers.submit {
+        if (bridgeClient) workers.submit {
             try {
-                val socket = local.accept().apply { soTimeout = 5_000 }
+                val socket = requireNotNull(local).accept().apply { soTimeout = 5_000 }
                 sockets += socket
-                val ws = client.newWebSocket(Request.Builder().url(server.url("/tls")).build(), object : WebSocketListener() {
+                open(object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
-                        outerAuthenticated.set(response.handshake != null)
                         workers.submit {
                             try {
                                 val buffer = ByteArray(4_096)
@@ -112,9 +111,25 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true) 
                     }
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { runCatching { socket.close() } }
                 })
-                webSockets += ws
             } catch (_: IOException) { }
         }
+    }
+
+    /** Direct TLS engine tests have no local client socket or SSLSocket bridge. */
+    fun open(listener: WebSocketListener): WebSocket {
+        val ws = client.newWebSocket(Request.Builder().url(server.url("/tls")).build(), object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                outerAuthenticated.set(response.handshake != null)
+                listener.onOpen(webSocket, response)
+            }
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) = listener.onMessage(webSocket, bytes)
+            override fun onMessage(webSocket: WebSocket, text: String) = listener.onMessage(webSocket, text)
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) = listener.onClosing(webSocket, code, reason)
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = listener.onClosed(webSocket, code, reason)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = listener.onFailure(webSocket, t, response)
+        })
+        webSockets += ws
+        return ws
     }
 
     private fun sendChunks(webSocket: WebSocket, bytes: ByteArray, chunkSize: Int) {
@@ -138,7 +153,7 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true) 
                 if (failure == null) failure = problem else failure.addSuppressed(problem)
             }
         }
-        attempt { local.close() }
+        attempt { local?.close() }
         webSockets.forEach { attempt { it.cancel() } }
         serverWebSockets.forEach { attempt { it.close(1001, "fixture shutdown") } }
         sockets.forEach { attempt { it.close() } }

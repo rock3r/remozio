@@ -35,11 +35,37 @@ Build the native peers with `./scripts/check.sh`, then run the six-task Gradle g
 
 The [recorded run](evidence/2026-10-03-websocket-carrier.json) passed all four additional cases on macOS 27.0.1, Apple Silicon, and JDK 21. All eleven TLS tests passed together.
 
+## Direct phone-engine extension
+
+The next four cases use `PinnedTLSClient` directly. `WebSocketTLSRelay` disables its local client listener in this mode. No client-side `SSLSocket` or TCP bridge is involved.
+
+```mermaid
+flowchart LR
+    A[Phone TLS engine] <-->|Ciphertext batches| B[Direct test driver]
+    B <-->|HTTPS WebSocket binary messages| C[Test relay]
+    C <-->|Inner TLS stream over loopback| D[Native Swift peer]
+    E[Trusted peer public-key pin] --> A
+    F[Independent outer certificate] --> B
+```
+
+The driver preserves output ordering and passes received binary messages to the engine. It retains any plaintext suffix that the engine has not consumed. Its event queue, queued bytes, output queue, response size, and waits have explicit limits. Test failure or scope exit cancels the WebSocket. The relay closes its native upstream and joins its workers.
+
+| Direct case | Required observation |
+| --- | --- |
+| Engine sends a large request | Exact reply; private marker absent from relay capture |
+| Inner peer public-key pin differs | Engine fails despite successful outer authentication |
+| Outer certificate is untrusted | No inner TLS bytes reach the relay; engine remains unstarted |
+| Relay alters inner ciphertext | No application reply is accepted |
+
+The [recorded direct run](evidence/2026-10-03-direct-websocket-engine.json) passed all four cases and all eighteen TLS tests on macOS 27.0.1 with JDK 21.
+
+These checks exercise the phone-core engine and real native TLS peer through the local WebSocket fixture. The fixture still controls the outer server and message sizes. Callback-level checks do not prove that a network library bounds memory before assembling an incoming message.
+
 ## Remaining integration gates
 
 This validates a local HTTPS/WebSocket carrier, not Cloudflare Tunnel or Access. Deployment routing, provider authentication, failure responses, reconnect, and network transitions remain untested.
 
-The client bridge adapts a JVM `SSLSocket` through another loopback socket. It is a test adapter, not the Android architecture. An Android-compatible stream adapter or TLS engine must preserve these boundaries and use the retained platform identity without exporting its private key. Hardware-key behavior still needs the Pixel session.
+The original bridge adapts a JVM `SSLSocket` through another loopback socket. The direct extension removes that bridge and uses the phone TLS engine. Its WebSocket driver remains a test adapter. The runtime carrier must bound message assembly and queues before accepting untrusted input, own cancellation and deadlines, and integrate the current enrollment. Hardware-key behavior still needs the Pixel session.
 
 The relay is a test server with a fixed native upstream. It is not a production proxy or an arbitrary TCP tunnel. The production Mac endpoint still needs protected service identity, caller authentication, resource limits, and current enrollment checks. Neither successful TLS layer authorizes an approval or replaces signed request validation.
 
