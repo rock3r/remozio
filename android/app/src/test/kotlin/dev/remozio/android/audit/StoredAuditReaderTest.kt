@@ -209,6 +209,26 @@ class StoredAuditReaderTest {
         } finally { release.countDown(); first.cancelAndJoin(); f.enrollment.close() }
     }
 
+    @Test fun gapRowsKeepTheirSequencePositionsInBothDirectionsAndAfterFiltering() {
+        val events = listOf(5, 2, 8).map { sequence ->
+            AuditEventMetadata(id(sequence), id(1), id(2), id(3), sequence.toULong(), null, null, null,
+                AuditEventKind.REQUEST_CREATED, AuditCategory.COMMAND, null, null, AuditAuthentication.SYSTEM,
+                AuditOutcome.PENDING, AuditReason.NONE, null, null)
+        }
+        val gaps = listOf(AuditHistoryGap(0u, 1u, true), AuditHistoryGap(2u, 4u, false),
+            AuditHistoryGap(5u, 7u, false), AuditHistoryGap(8u, ULong.MAX_VALUE, false))
+        fun labels(rows: List<AuditRow>) = rows.map { when (it) {
+            is AuditRow.Event -> "event ${it.value.sequence}"
+            is AuditRow.Gap -> "gap ${it.value.after}"
+        } }
+        val ascending = listOf("gap 0", "event 2", "gap 2", "event 5", "gap 5", "event 8", "gap 8")
+        assertEquals(ascending, labels(auditRows(events, gaps, newestFirst = false)))
+        assertEquals(ascending.reversed(), labels(auditRows(events, gaps, newestFirst = true)))
+        assertEquals(listOf("gap 0", "gap 2", "event 5", "gap 5", "gap 8"),
+            labels(auditRows(events.filter { it.sequence == 5uL }, gaps, newestFirst = false)))
+        assertEquals(listOf("gap 8", "gap 5", "gap 2", "gap 0"), labels(auditRows(emptyList(), gaps, newestFirst = true)))
+    }
+
     @Test fun unsupportedTimesAreAbsentInsteadOfOverflowingIntoPlausibleDates() {
         val utc = ZoneId.of("UTC")
         assertNull(auditTime(null, utc)); assertNull(auditTime(ULong.MAX_VALUE, utc))

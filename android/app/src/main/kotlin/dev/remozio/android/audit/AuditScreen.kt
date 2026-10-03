@@ -130,26 +130,34 @@ private fun LazyListScope.auditGroup(group: AuditHistoryGroup, onEvent: (AuditEv
                     else if (epoch.descriptor?.cause != AuditEpochCause.INITIAL) Text(stringResource(R.string.audit_recovery_segment))
                 }
             }
-            items(epoch.gaps) { gap ->
-                Column {
-                    Text(stringResource(R.string.audit_gap, gap.after.toString(), gap.through.toString()))
-                    if (gap.belowRetentionBoundary) Text(stringResource(R.string.audit_retention_gap))
-                }
-            }
             if (epoch.records.isEmpty()) item { Text(stringResource(if (epoch.retainedRecordCount > 0) R.string.audit_no_matching else R.string.audit_no_events)) }
-            items(epoch.records) { event ->
-                Card(onClick = { onEvent(event) }, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(stringResource(auditLabel(event.kind)), style = MaterialTheme.typography.titleMedium)
-                        Text(stringResource(auditLabel(event.category)))
-                        AuditField(R.string.audit_outcome, stringResource(auditLabel(event.outcome)))
-                        AuditField(R.string.audit_sequence, event.sequence.toString())
-                        AuditField(R.string.audit_event_time, auditTime(event.eventTimeMs))
-                        Text(stringResource(R.string.audit_event_details), style = MaterialTheme.typography.labelLarge)
+            items(auditRows(epoch.records, epoch.gaps, newestFirst = true)) { row ->
+                when (row) {
+                    is AuditRow.Gap -> AuditGapNotice(row.value)
+                    is AuditRow.Event -> {
+                        val event = row.value
+                        Card(onClick = { onEvent(event) }, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(stringResource(auditLabel(event.kind)), style = MaterialTheme.typography.titleMedium)
+                                Text(stringResource(auditLabel(event.category)))
+                                AuditField(R.string.audit_outcome, stringResource(auditLabel(event.outcome)))
+                                AuditField(R.string.audit_sequence, event.sequence.toString())
+                                AuditField(R.string.audit_event_time, auditTime(event.eventTimeMs))
+                                Text(stringResource(R.string.audit_event_details), style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AuditGapNotice(gap: AuditHistoryGap) {
+    Column {
+        Text(stringResource(R.string.audit_gap, gap.after.toString(), gap.through.toString()))
+        if (gap.belowRetentionBoundary) Text(stringResource(R.string.audit_retention_gap))
     }
 }
 
@@ -199,8 +207,12 @@ private fun AuditDetails(selection: AuditSelection, onDismiss: () -> Unit) {
                                 HorizontalDivider()
                                 AuditField(R.string.audit_epoch_id, auditID(epoch.epoch.copyBytes()))
                             }
-                            items(epoch.gaps) { gap -> Text(stringResource(R.string.audit_gap, gap.after.toString(), gap.through.toString())) }
-                            items(epoch.records) { event -> AuditEventDetails(event) }
+                            items(auditRows(epoch.records, epoch.gaps, newestFirst = false)) { row ->
+                                when (row) {
+                                    is AuditRow.Gap -> AuditGapNotice(row.value)
+                                    is AuditRow.Event -> AuditEventDetails(row.value)
+                                }
+                            }
                         }
                     }
                 }
