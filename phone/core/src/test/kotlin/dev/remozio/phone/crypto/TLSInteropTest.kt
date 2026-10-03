@@ -1,5 +1,12 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.phone.transport.EncryptedRecordTransport
+import dev.remozio.phone.transport.TLSRecordSession
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import dev.remozio.phone.transport.ClientTLSKeyManager
 import dev.remozio.phone.transport.PinnedTLSClient
 import dev.remozio.phone.transport.TLSClientProgress
@@ -243,6 +250,72 @@ class TLSInteropTest {
             assertEquals(TLSClientState.CLOSED, engine.state())
             assertThrows(IllegalStateException::class.java) { engine.receive(byteArrayOf()) }
         }
+    }
+
+    @Test fun sessionOwnsAFragmentedNativeTlsExchange(): Unit = Fixture().use { f ->
+        runBlocking {
+            withTimeout(8_000) {
+                val socket = Socket("127.0.0.1", f.port).apply { soTimeout = 4_000 }
+                val carrier = SocketRecords(socket)
+                val engine = f.engine()
+                val session = TLSRecordSession(this, engine, carrier, handshakeTimeoutMillis = 4_000)
+                try {
+                    session.awaitOpen()
+                    val payload = "synthetic-owned-session".repeat(2_500).toByteArray()
+                    val frame = ByteBuffer.allocate(payload.size + 4).putInt(payload.size).put(payload).array()
+                    val reply = async {
+                        val collected = ByteArrayOutputStream()
+                        while (collected.size() < frame.size) {
+                            val chunk = requireNotNull(session.receive())
+                            check(collected.size() + chunk.size <= frame.size)
+                            collected.write(chunk)
+                        }
+                        collected.toByteArray()
+                    }
+                    var offset = 0
+                    while (offset < frame.size) {
+                        val end = minOf(offset + 16_384, frame.size)
+                        session.send(frame.copyOfRange(offset, end))
+                        offset = end
+                    }
+                    assertArrayEquals(frame, reply.await())
+                } finally { session.closeAndJoin() }
+                assertTrue(socket.isClosed)
+                assertEquals(TLSClientState.CLOSED, engine.state())
+            }
+        }
+    }
+
+    @Test fun sessionRejectsWrongPinAndReleasesTheNativeConnection(): Unit = Fixture().use { f ->
+        runBlocking {
+            withTimeout(8_000) {
+                val socket = Socket("127.0.0.1", f.port).apply { soTimeout = 4_000 }
+                val engine = f.engine(pin = f.phone.certificate)
+                val session = TLSRecordSession(this, engine, SocketRecords(socket), handshakeTimeoutMillis = 4_000)
+                try {
+                    var rejected = false
+                    try { session.awaitOpen() } catch (_: IOException) { rejected = true }
+                    assertTrue(rejected)
+                } finally { session.closeAndJoin() }
+                assertTrue(socket.isClosed)
+                assertEquals(TLSClientState.CLOSED, engine.state())
+            }
+        }
+    }
+
+    private class SocketRecords(private val socket: Socket) : EncryptedRecordTransport {
+        override val maximumMessageBytes = 311
+        override suspend fun send(ciphertext: ByteArray): Unit = withContext(Dispatchers.IO) {
+            require(ciphertext.size <= maximumMessageBytes)
+            socket.outputStream.write(ciphertext)
+            socket.outputStream.flush()
+        }
+        override suspend fun receive(): ByteArray? = withContext(Dispatchers.IO) {
+            val bytes = ByteArray(127)
+            val count = socket.inputStream.read(bytes)
+            if (count < 0) null else bytes.copyOf(count)
+        }
+        override fun close() { socket.close() }
     }
 
     @Test fun engineUsesWebSocketDirectlyWithoutAClientSocketBridge(): Unit = Fixture().use { f ->
