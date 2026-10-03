@@ -1,0 +1,17 @@
+{
+  "authenticationUIAllowed" : false,
+  "enclaveTokenVerified" : true,
+  "experiment" : "secure-enclave-tls",
+  "identityCreated" : true,
+  "mutualTLS13Exchange" : true,
+  "osVersion" : "Version 27.0.1 (Build 26A434)",
+  "persistentKeyRequested" : false,
+  "privateKeyExportRejected" : true,
+  "schemaVersion" : 1,
+  "secureEnclaveAvailable" : true,
+  "stage" : "complete",
+  "status" : "passed",
+  "wrongPinChannelOutcome" : "timedOut",
+  "wrongPinPolicyRejectionObserved" : true,
+  "wrongServerPinRejected" : true
+}

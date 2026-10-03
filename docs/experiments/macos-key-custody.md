@@ -44,3 +44,5 @@ CI builds the executable but does not run the hardware probe. The normal local g
 Apple documents that [after-first-unlock accessibility](https://developer.apple.com/documentation/security/ksecattraccessibleafterfirstunlockthisdeviceonly) requires one unlock after restart. This candidate must not be assumed to satisfy the root authority's pre-login requirement. The experiment does not select the production accessibility policy.
 
 The [Secure Enclave API](https://developer.apple.com/documentation/cryptokit/secureenclave/p256/signing/privatekey) exposes an opaque representation for restoration. Successful restoration is useful evidence for key persistence. It does not supply a monotonic counter or detect restoration of an older journal and matching key blob. A signature over a backup cannot establish that the backup is the latest state.
+
+The later [Secure Enclave TLS experiment](macos-enclave-tls.md) establishes a local Network.framework handshake using a disposable enclave key. It does not close the lifecycle and protected-installation gates above.
