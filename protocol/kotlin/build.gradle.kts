@@ -10,6 +10,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    val channelVectors = rootProject.layout.projectDirectory.file("protocol/vectors/channel-negotiation-v1.json")
+    inputs.file(channelVectors)
+    systemProperty("remozio.channelVectors", channelVectors.asFile.absolutePath)
     val routingVectors = rootProject.layout.projectDirectory.file("protocol/vectors/routing-away-v1.json")
     inputs.file(routingVectors)
     systemProperty("remozio.routingVectors", routingVectors.asFile.absolutePath)
