@@ -28,15 +28,26 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 
 Each PR records its checks and limits. An experiment result does not certify an untested configuration. Device-dependent end-to-end tests are reserved for the user's next available computer session.
 
-## Interactive session checklist
+## Interactive session preparation
 
-Use the [interactive handoff](interactive-handoff.md) for the current capability map, ordered checks, evidence format and integration blockers.
+Use the [interactive handoff](interactive-handoff.md) as the single checklist for the session. It separates prepared probes from work that still needs fixtures or integration.
 
-- Make the intended Apple signing identity available without exporting its private key.
-- Confirm a macOS 26 test host and supported Pixel running Android 17+.
-- Exercise service startup, lock/logout, reboot, and update replacement.
-- Capture authorized 1Password and Little Snitch fixtures without submitting real approvals.
-- Compare local use, Chrome Remote Desktop, Screen Sharing, dark displays, and manual Away.
-- Test ADB with Wi-Fi off, mobile data on, then reconnect after update and restart.
+Before starting:
 
-Do not collect passwords, ADB payloads, notification tokens, or provider secrets in committed evidence.
+- Confirm an Apple Silicon Mac with macOS 26 or later and a supported Pixel with Android 17 or later. Record the actual OS versions; macOS 26 compatibility still needs a macOS 26 host.
+- Choose the artifacts and signing identities named by the relevant procedure. Keep private signing keys on their intended devices.
+- Agree on each device-setting change. Use disposable keys and synthetic requests.
+
+### Prepared checks
+
+The handoff's [first-session checklist](interactive-handoff.md#first-session-prepared-checks) covers app surfaces, the biometric probe, ADB endpoint discovery/reachability, XPC, enclave signing and loopback TLS. Follow each linked procedure and its cleanup steps.
+
+The ADB endpoint probe does not enable a listener or implement the bridge. Its Wi-Fi-off check needs an explicitly provisioned endpoint. It cannot establish bridge recovery after an app update or restart.
+
+### Later checks
+
+The handoff's [later-session checklist](interactive-handoff.md#later-sessions-fixtures-or-integration-still-needed) preserves the tests for protected services, authority continuity, prompt adapters, presence, cloud delivery, enrollment, ADB and updates. These are not runnable product operations yet.
+
+Service registration, lock/logout/reboot behavior, update replacement, authorized prompt fixtures and remote-desktop presence need their implementation and procedures first. The complete bridge must also support Wi-Fi-off operation, reconnect and explicit Stop before its end-to-end tests.
+
+Do not collect passwords, ADB payloads, notification tokens, or provider secrets in committed evidence. Use the handoff's [evidence record](interactive-handoff.md#evidence-record) for results and limitations.
