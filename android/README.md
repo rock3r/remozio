@@ -10,7 +10,7 @@ Use JDK 21 and an Android SDK with `platforms;android-37.0` and `build-tools;37.
 ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
 ```
 
-The debug APK is `android/app/build/outputs/apk/debug/android-app-debug.apk`. Its package ID is `dev.remozio.android.debug`. Production uses `dev.remozio.android` and needs a separately provisioned signing identity. Production signing and release publication still need configuration.
+The debug APK is `android/app/build/outputs/apk/debug/android-app-debug.apk`. Its package ID is `dev.remozio.android.debug`. Production uses `dev.remozio.android` and needs a separately provisioned signing identity. The [release artifact procedure](releases.md) builds and verifies upload candidates. Production signing identity and publication still need configuration.
 
 ## Current scope
 

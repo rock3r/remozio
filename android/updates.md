@@ -156,6 +156,8 @@ Downloads use a fixed repository/tag/asset path rather than a feed-provided URL.
 
 Cancel closes the stream and discards staging. A cleanup failure remains visible and blocks another download until resolved. Repeated download actions share the active job. Download completion never starts installation. Feed metadata is only a discovery hint: the APK must independently pass native signature, package, SDK, signer-continuity, and version-code checks. Its version name and byte count must also match the selected offer.
 
+See the [release preparation procedure](releases.md) for the optimized build, signing, and artifact checks.
+
 ### Release artifact contract
 
 Publish one standalone signed APK named `remozio-android.apk`. Use a three-part semantic version tag, optionally prefixed with `v`. The APK version name must equal the tag without that prefix. Each update must increase both semantic precedence and Android version code; build metadata alone does not make a newer offer. Debug builds cannot install the production package because their package IDs differ.
