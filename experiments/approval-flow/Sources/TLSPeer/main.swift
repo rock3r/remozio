@@ -3,10 +3,11 @@ import Foundation
 import Network
 import Security
 import RemozioCore
+import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -16,9 +17,11 @@ func emit(_ fields: [String: Int]) {
 final class Probe: @unchecked Sendable {
     let queue = DispatchQueue(label: "dev.remozio.experiment.tls")
     let listener: NWListener
+    let negotiate: Bool
     var connections: [UUID: NetworkByteChannel] = [:]
 
-    init(identity: SecIdentity, peerPublicKey: Data) throws {
+    init(identity: SecIdentity, peerPublicKey: Data, negotiate: Bool) throws {
+        self.negotiate = negotiate
         let peer = try PinnedTLSPeer(subjectPublicKeyInfo: peerPublicKey)
         let tls = NWProtocolTLS.Options()
         let options = tls.securityProtocolOptions
@@ -67,8 +70,18 @@ final class Probe: @unchecked Sendable {
             connections[id] = channel
             Task {
                 do {
-                    try await channel.start(timeoutMilliseconds: 10_000)
-                    try await echoFrame(channel)
+                    if negotiate {
+                        let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+                            phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
+                        let framed = try await NegotiatedNetworkChannel.accept(channel: channel, scope: scope,
+                            requests: [], auditVersions: [], maximumPayloadBytes: 65_536, timeoutMilliseconds: 4_000)
+                        do { while let payload = try await framed.receive() { try await framed.send(payload) } }
+                        catch { await framed.closeAndWait(); throw error }
+                        await framed.closeAndWait()
+                    } else {
+                        try await channel.start(timeoutMilliseconds: 10_000)
+                        try await echoFrame(channel)
+                    }
                 } catch { }
                 await channel.close()
                 queue.async { self.connections.removeValue(forKey: id) }
@@ -123,7 +136,7 @@ let result = SecPKCS12Import(identityData as CFData, [kSecImportExportPassphrase
 guard result == errSecSuccess else { throw ProbeError.identityImport(result) }
 guard let items = imported as? [[String: Any]], let value = items.first?[kSecImportItemIdentity as String] else { throw ProbeError.invalidInput }
 let identity = value as! SecIdentity
-let probe = try Probe(identity: identity, peerPublicKey: peer)
+let probe = try Probe(identity: identity, peerPublicKey: peer, negotiate: setup.negotiate == true)
 probe.start()
 DispatchQueue.global().async {
     // The controller keeps this pipe open. EOF also handles controller crashes. No further commands are accepted.

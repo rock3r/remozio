@@ -1,5 +1,7 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.protocol.ChannelScope
+import dev.remozio.phone.transport.NegotiatedTLSChannel
 import dev.remozio.phone.transport.RelayAccessCredential
 import dev.remozio.phone.transport.EncryptedRecordTransport
 import dev.remozio.phone.transport.TLSRecordSession
@@ -335,6 +337,46 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun negotiatedHostsExchangeSessionBoundMessagesThroughTheHttpsRelay(): Unit = Fixture(negotiate = true).use { f ->
+        WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+            runBlocking {
+                withTimeout(10_000) {
+                    val carrier = relay.connector.connect(this, relay.endpoint,
+                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                    val session = TLSRecordSession(this, f.engine(), carrier, handshakeTimeoutMillis = 4_000)
+                    val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+                    try {
+                        val channel = NegotiatedTLSChannel.connect(session, scope, emptyList(), emptySet(), 65_536, timeoutMillis = 4_000)
+                        try {
+                            assertEquals(1uL, channel.negotiated.envelopeVersion)
+                            for (payload in listOf("synthetic-negotiated-private".repeat(1_900).toByteArray(), byteArrayOf(1, 2, 3))) {
+                                channel.send(payload); assertArrayEquals(payload, channel.receive())
+                            }
+                            assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("synthetic-negotiated-private"))
+                        } finally { channel.closeAndJoin() }
+                    } finally { session.closeAndJoin() }
+                }
+            }
+        }
+    }
+
+    @Test fun negotiatedNativeHostRejectsWrongEnrollmentScope(): Unit = Fixture(negotiate = true).use { f ->
+        runBlocking {
+            withTimeout(8_000) {
+                val socket = Socket("127.0.0.1", f.port).apply { soTimeout = 4_000 }
+                val session = TLSRecordSession(this, f.engine(), SocketRecords(socket), handshakeTimeoutMillis = 4_000)
+                try {
+                    val wrong = ChannelScope(ByteArray(16), ByteArray(16), ByteArray(16), ByteArray(16))
+                    var rejected = false
+                    try { NegotiatedTLSChannel.connect(session, wrong, emptyList(), emptySet(), 65_536, timeoutMillis = 4_000) }
+                    catch (_: IOException) { rejected = true }
+                    assertTrue(rejected)
+                } finally { session.closeAndJoin() }
+                assertTrue(socket.isClosed)
+            }
+        }
+    }
+
     private class SocketRecords(private val socket: Socket) : EncryptedRecordTransport {
         override val maximumMessageBytes = 311
         override suspend fun send(ciphertext: ByteArray): Unit = withContext(Dispatchers.IO) {
@@ -420,7 +462,7 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -435,7 +477,7 @@ class TLSInteropTest {
                 child = ProcessBuilder(peer, mac.path.toString()).redirectError(directory.resolve("peer.log").toFile()).start()
                 process = child
                 process.outputStream.bufferedWriter().also {
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\"}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

@@ -36,6 +36,26 @@ jobs:
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
       - run: ./gradlew :phone-core:test :phone-core:approvalFlowTest
+      - name: Diagnose native channel test crashes
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import subprocess
+          from pathlib import Path
+          bundles = list(Path('macos/core/.build/debug').glob('RemozioCore*Tests.xctest'))
+          if len(bundles) == 1:
+              bundle = bundles[0]
+              env = {'PATH': os.environ['PATH']}
+              if 'DEVELOPER_DIR' in os.environ:
+                  env['DEVELOPER_DIR'] = os.environ['DEVELOPER_DIR']
+              runner = subprocess.check_output(['xcrun', '--find', 'xctest'], env=env, text=True).strip()
+              subprocess.run(['xcrun', 'lldb', '--batch', '--no-lldbinit',
+                  '--one-line', 'run', '--one-line-on-crash', 'thread backtrace all', '--', runner,
+                  '-XCTest', 'RemozioCoreTests.NegotiatedNetworkChannelTests/testCoalescedAndFragmentedFramesSurviveNegotiation',
+                  str(bundle.resolve())], env=env, timeout=90, check=False)
+          PYTHON
   kotlin:
     name: Kotlin protocol
     runs-on: ubuntu-latest

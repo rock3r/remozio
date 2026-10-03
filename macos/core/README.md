@@ -74,3 +74,5 @@ Portable setup files have a [bounded encrypted container](SETUP-FILES.md). A typ
 The [TLS peer pin policy](pinned-tls-peer.md) validates enrolled P-256 keys and leaf certificate dates. The synthetic native listener uses it; production channel ownership remains pending.
 
 The [native byte channel](network-byte-channel.md) owns connection start, bounded I/O, cancellation, and cleanup. The TLS experiment uses it after pinned handshake admission.
+
+The [negotiated network channel](../../protocol/session-envelope.md) owns the Mac handshake, bounded framing, and session-bound message delivery.

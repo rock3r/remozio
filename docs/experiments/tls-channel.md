@@ -66,3 +66,9 @@ Further evidence must cover Android's hardware-backed client key, the outer rela
 References: [Apple security options](https://developer.apple.com/documentation/network/security-options), [PKCS#12 import](https://developer.apple.com/documentation/security/secpkcs12import(_:_:_:)), and [JSSE guide](https://docs.oracle.com/en/java/javase/21/security/java-secure-socket-extension-jsse-reference-guide.html).
 
 The later [WebSocket carrier experiment](websocket-carrier.md) tests an independent outer HTTPS layer. This page records the original byte-forwarder experiment.
+
+## Negotiated message mode
+
+The trusted controller can enable `negotiate` in the startup JSON. This mode runs `NegotiatedNetworkChannel` with a fixed synthetic scope and a 65,536-byte payload bound. The phone test uses `NegotiatedTLSChannel` through the HTTPS relay connector. Both hosts generate fresh nonces, confirm the shared transcript, and verify session-bound envelopes before echoing opaque synthetic payloads. A wrong scope fails before payload delivery. The network peer cannot select or downgrade this mode; the original echo mode remains for existing TLS tests.
+
+This tests native/JVM host integration, not production enrollment, authority admission, Android Keystore behavior, Cloudflare deployment, or real approvals. The [message-host contract](../../protocol/session-envelope.md) describes the framing and remaining boundaries.
