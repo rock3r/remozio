@@ -33,3 +33,5 @@ The [phone TLS engine](TRANSPORT.md) accepts ordered ciphertext without a local 
 `WebSocketRecordTransport` provides [bounded runtime framing](TRANSPORT.md#bounded-websocket-records) through Ktor WebSockets 3.6.0. Its host still owns authenticated HTTPS setup and enrollment lifecycle.
 
 The [relay connector](RELAY.md) authenticates outer HTTPS and validates the upgrade before bounded framing starts. Its host supplies trusted enrollment data and scoped Access credentials.
+
+The [enrollment store](ENROLLMENTS.md) persists prepared, active, and removed ownership records with encrypted replacement. It keeps Mac/account scopes separate. The production setup owner must still validate authorization and freshness before using active records.
