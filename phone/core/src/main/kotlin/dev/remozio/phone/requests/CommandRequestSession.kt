@@ -38,7 +38,17 @@ class CommandRequestSession private constructor(
     private val challenge: CborValue.Bytes,
     private val permittedActions: Set<CapturedAction>,
 ) : AutoCloseable {
+    private var memory: CommandMemoryBudget.Reservation? = null
     private var capture: CommandCapture? = capture
+
+    @Synchronized
+    internal fun retainMemory(budget: CommandMemoryBudget) {
+        check(memory == null && !closure.value)
+        val c = checkNotNull(capture)
+        val elements = c.arguments.size.toLong() + c.environment.size.toLong() * 3 +
+            c.ancestry.entries.size.toLong() * 2 + c.target.supplementaryGroups.size.toLong()
+        memory = budget.retain(c.canonicalByteCount.toLong(), elements)
+    }
     private val closure = MutableStateFlow(false)
     val closed: StateFlow<Boolean> = closure.asStateFlow()
     private val revision = MutableStateFlow(0uL)
@@ -51,7 +61,7 @@ class CommandRequestSession private constructor(
         val result = tracker.observe(body, signature, receivedAt)
         if (result == StatusAcceptance.APPLIED) {
             val status = checkNotNull(tracker.snapshot(receivedAt)).status
-            if (status.phase.isTerminal) capture = null
+            if (status.phase.isTerminal) { capture = null; memory?.releaseCapture() }
             revision.value = status.revision
         }
         return result
@@ -92,6 +102,7 @@ class CommandRequestSession private constructor(
     override fun close() {
         capture = null
         closure.value = true
+        memory?.close(); memory = null
     }
 
     companion object {

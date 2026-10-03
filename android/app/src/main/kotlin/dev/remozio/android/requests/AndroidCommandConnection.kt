@@ -6,6 +6,7 @@ import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.android.transport.AndroidTransportIdentities
 import dev.remozio.android.transport.AndroidTransportIdentity
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
+import dev.remozio.phone.requests.CommandMemoryBudget
 import dev.remozio.phone.requests.CommandRequestReceiver
 import dev.remozio.phone.requests.RequestLimits
 import dev.remozio.phone.transport.*
@@ -16,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Uses the saved relay route. LAN discovery and setup must never replace the enrolled inner TLS pin. */
 @WorkerThread
-internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrollment, limits: RequestLimits): CommandConnection {
+internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrollment, limits: RequestLimits, memoryBudget: CommandMemoryBudget? = null): CommandConnection {
     require(record.phase == EnrollmentPhase.ACTIVE)
     val retired = AndroidRetiredCommandRequests.open(context, record.enrollment)
     try {
@@ -47,7 +48,7 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
                 identity?.close()
                 throw failure
             }
-        }, clock = RequestElapsedClock::now, retired = retired)
+        }, clock = RequestElapsedClock::now, retired = retired, memoryBudget = memoryBudget)
     } catch (failure: Throwable) { retired.close(); throw failure }
 }
 

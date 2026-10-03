@@ -57,6 +57,38 @@ class CommandRequestReceiverTest {
         bind(enrollment, wire, time).run()
         assertTrue(wire.closed)
     }
+    @Test fun sharedMemoryCapacityPreservesExistingOwnersAndTerminalStatusReleasesCapture() = runBlocking<Unit> {
+        val budget = CommandMemoryBudget(capture.size.toLong() + 2048, 10000)
+        val firstInbox = CommandRequestInbox(1, 128, budget)
+        val secondInbox = CommandRequestInbox(1, 128, budget)
+        val a = Mac(); val b = Mac(8)
+        val first = a.enroll(firstInbox); val second = b.enroll(secondInbox)
+        deliver(first, a, a.issued(), a.status())
+        val retained = first.sessions().single()
+        // A duplicate needs no additional retained reservation.
+        deliver(first, a, a.issued())
+        assertSame(retained, first.sessions().single())
+        assertFailsWith<RequestCapacityException> { deliver(second, b, b.issued()) }
+        assertTrue(second.sessions().isEmpty()); assertFalse(retained.closed.value)
+        deliver(first, a, a.status(true))
+        deliver(second, b, b.issued())
+        assertEquals(1, second.sessions().size)
+        firstInbox.close(); secondInbox.close()
+        val third = a.enroll(CommandRequestInbox(1, 128, budget))
+        deliver(third, a, a.issued()); third.close()
+    }
+
+    @Test fun itemBudgetAndReservationReleaseAreIndependentOfByteCapacity() {
+        val budget = CommandMemoryBudget(100000, 100)
+        val first = budget.retain(100, 36)
+        assertEquals(InboxRejection.CAPACITY, assertFailsWith<InboxException> { budget.retain(1, 1) }.reason)
+        first.releaseCapture()
+        // Terminal metadata remains reserved until retirement or closure.
+        assertFailsWith<InboxException> { budget.retain(1, 1) }
+        first.close(); first.close()
+        budget.retain(999, 36).close()
+    }
+
     @Test fun reconnectPreservesTimersAndTerminalOwnersInObservableState() = runBlocking<Unit> {
         val mac = Mac(); val enrollment = mac.enroll()
         deliver(enrollment, mac, mac.issued(), mac.status())
