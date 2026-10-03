@@ -24,3 +24,6 @@ __pycache__/
 .kotlin/
 build/
 local.properties
+
+# Local native UI review captures.
+/.impeccable/review/
