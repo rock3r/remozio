@@ -119,3 +119,7 @@ Permission denial, app disablement, missing channel, disabled channel, lower imp
 Host tests cover the permission and channel classification. Pixel testing still needs permission allow/deny/dismiss, return from system settings, channel changes, TalkBack, large text and actual notification appearance. No device was contacted by the host checks.
 
 The permission flow follows [Android's Compose guidance](https://developer.android.com/develop/ui/compose/notifications/notification-permission). Channel ownership follows [Android notification channels](https://developer.android.com/develop/ui/compose/notifications/channels).
+
+## Biometric key custody
+
+The [biometric key component](../docs/android-biometric-keys.md) creates and inspects hardware-backed, per-use keys. Enrollment registration, request-bound signing, and recovery still need integration. The debug probe alias remains separate.
