@@ -122,4 +122,4 @@ The permission flow follows [Android's Compose guidance](https://developer.andro
 
 ## Biometric key custody
 
-The [biometric key component](../docs/android-biometric-keys.md) creates and inspects hardware-backed, per-use keys. Enrollment registration, request-bound signing, and recovery still need integration. The debug probe alias remains separate.
+The [biometric key component](../docs/android-biometric-keys.md) creates and inspects hardware-backed, per-use keys. The [command signer](../docs/android-command-biometrics.md) provides a request-bound native biometric prompt. Enrollment registration, launcher integration, and recovery remain pending. The debug probe alias remains separate.

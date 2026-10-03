@@ -34,6 +34,9 @@ class CommandRequestSession private constructor(
     private val tracker: RequestStatusTracker,
     val identity: CommandRequestIdentity,
     internal val requestDigest: CborValue.Bytes,
+    private val authorityKey: CborValue.Bytes,
+    private val challenge: CborValue.Bytes,
+    private val permittedActions: Set<CapturedAction>,
 ) : AutoCloseable {
     private var capture: CommandCapture? = capture
     private val closure = MutableStateFlow(false)
@@ -58,6 +61,28 @@ class CommandRequestSession private constructor(
     @Synchronized
     fun snapshot(now: ElapsedInstant) = if (closure.value) CommandRequestSnapshot(null, null, closed = true)
         else CommandRequestSnapshot(capture, tracker.snapshot(now))
+
+    fun isBoundToAuthority(macID: ByteArray, accountID: ByteArray, publicKey: ByteArray): Boolean =
+        identity.macID == CborValue.Bytes(macID) && identity.accountID == CborValue.Bytes(accountID) &&
+            authorityKey == CborValue.Bytes(publicKey)
+
+    /** Runs a bound decision operation under the session monitor. The Mac still decides freshness and the winning phone. */
+    @Synchronized
+    fun <T> withPendingDecision(
+        now: ElapsedInstant,
+        phoneID: ByteArray,
+        keyID: ByteArray,
+        action: CapturedAction,
+        operation: (DecisionPayload) -> T,
+    ): T {
+        check(!closure.value && capture != null)
+        val tracked = checkNotNull(tracker.snapshot(now))
+        check(tracked.status.phase == RequestPhase.QUEUED || tracked.status.phase == RequestPhase.PRESENTED)
+        check(!tracked.timing.clockUncertain && (tracked.timing.authorizationRemainingUpperBoundMs ?: 0uL) > 0uL)
+        ActionPolicy.requirement(action, RequestKind.COMMAND, permittedActions)
+        return operation(DecisionPayload(identity.macID.copyBytes(), identity.accountID.copyBytes(), identity.requestID.copyBytes(),
+            requestDigest.copyBytes(), challenge.copyBytes(), phoneID, keyID, action))
+    }
 
     /** Local invalidation is not an authority-signed terminal result. Old UI handles must stop displaying it. */
     @Synchronized
@@ -96,7 +121,8 @@ class CommandRequestSession private constructor(
                 RequestStatusTracker(request, key, limits.status, limits.signing, limits.body),
                 CommandRequestIdentity(CborValue.Bytes(request.macID), CborValue.Bytes(request.accountID),
                     CborValue.Bytes(request.requestID)),
-                CborValue.Bytes(request.requestDigest(limits.body, limits.signing)))
+                CborValue.Bytes(request.requestDigest(limits.body, limits.signing)),
+                CborValue.Bytes(key), CborValue.Bytes(request.challenge), request.permittedActions.toSet())
         }
     }
 }
