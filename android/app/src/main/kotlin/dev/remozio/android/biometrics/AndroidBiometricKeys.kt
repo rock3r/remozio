@@ -10,6 +10,8 @@ import java.security.KeyFactory
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.PrivateKey
+import java.security.PublicKey
+import java.security.Signature
 import java.security.interfaces.ECPublicKey
 
 enum class BiometricKeySecurity { STRONGBOX, TRUSTED_ENVIRONMENT }
@@ -71,8 +73,20 @@ internal fun loadBiometricKey(reference: EnrollmentKeyReference): BiometricKeyMa
         info.digests.toSet(), info.isUserAuthenticationRequired, info.isUserAuthenticationRequirementEnforcedBySecureHardware,
         info.userAuthenticationType, info.userAuthenticationValidityDurationSeconds, info.isUnlockedDeviceRequired,
         info.isTrustedUserPresenceRequired, info.isUserConfirmationRequired))
-    val point = decisionPublicPoint(store.getCertificate(reference.alias)?.publicKey as? ECPublicKey
-        ?: throw BiometricIdentityUnavailable())
+    val publicKey = store.getCertificate(reference.alias)?.publicKey as? ECPublicKey
+        ?: throw BiometricIdentityUnavailable()
+    val point = decisionPublicPoint(publicKey)
     require(MessageDigest.isEqual(reference.publicKey.copyBytes(), point))
+    checkBiometricKeyOperation(key, publicKey)
     return BiometricKeyMaterial(key, BiometricKeyInspection(security, info.isInvalidatedByBiometricEnrollment))
+}
+
+/** Initializes no data or prompt. Switching to verification releases the disposable signing operation. */
+internal fun checkBiometricKeyOperation(
+    key: PrivateKey,
+    publicKey: PublicKey,
+    operation: Signature = Signature.getInstance("SHA256withECDSA"),
+) {
+    try { operation.initSign(key) }
+    finally { operation.initVerify(publicKey) }
 }

@@ -4,7 +4,7 @@ The Android app can create and inspect a distinct P-256 biometric key for an enr
 
 Keys require strong biometrics for each operation, hardware-enforced authentication, and an unlocked device. Creation requests StrongBox first. Only explicit StrongBox unavailability permits a TEE retry, and only while the alias remains absent. Existing aliases are never overwritten.
 
-Inspection checks the key origin, curve, signing purpose, digest, authentication policy, alias, and enrolled public key. Missing or invalid keys require explicit recovery. Inspection never replaces a key. Per-use metadata values of -1 and 0 are accepted; authentication windows are rejected.
+Inspection checks the key origin, curve, signing purpose, digest, authentication policy, alias, and enrolled public key. A disposable signing initialization checks for operation-level invalidation, then switches to verification to release the operation. It supplies no data and requests no signature or prompt. Missing or invalid keys require explicit recovery. Inspection never replaces a key. Per-use metadata values of -1 and 0 are accepted; authentication windows are rejected.
 
 Creation requests retention across biometric enrollment changes. The platform invalidation flag is diagnostic only. The Pixel experiment has not established actual retention. This component offers no generic signing operation and has no production UI integration yet. Request-bound CryptoObject signing and enrollment recovery remain separate work.
 

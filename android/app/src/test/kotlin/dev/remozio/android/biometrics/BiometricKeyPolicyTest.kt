@@ -2,6 +2,7 @@ package dev.remozio.android.biometrics
 
 import android.security.keystore.KeyProperties
 import org.junit.Test
+import java.security.*
 import kotlin.test.*
 
 class BiometricKeyPolicyTest {
@@ -28,6 +29,31 @@ class BiometricKeyPolicyTest {
             facts.copy(validitySeconds = 1), facts.copy(validitySeconds = -2),
             facts.copy(unlockedDeviceRequired = false), facts.copy(presenceRequired = true), facts.copy(confirmationRequired = true)
         ).forEach { assertFails { biometricKeySecurity(it) } }
+    }
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    private class ProbeSignature(private val invalid: Boolean) : Signature("probe") {
+        var released = false
+        override fun engineInitSign(key: PrivateKey) {
+            if (invalid) throw InvalidKeyException("invalidated")
+        }
+        override fun engineInitVerify(key: PublicKey) { released = true }
+        override fun engineUpdate(value: Byte) { error("No data may be supplied") }
+        override fun engineUpdate(value: ByteArray, offset: Int, length: Int) { error("No data may be supplied") }
+        override fun engineSign(): ByteArray = error("No signature may be requested")
+        override fun engineVerify(value: ByteArray): Boolean = error("No verification may be requested")
+        override fun engineSetParameter(name: String, value: Any) = error("No parameter mutation")
+        override fun engineGetParameter(name: String): Any = error("No parameter access")
+    }
+
+    @Test fun operationProbeRejectsInvalidKeysAndReleasesTheOperationWithoutSigning() {
+        val pair = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val valid = ProbeSignature(false)
+        checkBiometricKeyOperation(pair.private, pair.public, valid)
+        assertTrue(valid.released)
+        val invalid = ProbeSignature(true)
+        assertFailsWith<InvalidKeyException> { checkBiometricKeyOperation(pair.private, pair.public, invalid) }
+        assertTrue(invalid.released)
     }
 
     private class Backend : BiometricKeyCreationBackend {
