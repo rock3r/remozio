@@ -35,7 +35,7 @@ Calls serialize engine operations. Delegated key tasks run synchronously and can
 
 `TLSInteropTest` exercises the engine against the native Swift loopback peer using disposable keys. It covers fragmented records, a large application frame, peer pin and ALPN rejection, handshake/input limits, abort, and abrupt EOF. The [direct WebSocket extension](../../docs/experiments/websocket-carrier.md#direct-phone-engine-extension) also feeds this engine without a local client bridge. The earlier socket experiments remain separate fixtures.
 
-The engine is a phone-core component, not a wired Android connection. The bounded framing layer is described below. The [Android identity loader](../../android/transport-identity.md) now supplies an existing hardware-backed key through `ClientTLSKeyManager`. HTTPS connection setup, a lifecycle owner that couples framing to TLS, enrollment storage, and key creation remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
+The engine is a phone-core component, not a wired Android connection. The bounded framing layer is described below. The [Android identity loader](../../android/transport-identity.md) now supplies an existing hardware-backed key through `ClientTLSKeyManager`. The session owner below couples framing to TLS. HTTPS connection setup, enrollment storage, and key creation remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
 
 ## Bounded WebSocket records
 
@@ -63,3 +63,32 @@ Cancelling a send or receive aborts this transport. Explicit close and parent ca
 The Ktor configuration constructor and session start method require an `InternalAPI` opt-in. This is confined to the adapter and the dependency is pinned. Parser, queue, and lifecycle tests must pass when that dependency changes; no reflection or private fields are used.
 
 Portable tests cover a first oversized header without a body, fragmented overflow, output masking and copy ownership, ping handling, rejected message types, backpressure, queued messages before close, and cancellation. Android compilation and lint check API availability. Actual HTTPS setup, the connection owner, current-enrollment checks, and device behavior remain integration work.
+
+
+## TLS session ownership
+
+`TLSRecordSession` owns one engine and one `EncryptedRecordTransport`. `WebSocketRecordTransport` implements that carrier contract. The caller still supplies an authenticated HTTPS connection and a trusted enrollment identity. The session does not open an endpoint or establish enrollment trust.
+
+```mermaid
+flowchart LR
+    Network[Encrypted carrier] -->|one queued chunk| Reader[Carrier reader]
+    Reader --> Owner[One TLS worker]
+    Send[Serialized send calls] -->|one queued write| Owner
+    Owner --> Network
+    Owner -->|bounded pending plaintext| Receive[Serialized receive calls]
+    Cancel[Cancellation or enrollment change] --> Close[Abort both owners]
+    Close --> Owner
+    Close --> Network
+```
+
+The worker defaults to `Dispatchers.IO`. It serializes engine calls and preserves partial writes. Ciphertext is split to the carrier's declared message limit, at most 32,768 bytes. Send calls accept nonempty plaintext chunks up to 32,768 bytes. Send completion means local carrier acceptance, never delivery, approval, or execution.
+
+Queues hold one incoming ciphertext chunk, one write, and one plaintext chunk each. The reader can hold one additional input chunk while its queue is full. The worker retains at most 65,536 pending plaintext bytes, plus the engine's bounded buffers and current batch. Carrier queues have their own documented bounds. Application consumers must drain incoming data; backpressure does not permit unbounded retention. A full plaintext queue still permits independent writes that need no further peer input. Arbitration alternates priority between ready writes and inbound work, so continuous input cannot monopolize the worker.
+
+The handshake deadline defaults to 15 seconds and accepts settings from 1 to 60,000 milliseconds. It covers TLS negotiation and its carrier writes. It does not include application consumption after authentication. Operation deadlines remain the protocol owner's responsibility. Cancelling `awaitOpen`, `send`, or `receive` aborts this incarnation; it does not retry a decision.
+
+`close` marks the session aborted, discards queued application data, cancels work, and closes the carrier without waiting. Late provider output is checked and discarded. A hardware provider call may finish later because coroutine cancellation cannot interrupt every native key operation. The handshake deadline cannot guarantee timely return from such a blocked provider. `closeAndJoin` waits for the worker and carrier jobs to finish. The carrier's `close` must be nonblocking; `awaitClosed` must await any independent cleanup jobs.
+
+An authenticated TLS close permits draining plaintext already received, then returns null. A stalled write fails without discarding that final plaintext; subsequent writes are rejected. Abrupt carrier EOF fails the session. Neither condition proves a request outcome. Explicit close or parent cancellation discards buffered plaintext. The enrollment owner must close the session when trust changes and recheck current enrollment before using returned plaintext as authority. Closing the session does not delete or replace enrollment keys.
+
+Deterministic tests cover partial writes, both framing layers, backpressure, cancellation, deadlines, bounded input, and cleanup. Native Swift/Kotlin tests cover a fragmented exchange and wrong-pin rejection through the session owner. These tests use synthetic keys and loopback traffic. Android Keystore behavior, real HTTPS setup, app lifecycle integration, and network transitions remain unverified on a Pixel.

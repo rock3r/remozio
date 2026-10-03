@@ -32,10 +32,10 @@ class WebSocketRecordTransport(
     parent: CoroutineScope,
     private val input: ByteReadChannel,
     private val output: ByteWriteChannel,
-    private val maximumMessageBytes: Int,
+    override val maximumMessageBytes: Int,
     queueCapacity: Int,
     private val closeUnderlying: () -> Unit,
-) : AutoCloseable {
+) : EncryptedRecordTransport {
     private val queues = WebSocketChannelsConfig().apply {
         require(maximumMessageBytes in 1..32_768)
         require(queueCapacity in 1..64)
@@ -68,7 +68,7 @@ class WebSocketRecordTransport(
     }
 
     /** Acceptance into the bounded output queue is not delivery or execution acknowledgement. */
-    suspend fun send(ciphertext: ByteArray) {
+    override suspend fun send(ciphertext: ByteArray) {
         require(ciphertext.size <= maximumMessageBytes) { "Split ciphertext into bounded messages" }
         try {
             sendMutex.withLock {
@@ -80,7 +80,7 @@ class WebSocketRecordTransport(
     }
 
     /** Drains messages that precede a peer close. Null is carrier EOF, not authenticated TLS closure. */
-    suspend fun receive(): ByteArray? = try {
+    override suspend fun receive(): ByteArray? = try {
         receiveMutex.withLock {
             checkNotAborted()
             val result = select {
@@ -113,7 +113,9 @@ class WebSocketRecordTransport(
         }
     }
 
-    suspend fun closeAndJoin() { close(); sessionJob.join(); owner.join() }
+    suspend fun closeAndJoin() { close(); awaitClosed() }
+
+    override suspend fun awaitClosed() { sessionJob.join(); owner.join() }
 
     private fun checkNotAborted() {
         if (closed.get() || parentJob.isCancelled || owner.isCancelled) throw IOException("WebSocket transport closed")
