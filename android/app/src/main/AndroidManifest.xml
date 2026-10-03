@@ -8,6 +8,8 @@
         android:icon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.Remozio">
+        <receiver android:name=".updates.UpdateStatusReceiver" android:exported="false" />
+        <activity android:name=".updates.UpdateConfirmationActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
