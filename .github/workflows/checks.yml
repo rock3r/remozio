@@ -36,6 +36,35 @@ jobs:
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
       - run: ./gradlew :phone-core:test :phone-core:approvalFlowTest
+      - name: Report native test crashes
+        if: failure()
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import time
+          from pathlib import Path
+          reports = Path.home() / 'Library/Logs/DiagnosticReports'
+          for attempt in range(5):
+              crashes = sorted(reports.glob('xctest*.ips'))
+              if crashes:
+                  break
+              time.sleep(1)
+          for path in crashes:
+              text = path.read_text()
+              _, end = json.JSONDecoder().raw_decode(text)
+              report = json.loads(text[end:])
+              print(path.name, report.get('exception'), report.get('termination'))
+              images = report.get('usedImages', [])
+              for thread in report.get('threads', []):
+                  if not thread.get('triggered'):
+                      continue
+                  for frame in thread.get('frames', []):
+                      index = frame.get('imageIndex', -1)
+                      image = images[index] if 0 <= index < len(images) else {}
+                      print(image.get('name'), frame)
+          if not crashes:
+              print('No XCTest crash report was available.')
+          PYTHON
   kotlin:
     name: Kotlin protocol
     runs-on: ubuntu-latest
