@@ -46,12 +46,12 @@ class RetiredRequestIndexTest {
     }
 
     @Test fun exactMembershipSurvivesReopenAndDoesNotStorePlainRequestIDs() = fixture { file ->
-        RetiredRequestIndex(Database(file), true).use { index ->
+        RetiredRequestIndex(Database(file)).use { index ->
             for (value in 1..200) index.remember(id(value), digest(value))
             index.remember(id(1), digest(1))
             assertNull(index.lookup(id(0)))
         }
-        RetiredRequestIndex(Database(file), false).use { index ->
+        RetiredRequestIndex(Database(file)).use { index ->
             for (value in 1..200) assertContentEquals(digest(value), index.lookup(id(value)))
             val result = checkNotNull(index.lookup(id(1))); result.fill(0)
             assertContentEquals(digest(1), index.lookup(id(1)))
@@ -63,33 +63,60 @@ class RetiredRequestIndexTest {
     }
 
     @Test fun conflictingDigestCannotOverwriteAndQuarantinesOwner() = fixture { file ->
-        RetiredRequestIndex(Database(file), true).use { index ->
+        RetiredRequestIndex(Database(file)).use { index ->
             index.remember(id(1), digest(1))
             assertFails { index.remember(id(1), digest(2)) }
             assertFails { index.lookup(id(1)) }
         }
-        RetiredRequestIndex(Database(file), false).use { assertContentEquals(digest(1), it.lookup(id(1))) }
+        RetiredRequestIndex(Database(file)).use { assertContentEquals(digest(1), it.lookup(id(1))) }
     }
 
     @Test fun uncertainCommitRequiresReopenAndPreservesCommittedMembership() = fixture { file ->
         val db = Database(file)
-        RetiredRequestIndex(db, true).use { index ->
+        RetiredRequestIndex(db).use { index ->
             db.failAfterCommit = true
             assertFails { index.remember(id(1), digest(1)) }
             assertFails { index.lookup(id(1)) }
         }
-        RetiredRequestIndex(Database(file), false).use { assertContentEquals(digest(1), it.lookup(id(1))) }
+        RetiredRequestIndex(Database(file)).use { assertContentEquals(digest(1), it.lookup(id(1))) }
     }
 
     @Test fun malformedRowsAndUnsupportedSchemaFailWithoutReset() = fixture { file ->
-        RetiredRequestIndex(Database(file), true).use { it.remember(id(1), digest(1)) }
+        RetiredRequestIndex(Database(file)).use { it.remember(id(1), digest(1)) }
         Database(file).use { it.execute("UPDATE retired_requests SET digest = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'") }
-        RetiredRequestIndex(Database(file), false).use { assertFails { it.lookup(id(1)) } }
+        RetiredRequestIndex(Database(file)).use { assertFails { it.lookup(id(1)) } }
         Database(file).use { db ->
             db.execute("PRAGMA user_version = 2")
-            assertFails { RetiredRequestIndex(db, false) }
+            assertFails { RetiredRequestIndex(db) }
             assertEquals(2, (db.row("PRAGMA user_version")!!.single() as Number).toInt())
             assertEquals(1, (db.row("SELECT count(*) FROM retired_requests")!!.single() as Number).toInt())
+        }
+    }
+
+    @Test fun pristineVersionZeroRecoversAfterCreationOrRolledBackSchema() {
+        for (rollback in listOf(false, true)) fixture { file ->
+            Database(file).use { db ->
+                if (rollback) assertFails {
+                    db.transaction {
+                        db.execute("CREATE TABLE interrupted(value INTEGER)")
+                        error("Synthetic interruption before schema commit")
+                    }
+                }
+                assertEquals(0, (db.row("PRAGMA user_version")!!.single() as Number).toInt())
+            }
+            RetiredRequestIndex(Database(file)).use { it.remember(id(1), digest(1)) }
+            RetiredRequestIndex(Database(file)).use { assertContentEquals(digest(1), it.lookup(id(1))) }
+        }
+    }
+
+    @Test fun versionZeroWithExistingObjectsIsNeverReinitialized() = fixture { file ->
+        Database(file).use { db ->
+            db.execute("CREATE TABLE preserved(value INTEGER)")
+            db.execute("INSERT INTO preserved(value) VALUES (42)")
+            assertFails { RetiredRequestIndex(db) }
+            assertEquals(42, (db.row("SELECT value FROM preserved")!!.single() as Number).toInt())
+            assertEquals(0, (db.row("PRAGMA user_version")!!.single() as Number).toInt())
+            assertEquals(1, (db.row("SELECT count(*) FROM sqlite_master")!!.single() as Number).toInt())
         }
     }
 }

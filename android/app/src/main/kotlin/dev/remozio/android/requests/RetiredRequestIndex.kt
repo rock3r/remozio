@@ -10,18 +10,21 @@ internal interface RetiredRequestDatabase : AutoCloseable {
 }
 
 /** Exact membership on disk. The caller owns the database on failed construction; a successful owner closes it. */
-internal class RetiredRequestIndex(private val db: RetiredRequestDatabase, newDatabase: Boolean) : RetiredCommandRequests {
+internal class RetiredRequestIndex(private val db: RetiredRequestDatabase) : RetiredCommandRequests {
     private var closed = false
     private var failed = false
 
     init {
         check(db.row("PRAGMA journal_mode")?.single()?.toString()?.equals("delete", true) == true)
         check((db.row("PRAGMA synchronous")?.single() as? Number)?.toInt() == 3)
-        if (newDatabase) db.transaction {
-            db.execute("CREATE TABLE retired_requests(request_key TEXT PRIMARY KEY NOT NULL, digest BLOB NOT NULL CHECK(length(digest) = 32)) WITHOUT ROWID")
-            db.execute("PRAGMA user_version = 1")
+        db.transaction {
+            val version = (db.row("PRAGMA user_version")?.single() as? Number)?.toInt()
+            if (version == 0) {
+                check((db.row("SELECT count(*) FROM sqlite_master")?.single() as? Number)?.toLong() == 0L)
+                db.execute("CREATE TABLE retired_requests(request_key TEXT PRIMARY KEY NOT NULL, digest BLOB NOT NULL CHECK(length(digest) = 32)) WITHOUT ROWID")
+                db.execute("PRAGMA user_version = 1")
+            } else check(version == 1)
         }
-        check((db.row("PRAGMA user_version")?.single() as? Number)?.toInt() == 1)
     }
 
     @Synchronized override fun lookup(requestID: ByteArray): ByteArray? {

@@ -31,13 +31,12 @@ internal object AndroidRetiredCommandRequests {
         val owner = ExclusiveFileOwner.acquire(File(file.path + ".lock"))
         var db: SQLiteDatabase? = null
         try {
-            val existed = file.exists()
             db = SQLiteDatabase.openDatabase(file, SQLiteDatabase.OpenParams.Builder()
                 .setOpenFlags(SQLiteDatabase.CREATE_IF_NECESSARY or SQLiteDatabase.NO_LOCALIZED_COLLATORS)
                 .setJournalMode(SQLiteDatabase.JOURNAL_MODE_DELETE)
                 .setSynchronousMode(SQLiteDatabase.SYNC_MODE_EXTRA)
                 .setErrorHandler { throw SQLiteException("Request index is corrupt; preserve it for recovery") }.build())
-            return RetiredRequestIndex(AndroidRetiredRequestDatabase(db, owner), newDatabase = !existed)
+            return RetiredRequestIndex(AndroidRetiredRequestDatabase(db, owner))
         } catch (failure: Throwable) { try { db?.close() } finally { owner.close() }; throw failure }
     }
 

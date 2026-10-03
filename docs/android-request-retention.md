@@ -22,7 +22,7 @@ Recent terminal handles remain visible until capacity requires retirement. Retir
 
 The Android connection factory owns an exact SQLite index in app-private, no-backup storage. Its file name binds the enrollment record, Mac, account, epoch, and authority key. Each row contains a SHA-256 request-ID key and the 32-byte request digest. It stores no command, capture, credential, status, or audit record.
 
-Queries retrieve one bounded digest. The index is not loaded into memory. Transactions use the delete journal and extra synchronization. An OS file lock excludes competing owners. A failed write quarantines that open index until it is closed and reopened. Corruption and unsupported schemas fail without recreating the database.
+Queries retrieve one bounded digest. The index is not loaded into memory. Transactions use the delete journal and extra synchronization. An OS file lock excludes competing owners. A failed write quarantines that open index until it is closed and reopened. Schema initialization is transactional. A pristine version-0 database can finish initialization after an interruption. A version-0 database with any schema object, corruption, or an unsupported version fails without recreating the database.
 
 The index grows with retired requests and has no automatic eviction. Its small opaque records are independent of audit-history retention. Filesystem exhaustion is a storage failure, not permission to discard active requests or suppress an error. Local app storage is trusted; this index is not a replacement for the Mac's durable consumption ledger. Restoring an entire old backup remains outside the agreed guarantee.
 
