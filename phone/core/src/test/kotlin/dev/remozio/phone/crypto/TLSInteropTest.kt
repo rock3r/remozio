@@ -1,5 +1,6 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.phone.transport.RelayAccessCredential
 import dev.remozio.phone.transport.EncryptedRecordTransport
 import dev.remozio.phone.transport.TLSRecordSession
 import kotlinx.coroutines.Dispatchers
@@ -299,6 +300,37 @@ class TLSInteropTest {
                 } finally { session.closeAndJoin() }
                 assertTrue(socket.isClosed)
                 assertEquals(TLSClientState.CLOSED, engine.state())
+            }
+        }
+    }
+
+    @Test fun ownedSessionCrossesThePlatformHttpsRelayConnector(): Unit = Fixture().use { f ->
+        WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+            runBlocking {
+                withTimeout(10_000) {
+                    val carrier = relay.connector.connect(this, relay.endpoint,
+                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                    val engine = f.engine()
+                    val session = TLSRecordSession(this, engine, carrier, handshakeTimeoutMillis = 4_000)
+                    try {
+                        session.awaitOpen()
+                        val payload = "synthetic-connector-private".repeat(2_000).toByteArray()
+                        val frame = ByteBuffer.allocate(payload.size + 4).putInt(payload.size).put(payload).array()
+                        val reply = async {
+                            val collected = ByteArrayOutputStream()
+                            while (collected.size() < frame.size) collected.write(requireNotNull(session.receive()))
+                            collected.toByteArray()
+                        }
+                        var offset = 0
+                        while (offset < frame.size) {
+                            val end = minOf(offset + 16_384, frame.size)
+                            session.send(frame.copyOfRange(offset, end)); offset = end
+                        }
+                        assertArrayEquals(frame, reply.await())
+                        assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("synthetic-connector-private"))
+                    } finally { session.closeAndJoin() }
+                    assertEquals(TLSClientState.CLOSED, engine.state())
+                }
             }
         }
     }

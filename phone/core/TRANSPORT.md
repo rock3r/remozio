@@ -92,3 +92,7 @@ The handshake deadline defaults to 15 seconds and accepts settings from 1 to 60,
 An authenticated TLS close permits draining plaintext already received, then returns null. A stalled write fails without discarding that final plaintext; subsequent writes are rejected. Abrupt carrier EOF fails the session. Neither condition proves a request outcome. Explicit close or parent cancellation discards buffered plaintext. The enrollment owner must close the session when trust changes and recheck current enrollment before using returned plaintext as authority. Closing the session does not delete or replace enrollment keys.
 
 Deterministic tests cover partial writes, both framing layers, backpressure, cancellation, deadlines, bounded input, and cleanup. Native Swift/Kotlin tests cover a fragmented exchange and wrong-pin rejection through the session owner. These tests use synthetic keys and loopback traffic. Android Keystore behavior, real HTTPS setup, app lifecycle integration, and network transitions remain unverified on a Pixel.
+
+## Outer relay connection
+
+The [relay connector](RELAY.md) supplies platform HTTPS authentication, scoped Access credentials, and a bounded upgrade before the WebSocket framer starts. It returns a carrier for the owned TLS session. Inner peer authentication remains mandatory.
