@@ -99,7 +99,12 @@ class BiometricProbeActivity : ComponentActivity() {
 
     private fun failure(token: Any, error: Exception) {
         // Provider messages are deliberately excluded from the display and logs.
-        complete(token, getString(R.string.probe_error, error.javaClass.simpleName))
+        val message = if (error is BiometricProbePolicyException) {
+            getString(R.string.probe_policy_error, error.policy.diagnostic())
+        } else {
+            getString(R.string.probe_error, error.javaClass.simpleName)
+        }
+        complete(token, message)
     }
 
     private fun runKey(block: () -> String) {
