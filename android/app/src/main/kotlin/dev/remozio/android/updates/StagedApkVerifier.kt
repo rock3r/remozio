@@ -87,6 +87,8 @@ internal class VerifiedApk internal constructor(
             val digest = MessageDigest.getInstance("SHA-256")
             val copied = file.inputStream().use { copyBounded(it, output, size, digest) {} }
             if (copied != size || !MessageDigest.isEqual(sha256, digest.digest())) throw UpdateRejected()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             throw UpdateRejected()
         }

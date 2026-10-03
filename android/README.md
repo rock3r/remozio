@@ -70,4 +70,4 @@ Clock and lifecycle behavior follow the [SystemClock contract](https://developer
 
 The platform-independent request owner and tracker live in [phone-core](../phone/core/README.md). Android supplies lifecycle and elapsed-clock integration. Its shared core also runs against the native Swift peer in the device-free [approval-flow experiment](../docs/experiments/approval-flow.md).
 
-The [sideload update verifier](updates.md) stages APKs privately, verifies their signatures and identity, and binds installer handoff to the verified bytes. Release discovery and installer UI are not connected yet.
+The [sideload update verifier](updates.md) stages APKs privately, verifies their signatures and identity, and binds installer handoff to the verified bytes. A native installer backend now enforces verified copying and durable recording before commit. Release discovery, persistent callback ownership, and installer UI are not connected yet.
