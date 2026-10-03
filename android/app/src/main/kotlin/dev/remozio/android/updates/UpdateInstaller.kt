@@ -5,6 +5,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 
 internal class InstallPermissionRequired : Exception("Allow Remozio to request app installation")
@@ -33,8 +35,26 @@ internal class UpdateInstaller(
     private val recordCommitIntent: (InstallAttempt) -> Unit,
 ) {
     private val occupied = AtomicBoolean()
+    private var pendingCleanup: VerifiedApk? = null
+    private val mutableCleanupRequired = MutableStateFlow(false)
+    val cleanupRequired = mutableCleanupRequired.asStateFlow()
 
-    /** Permission and busy rejection retain [apk]. Once preparation starts, this method owns it. */
+    /** Blocking cleanup only. It never repeats a commit or changes its reported outcome. */
+    @Synchronized fun retryCleanup(): Boolean {
+        val apk = pendingCleanup ?: return true
+        if (runCatching { apk.close() }.isFailure) return false
+        pendingCleanup = null
+        mutableCleanupRequired.value = false
+        return true
+    }
+
+    @Synchronized private fun retainForCleanup(apk: VerifiedApk) {
+        check(pendingCleanup == null)
+        pendingCleanup = apk
+        mutableCleanupRequired.value = true
+    }
+
+    /** Permission, busy, and pending-cleanup rejection retain [apk]. Once preparation starts, this method owns it. */
     suspend fun submit(apk: VerifiedApk): InstallSubmission {
         var ownsApk = false
         var acquired = false
@@ -42,6 +62,7 @@ internal class UpdateInstaller(
             return withContext(Dispatchers.IO) {
                 if (!occupied.compareAndSet(false, true)) throw UpdateRejected()
                 acquired = true
+                if (cleanupRequired.value) throw UpdateRejected()
                 if (!backend.canRequestInstallation()) throw InstallPermissionRequired()
                 ownsApk = true
                 checkUpdate(backend.installed(), apk.identity, deviceSdk)
@@ -93,7 +114,7 @@ internal class UpdateInstaller(
         } catch (_: Exception) {
             throw UpdateRejected()
         } finally {
-            if (ownsApk) runCatching { apk.close() }
+            if (ownsApk && runCatching { apk.close() }.isFailure) retainForCleanup(apk)
             if (acquired) occupied.set(false)
         }
     }

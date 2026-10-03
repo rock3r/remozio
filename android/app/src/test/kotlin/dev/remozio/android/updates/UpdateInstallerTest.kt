@@ -224,4 +224,59 @@ class UpdateInstallerTest {
         }
     }
 
+    @Test fun failedApkCleanupIsObservableAndRecoverableAfterCommit() = fixture {
+        val staged = apk()
+        val extra = File(file!!.parentFile, "retain").apply { writeText("test") }
+        assertEquals(InstallSubmissionState.REQUESTED, installer.submit(staged).state)
+        assertTrue(installer.cleanupRequired.value)
+        assertFalse(installer.retryCleanup())
+        assertFailsWith<UpdateRejected> { apk() }
+        val otherVerifier = StagedApkVerifier(cache, object : ApkInspector {
+            override fun installed() = identity(1)
+            override fun verify(file: File) = identity(2)
+        }, 37, 8)
+        val other = otherVerifier.stage(ByteArrayInputStream(byteArrayOf(4)))
+        assertFailsWith<UpdateRejected> { installer.submit(other) }
+        val retained = ByteArrayOutputStream()
+        other.copyToUncommittedSession(retained)
+        assertContentEquals(byteArrayOf(4), retained.toByteArray())
+        other.close()
+        extra.delete()
+        assertTrue(installer.retryCleanup())
+        assertFalse(installer.cleanupRequired.value)
+        apk().close()
+        assertEquals(1, events.count { it == "commit" })
+        assertEquals(1, commits.size)
+        assertFalse("abandon" in events)
+    }
+
+    @Test fun failedApkCleanupIsRetainedWhenPreparationFails() = fixture {
+        val staged = apk()
+        val extra = File(file!!.parentFile, "retain").apply { writeText("test") }
+        session.failAt = "write"
+        assertFailsWith<UpdateRejected> { installer.submit(staged) }
+        assertTrue(installer.cleanupRequired.value)
+        extra.delete()
+        assertTrue(installer.retryCleanup())
+        apk().close()
+        assertFalse("commit" in events)
+    }
+
+    @Test fun failedApkCleanupDoesNotReplaceCancellation() = fixture {
+        val staged = apk(ByteArray(40_000))
+        val extra = File(file!!.parentFile, "retain").apply { writeText("test") }
+        assertFailsWith<CancellationException> {
+            coroutineScope {
+                session.onWrite = { cancel() }
+                installer.submit(staged)
+            }
+        }
+        assertTrue(installer.cleanupRequired.value)
+        extra.delete()
+        assertTrue(installer.retryCleanup())
+        apk().close()
+        assertFalse("commit" in events)
+        assertTrue(commits.isEmpty())
+    }
+
 }

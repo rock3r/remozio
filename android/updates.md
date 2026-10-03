@@ -53,7 +53,9 @@ The host must supply two bindings before this path can run:
 
 Neither binding has a permissive default. The launcher does not instantiate this installer yet. The host must own one pending update, recover its durable record after process death, and reconcile its sessions before another attempt. The coordinator serializes calls while preparing and submitting; it does not replace that persistent ownership.
 
-Permission and concurrent-call rejection retain the verified handle. This lets the user return from installation settings without downloading the APK again. Once preparation begins, the coordinator owns the handle and closes it on exit. It checks the installed identity before creating a session and again after copying.
+Permission, concurrent-call, and pending-cleanup rejection retain the verified handle. This lets the user return from installation settings without downloading the APK again. Once preparation begins, the coordinator owns the handle and closes it on exit. It checks the installed identity before creating a session and again after copying.
+
+If APK cleanup fails, the installer retains that handle and publishes `cleanupRequired = true`, including after failure or cancellation. The host must keep the installer owner and observe this state. New submissions are rejected while cleanup is pending. `retryCleanup` retries only deletion, off the UI thread. It releases the verifier's slot when deletion succeeds and never repeats installation or changes a submitted/unknown result. Process-death cleanup still belongs to the recovery host.
 
 The sequence is copy with cancellation checks, verify the digest, flush the original installer stream, close that stream, recheck eligibility, store commit intent, then commit. A failure before commit attempts to abandon the session. The backend also attempts abandonment if session setup fails. A platform cleanup failure can leave an orphan session; the future recovery host must inspect and reconcile sessions owned by Remozio. Resource cleanup errors cannot authorize a commit.
 
