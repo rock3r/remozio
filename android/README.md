@@ -77,3 +77,5 @@ The [transport identity loader](transport-identity.md) validates an existing har
 The [phone enrollment store](../phone/core/ENROLLMENTS.md) has an Android adapter with a dedicated hardware encryption key and a no-backup atomic file. It is available to the future enrollment host and does not initialize on app startup.
 
 The [decision identity](decision-identity.md) creates and loads a separate hardware key for biometric-free choices. Its first signing adapter verifies an issued command and signs only an explicit permitted decline. App lifecycle and delivery integration remain outstanding.
+
+The debug-only [ADB endpoint experiment](../docs/experiments/android-adb-endpoint.md) prepares system-picker discovery and explicit loopback reachability checks. It sends no ADB commands and does not implement a bridge. Device results remain pending.

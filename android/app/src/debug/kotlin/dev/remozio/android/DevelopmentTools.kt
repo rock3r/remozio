@@ -36,6 +36,9 @@ internal fun DevelopmentTools() {
     var scene by remember { mutableStateOf<SampleScene?>(null) }
     val context = LocalContext.current
     Column {
+        OutlinedButton(onClick = { context.startActivity(Intent(context, AdbEndpointProbeActivity::class.java)) }) {
+            Text(stringResource(R.string.adb_probe_title))
+        }
         OutlinedButton(onClick = { context.startActivity(Intent(context, BiometricProbeActivity::class.java)) }) {
             Text(stringResource(R.string.probe_title))
         }
