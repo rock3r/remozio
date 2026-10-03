@@ -14,7 +14,7 @@ The debug APK is `android/app/build/outputs/apk/debug/android-app-debug.apk`. It
 
 ## Current scope
 
-The launcher opens an empty Mac list. It uses native Compose, Material 3 Expressive, system light/dark colors, and a scrollable layout for large text. Pairing, requests, notifications, networking, and persistent storage are not connected yet.
+The launcher opens an empty Mac list and the app update status card. It uses native Compose, Material 3 Expressive, system light/dark colors, and a scrollable layout for large text. Pairing, request delivery, and release downloads are not connected yet. Update status uses app-private storage and installer callbacks.
 
 Material 3 uses `1.5.0-alpha29` because the Expressive theme is not in the stable 1.4 release. Other Compose libraries use BOM `2026.09.00`. AGP supplies built-in Kotlin; the app does not apply a second Android Kotlin plugin.
 
@@ -70,4 +70,4 @@ Clock and lifecycle behavior follow the [SystemClock contract](https://developer
 
 The platform-independent request owner and tracker live in [phone-core](../phone/core/README.md). Android supplies lifecycle and elapsed-clock integration. Its shared core also runs against the native Swift peer in the device-free [approval-flow experiment](../docs/experiments/approval-flow.md).
 
-The [sideload update verifier](updates.md) stages APKs privately, verifies their signatures and identity, and binds installer handoff to the verified bytes. A native installer backend now enforces verified copying and durable recording before commit. Release discovery, persistent callback ownership, and installer UI are not connected yet.
+The [sideload update verifier](updates.md) stages APKs privately, verifies their signatures and identity, and binds installer handoff to the verified bytes. A native installer backend now enforces verified copying and durable recording before commit. The application now owns pending update state and exposes installation, permission, cleanup, and confirmation controls. Release discovery and downloads are not connected yet; the launcher cannot obtain a new APK.

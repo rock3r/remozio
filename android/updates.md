@@ -1,6 +1,6 @@
 # Sideload update verification
 
-`apkUpdateVerifier(context)` creates the Android verifier. The update host must retain one instance and close each returned handle. The host is not connected to the launcher yet. The verifier does not discover releases or download files. The separate installer backend can submit verified bytes when a host supplies the required persistence and callback bindings.
+`apkUpdateVerifier(context)` creates the Android verifier. The update host must retain one instance and close each returned handle. The application owner is connected to the launcher status card. The verifier does not discover releases or download files. The separate installer backend can submit verified bytes when a host supplies the required persistence and callback bindings.
 
 ```mermaid
 flowchart LR
@@ -51,7 +51,7 @@ The host must supply two bindings before this path can run:
 - A durable `recordCommitIntent` implementation. It must atomically store the session ID, package, and version before returning. A storage failure prevents commit.
 - A private status receiver bound to that session. Android requires a mutable `PendingIntent` for this callback on current targets. The host must use an explicit private component and validate the session binding. It must handle pending user action in the foreground and reconcile terminal results.
 
-Neither binding has a permissive default. The launcher does not instantiate this installer yet. The host must own one pending update, recover its durable record after process death, and reconcile its sessions before another attempt. The coordinator serializes calls while preparing and submitting; it does not replace that persistent ownership.
+Neither binding has a permissive default. The application owner creates this installer after an explicit install action for a staged APK. The host must own one pending update, recover its durable record after process death, and reconcile its sessions before another attempt. The coordinator serializes calls while preparing and submitting; it does not replace that persistent ownership.
 
 Permission, concurrent-call, and pending-cleanup rejection retain the verified handle. This lets the user return from installation settings without downloading the APK again. Once preparation begins, the coordinator owns the handle and closes it on exit. Final APK cleanup runs on the IO dispatcher in a non-cancellable context, including when the caller uses the UI dispatcher. It checks the installed identity before creating a session and again after copying.
 
@@ -97,7 +97,7 @@ An unresolved record survives reopening and prevents another reservation. Commit
 
 `AndroidUpdateRecordDatabase` uses native SQLite in `noBackupFilesDir`, with DELETE journaling and EXTRA synchronization. It checks the effective modes before use. Schema version 1 initializes only an empty database. Unknown versions, invalid fields, and corruption raise errors without deliberate database deletion or recreation. The host must surface an update recovery error without disabling normal approvals. A failed or uncertain storage commit cannot authorize native installation.
 
-JVM tests execute the shared SQL against SQLite through a test-only JDBC adapter. They cover reopening, rollback, concurrent reservations through separate connections, stale callbacks, early callbacks, terminal ordering, and invalid stored state. They do not prove Android filesystem durability under power loss. Native callbacks, session reconciliation, and the launcher owner remain integration work. No update record is opened automatically by the launcher yet.
+JVM tests execute the shared SQL against SQLite through a test-only JDBC adapter. They cover reopening, rollback, concurrent reservations through separate connections, stale callbacks, early callbacks, terminal ordering, and invalid stored state. They do not prove Android filesystem durability under power loss. Native callbacks, session reconciliation, and the launcher owner remain integration work. The launcher status card opens the update record through its application owner.
 
 Storage references: [Android SQLite configuration](https://developer.android.com/reference/android/database/sqlite/SQLiteDatabase.OpenParams.Builder) and [test driver release](https://github.com/xerial/sqlite-jdbc/releases/tag/3.53.4.0).
 
@@ -111,6 +111,21 @@ For pending user action, the receiver retains Android's confirmation intent insi
 
 `UpdateConfirmationNotifications.existing` uses the fixed attempt identity and `FLAG_NO_CREATE` to retrieve an existing system token. It does not create a replacement confirmation or serialize an arbitrary intent to disk. The future foreground update UI can use this lookup even after its process restarts. Token retention is best effort: missing tokens, reboot, package replacement, and disabled-notification behavior need real-device evidence. A missing token must be shown as unavailable while the durable attempt remains unresolved. It must never trigger another installer commit automatically.
 
-Parser tests cover canonical identities, wrong session IDs, preapproval rejection, terminal status mapping, and unknown codes. Existing SQLite tests cover callback ordering and stale attempts. Native broadcast isolation, notification taps, confirmation token recovery, and package replacement remain part of the Pixel session. Release discovery, download UI, and the update owner are not connected to the launcher yet.
+Parser tests cover canonical identities, wrong session IDs, preapproval rejection, terminal status mapping, and unknown codes. Existing SQLite tests cover callback ordering and stale attempts. Native broadcast isolation, notification taps, confirmation token recovery, and package replacement remain part of the Pixel session. The application owner and status card now use these callbacks. Release discovery and download UI remain unwired.
 
 Callback references: [installer commit](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session#commit(android.content.IntentSender)) and [system-held PendingIntent tokens](https://developer.android.com/reference/android/app/PendingIntent).
+
+
+## Application owner and foreground status
+
+`RemozioApplication` retains one lazy `UpdateHost` across activity recreation. The owner serializes operations on IO, retains one verified APK, and publishes a lifecycle-aware state flow. The launcher shows installed version separately from the recorded update outcome. It never infers a historical success from the current version.
+
+The status card exposes install, discard, permission settings, confirmation, refresh, and cleanup actions only when applicable. Permission rejection keeps the verified download. Returning from installation settings rechecks permission and continues the user-initiated installation. A foreground install can open Android confirmation directly; leaving the foreground clears that automatic opening intent. The notification remains the background entry point. The private confirmation activity rechecks the durable attempt again.
+
+Callback delivery signals the owner without creating it during a cold broadcast. App resume also refreshes the durable record, so a lost in-process signal does not hide a stored result. Corrupt or unavailable update storage reports an update error; it does not remove the Mac list or initialize approval credentials.
+
+Before a new attempt, recovery can abandon only owned, uncommitted sessions for Remozio itself. It verifies their removal before marking pre-intent preparation abandoned. A committed native session blocks that cleanup. Any record at or after commit intent stays unresolved until a valid callback establishes an outcome. This owner must remain the only producer of self-update installer sessions in the app UID.
+
+Staging uses a dedicated private `updates-v1` directory. Recovery removes only known updater directories and their `update.apk` files. It refuses symbolic links and unknown files instead of following or recursively deleting them. Cleanup failures gate new staging and expose a retry action. A failed discard retains its handle until cleanup succeeds.
+
+Shared SQLite and owner tests cover permission return, backend setup failure, preparation recovery, unacknowledged reservations, uncertain commits, callback refresh, cleanup retries, and link refusal. The Compose surface uses existing Material 3 Expressive controls with static status text and no custom transition. Large text, TalkBack, lifecycle timing, notification taps, and actual installer behavior still need the Pixel session. Release discovery and download acquisition remain the next integration step; this surface cannot fetch an APK yet.
