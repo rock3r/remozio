@@ -15,13 +15,13 @@ flowchart LR
     V --> N
 ```
 
-The native factory combines the saved Access credential, HTTPS WebSocket carrier, Android transport identity, inner TLS client, negotiated channel, and request receiver. It uses inner ALPN `remozio/1`. A production Mac listener must require that same identifier. The experiment identifier remains separate.
+The native factory opens its private retirement index off the main thread and combines the saved Access credential, HTTPS WebSocket carrier, Android transport identity, inner TLS client, negotiated channel, and request receiver. It uses inner ALPN `remozio/1`. A production Mac listener must require that same identifier. The experiment identifier remains separate.
 
 The connection advertises only command schema 1 on approval wire version 1. It does not advertise UI capture or audit capabilities. The saved Mac, account, phone, and enrollment epoch must match the peer offer. The maximum payload covers the configured request and status bounds plus the approval envelope. The inner handshake has a 1 MiB resource bound.
 
 ## Connection lifetime
 
-The foreground or push-wake host calls `run` for one connection attempt. Concurrent attempts are rejected. Cancellation, EOF, or failure releases the socket and identity handle. The inbox survives disconnection so reconnect cannot reset a request's timer or terminal state. Closing the owner cancels connection setup and invalidates every retained request handle.
+The foreground or push-wake host calls `run` for one connection attempt. Concurrent attempts are rejected. Cancellation, EOF, or failure releases the socket and identity handle. The inbox survives disconnection so reconnect cannot reset a request's timer or terminal state. The native factory uses the [retirement index](android-request-retention.md) to move older terminal handles out of a full live window. Closing the owner cancels connection setup and invalidates every retained request handle.
 
 Connection state reports only connecting, connected, disconnected, or closed. It makes no claim about Mac presence or request completion. This owner does not retry connections or decisions automatically. A host can explicitly run another connection attempt.
 

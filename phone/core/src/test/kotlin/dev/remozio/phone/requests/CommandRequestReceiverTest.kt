@@ -30,7 +30,9 @@ class CommandRequestReceiverTest {
             fun scalar(n: java.math.BigInteger) = n.toByteArray().takeLast(32).toByteArray().let { ByteArray(32 - it.size) + it }
             byteArrayOf(4) + scalar(point.affineX) + scalar(point.affineY)
         }
-        val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(identity), id(2), id(5), id(6, 32),
+        var requestID = 5
+        var challengeValue = 6
+        val request get() = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(identity), id(2), id(requestID), id(challengeValue, 32),
             emptySet(), 1000u, 61000u, capture, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), bound, bound)
         fun envelope(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose): ByteArray {
             val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
@@ -39,12 +41,13 @@ class CommandRequestReceiverTest {
             return ApprovalMessage(1u, type, purpose, body, signature).encode(bound.maxBytes)
         }
         fun issued() = envelope(request.encode(bound), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
-        fun status(terminal: Boolean = false) = envelope(RequestStatusPayload(id(identity), id(2), id(5), request.requestDigest(bound, bound),
+        fun status(terminal: Boolean = false) = envelope(RequestStatusPayload(id(identity), id(2), id(requestID), request.requestDigest(bound, bound),
             request.challenge, if (terminal) 2u else 1u, if (terminal) RequestPhase.EXPIRED else RequestPhase.PRESENTED,
             if (terminal) RequestStatusReason.AUTHORIZATION_EXPIRED else RequestStatusReason.NONE, id(7),
             if (terminal) 60000u else 10u, if (terminal) null else 60000u, null, false, if (terminal) 60000u else null, null).encode(bound),
             ApprovalMessageType.STATUS, SigningPurpose.STATUS)
-        fun enroll(inbox: CommandRequestInbox = CommandRequestInbox(2, 4)) = inbox.add(id(identity), id(2), publicKey, limits)
+        fun enroll(inbox: CommandRequestInbox = CommandRequestInbox(2, 4), retired: RetiredCommandRequests? = null) =
+            inbox.add(id(identity), id(2), publicKey, limits, retired)
     }
     private fun bind(enrollment: CommandRequestEnrollment, wire: RequestMessageChannel, time: ULong = 100u) =
         CommandRequestReceiver.bind(enrollment, wire, id(3), id(4)) { ElapsedInstant(0, time) }
@@ -137,4 +140,81 @@ class CommandRequestReceiverTest {
         val snapshot = enrollment.sessions().single().snapshot(ElapsedInstant(0, 100u))
         assertEquals(RequestPhase.PRESENTED, snapshot.status!!.status.phase); assertNotNull(snapshot.capture)
     }
+    private class Retired : RetiredCommandRequests {
+        val digests = mutableMapOf<CborValue.Bytes, ByteArray>()
+        var failWrite = false
+        var failRead = false
+        var closed = false
+        override fun lookup(requestID: ByteArray): ByteArray? {
+            check(!closed && !failRead)
+            return digests[CborValue.Bytes(requestID)]?.copyOf()
+        }
+        override fun remember(requestID: ByteArray, requestDigest: ByteArray) {
+            check(!closed && !failWrite)
+            val key = CborValue.Bytes(requestID)
+            val previous = digests[key]
+            check(previous == null || previous.contentEquals(requestDigest))
+            digests[key] = requestDigest.copyOf()
+        }
+        override fun close() { closed = true }
+    }
+
+    @Test fun moreThan128RequestsRetireOnlyTerminalHandlesAndRejectReplays() = runBlocking<Unit> {
+        val mac = Mac(); val index = Retired(); val inbox = CommandRequestInbox(1, 128)
+        val enrollment = mac.enroll(inbox, index)
+        var first: CommandRequestSession? = null
+        for (requestID in 1..200) {
+            mac.requestID = requestID
+            deliver(enrollment, mac, mac.issued(), mac.status(true))
+            if (requestID == 1) first = enrollment.sessions().single()
+        }
+        assertEquals(128, enrollment.sessions().size)
+        assertEquals(72, index.digests.size)
+        assertTrue(checkNotNull(first).closed.value)
+        val retained = enrollment.sessions()
+        mac.requestID = 1
+        deliver(enrollment, mac, mac.issued(), mac.status(), mac.status(true))
+        assertEquals(retained, enrollment.sessions())
+        assertEquals(128, enrollment.requestSessions.value.size)
+        inbox.close(); assertTrue(index.closed)
+    }
+
+    @Test fun fullActiveWindowAndFailedRetirementKeepExistingRequests() = runBlocking<Unit> {
+        val mac = Mac(); val index = Retired(); val enrollment = mac.enroll(CommandRequestInbox(1, 2), index)
+        mac.requestID = 1; deliver(enrollment, mac, mac.issued(), mac.status())
+        mac.requestID = 2; deliver(enrollment, mac, mac.issued(), mac.status())
+        val pending = enrollment.sessions()
+        mac.requestID = 3
+        assertFailsWith<IOException> { deliver(enrollment, mac, mac.issued()) }
+        assertEquals(pending, enrollment.sessions()); assertTrue(index.digests.isEmpty())
+        mac.requestID = 1; deliver(enrollment, mac, mac.status(true))
+        index.failWrite = true; mac.requestID = 3
+        assertFailsWith<IOException> { deliver(enrollment, mac, mac.issued()) }
+        assertEquals(pending, enrollment.sessions()); assertFalse(pending.first().closed.value)
+        assertEquals(RequestPhase.EXPIRED, pending.first().snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
+        index.failWrite = false
+        deliver(enrollment, mac, mac.issued())
+        assertTrue(pending.first().closed.value); assertFalse(pending.last().closed.value)
+        assertEquals(RequestPhase.PRESENTED, pending.last().snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
+    }
+
+    @Test fun retiredMembershipNeverBypassesAuthenticationOrStorageErrors() = runBlocking<Unit> {
+        val mac = Mac(); val index = Retired(); val enrollment = mac.enroll(CommandRequestInbox(1, 1), index)
+        mac.requestID = 1; deliver(enrollment, mac, mac.issued(), mac.status(true))
+        mac.requestID = 2; deliver(enrollment, mac, mac.issued())
+        mac.requestID = 1
+        val message = ApprovalMessage.decode(mac.status(), bound.maxBytes)
+        val bad = ApprovalMessage(1u, message.type, message.purpose, message.body.copyBytes(), ByteArray(64)).encode(bound.maxBytes)
+        assertFailsWith<IOException> { deliver(enrollment, mac, bad) }
+        val request = ApprovalMessage.decode(mac.issued(), bound.maxBytes)
+        val badRequest = ApprovalMessage(1u, request.type, request.purpose, request.body.copyBytes(), ByteArray(64)).encode(bound.maxBytes)
+        assertFailsWith<IOException> { deliver(enrollment, mac, badRequest) }
+        mac.challengeValue = 9
+        assertFailsWith<IOException> { deliver(enrollment, mac, mac.issued()) }
+        mac.challengeValue = 6
+        index.failRead = true
+        assertFailsWith<IOException> { deliver(enrollment, mac, mac.issued()) }
+        assertEquals(1, enrollment.sessions().size)
+    }
+
 }
