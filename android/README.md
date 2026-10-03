@@ -91,3 +91,17 @@ Active records show **Not connected** and unknown current Mac status. Prepared r
 The adapter may create the private enrollment directory and its coordination lock, but inventory reads create no key or enrollment archive. The reader uses the archive format's existing maximum limits, with no pruning or new retention policy. Native Keystore and AtomicFile behavior still need the Pixel session. Host tests cover projection, incomplete storage, errors, retry, reader cancellation and owner closure.
 
 The list keeps standard Material 3 Expressive cards and a standard loading indicator. Loading, errors and unknown status all have static text. No custom animation is added. TalkBack, large text and actual lifecycle timing remain device checks.
+
+## Cached audit history
+
+The primary Audit log destination reads existing encrypted history without biometrics. Compact windows use bottom navigation and detail sheets. Wider windows use a navigation rail and dialogs. The history list and request timeline are lazy lists, with a Close button outside the timeline.
+
+Filters select a Mac, request type and outcome. Mac IDs distinguish duplicate labels. Each account and journal epoch remains separate. Events follow sequence order within an established chain, never a shared clock order. Request details ignore list filters and show the complete retained timeline. Gaps, conflicting proofs and unknown segment boundaries stay visible. The cache does not establish current enrollment, current Mac status or a successful recent sync.
+
+Reading never creates an audit key, initializes an archive or prunes evidence. The reader excludes prepared setups and can use retained bindings from removed setups. Those bindings do not prove former activation or grant present authority. Both destinations share an enrollment-read lock, released before audit-cache work begins. Cache access closes before returning immutable evidence. Foreground entry and Retry trigger reads; no background polling or network connection is added. Missing history differs from unreadable history.
+
+The decoder accepts up to 16 MiB per archive, 4,096 proofs, 50,000 records and 4,096 epochs. The reader retains at most 32 MiB of encoded proof data across displayed scopes. These are resource limits, not a total heap bound or disk retention policy. Oversized or unreadable scopes show an error without deleting data. Selecting one Mac gives it the reader budget independently. Retention settings and live synchronization remain future work.
+
+Only closed metadata fields reach the view. Full commands, target values, UI captures and provider error text are absent. History offers no approval or replay action. Authentication labels describe evidence, not proof of a person's identity. Signed decisions, Mac acceptance, dispatch and observed results remain distinct events.
+
+Host tests use disposable software keys and archives. They cover scope separation, filters, gaps, conflicts, ordering, read budgets, corruption and cancellation. Pixel checks still need to validate Keystore access, AtomicFile recovery, TalkBack, large text and the adaptive layouts. No real audit archive or phone was accessed during host validation.

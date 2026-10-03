@@ -36,12 +36,15 @@ internal fun storedMacs(snapshot: EnrollmentSnapshot): MacInventoryState.Ready =
 internal class StoredMacReader(
     private val open: () -> EncryptedEnrollmentStore?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val enrollmentAccess: Mutex = Mutex(),
 ) {
     private val mutex = Mutex()
     suspend fun read(): MacInventoryState = mutex.withLock {
         try {
             withContext(dispatcher) {
-                open()?.use { storedMacs(it.snapshot()) } ?: MacInventoryState.Ready(emptyList())
+                enrollmentAccess.withLock {
+                    open()?.use { storedMacs(it.snapshot()) } ?: MacInventoryState.Ready(emptyList())
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

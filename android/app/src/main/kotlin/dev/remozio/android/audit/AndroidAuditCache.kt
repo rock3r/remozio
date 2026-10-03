@@ -21,10 +21,33 @@ import javax.crypto.SecretKeyFactory
 
 /** Blocking I/O. The enrollment owner calls this off the main thread and closes the cache when it is retired. */
 internal object AndroidAuditCache {
+    /** Read retained evidence only. Absence means no cached history, not an empty Mac journal. */
+    fun openExisting(context: Context, binding: AuditCacheBinding, protocol: AuditPageLimits,
+                     capacity: AuditEvidenceLimits, archiveLimits: CborLimits): EncryptedAuditCache? {
+        val app = context.applicationContext
+        check(!app.isDeviceProtectedStorage)
+        val directory = File(app.noBackupFilesDir, "audit")
+        if (!directory.exists()) return null
+        if (!directory.isDirectory) throw IOException("Audit directory unavailable")
+        val identity = identity(binding)
+        val storage = AndroidAuditStorage(File(directory, "$identity.cache"), requireArchive = true)
+        try {
+            if (!storage.hasArchive()) { storage.close(); return null }
+            val key = AuditCacheKey.load("remozio.audit-cache.v1.$identity", allowCreation = false)
+            return EncryptedAuditCache.open(storage, AuditArchiveCipher(key, archiveLimits.maxBytes), binding,
+                protocol, capacity, archiveLimits)
+        } catch (failure: Throwable) {
+            storage.close()
+            throw failure
+        }
+    }
+
+    private fun identity(binding: AuditCacheBinding) = MessageDigest.getInstance("SHA-256").digest(binding.macID + binding.accountID)
+        .joinToString("") { "%02x".format(it) }
+
     fun open(context: Context, binding: AuditCacheBinding, protocol: AuditPageLimits,
              capacity: AuditEvidenceLimits, archiveLimits: CborLimits): EncryptedAuditCache {
-        val identity = MessageDigest.getInstance("SHA-256").digest(binding.macID + binding.accountID)
-            .joinToString("") { "%02x".format(it) }
+        val identity = identity(binding)
         val directory = File(context.noBackupFilesDir, "audit")
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("Audit directory unavailable")
         val storage = AndroidAuditStorage(File(directory, "$identity.cache"))
@@ -77,7 +100,7 @@ private object AuditCacheKey {
 }
 
 /** Holds an OS file lock for the whole cache lifetime. AtomicFile itself provides no mutual exclusion. */
-private class AndroidAuditStorage(private val base: File) : AuditCiphertextStorage {
+private class AndroidAuditStorage(private val base: File, private val requireArchive: Boolean = false) : AuditCiphertextStorage {
     private val owner = ExclusiveFileOwner.acquire(File(base.path + ".lock"))
     private val atomic = AtomicFile(base)
     private var closed = false
@@ -90,7 +113,7 @@ private class AndroidAuditStorage(private val base: File) : AuditCiphertextStora
         check(!closed)
         require(maximumBytes > 0)
         val input = try { atomic.openRead() } catch (failure: FileNotFoundException) {
-            if (!base.exists() && !File(base.path + ".bak").exists()) return null
+            if (!requireArchive && !base.exists() && !File(base.path + ".bak").exists()) return null
             throw failure
         }
         return input.use {
