@@ -79,7 +79,7 @@ The [command execution experiment](macos-execution-binding.md) separately awaits
 
 ## Evidence record
 
-Use one small record per case, under the ignored `experiment-results/` directory. Review it before committing a sanitized result.
+Keep one small raw record per case under the ignored `experiment-results/` directory. After review and redaction, copy the sanitized result to `docs/experiments/evidence/` with a date and case name. Commit that reviewed copy; do not force-add the ignored raw record.
 
 ```text
 Case:
