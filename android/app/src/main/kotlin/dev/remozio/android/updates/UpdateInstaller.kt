@@ -4,6 +4,7 @@ import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -114,8 +115,13 @@ internal class UpdateInstaller(
         } catch (_: Exception) {
             throw UpdateRejected()
         } finally {
-            if (ownsApk && runCatching { apk.close() }.isFailure) retainForCleanup(apk)
-            if (acquired) occupied.set(false)
+            try {
+                if (ownsApk) withContext(Dispatchers.IO + NonCancellable) {
+                    if (runCatching { apk.close() }.isFailure) retainForCleanup(apk)
+                }
+            } finally {
+                if (acquired) occupied.set(false)
+            }
         }
     }
 }

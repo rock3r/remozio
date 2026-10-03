@@ -6,6 +6,9 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.file.Files
+import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -15,6 +18,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
@@ -277,6 +282,38 @@ class UpdateInstallerTest {
         apk().close()
         assertFalse("commit" in events)
         assertTrue(commits.isEmpty())
+    }
+
+    @Test fun cleanupRunsOffTheCallerThreadOnSuccessFailureAndCancellation() {
+        for (scenario in 0..2) fixture {
+            val directory = Files.createTempDirectory(cache.toPath(), "observed-").toFile()
+            val bytes = ByteArray(40_000)
+            val input = File(directory, "update.apk").apply { writeBytes(bytes) }
+            val cleanupThread = AtomicReference<Thread>()
+            val staged = VerifiedApk(directory, input, identity(2), bytes.size.toLong(),
+                MessageDigest.getInstance("SHA-256").digest(bytes)) { cleanupThread.set(Thread.currentThread()) }
+            Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { ui ->
+                withContext(ui) {
+                    val callerThread = Thread.currentThread()
+                    when (scenario) {
+                        0 -> assertEquals(InstallSubmissionState.REQUESTED, installer.submit(staged).state)
+                        1 -> {
+                            session.failAt = "write"
+                            assertFailsWith<UpdateRejected> { installer.submit(staged) }
+                        }
+                        2 -> assertFailsWith<CancellationException> {
+                            coroutineScope {
+                                session.onWrite = { cancel() }
+                                installer.submit(staged)
+                            }
+                        }
+                    }
+                    assertTrue(cleanupThread.get() != null)
+                    assertTrue(cleanupThread.get() !== callerThread)
+                    assertFalse(input.exists())
+                }
+            }
+        }
     }
 
 }
