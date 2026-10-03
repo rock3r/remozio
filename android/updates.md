@@ -37,7 +37,7 @@ Closing the handle deletes its staging file and releases the slot. A cleanup fai
 
 JVM tests cover identity policy, forward and reverse signer rotation, multiple signers, staging bounds, changed bytes, source failures, cancellation, and handle ownership. They inject the platform inspector. They do not prove Android's native signature verification or installer behavior.
 
-Release discovery, download policy, settings, user-facing update state, durable attempt storage, callback handling, and production signing remain separate integration work. The Pixel session must verify tampered and incorrectly signed APKs, valid key rotation, installation refusal, cancellation, and preservation of app data and pairing keys. No real APK is installed by these tests.
+Release discovery, download policy, settings, user-facing update state, callback handling, and production signing remain separate integration work. The Pixel session must verify tampered and incorrectly signed APKs, valid key rotation, installation refusal, cancellation, and preservation of app data and pairing keys. No real APK is installed by these tests.
 
 Sources: [Android signature verification API](https://developer.android.com/reference/android/content/pm/PackageManager#getVerifiedSigningInfo(java.lang.String,int)), [signing history](https://developer.android.com/reference/android/content/pm/SigningInfo), and [the platform implementation](https://github.com/aosp-mirror/platform_frameworks_base/blob/main/core/java/android/content/pm/PackageManager.java).
 
@@ -64,3 +64,39 @@ The sequence is copy with cancellation checks, verify the digest, flush the orig
 JVM tests use a fake installer backend and real private staging files. They cover operation ordering, changed APK bytes, changed installed versions, permission round trips, write/flush/close failures, failed persistence, cancellation, and uncertain commit replies. Android user confirmation, callback delivery, package replacement, and data/key preservation remain untested until the Pixel session.
 
 Installer references: [session operations](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session) and [required user action](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)).
+
+## Durable attempt record
+
+`UpdateRecordStore` stores one current attempt. Reserve a verified package and version, bind its native session ID, then persist commit intent. Each reservation generates a fresh 256-bit nonce. All transitions run in a database transaction. The caller must run these blocking operations off the UI thread.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Reserved: explicit update
+  Reserved --> Bound: native session ID
+  Reserved --> Abandoned: host reconciles resources
+  Bound --> Abandoned: host reconciles resources
+  Bound --> Intent: durable before commit
+  Intent --> Submitted: commit call returns
+  Intent --> Unknown: commit reply uncertain
+  Intent --> AwaitingUser: private callback
+  Submitted --> AwaitingUser: private callback
+  Unknown --> AwaitingUser: private callback
+  AwaitingUser --> Success: private callback
+  AwaitingUser --> Failure: private callback
+  Submitted --> Success: private callback
+  Submitted --> Failure: private callback
+  Unknown --> Success: private callback
+  Unknown --> Failure: private callback
+  Intent --> Success: private callback
+  Intent --> Failure: private callback
+```
+
+Callbacks must match both the stored nonce and session ID. They cannot complete an attempt before commit intent. The first terminal result wins. A submission return cannot overwrite an earlier callback. Reusing a native session ID does not admit callbacks from an older reservation. The private receiver must authenticate the callback capability; the store does not authenticate broadcasts itself.
+
+An unresolved record survives reopening and prevents another reservation. Commit intent is not proof that native commit ran. Missing sessions or a changed installed version do not establish an outcome. The record never retries installation automatically. Only a terminal record can be replaced by a new explicit reservation. This latest-attempt record is separate from the approval audit log.
+
+`AndroidUpdateRecordDatabase` uses native SQLite in `noBackupFilesDir`, with DELETE journaling and EXTRA synchronization. It checks the effective modes before use. Schema version 1 initializes only an empty database. Unknown versions, invalid fields, and corruption raise errors without deliberate database deletion or recreation. The host must surface an update recovery error without disabling normal approvals. A failed or uncertain storage commit cannot authorize native installation.
+
+JVM tests execute the shared SQL against SQLite through a test-only JDBC adapter. They cover reopening, rollback, concurrent reservations through separate connections, stale callbacks, early callbacks, terminal ordering, and invalid stored state. They do not prove Android filesystem durability under power loss. Native callbacks, session reconciliation, and the launcher owner remain integration work. No update record is opened automatically by the launcher yet.
+
+Storage references: [Android SQLite configuration](https://developer.android.com/reference/android/database/sqlite/SQLiteDatabase.OpenParams.Builder) and [test driver release](https://github.com/xerial/sqlite-jdbc/releases/tag/3.53.4.0).
