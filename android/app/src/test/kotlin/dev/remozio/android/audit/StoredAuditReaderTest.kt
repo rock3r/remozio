@@ -1,5 +1,8 @@
 package dev.remozio.android.audit
 
+import dev.remozio.android.enrollment.MacInventoryState
+import dev.remozio.android.enrollment.StoredMacReader
+import kotlinx.coroutines.sync.Mutex
 import dev.remozio.phone.audit.*
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.transport.RelayAccessCredential
@@ -48,9 +51,10 @@ class StoredAuditReaderTest {
             if (removed) enrollment.remove(record.recordID.copyBytes(), revision++)
             return Archive(record, authority).also { archives[record.macID] = it }
         }
+        fun openEnrollment() = EncryptedEnrollmentStore.open(disk, cipher, 10)
         fun reader(open: ((AuditCacheBinding, Int) -> EncryptedAuditCache?)? = null,
                    budget: AuditReadBudget = AuditReadBudget()) = StoredAuditReader(
-            { EncryptedEnrollmentStore.open(disk, cipher, 10) },
+            { openEnrollment() },
             open ?: { binding, limit -> archives[CborValue.Bytes(binding.macID)]?.open(binding, limit) }, budget,
         )
     }
@@ -211,6 +215,46 @@ class StoredAuditReaderTest {
             withTimeout(5000) { first.join(); assertIs<StoredAuditState.Ready>(second.await()) }
             assertFalse(published); assertEquals(2, archive.closes)
         } finally { release.countDown(); first.cancelAndJoin(); f.enrollment.close() }
+    }
+
+    @Test fun switchingDestinationsWaitsForCancelledEnrollmentReadToClose() = runBlocking {
+        val f = Fixture(); f.add(1).populate()
+        val access = Mutex(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val audit = StoredAuditReader({
+            entered.countDown(); check(release.await(5, TimeUnit.SECONDS)); f.openEnrollment()
+        }, { _, _ -> error("Cancelled audit must not open a cache") }, enrollmentAccess = access)
+        val macs = StoredMacReader({ check(f.disk.closes == 1); f.openEnrollment() }, enrollmentAccess = access)
+        var published = false
+        val reading = launch(Dispatchers.Default) { audit.read(); published = true }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            reading.cancel()
+            val inventory = async(Dispatchers.Default) { macs.read() }
+            release.countDown()
+            withTimeout(5000) {
+                reading.join()
+                assertEquals(1, assertIs<MacInventoryState.Ready>(inventory.await()).macs.size)
+            }
+            assertFalse(published)
+            assertEquals(2, f.disk.closes)
+        } finally { release.countDown(); reading.cancelAndJoin(); f.enrollment.close() }
+    }
+
+    @Test fun auditCacheWorkDoesNotHoldTheSharedEnrollmentLock() = runBlocking {
+        val f = Fixture(); val archive = f.add(1).also { it.populate() }
+        val access = Mutex(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val audit = StoredAuditReader({ f.openEnrollment() }, { binding, limit ->
+            entered.countDown(); check(release.await(5, TimeUnit.SECONDS)); archive.open(binding, limit)
+        }, enrollmentAccess = access)
+        val macs = StoredMacReader({ check(f.disk.closes == 1); f.openEnrollment() }, enrollmentAccess = access)
+        val reading = async(Dispatchers.Default) { audit.read() }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            withTimeout(2000) { assertIs<MacInventoryState.Ready>(macs.read()) }
+            release.countDown()
+            withTimeout(5000) { assertIs<StoredAuditState.Ready>(reading.await()) }
+            assertEquals(2, f.disk.closes)
+        } finally { release.countDown(); reading.cancelAndJoin(); f.enrollment.close() }
     }
 
     @Test fun gapRowsKeepTheirSequencePositionsInBothDirectionsAndAfterFiltering() {

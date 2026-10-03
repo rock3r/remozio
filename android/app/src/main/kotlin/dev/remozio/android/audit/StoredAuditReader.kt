@@ -53,6 +53,7 @@ internal class StoredAuditReader(
     private val openCache: (AuditCacheBinding, Int) -> EncryptedAuditCache?,
     private val budget: AuditReadBudget = AuditReadBudget(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val enrollmentAccess: Mutex = Mutex(),
 ) {
     private val mutex = Mutex()
 
@@ -60,7 +61,9 @@ internal class StoredAuditReader(
                      outcome: AuditOutcome? = null): StoredAuditState = mutex.withLock {
         try {
             withContext(dispatcher) {
-                val rows = openEnrollments()?.use { it.snapshot().entries } ?: emptyList()
+                val rows = enrollmentAccess.withLock {
+                    openEnrollments()?.use { it.snapshot().entries } ?: emptyList()
+                }
                 // Prepared setups are not an established source of history. Removed rows keep cache bindings.
                 val retained = rows.filter { it.phase != EnrollmentPhase.PREPARED }
                 val groups = retained.groupBy { AuditHistoryScope(it.enrollment.macID, it.enrollment.accountID) }

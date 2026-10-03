@@ -8,12 +8,14 @@ import dev.remozio.android.updates.androidUpdateHost
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.sync.Mutex
 
 class RemozioApplication : Application() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val enrollmentAccess = Mutex()
     internal val macs by lazy {
-        StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) })
+        StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) }, enrollmentAccess = enrollmentAccess)
     }
-    internal val audits by lazy { androidStoredAuditReader(this) }
+    internal val audits by lazy { androidStoredAuditReader(this, enrollmentAccess) }
     internal val updates by lazy { androidUpdateHost(this, scope) }
 }

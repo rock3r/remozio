@@ -1,13 +1,14 @@
 package dev.remozio.android.audit
 
 import android.content.Context
+import kotlinx.coroutines.sync.Mutex
 import dev.remozio.android.enrollment.AndroidEnrollmentStore
 import dev.remozio.phone.audit.AuditEvidenceLimits
 import dev.remozio.phone.audit.AuditPageLimits
 import dev.remozio.protocol.CborLimits
 
 /** Decoder limits only. This reader never selects retention or prunes an archive. */
-internal fun androidStoredAuditReader(context: Context): StoredAuditReader {
+internal fun androidStoredAuditReader(context: Context, enrollmentAccess: Mutex): StoredAuditReader {
     val app = context.applicationContext
     val protocol = AuditPageLimits(
         batch = CborLimits(1_048_576, 8, 131_072),
@@ -18,6 +19,7 @@ internal fun androidStoredAuditReader(context: Context): StoredAuditReader {
         descriptor = CborLimits(4096, 4, 64),
     )
     return StoredAuditReader(
+        enrollmentAccess = enrollmentAccess,
         openEnrollments = { AndroidEnrollmentStore.openExisting(app, 1024, 16_777_216) },
         openCache = { binding, maximumBytes ->
             AndroidAuditCache.openExisting(app, binding, protocol,
