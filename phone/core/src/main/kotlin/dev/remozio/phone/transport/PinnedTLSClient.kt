@@ -2,13 +2,7 @@ package dev.remozio.phone.transport
 
 import dev.remozio.protocol.CborValue
 import java.nio.ByteBuffer
-import java.security.AlgorithmParameters
-import java.security.KeyFactory
 import java.security.MessageDigest
-import java.security.interfaces.ECPublicKey
-import java.security.spec.ECGenParameterSpec
-import java.security.spec.ECParameterSpec
-import java.security.spec.X509EncodedKeySpec
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.Collections
@@ -54,7 +48,7 @@ class PinnedTLSClient(
         require(localKeys.size == 1 && localKeys[0] is X509KeyManager) { "One enrollment key manager required" }
         require(applicationProtocol.length in 1..255 && applicationProtocol.all { it.code in 0x21..0x7e })
         require(maximumHandshakeBytes in 1..1_048_576)
-        val pin = p256Pin(peerSubjectPublicKeyInfo)
+        val pin = p256TransportPin(peerSubjectPublicKeyInfo)
         val trust = object : X509TrustManager {
             override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) { throw CertificateException("Client role only") }
@@ -204,16 +198,5 @@ class PinnedTLSClient(
     private companion object {
         const val BUFFER_BYTES = 65_536
         const val MAX_CHUNK_BYTES = 32_768
-        fun p256Pin(encoded: ByteArray): ByteArray {
-            require(encoded.size in 1..256) { "Invalid transport pin" }
-            val copy = encoded.copyOf()
-            val key = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(copy)) as? ECPublicKey
-                ?: throw IllegalArgumentException("P-256 transport key required")
-            val curve = AlgorithmParameters.getInstance("EC").apply { init(ECGenParameterSpec("secp256r1")) }
-                .getParameterSpec(ECParameterSpec::class.java)
-            require(key.params.curve == curve.curve && key.params.generator == curve.generator &&
-                key.params.order == curve.order && key.params.cofactor == curve.cofactor && key.encoded.contentEquals(copy))
-            return copy
-        }
     }
 }

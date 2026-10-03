@@ -71,3 +71,5 @@ Clock and lifecycle behavior follow the [SystemClock contract](https://developer
 The platform-independent request owner and tracker live in [phone-core](../phone/core/README.md). Android supplies lifecycle and elapsed-clock integration. Its shared core also runs against the native Swift peer in the device-free [approval-flow experiment](../docs/experiments/approval-flow.md).
 
 The [sideload update verifier](updates.md) stages APKs privately, verifies their signatures and identity, and binds installer handoff to the verified bytes. A native installer backend now enforces verified copying and durable recording before commit. The application now owns pending update state and exposes installation, permission, cleanup, and confirmation controls. The launcher can check releases, download and verify a candidate, and then offer a separate install action. Update settings control foreground checks and prerelease discovery.
+
+The [transport identity loader](transport-identity.md) validates an existing hardware-backed enrollment key and supplies its handle to the TLS client. Pairing, key creation, and native Pixel validation remain outstanding.

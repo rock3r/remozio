@@ -1,5 +1,6 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.phone.transport.ClientTLSKeyManager
 import dev.remozio.phone.transport.PinnedTLSClient
 import dev.remozio.phone.transport.TLSClientProgress
 import dev.remozio.phone.transport.TLSClientState
@@ -15,6 +16,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.KeyStore
+import java.security.PrivateKey
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.Base64
@@ -307,6 +309,7 @@ class TLSInteropTest {
             Files.newInputStream(path).use { load(it, PASSWORD.toCharArray()) }
         }
         val certificate = store.getCertificate("fixture") as X509Certificate
+        val clientManager = ClientTLSKeyManager(store.getKey("fixture", PASSWORD.toCharArray()) as PrivateKey, arrayOf(certificate))
         val keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
             init(store, PASSWORD.toCharArray())
         }.keyManagers
@@ -357,7 +360,7 @@ class TLSInteropTest {
             return Identity(path)
         }
         fun engine(pin: X509Certificate = mac.certificate, protocol: String = "remozio-experiment/1", budget: Int = 65_536, identity: Identity = phone) =
-            PinnedTLSClient(identity.keyManagers, pin.publicKey.encoded, protocol, budget)
+            PinnedTLSClient(arrayOf(identity.clientManager), pin.publicKey.encoded, protocol, budget)
         fun connect(port: Int, identity: Identity? = phone, serverPin: X509Certificate = mac.certificate): SSLSocket {
             val context = SSLContext.getInstance("TLSv1.3")
             val trust = object : X509TrustManager {
@@ -379,6 +382,8 @@ class TLSInteropTest {
         fun closeControllerPipe() { process.outputStream.close() }
         fun waitForPeerExit(): Boolean = process.waitFor(3, TimeUnit.SECONDS)
         override fun close() {
+            mac.clientManager.close()
+            phone.clientManager.close()
             process.outputStream.close()
             process.destroy()
             if (!process.waitFor(3, TimeUnit.SECONDS)) { process.destroyForcibly(); process.waitFor(3, TimeUnit.SECONDS) }
