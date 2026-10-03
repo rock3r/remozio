@@ -2,6 +2,7 @@ package dev.remozio.android
 
 import android.os.Bundle
 import dev.remozio.android.audit.AuditScreen
+import dev.remozio.android.push.NotificationSettingsScreen
 import dev.remozio.android.enrollment.StoredMacList
 import dev.remozio.android.updates.UpdateStatusCard
 import androidx.activity.ComponentActivity
@@ -66,8 +67,8 @@ internal fun RemozioTheme(content: @Composable () -> Unit) {
 @Composable
 private fun RemozioScreen() {
     var destination by rememberSaveable { mutableIntStateOf(0) }
-    val labels = listOf(R.string.nav_macs, R.string.nav_audit)
-    val icons = listOf(R.drawable.ic_macs, R.drawable.ic_audit)
+    val labels = listOf(R.string.nav_macs, R.string.nav_audit, R.string.nav_settings)
+    val icons = listOf(R.drawable.ic_macs, R.drawable.ic_audit, R.drawable.ic_settings)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val expanded = maxWidth >= 600.dp
         Scaffold(bottomBar = {
@@ -87,7 +88,9 @@ private fun RemozioScreen() {
                         label = { Text(stringResource(labels[index])) },
                     ) }
                 }
-                Box(Modifier.weight(1f)) { if (destination == 1) AuditScreen() else MacsScreen() }
+                Box(Modifier.weight(1f)) {
+                    when (destination) { 1 -> AuditScreen(); 2 -> NotificationSettingsScreen(); else -> MacsScreen() }
+                }
             }
         }
     }

@@ -105,3 +105,17 @@ The decoder accepts up to 16 MiB per archive, 4,096 proofs, 50,000 records and 4
 Only closed metadata fields reach the view. Full commands, target values, UI captures and provider error text are absent. History offers no approval or replay action. Authentication labels describe evidence, not proof of a person's identity. Signed decisions, Mac acceptance, dispatch and observed results remain distinct events.
 
 Host tests use disposable software keys and archives. They cover scope separation, filters, gaps, conflicts, ordering, read budgets, corruption and cancellation. Pixel checks still need to validate Keystore access, AtomicFile recovery, TalkBack, large text and the adaptive layouts. No real audit archive or phone was accessed during host validation.
+
+## Notification setup
+
+Settings is a primary destination on compact and expanded layouts. Its Notifications card reads the runtime permission, app switch and request-channel importance when resumed. Refresh reads again. Entering the screen does not request permission, create a channel or post a notification.
+
+Set up notifications creates the existing request channel and asks for permission only after the user taps. Android app and request-channel settings remain available after denial. Creating the channel again preserves the user's channel choices. The request sender and setup screen share its definition. Update notifications retain their separate channel.
+
+Send a local test posts generic, explicitly labelled text on the request channel. It uses a separate notification tag and no enrollment, request or provider data. Repeated tests replace that test notification. Clear local test cancels only this diagnostic. A submitted result means Android accepted the posting call; it does not prove visibility, Firebase delivery, background admission or a working Mac connection.
+
+Permission denial, app disablement, missing channel, disabled channel, lower importance and unavailable status stay distinct. Quiet channels can still run an explicit local test. Do Not Disturb and other system settings can affect visibility even when posting is allowed. There is no automatic permission retry or startup prompt.
+
+Host tests cover the permission and channel classification. Pixel testing still needs permission allow/deny/dismiss, return from system settings, channel changes, TalkBack, large text and actual notification appearance. No device was contacted by the host checks.
+
+The permission flow follows [Android's Compose guidance](https://developer.android.com/develop/ui/compose/notifications/notification-permission). Channel ownership follows [Android notification channels](https://developer.android.com/develop/ui/compose/notifications/channels).
