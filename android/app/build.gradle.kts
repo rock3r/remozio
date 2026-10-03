@@ -3,6 +3,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val releaseVersion = providers.gradleProperty("remozioVersionName").orElse("0.1.0").get()
+val releaseCode = providers.gradleProperty("remozioVersionCode").orElse("1").get().toIntOrNull()
+require(releaseCode != null && releaseCode in 1..2_100_000_000) { "Invalid remozioVersionCode" }
+require(releaseVersion.length <= 128 && Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?").matches(releaseVersion)) {
+    "Invalid remozioVersionName"
+}
+require(releaseVersion.substringBefore('+').substringAfter('-', "").split('.').none {
+    it.length > 1 && it.all(Char::isDigit) && it.startsWith('0')
+}) { "Invalid numeric prerelease identifier" }
+require(releaseVersion.substringBefore('-').substringBefore('+').split('.').all { it.toIntOrNull() != null }) {
+    "Version component exceeds updater range"
+}
+
 android {
     namespace = "dev.remozio.android"
     compileSdk = 37
@@ -11,8 +24,8 @@ android {
         applicationId = "dev.remozio.android"
         minSdk = 37
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = releaseCode
+        versionName = releaseVersion
     }
     buildTypes {
         debug { applicationIdSuffix = ".debug" }

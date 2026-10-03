@@ -75,4 +75,4 @@ jobs:
           PYTHON
       - name: Install Android SDK packages
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"'
-      - run: ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
+      - run: ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug :android-app:assembleRelease
