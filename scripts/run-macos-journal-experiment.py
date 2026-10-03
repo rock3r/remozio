@@ -169,7 +169,7 @@ def measure():
             shutil.copyfile(saved / filename, directory / filename)
         report = inspect(directory)
         assert report["records"] == []
-        observations.append({"case": "whole-backup-rollback", "detected": False, "gate": "independent-witness-required"})
+        observations.append({"case": "whole-backup-rollback", "detected": False, "securityBoundary": "whole-mac-backup-restore-excluded"})
 
     return {
         "experiment": "authority-journal-process-crash-v1", "measuredAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
