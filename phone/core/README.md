@@ -29,3 +29,5 @@ The [TLS channel experiment](../../docs/experiments/tls-channel.md) adds a loopb
 The [WebSocket carrier extension](../../docs/experiments/websocket-carrier.md) keeps outer relay authentication separate from the inner Mac pin. OkHttp dependencies remain test-only.
 
 The [phone TLS engine](TRANSPORT.md) accepts ordered ciphertext without a local socket bridge. The host supplies an enrollment key manager and peer key pin. Carrier and Android hardware integration remain separate work.
+
+`WebSocketRecordTransport` provides [bounded runtime framing](TRANSPORT.md#bounded-websocket-records) through Ktor WebSockets 3.6.0. Its host still owns authenticated HTTPS setup and enrollment lifecycle.

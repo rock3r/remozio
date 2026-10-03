@@ -35,4 +35,31 @@ Calls serialize engine operations. Delegated key tasks run synchronously and can
 
 `TLSInteropTest` exercises the engine against the native Swift loopback peer using disposable keys. It covers fragmented records, a large application frame, peer pin and ALPN rejection, handshake/input limits, abort, and abrupt EOF. The [direct WebSocket extension](../../docs/experiments/websocket-carrier.md#direct-phone-engine-extension) also feeds this engine without a local client bridge. The earlier socket experiments remain separate fixtures.
 
-The engine is a phone-core component, not a wired Android connection. A runtime WebSocket adapter with verified parser limits, lifecycle owner, current-enrollment integration, and Android Keystore identity manager remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
+The engine is a phone-core component, not a wired Android connection. The bounded framing layer is described below. HTTPS connection setup, a lifecycle owner that couples framing to TLS, current-enrollment integration, and an Android Keystore identity manager remain to be implemented. Pixel hardware-key behavior and real network transitions require the interactive device tests.
+
+## Bounded WebSocket records
+
+`WebSocketRecordTransport` supplies runtime binary framing over host-owned byte channels. The host must first authenticate the HTTPS endpoint and validate its WebSocket upgrade. The constructor does not connect to a URL or establish trust.
+
+```mermaid
+flowchart LR
+    A[Authenticated HTTPS byte channels] --> B[Raw frame parser]
+    B --> C[Bounded fragment assembly]
+    C --> D[Binary ciphertext messages]
+    D --> E[Phone TLS engine]
+    F[Owner cancellation] --> G[Release underlying connection once]
+    F --> B
+    F --> C
+```
+
+The adapter uses Ktor WebSockets 3.6.0. It passes the frame limit into `RawWebSocket` at construction, before the reader starts. The default session enforces the same limit across fragments. All incoming and outgoing Ktor queues have the caller's explicit finite capacity. Compression extensions are disabled. Text and reserved-bit messages are rejected.
+
+The message limit is at most 32,768 bytes. This limits ciphertext messages, not application captures. Split larger TLS output batches across messages. Each library queue has the configured capacity; several queues and parser buffers exist in the pipeline. The host must also bound its byte channels and concurrent connections.
+
+`send` copies the caller's bytes and suspends under backpressure. Its return means queue acceptance. Concurrent sends retain message order through a mutex. `receive` serializes consumers and drains binary messages that precede a peer close. Null means carrier EOF; pass it to the TLS layer without inventing an authenticated close or request outcome.
+
+Cancelling a send or receive aborts this transport. Explicit close and parent cancellation also release its input, output, and underlying connection. Reads reject buffered messages after local cancellation, including when a peer close arrived first. Only normal peer closure permits draining. The required close callback must be nonblocking and release the host connection. Cleanup attempts each release step once. `closeAndJoin` explicitly cancels and joins Ktor’s independent default-session job, then joins the owner. Parent cancellation also waits for that session through a cleanup guard. The adapter does not retry messages or decisions.
+
+The Ktor configuration constructor and session start method require an `InternalAPI` opt-in. This is confined to the adapter and the dependency is pinned. Parser, queue, and lifecycle tests must pass when that dependency changes; no reflection or private fields are used.
+
+Portable tests cover a first oversized header without a body, fragmented overflow, output masking and copy ownership, ping handling, rejected message types, backpressure, queued messages before close, and cancellation. Android compilation and lint check API availability. Actual HTTPS setup, the connection owner, current-enrollment checks, and device behavior remain integration work.
