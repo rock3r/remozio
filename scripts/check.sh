@@ -6,6 +6,7 @@ python3 -m unittest discover -s .agents/skills/babysit-pr/scripts -p 'test_*.py'
 if [ "$(uname -s)" = Darwin ]; then
     swift build --package-path experiments/macos --triple arm64-apple-macosx26.0
     swift build --package-path experiments/key-custody --triple arm64-apple-macosx26.0 --disable-keychain --disable-netrc
+    python3 scripts/check-enclave-timeout.py
     python3 scripts/check-macos-packaging.py
     python3 scripts/check-macos-app.py
     swift build --package-path experiments/sparkle-probe --disable-keychain --disable-netrc

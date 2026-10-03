@@ -197,6 +197,7 @@ func admitted(_ connection: NWConnection) -> Bool {
         let context = LAContext()
         context.interactionNotAllowed = true
         defer { context.invalidate() }
+        var assertionsPassed = false
         do {
             report.stage = "create-enclave-key"
             let serverKey = try key(enclave: true, context: context)
@@ -232,14 +233,24 @@ func admitted(_ connection: NWConnection) -> Bool {
                 }
                 report.wrongServerPinRejected = true
             }
-            report.stage = "complete"
-            report.status = "passed"
+            assertionsPassed = true
+            report.stage = "cleanup"
         } catch {
             let failure = error as NSError
             report.errorDomain = failure.domain
             report.errorCode = failure.code
         }
         await cleanup()
+        if assertionsPassed {
+            report.stage = "complete"
+            report.status = "passed"
+        }
+        finish()
+    }
+
+    func timedOut() {
+        report.stage = "timeout"
+        report.status = "blocked"
         finish()
     }
 
@@ -269,9 +280,12 @@ fatalError("The enclave TLS probe is available only in debug builds.")
 #else
 guard getuid() != 0 else { fatalError("Run the disposable probe as an ordinary user.") }
 let probe = Probe()
-DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-    probe.report.stage = "timeout"
-    probe.finish()
+if CommandLine.arguments.dropFirst() == ["--timeout-control"] {
+    probe.report.stage = "complete"
+    probe.report.status = "passed"
+    probe.timedOut()
 }
+guard CommandLine.arguments.count == 1 else { exit(64) }
+DispatchQueue.main.asyncAfter(deadline: .now() + 15) { probe.timedOut() }
 await probe.run()
 #endif

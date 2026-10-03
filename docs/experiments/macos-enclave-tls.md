@@ -42,7 +42,7 @@ probe_bin=$(swift build --package-path experiments/key-custody --show-bin-path -
 
 Run as an ordinary user in a debug build. Exit 0 requires every assertion; exit 77 means the experiment could not establish them. Exit 70 means report encoding failed. There is no software fallback for the server key. The listener binds only an ephemeral IPv4 loopback port and accepts one connection per attempt. Connections have five-second opening deadlines. A 15-second main-queue watchdog ends an unfinished run; the recorded invocation also used an external 25-second process timeout.
 
-The normal gate builds this executable without running it. It does not install a service, modify an enrolled device, configure a relay, or use a production identity.
+The normal gate builds the executable and runs `--timeout-control`. That control starts from a passed report and verifies that timeout finalization produces a blocked report and exit 77. It creates no keys or sockets. Hardware exchange remains opt-in. It does not install a service, modify an enrolled device, configure a relay, or use a production identity.
 
 ## Remaining gates
 
