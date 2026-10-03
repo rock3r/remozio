@@ -9,6 +9,8 @@ import Sparkle
     var finished = false
     var found: String?
     var signatureValid = false
+    var selectionChecks = 0
+    var frameworkError = false
     var errorCode: Int?
 
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
@@ -18,6 +20,7 @@ import Sparkle
         signatureValid = appcast.signingValidationStatus == .succeeded
     }
     func updater(_ updater: SPUUpdater, shouldProceedWithUpdate item: SUAppcastItem, updateCheck: SPUUpdateCheck) throws {
+        selectionChecks += 1
         guard updateCheck == .updateInformation, item.signingValidationStatus == .succeeded else {
             throw NSError(domain: "RemozioProbe", code: 2)
         }
@@ -25,6 +28,7 @@ import Sparkle
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) { found = item.versionString }
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: (any Error)?) {
         errorCode = error.map { ($0 as NSError).code }
+        frameworkError = error.map { ($0 as NSError).domain == SUSparkleErrorDomain } ?? false
         finished = true
     }
 }
@@ -80,7 +84,8 @@ import Sparkle
     while !delegate.finished && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     guard delegate.finished else { throw NSError(domain: "Probe timed out", code: 1) }
     let result: [String: Any] = ["found": delegate.found as Any? ?? NSNull(), "signatureValid": delegate.signatureValid,
-                               "errorCode": delegate.errorCode as Any? ?? NSNull()]
+                               "errorCode": delegate.errorCode as Any? ?? NSNull(),
+                               "selectionChecks": delegate.selectionChecks, "frameworkError": delegate.frameworkError]
     print(String(decoding: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), as: UTF8.self))
 }
 

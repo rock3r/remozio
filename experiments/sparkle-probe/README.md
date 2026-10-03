@@ -35,4 +35,4 @@ Pinned upstream references:
 - [Feed failure policy](https://github.com/sparkle-project/Sparkle/blob/2.10.0/Sparkle/SUAppcastDriver.m)
 - [Delegate contract](https://sparkle-project.org/documentation/api-reference/Protocols/SPUUpdaterDelegate.html)
 
-Local evidence on macOS 27.0.1, Apple Silicon: the valid feed selected version 2 with a successful signature result. All three invalid feeds returned error 1000, no selected version, and no successful signature result. The server observed only the four expected feed requests. This is not validation on macOS 26 or a Developer ID signed product.
+Local evidence on macOS 27.0.1, Apple Silicon: the valid feed selected version 2 with a successful signature result. All three invalid feeds returned Sparkle-domain error 1000, no selected version, and no successful signature result. The selection guard was never reached for invalid feeds; its separate rejection cannot mask a framework-policy failure. The server observed only the four expected feed requests. This is not validation on macOS 26 or a Developer ID signed product.

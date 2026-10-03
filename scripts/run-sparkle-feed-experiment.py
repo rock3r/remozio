@@ -73,9 +73,9 @@ def main():
                     result = run(executable, 'probe', app)
                     outcome = json.loads(result.stdout.strip().splitlines()[-1])
                     if case == 'valid':
-                        assert outcome == {'found': '2', 'signatureValid': True, 'errorCode': None}, outcome
+                        assert outcome == {'found': '2', 'signatureValid': True, 'errorCode': None, 'selectionChecks': 1, 'frameworkError': False}, outcome
                     else:
-                        assert outcome['found'] is None and not outcome['signatureValid'] and outcome['errorCode'] is not None, outcome
+                        assert outcome == {'found': None, 'signatureValid': False, 'errorCode': 1000, 'selectionChecks': 0, 'frameworkError': True}, outcome
                     print(f'{case}: {json.dumps(outcome, sort_keys=True)}')
                 finally:
                     subprocess.run(['defaults', 'delete', identity], capture_output=True, timeout=10)
