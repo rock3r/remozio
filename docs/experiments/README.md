@@ -4,7 +4,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 
 | Work | Status | Next evidence |
 | --- | --- | --- |
-| Android biometric key | [Debug probe prepared](android-biometric-key.md) | Per-use hardware authentication, cancellation, enrollment retention, and update continuity on a Pixel |
+| Android biometric key | [Pixel signing and lifecycle observations](evidence/2026-10-03-pixel-platform.md) | Enrollment retention, reboot continuity, and production approval integration |
 | Swift/Kotlin approval flow | [Synthetic peer harness](approval-flow.md) | Durable admission, real enrollment, encrypted transport, and device keys |
 | Swift build and XPC identity checks | [Measured with ad-hoc signing](macos-xpc.md) | macOS 26 and Developer ID repeats |
 | Single app and background services | [Bundle build and seals checked](macos-packaging.md) | SMAppService registration, protected placement, update replacement |
@@ -16,7 +16,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Presence signals | [One-shot probe prepared](macos-presence.md) | GUI-session observations, remote desktop usability, lock and brightness support |
 | UI adapters | Needs interactive session | Authorized dialog fixtures |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |
-| Android ADB bridge | [Endpoint probe prepared](android-adb-endpoint.md) | Discovery, Wi-Fi-off fallback, listener exposure, foreground lifetime, reconnect and Stop |
+| Android ADB bridge | [Pixel discovery and loopback observations](evidence/2026-10-03-pixel-platform.md) | Wi-Fi-off fallback, listener exposure, foreground lifetime, reconnect and Stop |
 | Setup exports and APK updates | Pending | Independent import, signature checks and retained pairing |
 
 ## PR sequence

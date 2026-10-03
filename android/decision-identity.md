@@ -49,6 +49,6 @@ JVM tests use disposable software keys solely to check message bindings and cryp
 
 The launcher does not create or load these keys yet. Pairing, request controls, network dispatch and phone removal integration remain separate work. Real Keystore behavior, process restart, device lock, update continuity and Pixel custody checks remain for the physical-device session.
 
-The production biometric key and its retention policy remain separate from this decision key. The [biometric experiment](../docs/experiments/android-biometric-key.md) records those pending device checks.
+The production biometric key and its retention policy remain separate from this decision key. The [biometric experiment](../docs/experiments/android-biometric-key.md) records measured signing and lifecycle results; enrollment retention remains unproven.
 
 Platform references: [key generation policy](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder) and [local key information](https://developer.android.com/reference/android/security/keystore/KeyInfo).

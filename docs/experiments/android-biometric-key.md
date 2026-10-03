@@ -2,7 +2,7 @@
 
 The debug app has a **Biometric key experiment** button. The release app excludes the probe, its activity, and its permission.
 
-This prepares a physical Pixel experiment. Build results do not prove that Android enforces the requested key policy. No device results are recorded yet.
+The [recorded Pixel session](evidence/2026-10-03-pixel-platform.md) covers synthetic signing and selected lifecycle cases. Build results alone do not prove hardware policy enforcement.
 
 ```mermaid
 sequenceDiagram
@@ -50,7 +50,7 @@ Do not change device credentials or biometrics automatically. Do not treat a pro
 
 ## Validation boundaries
 
-Host unit tests cover operation invalidation and rejection of stale completion. Build and lint validate API use and source-set wiring. They cannot test secure hardware, biometric enrollment, prompt timing, process death, or APK-update continuity. Those results remain pending.
+Host unit tests cover operation invalidation and rejection of stale completion. Build and lint validate API use and source-set wiring. They cannot test secure hardware, biometric enrollment, prompt timing, process death, or APK-update continuity. The recorded Pixel session covers a subset of these cases; enrollment changes and the remaining lifecycle cases are still pending.
 
 API references: [KeyGenParameterSpec.Builder](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder), [KeyInfo](https://developer.android.com/reference/android/security/keystore/KeyInfo), and [BiometricPrompt](https://developer.android.com/reference/android/hardware/biometrics/BiometricPrompt).
 
@@ -61,3 +61,7 @@ On 2026-10-03, a Pixel 11 Pro running Android 17/API 37 reported a StrongBox key
 Android's public `KeyInfo` reference documents -1 for per-use validity, while the current [Keystore2 reader](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/keystore/java/android/security/keystore2/AndroidKeyStoreSecretKeyFactorySpi.java) initializes absent timeout metadata to 0. The [parameter writer](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/keystore/java/android/security/keystore2/KeyStore2ParameterUtils.java) omits the timeout for per-use keys. The probe accepts either representation with all other signing constraints intact. Source inspection does not replace the required no-prompt rejection and fresh-biometric signing tests.
 
 Enrollment invalidation is reported separately. Its observed value does not establish actual key behavior after biometric enrollment changes. The probe neither deletes the existing key nor selects a production recovery policy from that flag.
+
+## Recorded Pixel session
+
+The [2026-10-03 evidence](evidence/2026-10-03-pixel-platform.md) records verified synthetic signatures, unauthenticated rejection, cancellation, restart continuity and key identity after a debug APK update. Enrollment retention and production integration remain unproven.
