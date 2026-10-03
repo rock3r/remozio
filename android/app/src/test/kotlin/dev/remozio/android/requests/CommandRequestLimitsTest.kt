@@ -30,6 +30,15 @@ class CommandRequestLimitsTest {
         assertContentEquals("REMOZIO_32767".encodeToByteArray(), parsed.environment.last().name.copyBytes())
     }
 
+    @Test fun excessiveTinyArgumentsAreRejectedByTheDecoderItemBound() {
+        val wire = DeterministicCbor.encode(CborValue.Fields(fields +
+            (2uL to CborValue.ArrayValue(List(262_144) { CborValue.Bytes(byteArrayOf()) }))),
+            limits.capture.copy(maxItems = 1_048_576))
+        assertTrue(wire.size < limits.capture.maxBytes)
+        val failure = assertFailsWith<CborException> { CommandCapture(wire, limits.capture) }
+        assertEquals(CborFailure.ITEM_LIMIT, failure.reason)
+    }
+
     @Test fun captureLimitRejectsOversizeWithoutTruncationAndAllowsEnvelopeOverhead() {
         val error = assertFailsWith<CborException> {
             capture(2u, CborValue.ArrayValue(listOf(CborValue.Bytes(ByteArray(limits.capture.maxBytes) { 120 }))))
