@@ -14,7 +14,7 @@ The debug APK is `android/app/build/outputs/apk/debug/android-app-debug.apk`. It
 
 ## Current scope
 
-The launcher opens an empty Mac list and the app update status card. It uses native Compose, Material 3 Expressive, system light/dark colors, and a scrollable layout for large text. Pairing and request delivery are not connected yet. The update card can check GitHub releases and download a candidate after user selection. Update status uses app-private storage and installer callbacks.
+The launcher reads saved Mac records and shows the app update status card. A fresh installation has an empty Mac list. It uses native Compose, Material 3 Expressive, system light/dark colors, and a scrollable layout for large text. Pairing and request delivery are not connected yet. The update card can check GitHub releases and download a candidate after user selection. Update status uses app-private storage and installer callbacks.
 
 Material 3 uses `1.5.0-alpha29` because the Expressive theme is not in the stable 1.4 release. Other Compose libraries use BOM `2026.09.00`. AGP supplies built-in Kotlin; the app does not apply a second Android Kotlin plugin.
 
@@ -79,3 +79,15 @@ The [phone enrollment store](../phone/core/ENROLLMENTS.md) has an Android adapte
 The [decision identity](decision-identity.md) creates and loads a separate hardware key for biometric-free choices. Its first signing adapter verifies an issued command and signs only an explicit permitted decline. App lifecycle and delivery integration remain outstanding.
 
 The debug-only [ADB endpoint experiment](../docs/experiments/android-adb-endpoint.md) prepares system-picker discovery and explicit loopback reachability checks. It sends no ADB commands and does not implement a bridge. Device results remain pending.
+
+## Saved Mac inventory
+
+The launcher opens the existing encrypted enrollment archive off the main thread. It never generates a storage key or initializes an archive. A key and archive that are both absent produce the empty view. A partial, unreadable or incompatible store produces a retryable error without resetting data.
+
+The application owns one serialized reader across activity replacements. Each read closes its store before returning immutable display metadata: record ID, label and whether setup is incomplete. Credentials and key references never enter Compose state. Cancellation prevents a stopped reader from publishing late rows. Returning to the foreground reads again; there is no background polling.
+
+Active records show **Not connected** and unknown current Mac status. Prepared records show **Setup incomplete**; removed records are omitted. Labels do not merge records or identify authority. Reading a restored active record cannot establish current enrollment, online presence or permission to act. The list starts no channel and exposes no presence controls or approval actions.
+
+The adapter may create the private enrollment directory and its coordination lock, but inventory reads create no key or enrollment archive. The reader uses the archive format's existing maximum limits, with no pruning or new retention policy. Native Keystore and AtomicFile behavior still need the Pixel session. Host tests cover projection, incomplete storage, errors, retry, reader cancellation and owner closure.
+
+The list keeps standard Material 3 Expressive cards and a standard loading indicator. Loading, errors and unknown status all have static text. No custom animation is added. TalkBack, large text and actual lifecycle timing remain device checks.

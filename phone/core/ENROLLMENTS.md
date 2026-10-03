@@ -64,7 +64,7 @@ A dedicated, non-exportable AES-256 Keystore key protects the archive. StrongBox
 
 The key allows access after the first device unlock without a biometric prompt for each archive read. It has no approval purpose. Android credential-encrypted storage still controls pre-unlock file availability.
 
-Only an absent key and absent archive permit initial creation. An archive without its key fails. A key without its archive also fails, including an interrupted initialization. The adapter never guesses that an existing identity can be reset. It is not opened by app startup yet.
+Only an absent key and absent archive permit initial creation. An archive without its key fails. A key without its archive also fails, including an interrupted initialization. The adapter never guesses that an existing identity can be reset. The launcher can read an existing archive through `openExisting`. This path never creates a key or archive; both absent returns an empty inventory. Displaying a stored record grants no authority.
 
 ## Removal and freshness boundaries
 

@@ -20,7 +20,7 @@ Arrows show dependencies, not completed connections. Passing a component test do
 | Surface | Available now | Still missing |
 | --- | --- | --- |
 | Mac app | Window, menu, Settings, encrypted setup preview | Setup application, protected services, pairing and live approval routing |
-| Android app | Empty Mac list, update controls, debug previews and probes | Enrollment flow, live inventory, request actions and audit navigation |
+| Android app | Saved Mac list with unknown live status, update controls, debug previews and probes | Enrollment flow, live inventory, request actions and audit navigation |
 | Transport | Native byte channels, pinned TLS, negotiation and synthetic relay checks | Production listeners, enrolled hardware peers and configured Cloudflare path |
 | Authority | Verified decisions and durable journal components | Protected host, independent rollback witness and real executor |
 | Push | Sender, delivery and phone notification components | App integration, configured credentials and physical delivery evidence |
