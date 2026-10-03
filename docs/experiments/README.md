@@ -12,6 +12,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Independent witness, protected storage, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | User-selected execution contract; broader runtime coverage |
 | Streaming encrypted channel | [TLS](tls-channel.md) and [WebSocket carrier](websocket-carrier.md) harnesses | Android keys, Cloudflare integration, protected identities, and reconnect |
+| Native TLS key custody | [Disposable enclave identity and TLS exchange measured](macos-enclave-tls.md) | macOS 26 runtime, pre-login access, protected service identity, Android hardware peer |
 | UI adapters and presence | Needs interactive session | Authorized dialog fixtures and remote desktop states |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |
 | Android ADB bridge | Needs device session | Wi-Fi-off fallback, listener exposure, reconnect and Stop |

@@ -5,5 +5,7 @@ let package = Package(
     name: "RemozioKeyCustodyExperiment",
     platforms: [.macOS("26.0")],
     products: [.executable(name: "remozio-key-custody-probe", targets: ["KeyCustodyProbe"])],
-    targets: [.executableTarget(name: "KeyCustodyProbe")]
+    dependencies: [.package(path: "../../macos/core")],
+    targets: [.executableTarget(name: "KeyCustodyProbe"),
+              .executableTarget(name: "EnclaveTLSProbe", dependencies: [.product(name: "RemozioCore", package: "core")])]
 )
