@@ -26,6 +26,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 class RelayConnector internal constructor(private val sockets: SSLSocketFactory) {
     constructor() : this(SSLSocketFactory.getDefault() as SSLSocketFactory)
 
+    /** Uses the exact endpoint retained with the credential; callers cannot substitute a route. */
+    suspend fun connect(parent: CoroutineScope, credential: RelayAccessCredential): EncryptedRecordTransport =
+        connect(parent, credential.endpoint, credential)
+
     suspend fun connect(
         parent: CoroutineScope,
         endpoint: RelayEndpoint,
