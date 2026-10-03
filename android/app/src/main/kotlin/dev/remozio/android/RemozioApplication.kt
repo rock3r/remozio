@@ -1,6 +1,7 @@
 package dev.remozio.android
 
 import android.app.Application
+import dev.remozio.android.audit.androidStoredAuditReader
 import dev.remozio.android.enrollment.AndroidEnrollmentStore
 import dev.remozio.android.enrollment.StoredMacReader
 import dev.remozio.android.updates.androidUpdateHost
@@ -13,5 +14,6 @@ class RemozioApplication : Application() {
     internal val macs by lazy {
         StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) })
     }
+    internal val audits by lazy { androidStoredAuditReader(this) }
     internal val updates by lazy { androidUpdateHost(this, scope) }
 }
