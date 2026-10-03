@@ -67,7 +67,7 @@ The runner also checks that repeated recovery produces the same report. CI repea
 
 ## Production gates remain
 
-A matching database and checkpoint backup restores consistently and is **not detected**. A local hash chain cannot establish that a newer state once existed. The independent authority witness remains unresolved; this result must not enable production admission or weaken the design's rollback requirements.
+A matching database and checkpoint backup restores consistently and is **not detected**. A local hash chain cannot establish that a newer state once existed. The user excluded whole-Mac backup rollback from the guarantee on 2026-10-03; an independent witness is no longer required for that threat. The [accepted limits](../design-decisions.md#whole-mac-backup-rollback) retain protected storage, ordinary replay prevention, crash recovery and mismatch handling. This experiment still does not enable production admission.
 
 Process termination does not simulate physical power loss, failed drive flushes, torn checkpoint files, disk exhaustion, or every I/O error. Those need additional fault injection and platform evidence. The test has one synthetic admission per invocation, scans the full journal, and provides no retention or capacity policy.
 

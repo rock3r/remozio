@@ -77,7 +77,7 @@ The caller-supplied phone-trust overloads are internal fixture paths. Push regis
 
 Root journal schema 11 retains authority policy, enrollment tables, and routing state. It preserves gateway acknowledgments, recovered delivery receipts, and recovered revocations, and adds unknown trust restrictions. Explicit migrations accept source versions 1 through 10.
 Existing audit, consumption, and gateway state survive migration. No migration creates enrollment authority from those records.
-A restored complete backup still needs the independent continuity witness. A valid local database alone does not prove freshness.
+A valid local database alone does not prove freshness against a complete backup restore. [Whole-Mac backup rollback is outside the accepted guarantee](../../docs/design-decisions.md#whole-mac-backup-rollback). Protected-state checks, replay prevention and ordinary crash recovery remain required.
 
 Tests cover both removal/consumption orders, another phone winning after removal, restart, same-phone re-enrollment, replacement rollback,
 gateway/audit atomicity, stale revisions, invalid keys, storage faults, malformed data, read-only access, and explicit migration.

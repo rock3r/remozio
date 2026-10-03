@@ -62,7 +62,7 @@ It must not replay an old receipt or present another biometric prompt for routin
 The [delivery coordinator](gateway-delivery.md) now owns trust snapshots, OAuth acquisition, cancellation, and bounded network tasks.
 It enforces spacing and concurrency limits across its candidates and phones. The installed service and durable desired-state scheduler remain required.
 This per-candidate budget alone is not an aggregate rate limiter. The store itself does not schedule retries or call FCM.
-Whole-backup rollback detection still needs the independent witness from the design.
+Whole-Mac backup rollback is outside the [accepted guarantee](../../docs/design-decisions.md#whole-mac-backup-rollback). Ordinary protected-state recovery and replay prevention remain required.
 
 ## Validation
 

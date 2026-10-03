@@ -58,7 +58,7 @@ Revision overflow and operation capacity fail without eviction or counter reset.
 
 Accepted results currently have no pruning policy. The bounded store also retains expired challenges.
 Production service scheduling must reclaim safely obsolete challenges and define retry-result retention before exposing this control at scale.
-A complete, internally consistent backup still requires the independent continuity witness. These rows do not prove freshness after backup restoration.
+These rows do not prove freshness after a complete, internally consistent backup restoration. Whole-Mac backup rollback is outside the [accepted guarantee](../../docs/design-decisions.md#whole-mac-backup-rollback); ordinary replay and protected-state checks remain required.
 
 The host must authenticate local and phone channels, establish continuity, and serialize calls with current enrollment changes.
 It must send success only after commit, synchronize status to the Mac menu and other phones, and show conflicts without optimistic mode changes.

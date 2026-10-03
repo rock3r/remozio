@@ -114,4 +114,4 @@ No test sends a live provider request or contacts a phone.
 The installed service still needs its authenticated endpoint, protected enrollment updates, durable desired-state scheduler, and root-side proof handling.
 The owned wake drain loop handles accepted wake batches and preparation retries.
 The root scheduler must still submit capacity-limited admissions and recover routine registration after restart without another user prompt.
-Root integration for approval wakes, cross-Mac provider quotas, and independent rollback witnesses remain separate integration work.
+Root integration for approval wakes, cross-Mac provider quotas, and protected checkpoint recovery remain separate integration work.

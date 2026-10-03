@@ -46,6 +46,6 @@ Schema version 2 introduced the ledger; version 3 adds [durable outcomes](consum
 
 Fourteen normal-user tests use real synthetic P-256 signatures. They cover opposite decisions from two phones, replay after reopen, changed challenges, account isolation, current verification failures, action policy, both table failures, callback/automatic rollback, duplicate audit events, head mismatch, capacity, pruning, transaction lifetime, bounded corrupt reads and explicit migration.
 
-Pending-state comparison and cancellation/revocation ordering must still be owned by the authority coordinator. Lifecycle storage reserves, checkpoint commits, recovery classification and the independent rollback witness remain required before real dispatch. Process-local tests do not prove physical power-loss behavior or remote-device operation. No action was executed.
+Pending-state comparison and cancellation/revocation ordering must still be owned by the authority coordinator. Lifecycle storage reserves, protected checkpoint commits and recovery classification remain required before real dispatch. Process-local tests do not prove physical power-loss behavior or remote-device operation. No action was executed.
 
 Public consumption now reads the [enrollment journal](enrollment-journal.md) and requires its current trust revision. Caller-supplied trust remains an internal synthetic-fixture entry point.

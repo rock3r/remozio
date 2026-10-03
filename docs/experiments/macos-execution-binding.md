@@ -46,16 +46,11 @@ The replacement is deliberately scheduled after the check. This is a determinist
 
 The SDK probe only tests a public declaration. It does not prove that every possible platform mechanism is unavailable. The descriptor result does not establish behavior across other OS versions, filesystems, policies, or launch configurations. An unexpected compiler failure aborts the probe rather than being reported as an absent API.
 
-## Production decision remains open
+## Accepted production contract
 
-Section 8 of the approved design requires a concrete execution contract before enabling this path. Current evidence supports these next choices:
+On 2026-10-03 the user accepted explicit pathname execution with a final executable identity/content and working-directory recheck. This preserves ordinary executable location and argv behavior while acknowledging the remaining replacement race and mutable dependencies.
 
-| Choice | Effect |
-| --- | --- |
-| Explicit pathname execution with a final identity/content recheck | Preserves ordinary executable location and argv behavior, while acknowledging the remaining race and mutable dependencies |
-| Continue investigating a stronger supported mechanism | Keeps production execution pending until its semantics and guarantees are measured |
-
-The first choice needs the user's approval. It must not be described as immutable or atomic execution of approved bytes. Neither choice silently copies programs into privileged storage, forces a different interpreter, or restricts executable workflows.
+Approval binds the invocation, not immutable program bytes. Do not silently copy programs into privileged storage, force a different interpreter, or restrict executable workflows. The [accepted limits](../design-decisions.md#command-execution-by-pathname) record the decision. Production execution remains unimplemented; the decision resolves its semantic contract only.
 
 Before shipping, also resolve the separate sudoers or administered-policy gate, protected service placement, caller lifetime, deterministic environment, process I/O, durable consumption, and crash recovery. The phone must show exact arguments and the input-source disclosure. No result here substitutes for those checks.
 

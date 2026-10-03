@@ -99,4 +99,4 @@ Reconciliation tests cover current desired-token renewal, storage rollback, chec
 They verify counter and acknowledgment drift, inactive registration, reentrancy, cancellation, and monotonic-clock checks.
 The wire protocol and database schema remain unchanged.
 
-Protected service wiring, the independent witness, and real-device end-to-end checks remain separate work.
+Protected service wiring, local checkpoint recovery, and real-device end-to-end checks remain separate work.

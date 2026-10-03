@@ -11,7 +11,7 @@ flowchart LR
     T --> I[Production integration: pending]
     P[Pixel hardware experiments] --> I
     M[Mac protected installation and key lifecycle] --> I
-    W[Independent rollback witness: unresolved] --> I
+    W[Protected local checkpoint and recovery: pending] --> I
     I --> E[Real approval end-to-end tests: later]
 ```
 
@@ -22,7 +22,7 @@ Arrows show dependencies, not completed connections. Passing a component test do
 | Mac app | Window, menu, Settings, encrypted setup preview | Setup application, protected services, pairing and live approval routing |
 | Android app | Saved Mac list, cached audit navigation, notification setup, update controls, debug previews and probes | Enrollment flow, live inventory, request actions and audit synchronization |
 | Transport | Native byte channels, pinned TLS, negotiation and synthetic relay checks | Production listeners, enrolled hardware peers and configured Cloudflare path |
-| Authority | Verified decisions and durable journal components | Protected host, independent rollback witness and real executor |
+| Authority | Verified decisions and durable journal components | Protected host, local checkpoint recovery and real executor |
 | Push | Sender, delivery and phone notification components | App integration, configured credentials and physical delivery evidence |
 | Prompt adapters | Design contracts | Authorized UI fixtures, presence observations and live adapters |
 | ADB | Debug discovery and loopback probe | Hardware feasibility, foreground lifetime and the bridge itself |
@@ -40,6 +40,8 @@ The [Mac app guide](../../macos/app/README.md), [Android guide](../../android/RE
 Do not start with root service installation. The packaging fixture has no registration operation, and its manifests are not production service definitions.
 
 ## First session: prepared checks
+
+On 2026-10-03 the user selected Pixel checks first and Mac service, lock/logout/restart, and remote-desktop tests last. The table groups the prepared procedures; it does not override that order.
 
 Run each detailed procedure linked below. Record a failed or unavailable case separately from an expected rejection.
 
@@ -65,18 +67,18 @@ These are not runnable product tests yet. Prepare the relevant implementation an
 | Work | Required evidence before relying on it |
 | --- | --- |
 | Protected Mac services | Developer ID checks, protected paths, registration/removal, reboot to login window, lock/logout, update replacement and pre-login key access |
-| Authority continuity | Independently protected witness, interrupted transitions, pre-revocation backup restoration, stale floors and offline recovery |
+| Authority continuity | Protected local checkpoint, interrupted transitions, partial-state replacement, stale floors and offline recovery |
 | UI adapters and presence | Sanitized authorized dialog captures; local input, CRD, Screen Sharing, dark display, manual Away and offline states |
 | Cloudflare and FCM | Per-Mac configuration, scoped credentials, real delivery, reconnect, offline reconciliation and independent Mac operation |
 | Android enrollment | Hardware transport/decision keys, biometric key policy, removal, re-enrollment and retained pairing across updates |
 | ADB bridge | Peer authentication, listener exposure, foreground-service eligibility, idle/network/update recovery, explicit Stop and per-pair isolation |
 | Release updates | Real signing identities, retained keys, interrupted activation/install outcomes and safe recovery |
 
-The root witness remains a design feasibility blocker. A matching journal and checkpoint backup currently restores without detection, as the [journal experiment](macos-authority-journal.md) demonstrates. More journal unit tests cannot establish an independent witness.
+The user excluded whole-Mac backup rollback from the guarantee on 2026-10-03. A matching journal and checkpoint backup still restores without detection, as the [journal experiment](macos-authority-journal.md) demonstrates. An independent witness is no longer a blocker for that threat; protected storage and ordinary crash/replay recovery remain required.
 
 Do not substitute an online startup check, recurring authorization, forced re-pairing or physical recovery without consulting the user. Those changes alter the agreed UX. The current enclave probes also use after-first-unlock access; they do not establish pre-login availability.
 
-The [command execution experiment](macos-execution-binding.md) separately awaits a decision on the executable replacement race. Production command execution remains disabled. A successful phone signature does not resolve that execution contract.
+The user accepted pathname execution with a final identity/content recheck and its remaining race. The [command execution experiment](macos-execution-binding.md) records the evidence. Production command execution remains unimplemented. See the [accepted limits](../design-decisions.md) for both amendments.
 
 ## Evidence record
 

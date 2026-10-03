@@ -54,7 +54,7 @@ They verify decision and token-proof rejection, accurate audit metadata, restart
 They exercise delivery withdrawal, unknown-epoch enrollment rejection, wrong signatures and lifecycle scope, stale trust, and read-only access.
 Fault injection covers every write stage. Additional checks cover stored-signature corruption, capacity, and explicit schema-9 migration.
 
-The host recovery coordinator, independent rollback witness, and administrator repair of unknown trust changes remain integration work.
+The host recovery coordinator, protected checkpoint recovery, and administrator repair of unknown trust changes remain integration work.
 After restriction, [history reconciliation](gateway-history-recovery.md) can record the removal receipt and repair the counter.
 This feature does not restore lost authority, resolve conflicting delivery history, or automatically re-enroll a revoked phone.
 No real credentials, device installation, phone prompts, or physical backup restoration were used.
