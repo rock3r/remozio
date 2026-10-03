@@ -160,7 +160,9 @@ final class SyntheticAuthority {
                 observationRevision: revision, now: moment, estimatedLifetimeMs: nil, lateObservation: false)
         }
         let body = try payload.encode(limits: limits)
-        return ["status": hex(body), "statusSignature": hex(try sign(body, status: true))]
+        let signature = try sign(body, status: true)
+        let message = try ApprovalMessage(wireVersion: 1, type: .status, purpose: .status, body: body, signature: signature)
+        return ["status": hex(body), "statusSignature": hex(signature), "statusMessage": hex(try message.encode(maximumBodyBytes: limits.maxBytes))]
     }
 
     func start() throws {
@@ -168,7 +170,10 @@ final class SyntheticAuthority {
         let body = try request.payload.encode(limits: limits)
         var frame = try status()
         frame["request"] = hex(body)
-        frame["requestSignature"] = hex(try sign(body, status: false))
+        let signature = try sign(body, status: false)
+        frame["requestSignature"] = hex(signature)
+        frame["requestMessage"] = hex(try ApprovalMessage(wireVersion: 1, type: .request, purpose: .issuedRequest,
+            body: body, signature: signature).encode(maximumBodyBytes: limits.maxBytes))
         frame["authorityKey"] = hex(authority.publicKey.x963Representation)
         try emit(frame)
     }

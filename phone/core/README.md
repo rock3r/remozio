@@ -37,3 +37,5 @@ The [relay connector](RELAY.md) authenticates outer HTTPS and validates the upgr
 The [enrollment store](ENROLLMENTS.md) persists prepared, active, and removed ownership records with encrypted replacement. It keeps Mac/account scopes separate. The production setup owner must still validate authorization and freshness before using active records.
 
 The [negotiated TLS channel](../../protocol/session-envelope.md) owns the phone handshake, bounded framing, and session-bound message delivery.
+
+The [signed request receiver](../../protocol/approval-message.md) connects negotiated channels to the existing inbox. Enrollment ownership guards delivery and exposes the same sessions as observable app state.

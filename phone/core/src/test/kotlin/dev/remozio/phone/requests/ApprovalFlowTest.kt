@@ -16,6 +16,7 @@ import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import kotlin.test.*
 
@@ -26,6 +27,33 @@ class ApprovalFlowTest {
     private val capabilities = ContractCapabilities(mapOf(RequestContract(RequestKind.COMMAND, 1u, 1u) to emptySet()))
     private fun id(value: Int, count: Int = 16) = ByteArray(count) { value.toByte() }
     private fun instant(ms: ULong = 100u) = ElapsedInstant(0, ms)
+
+    @Test fun nativeCarriersReachTheOwnedInboxAndKeepTerminalStateAcrossReconnect() = withPeer { peer ->
+        val enrollment = CommandRequestInbox(1, 4).add(id(1), id(2), peer.authorityKey, requestLimits)
+        fun receive(vararg messages: ByteArray) = runBlocking {
+            val channel = object : RequestMessageChannel {
+                override val scope = ChannelScope(id(1), id(2), id(5), id(25))
+                override val supportsCommands = true
+                override val maximumPayloadBytes = 65536
+                val remaining = messages.iterator()
+                var closed = false
+                override suspend fun receive() = if (remaining.hasNext()) remaining.next() else null
+                override fun close() { closed = true }
+            }
+            CommandRequestReceiver.bind(enrollment, channel, id(5), id(25)) { instant() }.run()
+            assertTrue(channel.closed)
+        }
+        receive(peer.initial.bytes("requestMessage"), peer.initial.bytes("statusMessage"))
+        val owner = enrollment.requestSessions.value.single()
+        assertEquals(RequestPhase.PRESENTED, owner.snapshot(instant()).status!!.status.phase)
+        peer.send(peer.decision(5))
+        receive(peer.receive().bytes("statusMessage"))
+        peer.send(mapOf("command" to "loseOutcome"))
+        receive(peer.receive().bytes("statusMessage"), peer.initial.bytes("requestMessage"))
+        assertSame(owner, enrollment.requestSessions.value.single())
+        assertEquals(RequestPhase.UNKNOWN, owner.snapshot(instant()).status!!.status.phase)
+        assertNull(owner.snapshot(instant()).capture)
+    }
 
     @Test fun eitherPhoneCanWinAndBothReceiveTheSameTerminalOutcome() {
         for (first in listOf(5, 6)) withPeer { peer ->

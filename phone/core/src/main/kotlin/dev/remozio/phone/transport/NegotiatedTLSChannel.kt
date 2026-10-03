@@ -24,7 +24,7 @@ private class TLSApprovalStream(private val session: TLSRecordSession) : Approva
 }
 
 /** Owns framing, negotiation, and sequences for one enrolled TLS session. It grants no action authority. */
-class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteStream, private val maximumPayloadBytes: Int) : AutoCloseable {
+class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteStream, internal val maximumPayloadBytes: Int) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val readLock = Mutex()
     private val writeLock = Mutex()
@@ -32,7 +32,11 @@ class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteS
     private var offset = 0
     private var outgoing: ULong? = 0u
     private var incoming: ULong? = 0u
+    internal var localAuditVersions: Set<ULong> = emptySet()
+        private set
     private lateinit var metadata: NegotiatedChannel
+    internal var localRequests: List<ChannelRequestCapability> = emptyList()
+        private set
     val negotiated: NegotiatedChannel get() { check(!closed.get()); return metadata }
 
     suspend fun send(payload: ByteArray): Unit = operation {
@@ -65,7 +69,8 @@ class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteS
                                   trustedMinimum: ULong, timeoutMillis: Long) = operation {
         require(timeoutMillis in 1..60_000 && maximumPayloadBytes in 1..16_777_216)
         val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val owner = ChannelNegotiation(ChannelOffer(ChannelRole.PHONE, scope, nonce, setOf(1u), requests, auditVersions), trustedMinimum)
+        val offer = ChannelOffer(ChannelRole.PHONE, scope, nonce, setOf(1u), requests, auditVersions)
+        val owner = ChannelNegotiation(offer, trustedMinimum)
         try {
             withTimeout(timeoutMillis) {
                 stream.awaitOpen(); active()
@@ -73,7 +78,7 @@ class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteS
                 owner.receiveOffer(readFrame(65_536) ?: throw IOException("Missing offer"))
                 writeFrame(owner.confirmation())
                 owner.receiveConfirmation(readFrame(128) ?: throw IOException("Missing confirmation"))
-                active(); metadata = owner.confirmed()
+                active(); metadata = owner.confirmed(); localRequests = offer.requests; localAuditVersions = offer.auditVersions
             }
         } finally { owner.close() }
     }

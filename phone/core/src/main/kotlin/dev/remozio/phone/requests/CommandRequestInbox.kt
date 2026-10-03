@@ -1,9 +1,12 @@
 package dev.remozio.phone.requests
 
-import dev.remozio.protocol.CborValue
+import dev.remozio.protocol.*
+import java.util.Collections
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /** In-memory ownership errors. These are not remote request outcomes. */
-enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST }
+enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST, UNKNOWN_REQUEST }
 class InboxException(val reason: InboxRejection) : IllegalStateException(reason.name)
 
 /**
@@ -69,12 +72,15 @@ class CommandRequestInbox(private val maximumEnrollments: Int, private val maxim
 /** Holds requests for one trusted Mac/account incarnation. A replaced handle can never reopen. */
 class CommandRequestEnrollment internal constructor(
     macID: ByteArray, accountID: ByteArray, authorityKey: ByteArray,
-    private val limits: RequestLimits, private val maximumRequests: Int,
+    internal val limits: RequestLimits, private val maximumRequests: Int,
 ) : AutoCloseable {
     val macID = CborValue.Bytes(macID)
     val accountID = CborValue.Bytes(accountID)
     private val authorityKey = authorityKey.copyOf()
     private val requests = linkedMapOf<CommandRequestIdentity, CommandRequestSession>()
+    private var receiver: AutoCloseable? = null
+    private val publishedSessions = MutableStateFlow<List<CommandRequestSession>>(emptyList())
+    val requestSessions = publishedSessions.asStateFlow()
     private var closed = false
 
     init { require(authorityKey.size == 65 && authorityKey[0] == 4.toByte()) }
@@ -95,7 +101,39 @@ class CommandRequestEnrollment internal constructor(
             reject(InboxRejection.CAPACITY)
         }
         requests[candidate.identity] = candidate
+        publishedSessions.value = Collections.unmodifiableList(requests.values.toList())
         return candidate
+    }
+
+    /** Local ownership handoff only. Reconnect keeps the existing request window. */
+    @Synchronized
+    internal fun attach(owner: AutoCloseable) {
+        if (closed) reject(InboxRejection.CLOSED)
+        val previous = receiver
+        receiver = owner
+        previous?.close()
+    }
+
+    @Synchronized
+    internal fun detach(owner: AutoCloseable) { if (receiver === owner) receiver = null }
+
+    /** The identity check and state update share the enrollment monitor with replacement and removal. */
+    @Synchronized
+    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant) {
+        if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
+        val body = message.body.copyBytes()
+        val signature = message.signature.copyBytes()
+        when (message.type) {
+            ApprovalMessageType.REQUEST -> accept(body, signature)
+            ApprovalMessageType.STATUS -> {
+                val claim = RequestStatusPayload.decode(body, limits.status)
+                val key = CommandRequestIdentity(CborValue.Bytes(claim.macID), CborValue.Bytes(claim.accountID),
+                    CborValue.Bytes(claim.requestID))
+                val session = requests[key] ?: reject(InboxRejection.UNKNOWN_REQUEST)
+                session.observe(body, signature, receivedAt)
+            }
+            ApprovalMessageType.DECISION -> throw IllegalArgumentException("Unexpected inbound decision")
+        }
     }
 
     /** Snapshot of owned handles, including terminal tombstones. Capture contents remain owned by each session. */
@@ -105,8 +143,11 @@ class CommandRequestEnrollment internal constructor(
     @Synchronized
     override fun close() {
         closed = true
+        receiver?.close()
+        receiver = null
         requests.values.forEach { it.close() }
         requests.clear()
+        publishedSessions.value = emptyList()
     }
 }
 
