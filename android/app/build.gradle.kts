@@ -57,6 +57,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3:1.5.0-alpha29")
+    testImplementation(testFixtures(project(":phone-core")))
     testImplementation("org.xerial:sqlite-jdbc:3.53.4.0")
     testImplementation(kotlin("test-junit"))
     testImplementation("junit:junit:4.13.2")

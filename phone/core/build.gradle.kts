@@ -1,4 +1,7 @@
-plugins { kotlin("jvm") }
+plugins {
+    kotlin("jvm")
+    `java-test-fixtures`
+}
 
 kotlin { jvmToolchain(21) }
 

@@ -39,7 +39,7 @@ class StoredCommandConnectionsTest {
     private fun open() = EncryptedEnrollmentStore.open(storage, cipher, 10)
     private fun activate(enrollment: PhoneEnrollment, replacement: PhoneEnrollment? = null) = open().use {
         val prepared = it.prepare(enrollment, it.snapshot().revision)
-        it.activate(enrollment.recordID.copyBytes(), prepared.revision, replacement?.recordID?.copyBytes())
+        it.activateSyntheticEnrollment(enrollment.recordID.copyBytes(), prepared.revision, replacement?.recordID?.copyBytes())
     }
     private fun connection(record: StoredPhoneEnrollment) = CommandConnection(record, limits,
         open = { _, _ -> error("No network in registry test") }, clock = { ElapsedInstant(0, 0u) }, dispatcher = Dispatchers.Unconfined)
@@ -94,7 +94,7 @@ class StoredCommandConnectionsTest {
         var attempts = 0
         val registry = registry { attempts++; if (attempts == 1) error("Synthetic storage failure"); connection(it) }
         assertFailsWith<CommandEnrollmentUnavailable> { registry.acquire(a.recordID) }; assertEquals(0, attempts)
-        open().use { it.activate(a.recordID.copyBytes(), it.snapshot().revision) }
+        open().use { it.activateSyntheticEnrollment(a.recordID.copyBytes(), it.snapshot().revision) }
         assertFailsWith<CommandRegistryUnavailable> { registry.acquire(a.recordID) }
         val owner = registry.acquire(a.recordID); assertEquals(2, attempts)
         open().use { it.remove(a.recordID.copyBytes(), it.snapshot().revision) }

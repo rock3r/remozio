@@ -1,6 +1,6 @@
 # Phone enrollment storage
 
-`EncryptedEnrollmentStore` owns local enrollment records across app restarts. Trusted setup code prepares and activates them. Network input cannot select this store as an enrollment endpoint.
+`EncryptedEnrollmentStore` owns local enrollment records across app restarts. Trusted setup code prepares them; `PhonePairingAttempt` verifies a Mac receipt before activation. Network input cannot select this store as an enrollment endpoint.
 
 ```mermaid
 stateDiagram-v2
@@ -79,6 +79,8 @@ Portable tests cover encrypted restart, two-Mac isolation, exact replacement, ca
 The tests use software encryption keys and memory storage. They do not prove Android Keystore custody, filesystem behavior during power loss, backup resistance, or restart behavior on a Pixel. Those checks remain in the planned physical-device session. No enrollment UI, privileged Mac setup, key retirement, or live approval is enabled by this storage component.
 
 ## Pairing commit receipts
+
+The raw activation transition is internal to the phone-core Kotlin module. Android production callers use the receipt-verifying owner. Consumer tests use a synthetic helper from the separate test-fixtures artifact, which is not an application dependency.
 
 `PhonePairingAttempt` binds a retained transcript to one local PREPARED record. It checks the Mac/account/phone/epoch scope, both Mac pins, all phone key IDs and points, notification tag, and local protocol floor. An independently selected replacement must match the transcript's old phone and epoch and the same Mac/account.
 
