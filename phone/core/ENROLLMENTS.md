@@ -93,3 +93,11 @@ A receipt may arrive after the setup deadline because the Mac could have committ
 Archive version 2 adds this optional pairing metadata. Version 1 archives load without inventing missing transcripts and migrate on the next successful write. Legacy prepared rows need a new authorized setup; existing active pairings remain intact. The existing archive byte limit also bounds retained transcripts.
 
 Native biometric enrollment signing, receipt transport retries, and the setup UI remain separate integration work. No network enrollment endpoint is added here.
+
+## Android pairing biometric proof
+
+`AndroidPairingBiometrics` loads the prepared record's existing hardware biometric key with the same custody checks used for command approval. It signs only the retained transcript's phone-biometric input. Admission checks the signed validity interval and derives an elapsed lifetime from the remaining time. Expiry, clock regression or epoch change, local setup invalidation, and a substituted crypto object reject completion.
+
+`PairingBiometricPrompt` owns one native strong-biometric prompt and its crypto operation. It cancels on screen stop, disposal, setup invalidation, or expiry. The host invokes it only after independent Mac authentication, human transcript verification, and durable preparation. The host supplies the current local setup check and closes the owner on replacement. This component is not wired to a production setup screen yet.
+
+Software-key tests cover transcript/purpose binding, late admission, cancellation, stale callbacks, and crypto-object substitution. Android compilation and lint validate API use; they do not prove a real Pixel biometric prompt or key custody for this flow.
