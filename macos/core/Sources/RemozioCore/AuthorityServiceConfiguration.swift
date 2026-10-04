@@ -1,0 +1,85 @@
+import Darwin
+import Foundation
+import RemozioProtocol
+
+public enum AuthorityServiceConfigurationError: Error { case invalidConfiguration }
+
+/// Protected launch inputs. They contain no key material and grant no request approval authority.
+public struct AuthorityServiceConfiguration: Sendable {
+    public let macID: Data
+    public let accountID: Data
+    public let journalDirectory: String
+    public let serviceName: String
+    public let transportPolicy: XPCPeerPolicy
+    public let maximumPayloadBytes: Int
+    public let minimumEnvelopeVersion: UInt64
+    public let auditVersions: Set<UInt64>
+    public let maximumConnections: Int
+    public let handshakeTimeoutMilliseconds: UInt64
+    public let maximumOperations: Int
+    public let canonicalBytes: Data
+
+    public init(macID: Data, accountID: Data, journalDirectory: String, serviceName: String,
+                teamID: String, transportIdentifier: String, transportHashes: Set<Data>, transportUID: UInt32,
+                maximumPayloadBytes: Int = 262_144, minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [],
+                maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000, maximumOperations: Int = 8) throws {
+        let components = journalDirectory.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+        guard macID.count == 16, accountID.count == 16, transportUID > 0, transportUID < UInt32.max,
+              journalDirectory.hasPrefix("/"), journalDirectory.utf8.count < Int(PATH_MAX), !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
+              serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+              serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
+              (1...16_777_216).contains(maximumPayloadBytes), minimumEnvelopeVersion > 0,
+              auditVersions.count <= 16, !auditVersions.contains(0), (1...64).contains(maximumConnections),
+              (1...60_000).contains(handshakeTimeoutMilliseconds), (1...64).contains(maximumOperations) else { throw Self.invalid }
+        transportPolicy = try XPCPeerPolicy(teamID: teamID, componentIdentifier: transportIdentifier,
+            approvedCodeDirectoryHashes: transportHashes, expectedUserID: transportUID)
+        self.macID = macID; self.accountID = accountID; self.journalDirectory = journalDirectory; self.serviceName = serviceName
+        self.maximumPayloadBytes = maximumPayloadBytes; self.minimumEnvelopeVersion = minimumEnvelopeVersion
+        self.auditVersions = auditVersions; self.maximumConnections = maximumConnections
+        self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds; self.maximumOperations = maximumOperations
+        canonicalBytes = try DeterministicCBOR.encode(.map([
+            0: .unsigned(1), 1: .bytes(macID), 2: .bytes(accountID), 3: .text(journalDirectory), 4: .text(serviceName),
+            5: .text(teamID), 6: .text(transportIdentifier), 7: .array(transportHashes.sorted { $0.lexicographicallyPrecedes($1) }.map(CBORValue.bytes)),
+            8: .unsigned(UInt64(transportUID)), 9: .unsigned(UInt64(maximumPayloadBytes)), 10: .unsigned(minimumEnvelopeVersion),
+            11: .array(auditVersions.sorted().map(CBORValue.unsigned)), 12: .unsigned(UInt64(maximumConnections)),
+            13: .unsigned(handshakeTimeoutMilliseconds), 14: .unsigned(UInt64(maximumOperations)),
+        ]), limits: Self.limits())
+    }
+    public static func load(path: String) throws -> AuthorityServiceConfiguration {
+        try decode(ProtectedServiceConfiguration.read(path: path))
+    }
+    /// Parsing alone does not establish provenance. Runtime startup must use load(path:).
+    public static func decode(_ bytes: Data) throws -> AuthorityServiceConfiguration {
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
+              Set(fields.keys) == Set((0...14).map(UInt64.init)), fields[0] == .unsigned(1),
+              case .bytes(let mac) = fields[1], case .bytes(let account) = fields[2],
+              case .array(let hashes) = fields[7], (1...16).contains(hashes.count),
+              case .array(let audits) = fields[11], audits.count <= 16 else { throw invalid }
+        func string(_ key: UInt64) throws -> String {
+            guard case .text(let value) = fields[key] else { throw invalid }; return value
+        }
+        func number(_ key: UInt64) throws -> UInt64 {
+            guard case .unsigned(let value) = fields[key] else { throw invalid }; return value
+        }
+        func integer(_ key: UInt64) throws -> Int {
+            guard let result = Int(exactly: try number(key)) else { throw invalid }; return result
+        }
+        guard let uid = UInt32(exactly: try number(8)) else { throw invalid }
+        let hashValues = try hashes.map { value -> Data in
+            guard case .bytes(let data) = value else { throw invalid }; return data
+        }
+        let auditValues = try audits.map { value -> UInt64 in
+            guard case .unsigned(let version) = value else { throw invalid }; return version
+        }
+        let result = try AuthorityServiceConfiguration(macID: mac, accountID: account, journalDirectory: string(3), serviceName: string(4),
+            teamID: string(5), transportIdentifier: string(6), transportHashes: Set(hashValues), transportUID: uid,
+            maximumPayloadBytes: integer(9), minimumEnvelopeVersion: number(10), auditVersions: Set(auditValues),
+            maximumConnections: integer(12), handshakeTimeoutMilliseconds: number(13), maximumOperations: integer(14))
+        guard result.canonicalBytes == bytes else { throw invalid }; return result
+    }
+    private static var invalid: AuthorityServiceConfigurationError { .invalidConfiguration }
+    private static func limits() throws -> CBORLimits {
+        try CBORLimits(maxBytes: ProtectedServiceConfiguration.maximumBytes, maxDepth: 3, maxItems: 128)
+    }
+}
