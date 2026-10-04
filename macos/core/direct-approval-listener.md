@@ -38,8 +38,37 @@ Retain the returned revision with the listener. Before using a channel under the
 
 Journal tests cover empty and legacy snapshots, restart with a retained higher floor, a higher local floor, invalid proofs, contract and feature filtering, 64/65/128-feature boundaries, revocation, trust restriction of one among two phones, and stale or forged bindings. The higher-floor fixture tests retention; it does not add protocol-version-2 support.
 
+## Journal-owned listener lifecycle
+
+`DirectApprovalHost` takes exclusive ownership of the journal and serializes its operations on an actor. It creates the native listener from the protected snapshot. An empty snapshot stops listening. A trust revision change closes the old listener and its channels before constructing the replacement. Ordinary writes with unchanged trust keep the current listener.
+
+Each authenticated channel receives an opaque session with its listener generation and trust revision. A handler must call `transaction(session:)` for every journal operation. That method rechecks the generation and current enrollment in the same transaction as the operation. It never suspends inside that transaction. A session from an old listener fails even after stop/start with the same durable revision. Late events from an old listener cannot change the current state.
+
+Policy changes close the listener before applying new limits or protocol floors. Listener creation failures leave the host in `failed` state. If a journal write already committed, a subsequent listener failure does not report that write as rolled back. The caller reads the host state separately and can retry `start()`. `stop()` closes channels while retaining the journal. `close()` stops listening and closes the journal permanently. The service must call `close()` during shutdown.
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Host as DirectApprovalHost actor
+    participant Journal
+    participant Listener
+    Phone->>Host: Authenticated session operation
+    Host->>Journal: Check generation, revision and enrollment; perform transaction
+    Journal-->>Host: Commit result
+    Host->>Journal: Read current listener trust
+    alt Trust changed
+        Host->>Listener: Close old channels
+        Host->>Listener: Start replacement if eligible peers remain
+    end
+    Host-->>Phone: Operation result
+```
+
+The synchronous transaction callback belongs to trusted service code. It must use the existing decision verifiers and cannot retain a transaction for later work. Returning data for asynchronous transport is not a final dispatch check. Request delivery still needs its negotiated-feature check and the coordinator's final handoff check.
+
+Lifecycle tests use a disposable real journal and a listener fixture. They cover revocation, stale sessions, policy replacement, stop/start, late events, rollback, unchanged trust, and a listener failure after a committed enrollment. The native listener's separate loopback tests cover TLS and channel cancellation. These tests do not prove the product service is installed or wired to request delivery.
+
 ## Evidence and remaining integration
 
 The synthetic TLS peer uses this listener for negotiated tests, with disposable software identities and loopback binding. The original raw TLS experiment stays separate. Native tests cover peer-to-scope mapping, renewal, invalid certificates, ambiguous enrollments, and immediate channel abort. Kotlin/native tests exercise negotiated exchange through the existing synthetic HTTPS relay, scope rejection, multiple enrolled phones, and excess connections.
 
-The product app does not start this listener yet. Protected identity provisioning, service ownership and listener replacement on journal changes, service installation, request delivery, and LAN advertisement on a real network remain integration work. The tests do not prove Android DNS-SD discovery, hardware-key lifecycle, firewall behavior, or physical LAN-to-relay handoff. They install no service and publish no LAN advertisement.
+The product app does not start this listener yet. Protected identity provisioning, product service ownership of the host, service installation, request delivery, and LAN advertisement on a real network remain integration work. The tests do not prove Android DNS-SD discovery, hardware-key lifecycle, firewall behavior, or physical LAN-to-relay handoff. They install no service and publish no LAN advertisement.
