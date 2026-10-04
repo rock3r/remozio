@@ -49,10 +49,12 @@ class StoredPairingHostTest {
     private val storage = Storage()
     private val cipher = EnrollmentCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey(), 65536)
     private val mutex = Mutex()
+    private var custodyAvailable = true
+    private var custodyChecks = 0
     private val invalidated = mutableListOf<Set<CborValue.Bytes>>()
     private fun open() = EncryptedEnrollmentStore.open(storage, cipher, 10)
     private fun host(invalidate: (Set<CborValue.Bytes>) -> Unit = { invalidated.add(it) }) = StoredPairingHost(
-        ::open, ::open, mutex, { assertTrue(mutex.isLocked); invalidate(it) }, Dispatchers.Unconfined)
+        ::open, ::open, mutex, { assertTrue(mutex.isLocked); invalidate(it) }, { custodyChecks++; check(custodyAvailable) }, Dispatchers.Unconfined)
     private fun receipt(t: PairingTranscript) = CborValue.Bytes(P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
         initSign(authority.private); update(t.signingInput(PairingProofPurpose.MAC_COMMIT)); sign()
     }))
@@ -85,6 +87,22 @@ class StoredPairingHostTest {
         }.activate(next.recordID, receipt(replacement))
         assertEquals(EnrollmentPhase.REMOVED, result.entries.single { it.enrollment.recordID == old.recordID }.phase)
         assertEquals(EnrollmentPhase.ACTIVE, result.entries.single { it.enrollment.recordID == next.recordID }.phase)
+    }
+
+    @Test fun custodyFailurePreventsPreparationAndActivationWithoutClosingConnections() = runBlocking<Unit> {
+        val e = record(1); val t = transcript(e)
+        custodyAvailable = false
+        assertFails { host().prepare(e, t, 0u, 1u) }
+        open().use { assertTrue(it.snapshot().entries.isEmpty()) }
+        custodyAvailable = true
+        host().prepare(e, t, 0u, 1u)
+        custodyAvailable = false
+        assertFails { host().activate(e.recordID, receipt(t)) }
+        assertTrue(invalidated.isEmpty())
+        open().use { assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single().phase) }
+        assertEquals(3, custodyChecks)
+        host().remove(e.recordID, 1u)
+        assertEquals(3, custodyChecks)
     }
 
     @Test fun invalidReceiptDoesNotInterruptConnections() = runBlocking<Unit> {

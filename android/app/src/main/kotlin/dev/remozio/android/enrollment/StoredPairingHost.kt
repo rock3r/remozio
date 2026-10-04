@@ -18,12 +18,14 @@ internal class StoredPairingHost(
     private val openExisting: () -> EncryptedEnrollmentStore?,
     private val enrollmentAccess: Mutex,
     private val invalidateLocked: (Set<CborValue.Bytes>) -> Unit,
+    private val validateKeys: (PhoneEnrollment) -> Unit,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     suspend fun prepare(enrollment: PhoneEnrollment, transcript: PairingTranscript, expectedRevision: ULong,
         minimumEnvelopeVersion: ULong, replacingRecordID: CborValue.Bytes? = null): EnrollmentSnapshot =
         withContext(dispatcher) {
             enrollmentAccess.withLock {
+                validateKeys(enrollment)
                 openForSetup().use { it.preparePairing(enrollment, transcript, expectedRevision, minimumEnvelopeVersion, replacingRecordID?.copyBytes()) }
             }
         }
@@ -35,6 +37,7 @@ internal class StoredPairingHost(
                 val attempt = store.recoverPairing(recordID.copyBytes())
                 val row = store.snapshot().entries.single { it.enrollment.recordID == recordID }
                 require(attempt.transcript.verify(receipt.copyBytes(), row.enrollment.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
+                validateKeys(row.enrollment)
                 val affected = setOfNotNull(recordID, row.pairing?.replacingRecordID)
                 invalidateLocked(affected)
                 attempt.activate(store, receipt.copyBytes())
