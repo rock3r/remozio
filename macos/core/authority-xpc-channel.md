@@ -23,8 +23,8 @@ Cancellation invalidates native XPC and the local send gate before actor cleanup
 
 ## Evidence and remaining work
 
-Eight fixture tests cover handshake ordering, wrong versions, overlapping operations, payload bounds, denial, interruption, cancellation, timeout, synchronous invalidation, one-time owner notification, and late replies. They exercise the lifecycle with a callback driver. They do not establish live Developer ID IPC authentication or product service availability.
+Nine fixture tests cover handshake ordering, wrong versions, overlapping operations, payload bounds, denial, interruption, cancellation, timeout, synchronous invalidation, one-time owner notification, and late replies. They exercise the lifecycle with a callback driver. They do not establish live Developer ID IPC authentication or product service availability.
 
-The exported root implementation, semantic snapshot and binding codecs, ordered trust-update integration, bounded server work, and service packaging remain outstanding. Root operations must use the invocation guard and enforce current enrollment atomically. A successful validation reply is not an execution permit. Snapshot size limits must be handled explicitly by the root codec; never truncate a trust snapshot silently.
+The exported root implementation, ordered trust-update integration, bounded server work, and service packaging remain outstanding. Root operations must use the invocation guard and enforce current enrollment atomically. A successful validation reply is not an execution permit. The [trust codec](authority-trust-codec.md) rejects an oversized snapshot without truncation; the root endpoint must propagate that failure.
 
 No service is registered or activated by the fixture tests. The existing [XPC experiment](../../docs/experiments/macos-xpc.md) remains the evidence for the harmless-handshake requirement. It does not prove this product client is wired to a release service.
