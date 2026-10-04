@@ -128,6 +128,12 @@ public final class JournalDatabase {
         return tables
     }
 
+    fileprivate func continuityDigests(_ token: UUID) throws -> JournalContinuityDigests {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        return try JournalContinuityDigest.read(db)
+    }
+
     fileprivate func ledger(_ token: UUID) throws -> ConsumptionJournal {
         _ = try access(token)
         guard let consumption else { throw JournalDatabaseError.expiredTransaction }
@@ -316,6 +322,12 @@ public final class JournalTransaction {
         guard !write || writable else { throw JournalDatabaseError.readOnly }
         return try owner.access(token)
     }
+    /// Includes uncommitted writes in this transaction. Publish only after both durable stores commit.
+    public func continuityDigests() throws -> JournalContinuityDigests {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.continuityDigests(token)
+    }
+
     public func epoch(_ id: Data) throws -> AuditEpochRead? { try tables().epoch(id) }
     public func page(epoch: Data, after: UInt64, maximumRecords: Int, maximumBytes: Int) throws -> AuditJournalPage {
         try tables().page(epoch: epoch, after: after, maximumRecords: maximumRecords, maximumBytes: maximumBytes)

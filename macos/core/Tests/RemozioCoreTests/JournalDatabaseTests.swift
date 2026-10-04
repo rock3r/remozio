@@ -27,6 +27,70 @@ final class JournalDatabaseTests: XCTestCase {
                             recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize)
     }
 
+    func testContinuityDigestsSeparateHistoryAndSurviveReopen() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let initial = try database.read { try $0.continuityDigests() }
+        XCTAssertEqual(initial.authority.count, 32)
+        XCTAssertEqual(initial.ledger.count, 32)
+        XCTAssertNotEqual(initial.authority, initial.ledger)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        let epoch = try database.read { try $0.continuityDigests() }
+        XCTAssertEqual(initial.authority, epoch.authority)
+        XCTAssertNotEqual(initial.ledger, epoch.ledger)
+        try database.write { try $0.append(record(1), writer: writer, expectedHead: 0) }
+        let appended = try database.read { try $0.continuityDigests() }
+        XCTAssertEqual(initial.authority, appended.authority)
+        XCTAssertNotEqual(epoch.ledger, appended.ledger)
+        XCTAssertThrowsError(try database.write { tx in
+            try tx.append(record(2), writer: writer, expectedHead: 1)
+            XCTAssertNotEqual(try tx.continuityDigests().ledger, appended.ledger)
+            throw Failure.injected
+        })
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, appended)
+        let escaped = try database.read { $0 }
+        XCTAssertThrowsError(try escaped.continuityDigests())
+        try database.close()
+        let reopened = try open(fixture)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, appended)
+    }
+
+    func testContinuityDigestsBindTrustConsumptionAndOutcomesIndependentOfInsertionOrder() throws {
+        let first = try Fixture(), second = try Fixture()
+        let a = try open(first, initialize: true), b = try open(second, initialize: true)
+        let empty = try a.read { try $0.continuityDigests() }
+        // Synthetic storage bytes test hash coverage, not semantic enrollment or decision validation.
+        let one = "INSERT INTO approval_enrollments_v1 VALUES(zeroblob(16),zeroblob(16),0,x'01')"
+        let two = "INSERT INTO approval_enrollments_v1 VALUES(zeroblob(16),x'01010101010101010101010101010101',0,x'02')"
+        try first.sql(one)
+        try first.sql(two)
+        try second.sql(two)
+        try second.sql(one)
+        let enrolled = try a.read { try $0.continuityDigests() }
+        XCTAssertEqual(enrolled, try b.read { try $0.continuityDigests() })
+        XCTAssertNotEqual(empty.authority, enrolled.authority)
+        XCTAssertEqual(empty.ledger, enrolled.ledger)
+        try first.sql("UPDATE approval_enrollments_v1 SET active=1 WHERE body=x'01'")
+        XCTAssertNotEqual(enrolled.authority, try a.read { try $0.continuityDigests().authority })
+        let trust = try a.read { try $0.continuityDigests() }
+        try first.sql("INSERT INTO consumptions_v1 VALUES(zeroblob(16),zeroblob(16),zeroblob(16),x'01',x'02')")
+        let consumed = try a.read { try $0.continuityDigests() }
+        XCTAssertEqual(trust.authority, consumed.authority)
+        XCTAssertNotEqual(trust.ledger, consumed.ledger)
+        try first.sql("INSERT INTO consumption_outcomes_v1 VALUES(zeroblob(16),zeroblob(16),zeroblob(16),1,x'03')")
+        let outcome = try a.read { try $0.continuityDigests() }
+        XCTAssertNotEqual(consumed.ledger, outcome.ledger)
+        try first.sql("UPDATE consumption_outcomes_v1 SET revision=2,event=x'04'")
+        XCTAssertNotEqual(outcome.ledger, try a.read { try $0.continuityDigests().ledger })
+    }
+
+    func testContinuityDigestRejectsUncoveredTables() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        try fixture.sql("CREATE TABLE future_authority(value BLOB) STRICT")
+        XCTAssertThrowsError(try database.read { try $0.continuityDigests() }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .incompatibleStore)
+        }
+    }
+
     func testExplicitSetupPersistenceAndWriterRetirementAcrossReopen() throws {
         let fixture = try Fixture()
         XCTAssertThrowsError(try open(fixture))
