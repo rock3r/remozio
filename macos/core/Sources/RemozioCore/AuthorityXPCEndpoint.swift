@@ -21,6 +21,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let lock = NSRecursiveLock()
     private let verify: () throws -> Void
     private let invalidate: () -> Void
+    private let onHandshake: @Sendable () -> Void
     private let snapshot: @Sendable () throws -> DirectApprovalTrust
     private let validate: @Sendable (AuthorityPeerBinding) throws -> Bool
     private let budget: AuthorityXPCWorkBudget
@@ -33,13 +34,14 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     /// The listener must enforce the same peer policy and own the accepted connection. Activate it only after this initializer succeeds.
     public convenience init(connection: NSXPCConnection, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
                             budget: AuthorityXPCWorkBudget,
+                            onHandshake: @escaping @Sendable () -> Void = {}, onClose: @escaping @Sendable () -> Void = {},
                             snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
                             validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool) throws {
         guard peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
         _ = try peerPolicy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: peerPolicy)
         self.init(macID: macID, accountID: accountID, budget: budget,
-            verify: { _ = try invocation.verifyInvocation() }, invalidate: { [weak connection] in connection?.invalidate() },
+            verify: { _ = try invocation.verifyInvocation() }, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             snapshot: snapshot, validate: validate)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
@@ -49,10 +51,11 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     }
     init(macID: Data, accountID: Data, budget: AuthorityXPCWorkBudget,
          verify: @escaping () throws -> Void, invalidate: @escaping () -> Void,
+         onHandshake: @escaping @Sendable () -> Void = {},
          snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
          validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool) {
         self.macID = macID; self.accountID = accountID; self.budget = budget
-        self.verify = verify; self.invalidate = invalidate; self.snapshot = snapshot; self.validate = validate
+        self.verify = verify; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate
     }
     public func close() {
         let notify = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
@@ -63,6 +66,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             try verify()
             let accepted = lock.withLock { guard !closed, !ready, !busy else { return false }; ready = true; return true }
             guard accepted else { throw AuthorityXPCEndpointError.unavailable }
+            onHandshake()
             send { reply(1) }
         } catch { close(); reply(0) }
     }

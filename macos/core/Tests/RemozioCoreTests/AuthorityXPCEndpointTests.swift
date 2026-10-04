@@ -49,6 +49,14 @@ final class AuthorityXPCEndpointTests: XCTestCase {
         XCTAssertEqual(reads.value, 2); XCTAssertEqual(validations.value, 1)
         XCTAssertEqual(replies.value, 3); XCTAssertEqual(closures.value, 0)
     }
+    func testHandshakeNotifiesOwnerOnceBeforeReply() throws {
+        let handshakes = Counter(), trust = trust()
+        let endpoint = try AuthorityXPCEndpoint(macID: mac, accountID: account, budget: AuthorityXPCWorkBudget(),
+            verify: {}, invalidate: {}, onHandshake: { handshakes.increment() }, snapshot: { trust }, validate: { _ in false })
+        endpoint.hello { XCTAssertEqual($0, 1); XCTAssertEqual(handshakes.value, 1) }
+        endpoint.hello { XCTAssertEqual($0, 0) }
+        XCTAssertEqual(handshakes.value, 1)
+    }
     func testMissingHandshakeAndFailedIdentityNeverReadJournal() throws {
         for failedIdentity in [false, true] {
             let reads = Counter(), closures = Counter(), trust = trust()
