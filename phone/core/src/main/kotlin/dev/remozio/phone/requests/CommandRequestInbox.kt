@@ -14,7 +14,8 @@ class InboxException(val reason: InboxRejection) : IllegalStateException(reason.
  * Limits bound the live window. Configured retirement releases only persisted terminal handles, never active requests.
  * The Mac still owns durable decision consumption and replay protection.
  */
-class CommandRequestInbox(private val maximumEnrollments: Int, private val maximumRequestsPerEnrollment: Int) : AutoCloseable {
+class CommandRequestInbox(private val maximumEnrollments: Int, private val maximumRequestsPerEnrollment: Int,
+    private val memoryBudget: CommandMemoryBudget? = null) : AutoCloseable {
     private data class Scope(val mac: CborValue.Bytes, val account: CborValue.Bytes)
     private val enrollments = linkedMapOf<Scope, CommandRequestEnrollment>()
     private var closed = false
@@ -29,7 +30,7 @@ class CommandRequestInbox(private val maximumEnrollments: Int, private val maxim
         val scope = scope(macID, accountID)
         if (scope in enrollments) reject(InboxRejection.ALREADY_ENROLLED)
         if (enrollments.size >= maximumEnrollments) reject(InboxRejection.CAPACITY)
-        val enrollment = CommandRequestEnrollment(macID, accountID, authorityKey, limits, maximumRequestsPerEnrollment, retired)
+        val enrollment = CommandRequestEnrollment(macID, accountID, authorityKey, limits, maximumRequestsPerEnrollment, retired, memoryBudget)
         enrollments[scope] = enrollment
         return enrollment
     }
@@ -41,7 +42,7 @@ class CommandRequestInbox(private val maximumEnrollments: Int, private val maxim
         val scope = Scope(old.macID, old.accountID)
         if (enrollments[scope] !== old) reject(InboxRejection.STALE_ENROLLMENT)
         val replacement = CommandRequestEnrollment(old.macID.copyBytes(), old.accountID.copyBytes(),
-            authorityKey, limits, maximumRequestsPerEnrollment)
+            authorityKey, limits, maximumRequestsPerEnrollment, memoryBudget = memoryBudget)
         old.close()
         enrollments[scope] = replacement
         return replacement
@@ -76,6 +77,7 @@ class CommandRequestEnrollment internal constructor(
     macID: ByteArray, accountID: ByteArray, authorityKey: ByteArray,
     internal val limits: RequestLimits, private val maximumRequests: Int,
     private val retired: RetiredCommandRequests? = null,
+    private val memoryBudget: CommandMemoryBudget? = null,
 ) : AutoCloseable {
     val macID = CborValue.Bytes(macID)
     val accountID = CborValue.Bytes(accountID)
@@ -90,7 +92,10 @@ class CommandRequestEnrollment internal constructor(
 
     /** Even duplicates authenticate first. Reuse the existing owner instead of resetting its status or timing. */
     @Synchronized
-    fun accept(body: ByteArray, signature: ByteArray): CommandRequestSession {
+    fun accept(body: ByteArray, signature: ByteArray): CommandRequestSession =
+        memoryBudget?.parse { acceptParsed(body, signature) } ?: acceptParsed(body, signature)
+
+    private fun acceptParsed(body: ByteArray, signature: ByteArray): CommandRequestSession {
         if (closed) reject(InboxRejection.CLOSED)
         val candidate = CommandRequestSession.open(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits)
         try {
@@ -105,13 +110,29 @@ class CommandRequestEnrollment internal constructor(
                 if (!remembered.contentEquals(candidate.requestDigest.copyBytes())) reject(InboxRejection.CONFLICTING_REQUEST)
                 reject(InboxRejection.RETIRED_REQUEST)
             }
-            if (requests.size >= maximumRequests) {
-                val terminal = if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() }
-                if (terminal == null) reject(InboxRejection.CAPACITY)
-                // Persist before removing the handle. A failed write leaves the visible window intact.
-                checkNotNull(retired).remember(terminal.key.requestID.copyBytes(), terminal.value.requestDigest.copyBytes())
-                requests.remove(terminal.key)
-                terminal.value.close()
+            var terminal = if (requests.size >= maximumRequests) {
+                (if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() })
+                    ?: reject(InboxRejection.CAPACITY)
+            } else null
+            val persistRetirement = {
+                terminal?.let {
+                    checkNotNull(retired).remember(it.key.requestID.copyBytes(), it.value.requestDigest.copyBytes())
+                }
+                Unit
+            }
+            if (memoryBudget != null) {
+                try {
+                    candidate.retainMemory(memoryBudget, terminal?.value?.terminalMemory(), persistRetirement)
+                } catch (failure: InboxException) {
+                    if (failure.reason != InboxRejection.CAPACITY || terminal != null) throw failure
+                    terminal = (if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() })
+                        ?: throw failure
+                    candidate.retainMemory(memoryBudget, terminal.value.terminalMemory(), persistRetirement)
+                }
+            } else persistRetirement()
+            terminal?.let {
+                requests.remove(it.key)
+                it.value.close()
             }
             requests[candidate.identity] = candidate
             publishedSessions.value = Collections.unmodifiableList(requests.values.toList())
