@@ -102,7 +102,7 @@ final class EnrollmentJournalTests: XCTestCase {
             biometricKey: PairingKey(keyID: id(34), publicKey: biometric.publicKey.x963Representation),
             enrollmentTag: id(35, count: 32), replacement: replacement,
             expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
-        let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trusted,
+        let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trusted, authorizedReplacement: replacement,
             authorityPublicKey: rootKey.publicKey.x963Representation, transportPublicKey: transport, minimumEnvelopeVersion: 1,
             started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)
         return (attempt, try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation)
@@ -150,12 +150,35 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.approvalEnrollments().count }, 2)
     }
 
+    func testPairingReplacementMustMatchLocalAuthorization() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        let selected = try PairingReplacement(phoneID: id(5), epoch: id(9))
+        let otherPhone = try PairingReplacement(phoneID: id(6), epoch: id(9))
+        let otherEpoch = try PairingReplacement(phoneID: id(5), epoch: id(7))
+        let trusted = try db.read { try $0.approvalTrustSnapshot() }
+        let mismatches: [(PairingReplacement?, PairingReplacement?)] = [
+            (selected, nil), (nil, selected), (selected, otherPhone), (selected, otherEpoch),
+        ]
+        for (claimed, authorized) in mismatches {
+            let (attempt, _) = try pairing(db, biometric: key, replacement: claimed)
+            XCTAssertThrowsError(try PairingEnrollmentAttempt(transcript: attempt.transcript, trusted: trusted,
+                authorizedReplacement: authorized, authorityPublicKey: rootKey.publicKey.x963Representation,
+                transportPublicKey: attempt.transcript.macTransportKey, minimumEnvelopeVersion: 1,
+                started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)) {
+                XCTAssertEqual($0 as? PairingEnrollmentError, .wrongContext)
+            }
+        }
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().enrollments.map(\.phoneID) }, [id(5)])
+    }
+
     func testPairingCannotSubstituteLocalAuthorityOrSecurityFloor() throws {
         let fixture = try Fixture(), (db, _, _) = try setup(fixture)
         let (attempt, _) = try pairing(db, biometric: key)
         let trusted = try db.read { try $0.approvalTrustSnapshot() }
         for wrongKey in [false, true] {
-            XCTAssertThrowsError(try PairingEnrollmentAttempt(transcript: attempt.transcript, trusted: trusted,
+            XCTAssertThrowsError(try PairingEnrollmentAttempt(transcript: attempt.transcript, trusted: trusted, authorizedReplacement: nil,
                 authorityPublicKey: wrongKey ? key.publicKey.x963Representation : rootKey.publicKey.x963Representation,
                 transportPublicKey: attempt.transcript.macTransportKey, minimumEnvelopeVersion: wrongKey ? 1 : 2,
                 started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)) {

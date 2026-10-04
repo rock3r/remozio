@@ -9,12 +9,14 @@ public enum PairingEnrollmentError: Error, Equatable {
 /// Network input cannot create this authorization context. A restart requires a new authorized attempt.
 public final class PairingEnrollmentAttempt {
     public let transcript: PairingTranscript
+    private let authorizedReplacement: PairingReplacement?
     private let revision: UUID
     private let started: AuthorityMoment
     private let deadline: UInt64
     private let enrollment: StoredApprovalEnrollment
 
     public init(transcript: PairingTranscript, trusted: ApprovalTrustSnapshot,
+                authorizedReplacement: PairingReplacement?,
                 authorityPublicKey: Data, transportPublicKey: Data, minimumEnvelopeVersion: UInt64,
                 started: AuthorityMoment, deadlineMilliseconds: UInt64) throws {
         let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 5, maxItems: 5000)
@@ -24,7 +26,9 @@ public final class PairingEnrollmentAttempt {
               case let .bytes(phone) = scope[2], case let .bytes(epoch) = scope[3] else { throw PairingEnrollmentError.wrongContext }
         var uuid = trusted.revision.uuid
         let revisionBytes = withUnsafeBytes(of: &uuid) { Data($0) }
-        guard mac == trusted.macID, account == trusted.accountID,
+        guard transcript.replacement?.phoneID == authorizedReplacement?.phoneID,
+              transcript.replacement?.epoch == authorizedReplacement?.epoch,
+              mac == trusted.macID, account == trusted.accountID,
               transcript.expectedTrustRevision == revisionBytes,
               transcript.macAuthorityKey == authorityPublicKey, transcript.macTransportKey == transportPublicKey,
               transcript.minimumEnvelopeVersion == minimumEnvelopeVersion,
@@ -51,6 +55,7 @@ public final class PairingEnrollmentAttempt {
                 EnrolledApprovalKey(id: transcript.decisionKey.keyID, keyClass: .decision, publicKey: transcript.decisionKey.publicKey),
                 EnrolledApprovalKey(id: transcript.biometricKey.keyID, keyClass: .biometric, publicKey: transcript.biometricKey.publicKey),
             ]))
+        self.authorizedReplacement = authorizedReplacement
         self.transcript = transcript; self.revision = trusted.revision
         self.started = started; self.deadline = deadlineMilliseconds
     }
@@ -65,7 +70,7 @@ public final class PairingEnrollmentAttempt {
             throw PairingEnrollmentError.invalidProof
         }
         guard addEventID.count == 16, expectedAuditHead < UInt64.max else { throw PairingEnrollmentError.invalidAudit }
-        if transcript.replacement != nil {
+        if authorizedReplacement != nil {
             guard let removalEventID, removalEventID.count == 16, removalEventID != addEventID,
                   expectedAuditHead < UInt64.max - 1 else { throw PairingEnrollmentError.invalidAudit }
         } else if removalEventID != nil || gateway != nil { throw PairingEnrollmentError.wrongContext }
@@ -80,7 +85,7 @@ public final class PairingEnrollmentAttempt {
             var expected = revision
             var head = expectedAuditHead
             var control: GatewayAuthorityEnvelope?
-            if let replacement = transcript.replacement {
+            if let replacement = authorizedReplacement {
                 let removed = try transaction.revokeApprovalEnrollment(phoneID: replacement.phoneID, epoch: replacement.epoch,
                     expectedTrustRevision: expected, eventID: removalEventID!, receiptTimeMs: receiptTimeMs,
                     writer: writer, expectedAuditHead: head, gateway: gateway)

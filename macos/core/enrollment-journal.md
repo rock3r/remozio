@@ -91,7 +91,7 @@ See [unknown trust restrictions](unknown-trust-restrictions.md) for durable phon
 
 ## Pairing proof integration
 
-`PairingEnrollmentAttempt` binds the shared transcript to the locally retained authority keys, account scope, trust revision, security floor, and elapsed deadline. Construct it only after administrator authorization and human transcript verification. The network cannot supply that authorization context.
+`PairingEnrollmentAttempt` binds the shared transcript to the locally retained authority keys, account scope, trust revision, security floor, and elapsed deadline. The caller must separately provide the locally authorized replacement target, or explicit `nil` for an addition. Both the phone ID and epoch must match the transcript claim before an attempt can exist. Commit uses this retained local target. Construct it only after administrator authorization and human transcript verification. The network cannot supply that authorization context.
 
 Commit verifies the phone biometric signature over the exact transcript. It derives approval keys and capabilities from that transcript, then rechecks current journal scope and revision inside the write transaction. Replacement revokes the exact selected old epoch before adding the new enrollment. Both audit events and any required gateway revocation share the transaction. A failed addition restores the old enrollment through rollback.
 
