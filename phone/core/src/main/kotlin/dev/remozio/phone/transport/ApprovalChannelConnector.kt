@@ -26,7 +26,7 @@ class ApprovalChannelConnector(
 
     suspend fun connect(parent: CoroutineScope, direct: Flow<ApprovalCarrierRoute>, relay: ApprovalCarrierRoute?,
                         directTimeoutMillis: Long = 3_000): NegotiatedTLSChannel =
-        directFirst(direct, relay, directTimeoutMillis, { open(parent, it) }, { it.closeAndJoin() })
+        directFirst(direct, relay, directTimeoutMillis, { open(parent, it) }, { it.close() })
 
     private suspend fun open(parent: CoroutineScope, route: ApprovalCarrierRoute): NegotiatedTLSChannel {
         var carrier: EncryptedRecordTransport? = null
@@ -42,12 +42,11 @@ class ApprovalChannelConnector(
             currentCoroutineContext().ensureActive()
             return channel
         } catch (failure: Throwable) {
-            withContext(NonCancellable) {
-                when {
-                    channel != null -> channel.closeAndJoin()
-                    session != null -> session.closeAndJoin()
-                    else -> { engine?.close(); carrier?.close(); carrier?.awaitClosed() }
-                }
+            // Abort I/O now. The parent still owns workers that finish provider calls and release their engine later.
+            when {
+                channel != null -> channel.close()
+                session != null -> session.close()
+                else -> { engine?.close(); carrier?.close() }
             }
             throw failure
         }

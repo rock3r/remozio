@@ -25,25 +25,40 @@ class DirectFirstTLSIntegrationTest {
         val mac = HeldCertificate.Builder().commonName("synthetic-mac").ecdsa256().build()
         val other = HeldCertificate.Builder().commonName("synthetic-other").ecdsa256().build()
         val phoneKeys = HandshakeCertificates.Builder().heldCertificate(phone).build()
-        for (mode in 0..2) {
+        for (mode in 0..3) {
             Peer(if (mode == 1) other else mac, phone, wrongScope = mode == 2).use { direct ->
                 Peer(mac, phone).use { relay ->
                     val owner = SupervisorJob()
                     var relayOpened = false
+                    val allowCleanup = CompletableDeferred<Unit>()
+                    val directClosed = CompletableDeferred<Unit>()
+                    val stalled = object : EncryptedRecordTransport {
+                        override val maximumMessageBytes = 32_768
+                        override suspend fun send(ciphertext: ByteArray) { }
+                        override suspend fun receive(): ByteArray? = awaitCancellation()
+                        override fun close() { directClosed.complete(Unit) }
+                        override suspend fun awaitClosed() { allowCleanup.await() }
+                    }
                     val connector = ApprovalChannelConnector(arrayOf(phoneKeys.keyManager), mac.certificate.publicKey.encoded,
                         scope, emptyList(), emptySet(), 1024)
                     var channel: NegotiatedTLSChannel? = null
                     try {
                         channel = withTimeout(10_000) {
-                        connector.connect(CoroutineScope(owner), flowOf(ApprovalCarrierRoute { direct.open(it) }), ApprovalCarrierRoute {
-                            relayOpened = true
-                            direct.finished.await()
-                            relay.open(it)
-                        }, directTimeoutMillis = 5_000)
+                            connector.connect(CoroutineScope(owner), flowOf(ApprovalCarrierRoute {
+                                if (mode == 3) stalled else direct.open(it)
+                            }), ApprovalCarrierRoute {
+                                relayOpened = true
+                                if (mode == 3) {
+                                    assertTrue(directClosed.isCompleted)
+                                    assertFalse(allowCleanup.isCompleted)
+                                } else direct.finished.await()
+                                relay.open(it)
+                            }, directTimeoutMillis = if (mode == 3) 100 else 5_000)
                         }
                         assertNotNull(channel.negotiated)
                         assertEquals(mode != 0, relayOpened)
                     } finally {
+                        allowCleanup.complete(Unit)
                         try { withTimeout(5_000) { channel?.closeAndJoin() } }
                         finally { owner.cancel(); withTimeout(5_000) { owner.join() } }
                     }
