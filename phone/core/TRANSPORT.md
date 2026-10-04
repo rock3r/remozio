@@ -96,3 +96,11 @@ Deterministic tests cover partial writes, both framing layers, backpressure, can
 ## Outer relay connection
 
 The [relay connector](RELAY.md) supplies platform HTTPS authentication, scoped Access credentials, and a bounded upgrade before the WebSocket framer starts. It returns a carrier for the owned TLS session. Inner peer authentication remains mandatory.
+
+## Direct TCP carrier
+
+`DirectTCPConnector` supplies a bounded ciphertext stream for a resolved address. It performs no DNS lookup and rejects wildcard and multicast destinations. Discovery remains a source of route hints, not trust. A direct connection must use the same `PinnedTLSClient`, enrollment key, Mac pin, ALPN, and channel negotiation as a relay connection. No relay credential is sent on this carrier.
+
+The connection deadline is bounded. Cancellation closes the native socket during connect, read, or write. Each read chunk is at most the configured limit, and the receive queue applies backpressure. TCP preserves byte order but not the sender's chunk boundaries. Carrier EOF is not an authenticated TLS close or an approval outcome; the TLS session handles that distinction.
+
+Loopback tests exercise byte ordering, bounded chunks, EOF, cancelled readers, stalled connections and writes, and mutual TLS with a pinned key. A wrong Mac pin is rejected. These tests use software certificates. Android LAN discovery, route selection and fallback, hardware keys, network changes, and real-device direct delivery remain integration work. The Android command connection still uses its saved relay route.
