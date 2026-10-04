@@ -149,16 +149,25 @@ final class EnrollmentJournal {
         guard try !restrictedPhones().contains(phoneID),
               let enrollment = try all().first(where: { $0.approval.phoneID == phoneID && $0.epoch == epoch }),
               enrollment.approval.active else { return nil }
-        return try statement("SELECT transcript,proof FROM main.pairing_commits_v1 WHERE setup=? AND phone=? AND epoch=?", [setupID, phoneID, epoch]) {
+        return try pairing(enrollment, expectedSetupID: setupID)
+    }
+
+    private func pairing(_ enrollment: StoredApprovalEnrollment, expectedSetupID: Data? = nil) throws -> PairingTranscript? {
+        try statement("SELECT setup,transcript,proof FROM main.pairing_commits_v1 WHERE phone=? AND epoch=?",
+                      [enrollment.approval.phoneID, enrollment.epoch]) {
             let result = sqlite3_step($0)
             if result == SQLITE_DONE { return nil }
             guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
             do {
-                let transcript = try PairingTranscript.decode(blob($0, 0, maximum: 132000))
-                guard try transcript.verify(signature: blob($0, 1, maximum: 64),
+                let setupID = try blob($0, 0, maximum: 16)
+                guard setupID.count == 16 else { throw EnrollmentJournalError.corruptData }
+                if let expectedSetupID, expectedSetupID != setupID { return nil }
+                let transcript = try PairingTranscript.decode(blob($0, 1, maximum: 132000))
+                guard try transcript.verify(signature: blob($0, 2, maximum: 64),
                       publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric),
                       transcript.setupID == setupID,
-                      transcript.phone.scope == (try ChannelScope(macID: mac, accountID: account, phoneID: phoneID, enrollmentEpoch: epoch)),
+                      transcript.phone.scope == (try ChannelScope(macID: mac, accountID: account,
+                          phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch)),
                       transcript.transportKey.publicKey == enrollment.identityPublicKey,
                       transcript.enrollmentTag == enrollment.notificationTag,
                       try PairingEnrollmentAttempt.capabilities(transcript).contracts == enrollment.approval.capabilities.contracts,
@@ -168,6 +177,50 @@ final class EnrollmentJournal {
                 }
                 return transcript
             } catch { throw EnrollmentJournalError.corruptData }
+        }
+    }
+
+    func directApprovalTrust(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64,
+                             auditVersions: Set<UInt64>) throws -> DirectApprovalTrust {
+        let trust = try snapshot()
+        let active = Set(trust.enrollments.map(\.phoneID))
+        var peers: [DirectApprovalPeer] = []
+        for enrollment in try all() where enrollment.approval.active && active.contains(enrollment.approval.phoneID) {
+            let transcript = try pairing(enrollment)
+            let requests = try trust.allowedContracts.compactMap { contract -> ChannelRequestCapability? in
+                guard let local = trust.authorityCapabilities.contracts[contract],
+                      let remote = enrollment.approval.capabilities.contracts[contract] else { return nil }
+                let kind: UInt64
+                switch contract.requestKind {
+                case .command: kind = 0
+                case .onePasswordAccess: kind = 1
+                case .onePasswordUnlock: kind = 2
+                case .littleSnitch: kind = 3
+                }
+                return try ChannelRequestCapability(kind: kind, wireVersion: contract.wireVersion,
+                    schemaVersion: contract.schemaVersion, features: local.intersection(remote))
+            }
+            peers.append(try DirectApprovalPeer(scope: ChannelScope(macID: mac, accountID: account,
+                phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),
+                transportPublicKey: P256.Signing.PublicKey(x963Representation: enrollment.identityPublicKey).derRepresentation,
+                requests: requests, auditVersions: auditVersions,
+                minimumEnvelopeVersion: max(minimumEnvelopeVersion, transcript?.minimumEnvelopeVersion ?? 1),
+                maximumPayloadBytes: maximumPayloadBytes))
+        }
+        if !peers.isEmpty { _ = try DirectPeerSnapshot(peers) }
+        return DirectApprovalTrust(macID: mac, accountID: account, revision: trust.revision, peers: peers)
+    }
+
+    func requireDirectPeer(_ peer: DirectApprovalPeer, revision: UUID) throws {
+        let trust = try snapshot()
+        guard revision == trust.revision else { throw EnrollmentJournalError.staleRevision }
+        guard peer.scope.macID == mac, peer.scope.accountID == account,
+              trust.enrollments.contains(where: { $0.phoneID == peer.scope.phoneID }),
+              let enrollment = try all().first(where: {
+                  $0.approval.active && $0.approval.phoneID == peer.scope.phoneID && $0.epoch == peer.scope.enrollmentEpoch
+              }),
+              try P256.Signing.PublicKey(derRepresentation: peer.transportPublicKey).x963Representation == enrollment.identityPublicKey else {
+            throw EnrollmentJournalError.unavailableEnrollment
         }
     }
 

@@ -365,6 +365,20 @@ public final class JournalTransaction {
             try RequestDeliveryTrust(approval: ledger.snapshot(), enrollments: ledger.all())
         }
     }
+    /// One protected read for a listener incarnation. The host supplies current local protocol policy and resource limits.
+    public func directApprovalTrust(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64 = 1,
+                                    auditVersions: Set<UInt64> = []) throws -> DirectApprovalTrust {
+        guard (1...16_777_216).contains(maximumPayloadBytes), minimumEnvelopeVersion > 0,
+              auditVersions.count <= 16, !auditVersions.contains(0) else { throw DirectListenerError.invalidConfiguration }
+        return try withEnrollment(write: false) {
+            try $0.directApprovalTrust(maximumPayloadBytes: maximumPayloadBytes,
+                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
+        }
+    }
+    /// Rechecks the protected revision and peer binding. It grants no approval or execution authority.
+    public func requireDirectApprovalPeer(_ peer: DirectApprovalPeer, expectedTrustRevision: UUID) throws {
+        try withEnrollment(write: false) { try $0.requireDirectPeer(peer, revision: expectedTrustRevision) }
+    }
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
     }

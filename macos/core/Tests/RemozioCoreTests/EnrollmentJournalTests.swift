@@ -85,17 +85,17 @@ final class EnrollmentJournalTests: XCTestCase {
     }
 
     private func pairing(_ db: JournalDatabase, biometric: P256.Signing.PrivateKey,
-                         replacement: PairingReplacement? = nil) throws -> (PairingEnrollmentAttempt, Data) {
+                         replacement: PairingReplacement? = nil, minimum: UInt64 = 1) throws -> (PairingEnrollmentAttempt, Data) {
         let trusted = try db.read { try $0.approvalTrustSnapshot() }
         let scope = try ChannelScope(macID: id(1), accountID: id(2), phoneID: id(8), enrollmentEpoch: id(10))
         let offers = try [ChannelRole.phone, .mac].enumerated().map { index, role in
-            try ChannelOffer(role: role, scope: scope, nonce: id(UInt8(20 + index), count: 32), envelopeVersions: [1],
+            try ChannelOffer(role: role, scope: scope, nonce: id(UInt8(20 + index), count: 32), envelopeVersions: [minimum],
                 requests: [ChannelRequestCapability(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [])
         }
         var revision = trusted.revision.uuid
         let transport = P256.Signing.PrivateKey().publicKey.x963Representation
         let transcript = try PairingTranscript(setupID: id(30), challenge: id(31, count: 32), phone: offers[0], mac: offers[1],
-            minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: rootKey.publicKey.x963Representation,
+            minimumEnvelopeVersion: minimum, selectedEnvelopeVersion: minimum, macAuthorityKey: rootKey.publicKey.x963Representation,
             macTransportKey: transport,
             transportKey: PairingKey(keyID: id(32), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
             decisionKey: PairingKey(keyID: id(33), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
@@ -103,9 +103,91 @@ final class EnrollmentJournalTests: XCTestCase {
             enrollmentTag: id(35, count: 32), replacement: replacement,
             expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
         let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trusted, authorizedReplacement: replacement,
-            authorityPublicKey: rootKey.publicKey.x963Representation, transportPublicKey: transport, minimumEnvelopeVersion: 1,
+            authorityPublicKey: rootKey.publicKey.x963Representation, transportPublicKey: transport, minimumEnvelopeVersion: minimum,
             started: .init(epoch: clock, milliseconds: 100), startedAtUnixMillis: 1000, deadlineMilliseconds: 1100)
         return (attempt, try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation)
+    }
+
+    func testDirectTrustUsesCurrentJournalBindingsAndRejectsStaleOrForgedPeers() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        XCTAssertTrue(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.isEmpty })
+        let revision = try add(db, writer: writer, revision: empty)
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 2048, auditVersions: [1]) }
+        let peer = try XCTUnwrap(trust.peers.first)
+        XCTAssertEqual(trust.revision, revision); XCTAssertEqual(trust.macID, id(1)); XCTAssertEqual(trust.accountID, id(2))
+        XCTAssertEqual(peer.scope, try ChannelScope(macID: id(1), accountID: id(2), phoneID: id(5), enrollmentEpoch: id(9)))
+        XCTAssertEqual(peer.maximumPayloadBytes, 2048); XCTAssertEqual(peer.minimumEnvelopeVersion, 1)
+        XCTAssertEqual(peer.auditVersions, [1]); XCTAssertEqual(peer.requests.map(\.kind), [0])
+        try db.read { try $0.requireDirectApprovalPeer(peer, expectedTrustRevision: revision) }
+        let row = try XCTUnwrap(db.read { try $0.approvalEnrollments().first })
+        XCTAssertEqual(try P256.Signing.PublicKey(derRepresentation: peer.transportPublicKey).x963Representation, row.identityPublicKey)
+        for scope in [try ChannelScope(macID: id(99), accountID: id(2), phoneID: id(5), enrollmentEpoch: id(9)),
+                      try ChannelScope(macID: id(1), accountID: id(2), phoneID: id(5), enrollmentEpoch: id(99))] {
+            let forged = try DirectApprovalPeer(scope: scope, transportPublicKey: peer.transportPublicKey,
+                requests: [], auditVersions: [], maximumPayloadBytes: 1024)
+            XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalPeer(forged, expectedTrustRevision: revision) }) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+            }
+        }
+        let wrongKey = try DirectApprovalPeer(scope: peer.scope, transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation,
+            requests: [], auditVersions: [], maximumPayloadBytes: 1024)
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalPeer(wrongKey, expectedTrustRevision: revision) })
+        let removed = try remove(db, writer: writer, revision: revision)
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalPeer(peer, expectedTrustRevision: revision) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalPeer(peer, expectedTrustRevision: removed.revision) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+        }
+        XCTAssertTrue(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.isEmpty })
+    }
+
+    func testDirectTrustRetainsThePairingFloorAcrossRestartAndHonorsHigherLocalPolicy() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key, minimum: 2)
+        _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        try db.close()
+        let reopened = try open(fixture)
+        for minimum in [UInt64(1), 2, 3] {
+            let trust = try reopened.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024, minimumEnvelopeVersion: minimum) }
+            XCTAssertEqual(trust.peers.first?.minimumEnvelopeVersion, max(2, minimum))
+        }
+    }
+
+    func testDirectTrustRejectsInvalidRetainedProofAndRetiresTheJournalOwner() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        try fixture.sql("UPDATE pairing_commits_v1 SET proof=zeroblob(64)")
+        XCTAssertThrowsError(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .corruptData)
+        }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testDirectTrustFiltersContractsAndIntersectsFeatures() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let other = try RequestContract(requestKind: .littleSnitch, wireVersion: 1, schemaVersion: 1)
+        let local = try ContractCapabilities(contracts: [contract: [7, 8], other: []])
+        let revision = try db.write { try $0.configureApprovalAuthority(capabilities: local, allowedContracts: [contract]) }
+        let writer = try db.write { try $0.createEpoch(descriptor()) }
+        let original = try enrollment()
+        let row = try StoredApprovalEnrollment(epoch: original.epoch, notificationTag: original.notificationTag,
+            identityPublicKey: original.identityPublicKey, approval: ApprovalEnrollment(phoneID: original.approval.phoneID, active: true,
+                capabilities: ContractCapabilities(contracts: [contract: [8, 9], other: []]), keys: original.approval.keys))
+        _ = try db.write { try $0.addApprovalEnrollment(row, expectedTrustRevision: revision,
+            eventID: id(40), receiptTimeMs: 1000, writer: writer, expectedAuditHead: 0) }
+        let peer = try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        XCTAssertEqual(peer.requests.count, 1); XCTAssertEqual(peer.requests.first?.kind, 0)
+        XCTAssertEqual(peer.requests.first?.features, [8])
+        for bytes in [0, 16_777_217] {
+            XCTAssertThrowsError(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: bytes) })
+        }
+        XCTAssertThrowsError(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024, minimumEnvelopeVersion: 0) })
+        XCTAssertThrowsError(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024, auditVersions: [0]) })
+        XCTAssertEqual(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.count }, 1)
     }
 
     func testPairingProofCommitsExactKeysAndCannotReplayAfterReopen() throws {
@@ -925,6 +1007,7 @@ final class EnrollmentJournalTests: XCTestCase {
             XCTAssertEqual(result.disposition, .restricted); XCTAssertNotEqual(result.trustRevision, revision)
             XCTAssertEqual(try db.read { try $0.approvalTrustRestrictions() }, [id(5)])
             XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+            XCTAssertTrue(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.isEmpty })
             let retained = try db.read { try XCTUnwrap($0.approvalEnrollments().first) }
             XCTAssertTrue(retained.approval.active)
             XCTAssertEqual(retained.identityPublicKey, old.identityPublicKey)
@@ -986,7 +1069,15 @@ final class EnrollmentJournalTests: XCTestCase {
         let request = try request(), pending = try PendingRequestDelivery(request: request)
         let routing = PresenceRouting(destination: .phones, reason: .manualAway, detectionLimited: false)
         XCTAssertEqual(pending.reconcile(current: request, routing: routing, trust: try db.read { try $0.requestDeliveryTrust() }, now: moment()) { _ in true }.active.count, 2)
+        let prior = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024) }
+        XCTAssertEqual(Set(prior.peers.map { $0.scope.phoneID }), [id(5), id(8)])
         let result = try restrictTrust(db, writer: writer, revision: revision, head: 2)
+        let current = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024) }
+        XCTAssertEqual(current.peers.map { $0.scope.phoneID }, [id(8)])
+        XCTAssertEqual(current.revision, result.trustRevision)
+        let blocked = try XCTUnwrap(prior.peers.first { $0.scope.phoneID == id(5) })
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalPeer(blocked, expectedTrustRevision: current.revision) })
+        try db.read { try $0.requireDirectApprovalPeer(XCTUnwrap(current.peers.first), expectedTrustRevision: current.revision) }
         let update = pending.reconcile(current: request, routing: routing, trust: try db.read { try $0.requestDeliveryTrust() }, now: moment()) { _ in
             XCTFail("No new delivery"); return true
         }
