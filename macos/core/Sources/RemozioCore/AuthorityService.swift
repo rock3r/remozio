@@ -10,8 +10,12 @@ public final class AuthorityService: @unchecked Sendable {
     private var closed = false
 
     /// Transfers the database to this service. Construction failure releases its writer lease.
-    public init(configuration: AuthorityServiceConfiguration, database: sending JournalDatabase) throws {
-        let journal = AuthorityJournal(database: database)
+    public convenience init(configuration: AuthorityServiceConfiguration, database: sending JournalDatabase) throws {
+        try self.init(configuration: configuration, journal: AuthorityJournal(database: database))
+    }
+
+    /// Shares the prepared request owner with the service. Service closure retires that owner too.
+    public init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal) throws {
         self.journal = journal
         do {
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,

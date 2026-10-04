@@ -47,6 +47,69 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try .init(database: db, writer: writer, clockEpoch: clock, maximumRequests: maximum, maximumRetainedBytes: bytes,
             requestLimits: limits, captureLimits: limits, decisionLimits: limits, signingLimits: limits, auditLimits: limits)
     }
+    private func journalOwner(_ fixture: Fixture) throws -> AuthorityJournal {
+        let limits = try limits, capabilities = try capabilities, contract = try contract
+        let descriptor = try descriptor(3), clock = clock, anchor = fixture.root.path
+        let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+            maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+        _ = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+        let writer = try db.write { try $0.createEpoch(descriptor) }
+        let requests = try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        return AuthorityJournal(requests: requests)
+    }
+    func testSharedJournalOwnsRequestStateAndRejectsReentry() throws {
+        let fixture = try Fixture(), journal = try journalOwner(fixture)
+        let draft = try draft(), time = now()
+        let request = try journal.withRequests { try $0.admit(draft, now: time, receiptTimeMs: 1001) }
+        let state = try journal.withRequests { owner in
+            XCTAssertThrowsError(try journal.read { try $0.approvalTrustSnapshot().revision })
+            XCTAssertThrowsError(try journal.close())
+            XCTAssertThrowsError(try journal.withRequests { try $0.state(requestID: request.requestID) })
+            return try owner.state(requestID: request.requestID)
+        }
+        XCTAssertEqual(state.phase, .queued)
+        try journal.read { _ in
+            XCTAssertThrowsError(try journal.withRequests { try $0.state(requestID: request.requestID) }) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+        }
+        XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID) }, state)
+        try journal.close()
+        XCTAssertThrowsError(try journal.withRequests { try $0.state(requestID: request.requestID) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .closed)
+        }
+    }
+    func testSharedRequestOperationExcludesTrustReads() throws {
+        let fixture = try Fixture(), journal = try journalOwner(fixture)
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let attempted = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
+        let operation = expectation(description: "request operation"), reader = expectation(description: "trust reader")
+        DispatchQueue.global().async {
+            defer { operation.fulfill() }
+            do {
+                try journal.withRequests { _ in
+                    entered.signal()
+                    guard release.wait(timeout: .now() + 5) == .success else { throw Failure.fixture }
+                }
+            } catch { XCTFail("Request operation failed: \(error)") }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        DispatchQueue.global().async {
+            defer { finished.signal(); reader.fulfill() }
+            attempted.signal()
+            do { _ = try journal.trustSnapshot(maximumPayloadBytes: 1024) }
+            catch { XCTFail("Trust read failed: \(error)") }
+        }
+        XCTAssertEqual(attempted.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(finished.wait(timeout: .now() + 0.05), .timedOut)
+        release.signal()
+        wait(for: [operation, reader], timeout: 3)
+        try journal.close()
+    }
     private func decision(_ request: IssuedRequestPayload, decline: Bool = false) throws -> (Data, Data) {
         let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
             requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,

@@ -65,7 +65,7 @@ public struct ApprovalRequestState: Equatable, Sendable {
 /// The service serializes this non-Sendable owner with all other journal users and adapter observations.
 /// Construct only after authority continuity and admission-storage gates pass. This owner never dispatches target actions.
 public final class ApprovalRequestCoordinator {
-    private let database: JournalDatabase
+    let database: JournalDatabase
     private let writer: AuditEpochWriter
     private let mac: Data
     private let account: Data
