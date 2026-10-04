@@ -107,3 +107,11 @@ Sixteen normal-user tests use the real protected journal and disposable P-256 ke
 Swift and Kotlin test every lifecycle state/event pair against the same fixture, including pending target loss. No action is executed and no real credential, provider, or phone is used.
 
 Protected service hosting, authenticated transport, actual adapter validation, protected checkpoint recovery, lifecycle storage reservations, deadline scheduling, and physical-device checks remain required before production admission or dispatch.
+
+## Expiry without phone traffic
+
+`expirePending` scans the bounded live request set at one authority time sample. It selects elapsed queued or presented requests and commits their expiry events in one journal transaction. Only a successful commit changes live state and releases captures. A failure on any audit insert leaves the whole selected set unchanged. Authorized and executing requests retain their original state.
+
+Run the sweep under `AuthorityJournal.withRequests`. Reconcile each returned state with its delivery owner and withdraw queued work. A failed sweep is an authority error; stop affected delivery work instead of reporting expiry. The host must supply its own timer and sleep-inclusive clock. This API does not install that timer or emit a network status message.
+
+Tests cover exact deadlines, future deadlines, presented requests, already consumed requests, repeated sweeps, closed storage, and rollback after the second audit insert fails.
