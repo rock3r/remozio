@@ -379,6 +379,10 @@ public final class JournalTransaction {
     public func requireDirectApprovalPeer(_ peer: DirectApprovalPeer, expectedTrustRevision: UUID) throws {
         try withEnrollment(write: false) { try $0.requireDirectPeer(peer, revision: expectedTrustRevision) }
     }
+    /// Validate a decoded IPC binding against current protected enrollment state in this transaction.
+    public func requireDirectApprovalBinding(_ binding: AuthorityPeerBinding) throws {
+        try withEnrollment(write: false) { try $0.requireDirectBinding(binding) }
+    }
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
     }

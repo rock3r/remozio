@@ -142,6 +142,24 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertTrue(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.isEmpty })
     }
 
+    func testDecodedIPCBindingRechecksCurrentJournalRevisionAndIdentity() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        let peer = try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let bytes = try AuthorityTrustCodec.encodeBinding(AuthorityPeerBinding(peer: peer, revision: revision))
+        let binding = try AuthorityTrustCodec.decodeBinding(bytes, expectedMacID: id(1), expectedAccountID: id(2))
+        try db.read { try $0.requireDirectApprovalBinding(binding) }
+        let wrong = try AuthorityPeerBinding(scope: peer.scope, transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, revision: revision)
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalBinding(wrong) })
+        let revoked = try remove(db, writer: writer, revision: revision)
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalBinding(binding) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        XCTAssertThrowsError(try db.read { try $0.requireDirectApprovalBinding(AuthorityPeerBinding(peer: peer, revision: revoked.revision)) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+        }
+    }
+
     func testDirectTrustRetainsThePairingFloorAcrossRestartAndHonorsHigherLocalPolicy() throws {
         let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
         let (attempt, proof) = try pairing(db, biometric: key, minimum: 2)
