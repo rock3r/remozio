@@ -4,6 +4,7 @@ import dev.remozio.phone.transport.RelayAccessCredential
 import dev.remozio.phone.transport.RelayEndpoint
 import dev.remozio.phone.transport.p256TransportPin
 import dev.remozio.protocol.CborValue
+import dev.remozio.protocol.PairingTranscript
 
 /** Local references only. Private keys never enter an enrollment archive. */
 enum class EnrollmentKeyRole(val aliasPart: String) { TRANSPORT("transport"), DECISION("decision"), BIOMETRIC("biometric") }
@@ -43,7 +44,13 @@ class PhoneEnrollment(
 }
 
 enum class EnrollmentPhase { PREPARED, ACTIVE, REMOVED }
-class StoredPhoneEnrollment(val enrollment: PhoneEnrollment, val phase: EnrollmentPhase) {
+class PreparedPairing(val transcript: PairingTranscript, replacingRecordID: ByteArray?, val minimumEnvelopeVersion: ULong) {
+    val replacingRecordID = replacingRecordID?.let(::id)
+    init { require(minimumEnvelopeVersion > 0uL && transcript.minimumEnvelopeVersion == minimumEnvelopeVersion) }
+    override fun toString() = "PreparedPairing(redacted)"
+}
+
+class StoredPhoneEnrollment(val enrollment: PhoneEnrollment, val phase: EnrollmentPhase, val pairing: PreparedPairing? = null) {
     /** Compares all connection material without exposing relay credentials. A display rename is not a trust change. */
     fun sameConnectionAs(other: StoredPhoneEnrollment): Boolean =
         (EnrollmentEncoding.encode(this) as CborValue.Fields).values.filterKeys { it != 5uL } ==
@@ -67,15 +74,25 @@ internal object EnrollmentEncoding {
         val relay = e.relayCredential?.let { c -> CborValue.Fields(mapOf(
             0uL to CborValue.Text(c.endpoint.host), 1uL to CborValue.Unsigned(c.endpoint.port.toULong()),
             2uL to CborValue.Text(c.endpoint.path), 3uL to CborValue.Text(c.clientId), 4uL to CborValue.Text(c.clientSecret))) } ?: CborValue.Null
+        val pairing = row.pairing?.let { CborValue.ArrayValue(listOf(CborValue.Bytes(it.transcript.encode()),
+            it.replacingRecordID ?: CborValue.Null, CborValue.Unsigned(it.minimumEnvelopeVersion))) } ?: CborValue.Null
         return CborValue.Fields(mapOf(
+            14uL to pairing,
             0uL to e.recordID, 1uL to e.macID, 2uL to e.accountID, 3uL to e.phoneID, 4uL to e.epoch,
             5uL to CborValue.Text(e.label), 6uL to e.authorityPublicKey, 7uL to e.transportPublicKey,
             8uL to key(e.transportKey), 9uL to key(e.decisionKey), 10uL to key(e.biometricKey),
             11uL to e.enrollmentTag, 12uL to relay, 13uL to CborValue.Unsigned(when (row.phase) { EnrollmentPhase.PREPARED -> 0uL; EnrollmentPhase.ACTIVE -> 1uL; EnrollmentPhase.REMOVED -> 2uL }),
         ))
     }
-    fun decode(value: CborValue): StoredPhoneEnrollment {
-        val f = fields(value, 13)
+    fun decode(value: CborValue, schema: ULong = 2u): StoredPhoneEnrollment {
+        val f = fields(value, if (schema == 1uL) 13 else 14)
+        val pairing = if (schema == 1uL || f[14u] == CborValue.Null) null else {
+            val row = (f[14u] as? CborValue.ArrayValue)?.values ?: throw IllegalArgumentException()
+            require(row.size == 3)
+            PreparedPairing(PairingTranscript.decode((row[0] as CborValue.Bytes).copyBytes()),
+                if (row[1] == CborValue.Null) null else (row[1] as CborValue.Bytes).copyBytes(),
+                (row[2] as CborValue.Unsigned).value)
+        }
         fun key(index: ULong, role: EnrollmentKeyRole): EnrollmentKeyReference {
             val k = fields(f.getValue(index), 2)
             return EnrollmentKeyReference(role, bytes(k, 0u), text(k, 1u), bytes(k, 2u))
@@ -88,7 +105,7 @@ internal object EnrollmentEncoding {
         val phase = when (uint(f, 13u)) { 0uL -> EnrollmentPhase.PREPARED; 1uL -> EnrollmentPhase.ACTIVE; 2uL -> EnrollmentPhase.REMOVED; else -> throw IllegalArgumentException() }
         return StoredPhoneEnrollment(PhoneEnrollment(bytes(f, 0u), bytes(f, 1u), bytes(f, 2u), bytes(f, 3u), bytes(f, 4u),
             text(f, 5u), bytes(f, 6u), bytes(f, 7u), key(8u, EnrollmentKeyRole.TRANSPORT), key(9u, EnrollmentKeyRole.DECISION),
-            key(10u, EnrollmentKeyRole.BIOMETRIC), bytes(f, 11u), relay), phase)
+            key(10u, EnrollmentKeyRole.BIOMETRIC), bytes(f, 11u), relay), phase, pairing)
     }
     internal fun fields(value: CborValue, last: Int): Map<ULong, CborValue> {
         val fields = (value as? CborValue.Fields)?.values ?: throw IllegalArgumentException()

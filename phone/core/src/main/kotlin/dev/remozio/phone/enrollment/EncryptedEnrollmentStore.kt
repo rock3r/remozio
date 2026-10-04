@@ -66,6 +66,30 @@ class EncryptedEnrollmentStore private constructor(
         return commit(state.entries + StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED))
     }
 
+    /** Call after independent Mac authentication and human transcript verification, before sending the biometric proof. */
+    @Synchronized fun preparePairing(enrollment: PhoneEnrollment, transcript: PairingTranscript,
+        expectedRevision: ULong, minimumEnvelopeVersion: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot {
+        checkRevision(expectedRevision)
+        require(state.entries.none { it.enrollment.recordID == enrollment.recordID })
+        require(state.entries.none { it.enrollment.scope == enrollment.scope && it.phase == EnrollmentPhase.PREPARED })
+        val previous = replacingRecordID?.let { target -> state.entries.single { it.enrollment.recordID == id(target) } }
+        val active = state.entries.singleOrNull { it.enrollment.scope == enrollment.scope && it.phase == EnrollmentPhase.ACTIVE }
+        require(active === previous)
+        val row = StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED,
+            PreparedPairing(transcript, replacingRecordID, minimumEnvelopeVersion))
+        PhonePairingAttempt(transcript, row, previous, minimumEnvelopeVersion)
+        return commit(state.entries + row)
+    }
+
+    /** Restores only the transcript retained in the authenticated local archive. */
+    @Synchronized fun recoverPairing(recordID: ByteArray): PhonePairingAttempt {
+        checkAvailable()
+        val row = state.entries.single { it.enrollment.recordID == id(recordID) }
+        val setup = requireNotNull(row.pairing)
+        val previous = setup.replacingRecordID?.let { target -> state.entries.single { it.enrollment.recordID == target } }
+        return PhonePairingAttempt(setup.transcript, row, previous, setup.minimumEnvelopeVersion)
+    }
+
     /** Internal transition used by the receipt-verifying pairing owner. */
     @JvmSynthetic
     @Synchronized internal fun activate(recordID: ByteArray, expectedRevision: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot {
@@ -77,8 +101,8 @@ class EncryptedEnrollmentStore private constructor(
         require(active?.enrollment?.recordID == replacingRecordID?.let(::id))
         return commit(state.entries.map {
             when {
-                it === prepared -> StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.ACTIVE)
-                it === active -> StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED)
+                it === prepared -> StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.ACTIVE, it.pairing)
+                it === active -> StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED, it.pairing)
                 else -> it
             }
         })
@@ -90,7 +114,7 @@ class EncryptedEnrollmentStore private constructor(
         val identifier = id(recordID)
         val existing = state.entries.single { it.enrollment.recordID == identifier }
         if (existing.phase == EnrollmentPhase.REMOVED) return state
-        return commit(state.entries.map { if (it === existing) StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED) else it })
+        return commit(state.entries.map { if (it === existing) StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED, it.pairing) else it })
     }
 
     private fun commit(rows: List<StoredPhoneEnrollment>): EnrollmentSnapshot {
@@ -128,11 +152,12 @@ class EncryptedEnrollmentStore private constructor(
                 val plaintext = cipher.decrypt(encrypted)
                 val restored = try {
                     val fields = EnrollmentEncoding.fields(DeterministicCbor.decode(plaintext, limits), 2)
-                    require(fields[0u] == CborValue.Unsigned(1u))
+                    val schema = EnrollmentEncoding.uint(fields, 0u)
+                    require(schema == 1uL || schema == 2uL)
                     val revision = EnrollmentEncoding.uint(fields, 1u)
                     val entries = (fields[2u] as? CborValue.ArrayValue)?.values ?: throw EnrollmentStoreUnavailable()
                     require(entries.size <= maximumRecords)
-                    val rows = entries.map(EnrollmentEncoding::decode)
+                    val rows = entries.map { EnrollmentEncoding.decode(it, schema) }
                     validate(rows, maximumRecords)
                     EnrollmentSnapshot(revision, rows)
                 } finally { plaintext.fill(0) }
@@ -149,7 +174,7 @@ class EncryptedEnrollmentStore private constructor(
             return CborLimits(cipher.maximumPlaintextBytes, 8, records * 100 + 16)
         }
         private fun encode(state: EnrollmentSnapshot, limits: CborLimits) = DeterministicCbor.encode(CborValue.Fields(mapOf(
-            0uL to CborValue.Unsigned(1u), 1uL to CborValue.Unsigned(state.revision),
+            0uL to CborValue.Unsigned(2u), 1uL to CborValue.Unsigned(state.revision),
             2uL to CborValue.ArrayValue(state.entries.map(EnrollmentEncoding::encode)),
         )), limits)
         private fun validate(rows: List<StoredPhoneEnrollment>, maximumRecords: Int) {
