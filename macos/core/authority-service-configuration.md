@@ -1,0 +1,32 @@
+# Protected authority configuration
+
+`AuthorityServiceConfiguration.load(path:)` reads root-owned startup state through `ProtectedServiceConfiguration`. Parsing arbitrary bytes with `decode` does not establish their provenance.
+
+The reader requires UID 0 and an absolute path. It walks from `/` using descriptors and rejects symlinks, writable ancestors, remote filesystems, hardlinks, and non-regular files. The configuration file must have mode 0600. Ancestors must be root-owned and must not grant mutation through modes or ACLs. ACL checks are shared with the protected journal and gateway leases.
+
+Reads are limited to 64 KiB. The reader retains every path descriptor until it has checked the identities again. It checks file size and modification metadata after reading. This detects observed changes during the read; it does not defend against a malicious root process.
+
+```mermaid
+flowchart LR
+    Installer[Protected provisioning] --> File[Root-owned configuration]
+    File --> Reader[Descriptor walk and bounded read]
+    Reader --> Decoder[Canonical versioned decoder]
+    Decoder --> Startup[Authority startup inputs]
+```
+
+Version 1 uses a deterministic CBOR map with these exact keys:
+
+| Key | Value |
+|---|---|
+| 0 | Format version, 1 |
+| 1–2 | Mac and account IDs, 16 bytes each |
+| 3–4 | Absolute journal directory and authority Mach service name |
+| 5–6 | Developer team ID and transport component identifier |
+| 7 | Sorted unique transport code hashes, 1–16 entries of 20 bytes |
+| 8 | Dedicated transport UID; zero and the invalid UID sentinel are rejected |
+| 9–11 | Payload limit, minimum envelope version, and sorted unique audit versions |
+| 12–14 | Connection limit, handshake timeout, and operation limit |
+
+Unknown versions, extra or missing fields, duplicates, noncanonical ordering, and invalid bounds fail. The decoder compiles the transport code requirement through `XPCPeerPolicy`. No authority key or credential belongs in this file.
+
+Protected ownership establishes who can replace these inputs. It does not prove that the installer chose correct code hashes, checked a release build floor, or provisioned a dedicated service account. Installation, activation, and the daemon entry point must enforce those remaining requirements. These tests neither install nor start a root service.

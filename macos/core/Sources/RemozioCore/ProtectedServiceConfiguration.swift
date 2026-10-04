@@ -1,0 +1,73 @@
+import Darwin
+import Foundation
+
+/// Reads immutable startup metadata. Provisioning and activation must establish its contents separately.
+public enum ProtectedServiceConfiguration {
+    public static let maximumBytes = 65_536
+
+    /// Requires root-owned local ancestors and one private regular file. No environment or working-directory lookup occurs.
+    public static func read(path: String) throws -> Data {
+        guard geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try read(anchor: "/", relativePath: String(path.dropFirst()), owner: 0)
+    }
+
+    /// Fixture entry point. Production always walks from the filesystem root with UID 0.
+    static func read(anchor: String, relativePath: String, owner: uid_t) throws -> Data {
+        let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !parts.isEmpty, !anchor.utf8.contains(0),
+              anchor.utf8.count + relativePath.utf8.count + 1 < Int(PATH_MAX),
+              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }) else {
+            throw JournalLeaseError.invalidPath
+        }
+        struct Node { let fd: Int32; let parent: Int32?; let name: String; let info: stat; let directory: Bool }
+        var nodes: [Node] = []
+        defer { for node in nodes.reversed() { _ = Darwin.close(node.fd) } }
+        func retain(_ fd: Int32, parent: Int32?, name: String, directory: Bool) throws {
+            guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+            do {
+                var info = stat()
+                guard fstat(fd, &info) == 0 else { throw JournalLeaseError.system(errno) }
+                try ProtectedStorageMetadata.validate(fd, info, directory: directory, privateObject: !directory,
+                    owner: owner, ancestorOwner: owner)
+                nodes.append(Node(fd: fd, parent: parent, name: name, info: info, directory: directory))
+            } catch { _ = Darwin.close(fd); throw error }
+        }
+        try retain(open(anchor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: anchor, directory: true)
+        for (index, part) in parts.enumerated() {
+            let parent = nodes.last!.fd, directory = index < parts.count - 1
+            let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (directory ? O_DIRECTORY : 0)
+            try retain(openat(parent, part, flags), parent: parent, name: part, directory: directory)
+        }
+        let file = nodes.last!
+        guard file.info.st_size > 0, file.info.st_size <= maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+        var result = Data(count: Int(file.info.st_size)), offset = 0
+        while offset < result.count {
+            let count = result.withUnsafeMutableBytes {
+                Darwin.read(file.fd, $0.baseAddress!.advanced(by: offset), $0.count - offset)
+            }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw count == 0 ? JournalLeaseError.identityChanged : JournalLeaseError.system(errno) }
+            offset += count
+        }
+        for node in nodes {
+            var held = stat(), named = stat()
+            guard fstat(node.fd, &held) == 0 else { throw JournalLeaseError.system(errno) }
+            let rc = node.parent.map { fstatat($0, node.name, &named, AT_SYMLINK_NOFOLLOW) } ?? lstat(node.name, &named)
+            guard rc == 0 else { throw JournalLeaseError.system(errno) }
+            guard held.st_dev == node.info.st_dev, held.st_ino == node.info.st_ino,
+                  named.st_dev == held.st_dev, named.st_ino == held.st_ino,
+                  (named.st_mode & S_IFMT) == (node.directory ? S_IFDIR : S_IFREG) else { throw JournalLeaseError.identityChanged }
+            try ProtectedStorageMetadata.validate(node.fd, held, directory: node.directory, privateObject: !node.directory,
+                owner: owner, ancestorOwner: owner)
+            if !node.directory {
+                guard held.st_size == node.info.st_size,
+                      held.st_mtimespec.tv_sec == node.info.st_mtimespec.tv_sec,
+                      held.st_mtimespec.tv_nsec == node.info.st_mtimespec.tv_nsec,
+                      held.st_ctimespec.tv_sec == node.info.st_ctimespec.tv_sec,
+                      held.st_ctimespec.tv_nsec == node.info.st_ctimespec.tv_nsec else { throw JournalLeaseError.identityChanged }
+            }
+        }
+        return result
+    }
+}
