@@ -104,7 +104,7 @@ final class EnrollmentJournalTests: XCTestCase {
             expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
         let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trusted, authorizedReplacement: replacement,
             authorityPublicKey: rootKey.publicKey.x963Representation, transportPublicKey: transport, minimumEnvelopeVersion: 1,
-            started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)
+            started: .init(epoch: clock, milliseconds: 100), startedAtUnixMillis: 1000, deadlineMilliseconds: 1100)
         return (attempt, try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation)
     }
 
@@ -165,7 +165,7 @@ final class EnrollmentJournalTests: XCTestCase {
             XCTAssertThrowsError(try PairingEnrollmentAttempt(transcript: attempt.transcript, trusted: trusted,
                 authorizedReplacement: authorized, authorityPublicKey: rootKey.publicKey.x963Representation,
                 transportPublicKey: attempt.transcript.macTransportKey, minimumEnvelopeVersion: 1,
-                started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)) {
+                started: .init(epoch: clock, milliseconds: 100), startedAtUnixMillis: 1000, deadlineMilliseconds: 1100)) {
                 XCTAssertEqual($0 as? PairingEnrollmentError, .wrongContext)
             }
         }
@@ -181,10 +181,35 @@ final class EnrollmentJournalTests: XCTestCase {
             XCTAssertThrowsError(try PairingEnrollmentAttempt(transcript: attempt.transcript, trusted: trusted, authorizedReplacement: nil,
                 authorityPublicKey: wrongKey ? key.publicKey.x963Representation : rootKey.publicKey.x963Representation,
                 transportPublicKey: attempt.transcript.macTransportKey, minimumEnvelopeVersion: wrongKey ? 1 : 2,
-                started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)) {
+                started: .init(epoch: clock, milliseconds: 100), startedAtUnixMillis: 1000, deadlineMilliseconds: 1100)) {
                 XCTAssertEqual($0 as? PairingEnrollmentError, .wrongContext)
             }
         }
+    }
+
+    func testPairingSignedValidityBoundsAdmissionAndElapsedLifetime() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (original, proof) = try pairing(db, biometric: key)
+        let trusted = try db.read { try $0.approvalTrustSnapshot() }
+        func admit(_ wallTime: UInt64) throws -> PairingEnrollmentAttempt {
+            try PairingEnrollmentAttempt(transcript: original.transcript, trusted: trusted, authorizedReplacement: nil,
+                authorityPublicKey: rootKey.publicKey.x963Representation,
+                transportPublicKey: original.transcript.macTransportKey, minimumEnvelopeVersion: 1,
+                started: .init(epoch: clock, milliseconds: 100), startedAtUnixMillis: wallTime, deadlineMilliseconds: 1100)
+        }
+        for wallTime: UInt64 in [999, 2000, 2001, UInt64.max] {
+            XCTAssertThrowsError(try admit(wallTime)) { XCTAssertEqual($0 as? PairingEnrollmentError, .expired) }
+        }
+        let late = try admit(1990)
+        XCTAssertThrowsError(try late.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 2000,
+            now: { AuthorityMoment(epoch: self.clock, milliseconds: 110) })) {
+            XCTAssertEqual($0 as? PairingEnrollmentError, .expired)
+        }
+        XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
+        _ = try late.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1999,
+            now: { AuthorityMoment(epoch: self.clock, milliseconds: 109) })
     }
 
     func testPairingExpiryBeforeCommitRollsBackKeysAndAudit() throws {

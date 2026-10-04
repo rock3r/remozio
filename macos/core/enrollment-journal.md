@@ -95,6 +95,8 @@ See [unknown trust restrictions](unknown-trust-restrictions.md) for durable phon
 
 Commit verifies the phone biometric signature over the exact transcript. It derives approval keys and capabilities from that transcript, then rechecks current journal scope and revision inside the write transaction. Replacement revokes the exact selected old epoch before adding the new enrollment. Both audit events and any required gateway revocation share the transaction. A failed addition restores the old enrollment through rollback.
 
+Admission requires a trusted local wall-clock sample within the signed issue and expiry interval. The elapsed deadline is capped at the remaining signed lifetime, so late admission cannot renew an old transcript. Supply the wall-clock and elapsed samples together from the local host. Subsequent wall-clock adjustments do not extend this elapsed deadline.
+
 The elapsed clock is checked after proof validation and immediately before the transaction returns. Expiry, clock changes, and regression reject the commit. The successful journal write advances the opaque trust revision, so the same proof cannot commit twice, including after reopening the database.
 
 This owner does not implement Authorization Services, human verification UI, setup transport, persisted prepared attempts, or signed receipt recovery. The host must recheck administrator authorization before commit and sign a receipt only after durable success. A process restart requires a new authorized attempt until setup recovery is integrated. No production enrollment endpoint is enabled by this component.

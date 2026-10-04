@@ -18,7 +18,7 @@ public final class PairingEnrollmentAttempt {
     public init(transcript: PairingTranscript, trusted: ApprovalTrustSnapshot,
                 authorizedReplacement: PairingReplacement?,
                 authorityPublicKey: Data, transportPublicKey: Data, minimumEnvelopeVersion: UInt64,
-                started: AuthorityMoment, deadlineMilliseconds: UInt64) throws {
+                started: AuthorityMoment, startedAtUnixMillis: UInt64, deadlineMilliseconds: UInt64) throws {
         let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 5, maxItems: 5000)
         guard case let .map(offer) = try DeterministicCBOR.decode(transcript.phone.encode(), limits: limits),
               case let .array(scope) = offer[2], scope.count == 4,
@@ -32,10 +32,13 @@ public final class PairingEnrollmentAttempt {
               transcript.expectedTrustRevision == revisionBytes,
               transcript.macAuthorityKey == authorityPublicKey, transcript.macTransportKey == transportPublicKey,
               transcript.minimumEnvelopeVersion == minimumEnvelopeVersion,
-              started.milliseconds < deadlineMilliseconds,
-              deadlineMilliseconds - started.milliseconds <= transcript.expiresAtUnixMillis - transcript.issuedAtUnixMillis else {
+              started.milliseconds < deadlineMilliseconds else {
             throw PairingEnrollmentError.wrongContext
         }
+        guard startedAtUnixMillis >= transcript.issuedAtUnixMillis,
+              startedAtUnixMillis < transcript.expiresAtUnixMillis else { throw PairingEnrollmentError.expired }
+        let remaining = transcript.expiresAtUnixMillis - startedAtUnixMillis
+        let lifetime = min(deadlineMilliseconds - started.milliseconds, remaining)
         var contracts: [RequestContract: Set<UInt64>] = [:]
         for capability in transcript.phone.requests {
             let kind: RequestKind
@@ -57,7 +60,7 @@ public final class PairingEnrollmentAttempt {
             ]))
         self.authorizedReplacement = authorizedReplacement
         self.transcript = transcript; self.revision = trusted.revision
-        self.started = started; self.deadline = deadlineMilliseconds
+        self.started = started; self.deadline = started.milliseconds + lifetime
     }
 
     /// Commits keys, optional old-phone revocation, and audit records in one transaction.
