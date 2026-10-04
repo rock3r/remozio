@@ -32,6 +32,23 @@ final class AuthorityXPCEndpointTests: XCTestCase {
         XCTAssertEqual(closures.value, 0)
         endpoint.close(); endpoint.close(); XCTAssertEqual(closures.value, 1)
     }
+    func testReplyCanImmediatelyStartNextOperationAtCapacityOne() throws {
+        let reads = Counter(), validations = Counter(), closures = Counter(), replies = Counter(), trust = trust()
+        let bytes = try binding()
+        let endpoint = try AuthorityXPCEndpoint(macID: mac, accountID: account, budget: AuthorityXPCWorkBudget(maximum: 1),
+            verify: {}, invalidate: { closures.increment() }, snapshot: { reads.increment(); return trust },
+            validate: { _ in validations.increment(); return true })
+        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.trustSnapshot { snapshot in
+            XCTAssertNotNil(snapshot); replies.increment()
+            endpoint.validatePeer(bytes) { allowed in
+                XCTAssertTrue(allowed); replies.increment()
+                endpoint.trustSnapshot { next in XCTAssertNotNil(next); replies.increment() }
+            }
+        }
+        XCTAssertEqual(reads.value, 2); XCTAssertEqual(validations.value, 1)
+        XCTAssertEqual(replies.value, 3); XCTAssertEqual(closures.value, 0)
+    }
     func testMissingHandshakeAndFailedIdentityNeverReadJournal() throws {
         for failedIdentity in [false, true] {
             let reads = Counter(), closures = Counter(), trust = trust()

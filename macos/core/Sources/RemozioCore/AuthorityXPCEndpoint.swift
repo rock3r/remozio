@@ -68,20 +68,26 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     }
     public func trustSnapshot(reply: @escaping @Sendable (Data?) -> Void) {
         do {
-            try begin(); defer { end() }
-            let trust = try snapshot()
-            guard trust.macID == macID, trust.accountID == accountID else { throw AuthorityXPCEndpointError.unavailable }
-            let bytes = try AuthorityTrustCodec.encodeSnapshot(trust)
+            let bytes = try work {
+                let trust = try snapshot()
+                guard trust.macID == macID, trust.accountID == accountID else { throw AuthorityXPCEndpointError.unavailable }
+                return try AuthorityTrustCodec.encodeSnapshot(trust)
+            }
             send { reply(bytes) }
         } catch { close(); reply(nil) }
     }
     public func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void) {
         do {
-            try begin(); defer { end() }
-            let decoded = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
-            let allowed = try validate(decoded)
+            let allowed = try work {
+                let decoded = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
+                return try validate(decoded)
+            }
             send { reply(allowed) }
         } catch { close(); reply(false) }
+    }
+    private func work<T>(_ body: () throws -> T) throws -> T {
+        try begin(); defer { end() }
+        return try body()
     }
     private func begin() throws {
         try verify()
