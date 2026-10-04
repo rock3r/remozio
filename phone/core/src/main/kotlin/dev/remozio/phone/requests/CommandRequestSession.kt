@@ -42,12 +42,17 @@ class CommandRequestSession private constructor(
     private var capture: CommandCapture? = capture
 
     @Synchronized
-    internal fun retainMemory(budget: CommandMemoryBudget) {
+    internal fun retainMemory(budget: CommandMemoryBudget, replacing: CommandMemoryBudget.Reservation? = null, beforeCommit: () -> Unit = {}) {
         check(memory == null && !closure.value)
         val c = checkNotNull(capture)
         val elements = c.arguments.size.toLong() + c.environment.size.toLong() * 3 +
             c.ancestry.entries.size.toLong() * 2 + c.target.supplementaryGroups.size.toLong()
-        memory = budget.retain(c.canonicalByteCount.toLong(), elements)
+        memory = budget.retain(c.canonicalByteCount.toLong(), elements, replacing, beforeCommit)
+    }
+    @Synchronized
+    internal fun terminalMemory(): CommandMemoryBudget.Reservation? {
+        check(isTerminal())
+        return memory
     }
     private val closure = MutableStateFlow(false)
     val closed: StateFlow<Boolean> = closure.asStateFlow()

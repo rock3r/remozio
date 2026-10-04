@@ -10,17 +10,23 @@ class CommandMemoryBudget(private val maximumBytes: Long, private val maximumIte
     // Parsing has a separate monitor: releasing a session never waits for the parsing monitor.
     internal fun <T> parse(operation: () -> T): T = synchronized(parsing) { operation() }
 
-    @Synchronized internal fun retain(captureBytes: Long, captureItems: Long): Reservation {
+    @Synchronized internal fun retain(captureBytes: Long, captureItems: Long, replacing: Reservation? = null, beforeCommit: () -> Unit = {}): Reservation {
         require(captureBytes >= 0 && captureItems >= 0)
-        if (captureBytes > maximumBytes - bytes - METADATA_BYTES || captureItems > maximumItems - items - METADATA_ITEMS)
+        replacing?.let { require(it.owner === this && !it.closed && it.captureBytes == 0L && it.captureItems == 0L) }
+        val creditBytes = if (replacing == null) 0L else METADATA_BYTES
+        val creditItems = if (replacing == null) 0L else METADATA_ITEMS
+        if (captureBytes > maximumBytes - bytes - METADATA_BYTES + creditBytes || captureItems > maximumItems - items - METADATA_ITEMS + creditItems)
             throw InboxException(InboxRejection.CAPACITY)
+        beforeCommit()
+        replacing?.close()
         bytes += captureBytes + METADATA_BYTES
         items += captureItems + METADATA_ITEMS
         return Reservation(captureBytes, captureItems)
     }
 
-    inner class Reservation internal constructor(private var captureBytes: Long, private var captureItems: Long) : AutoCloseable {
-        private var closed = false
+    inner class Reservation internal constructor(internal var captureBytes: Long, internal var captureItems: Long) : AutoCloseable {
+        internal val owner get() = this@CommandMemoryBudget
+        internal var closed = false
         internal fun releaseCapture() = synchronized(this@CommandMemoryBudget) {
             if (!closed) {
                 bytes -= captureBytes; items -= captureItems

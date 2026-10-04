@@ -191,6 +191,24 @@ class CommandRequestReceiverTest {
         override fun close() { closed = true }
     }
 
+    @Test fun terminalReplacementReusesMetadataCapacityAndFailedPersistenceKeepsTheOwner() = runBlocking<Unit> {
+        val budget = CommandMemoryBudget(capture.size.toLong() + 1024, 10000)
+        val index = Retired(); val mac = Mac()
+        val inbox = CommandRequestInbox(1, 1, budget)
+        val enrollment = mac.enroll(inbox, index)
+        deliver(enrollment, mac, mac.issued(), mac.status(true))
+        val previous = enrollment.sessions().single()
+        mac.requestID = 9; index.failWrite = true
+        assertFailsWith<IOException> { deliver(enrollment, mac, mac.issued()) }
+        assertSame(previous, enrollment.sessions().single())
+        assertFalse(previous.closed.value)
+        index.failWrite = false
+        deliver(enrollment, mac, mac.issued())
+        assertTrue(previous.closed.value)
+        assertEquals(CborValue.Bytes(id(9)), enrollment.sessions().single().identity.requestID)
+        inbox.close()
+    }
+
     @Test fun moreThan128RequestsRetireOnlyTerminalHandlesAndRejectReplays() = runBlocking<Unit> {
         val mac = Mac(); val index = Retired(); val inbox = CommandRequestInbox(1, 128)
         val enrollment = mac.enroll(inbox, index)

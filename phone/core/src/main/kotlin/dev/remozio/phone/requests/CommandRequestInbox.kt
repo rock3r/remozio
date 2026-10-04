@@ -110,14 +110,22 @@ class CommandRequestEnrollment internal constructor(
                 if (!remembered.contentEquals(candidate.requestDigest.copyBytes())) reject(InboxRejection.CONFLICTING_REQUEST)
                 reject(InboxRejection.RETIRED_REQUEST)
             }
-            memoryBudget?.let { candidate.retainMemory(it) }
-            if (requests.size >= maximumRequests) {
-                val terminal = if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() }
-                if (terminal == null) reject(InboxRejection.CAPACITY)
-                // Persist before removing the handle. A failed write leaves the visible window intact.
-                checkNotNull(retired).remember(terminal.key.requestID.copyBytes(), terminal.value.requestDigest.copyBytes())
-                requests.remove(terminal.key)
-                terminal.value.close()
+            val terminal = if (requests.size >= maximumRequests) {
+                (if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() })
+                    ?: reject(InboxRejection.CAPACITY)
+            } else null
+            val persistRetirement = {
+                terminal?.let {
+                    checkNotNull(retired).remember(it.key.requestID.copyBytes(), it.value.requestDigest.copyBytes())
+                }
+                Unit
+            }
+            if (memoryBudget != null) {
+                candidate.retainMemory(memoryBudget, terminal?.value?.terminalMemory(), persistRetirement)
+            } else persistRetirement()
+            terminal?.let {
+                requests.remove(it.key)
+                it.value.close()
             }
             requests[candidate.identity] = candidate
             publishedSessions.value = Collections.unmodifiableList(requests.values.toList())
