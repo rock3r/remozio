@@ -87,9 +87,17 @@ public final class ProtectedExecutablePath {
             nodes.append(Node(fd: fd, parent: parent, name: name, initial: info, directory: directory))
         } catch { _ = Darwin.close(fd); throw error }
     }
+    static func validateMount(_ filesystem: statfs) throws {
+        guard filesystem.f_flags & UInt32(MNT_LOCAL) != 0, filesystem.f_owner == 0 else {
+            throw JournalLeaseError.unsafeMetadata
+        }
+    }
     private func metadata(_ fd: Int32, _ info: stat, directory: Bool) throws {
         try ProtectedStorageMetadata.validate(fd, info, directory: directory, privateObject: false,
             owner: owner, ancestorOwner: owner)
+        var filesystem = statfs()
+        guard fstatfs(fd, &filesystem) == 0 else { throw JournalLeaseError.system(errno) }
+        try Self.validateMount(filesystem)
         guard directory || (info.st_mode & 0o100 != 0 && info.st_size > 0) else { throw JournalLeaseError.unsafeMetadata }
     }
 }
