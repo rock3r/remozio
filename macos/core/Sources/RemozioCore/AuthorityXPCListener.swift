@@ -114,6 +114,22 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         policy.configure(listener)
         listener.delegate = self
     }
+    /// Bind authenticated transport RPCs to one serialized root journal owner.
+    public convenience init(serviceName: String, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
+                            journal: AuthorityJournal, maximumPayloadBytes: Int,
+                            minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [],
+                            maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
+                            maximumOperations: Int = 8) throws {
+        let trust = try journal.trustSnapshot(maximumPayloadBytes: maximumPayloadBytes,
+            minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
+        guard trust.macID == macID, trust.accountID == accountID else { throw AuthorityXPCEndpointError.invalidConfiguration }
+        try self.init(serviceName: serviceName, peerPolicy: peerPolicy, macID: macID, accountID: accountID,
+            maximumConnections: maximumConnections, handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds,
+            maximumOperations: maximumOperations,
+            snapshot: { try journal.trustSnapshot(maximumPayloadBytes: maximumPayloadBytes,
+                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions) },
+            validate: { try journal.validatePeer($0) })
+    }
     deinit { listener.invalidate(); registry.close() }
     public func start() throws {
         try lock.withLock {
