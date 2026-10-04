@@ -17,12 +17,15 @@ internal class StoredCommandConnections(
     private val create: (StoredPhoneEnrollment) -> CommandConnection,
     private val enrollmentAccess: Mutex,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val closeConnection: (CommandConnection) -> Unit = { it.close() },
 ) {
+    private val failedClosures = mutableSetOf<CborValue.Bytes>()
     private val owners = mutableMapOf<CborValue.Bytes, CommandConnection>()
 
     /** Revalidates the complete archive before returning an existing owner or opening its request index. */
     suspend fun acquire(recordID: CborValue.Bytes): CommandConnection = withContext(dispatcher) {
         enrollmentAccess.withLock {
+            if (recordID in failedClosures) throw CommandRegistryUnavailable()
             val rows = try {
                 open()?.use { it.snapshot().entries } ?: emptyList()
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -33,8 +36,7 @@ internal class StoredCommandConnections(
             val active = rows.filter { it.phase == EnrollmentPhase.ACTIVE }.associateBy { it.enrollment.recordID }
             val stale = owners.filter { (id, owner) -> active[id]?.sameConnectionAs(owner.record) != true }
             // Invalidate every changed incarnation before constructing any replacement.
-            stale.keys.forEach { owners.remove(it) }
-            closeAll(stale.values)
+            invalidateRecordsLocked(stale.keys)
             val record = active[recordID] ?: throw CommandEnrollmentUnavailable()
             owners[recordID] ?: try {
                 create(record).also { owners[recordID] = it }
@@ -45,26 +47,25 @@ internal class StoredCommandConnections(
 
     /** Setup must call this before committing enrollment changes, under the same enrollment mutex. */
     internal fun invalidateLocked() {
-        val previous = owners.values.toList()
-        owners.clear()
-        closeAll(previous)
+        invalidateRecordsLocked(owners.keys.toSet() + failedClosures)
     }
 
     /** The application enrollment host holds the shared mutex while retiring these records. */
     internal fun invalidateRecordsLocked(recordIDs: Set<CborValue.Bytes>) {
-        val previous = recordIDs.mapNotNull { owners.remove(it) }
-        closeAll(previous)
+        recordIDs.forEach { id ->
+            val owner = owners.remove(id)
+            if (owner != null) {
+                try { closeConnection(owner) } catch (_: Exception) { failedClosures.add(id) }
+            }
+        }
+        if (recordIDs.any { it in failedClosures }) throw CommandRegistryUnavailable()
     }
 
     suspend fun invalidate() = withContext(dispatcher) {
         enrollmentAccess.withLock { invalidateLocked() }
     }
 
-    private fun closeAll(connections: Collection<CommandConnection>) {
-        var failed = false
-        connections.forEach { try { it.close() } catch (_: Exception) { failed = true } }
-        if (failed) throw CommandRegistryUnavailable()
-    }
+
 }
 
 internal class CommandEnrollmentUnavailable : IllegalStateException("Enrollment is not active")
