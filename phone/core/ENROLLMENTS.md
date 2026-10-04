@@ -77,3 +77,13 @@ AES authentication and the archive revision do not prove freshness against a com
 Portable tests cover encrypted restart, two-Mac isolation, exact replacement, cancelled replacement, stale revisions and callbacks, malformed state, capacity, and failures before or after a write. Android compilation and lint check API use.
 
 The tests use software encryption keys and memory storage. They do not prove Android Keystore custody, filesystem behavior during power loss, backup resistance, or restart behavior on a Pixel. Those checks remain in the planned physical-device session. No enrollment UI, privileged Mac setup, key retirement, or live approval is enabled by this storage component.
+
+## Pairing commit receipts
+
+`PhonePairingAttempt` binds a retained transcript to one local PREPARED record. It checks the Mac/account/phone/epoch scope, both Mac pins, all phone key IDs and points, notification tag, and local protocol floor. An independently selected replacement must match the transcript's old phone and epoch and the same Mac/account.
+
+Activation verifies the Mac commit signature with the authority key from that local record. It then rechecks the exact prepared material and active replacement in the current archive before calling the revision-checked atomic activation. A concurrent archive change rejects the write. Repeated receipts cannot reactivate an ACTIVE or REMOVED record. Invalid signatures and phone-proof signatures leave preparation intact.
+
+A receipt may arrive after the setup deadline because the Mac could have committed before expiry. Only the Mac's commit receipt can finish that ambiguous setup; an elapsed timeout does not prove failure. The host must independently authenticate the Mac and verify the human transcript before constructing this owner. It must hold the application enrollment mutex and invalidate runtime owners before activation.
+
+This owner remains in memory. Persisting the exact transcript with PREPARED state, recovering receipts after a process restart, native biometric enrollment signing, and the setup UI remain separate integration work. Reconstructing an owner from a newly received network transcript is not recovery. No network enrollment endpoint is added here.
