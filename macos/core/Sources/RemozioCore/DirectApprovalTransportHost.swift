@@ -29,6 +29,7 @@ public actor DirectApprovalTransportHost {
     private let factory: Factory
     private let validatePeer: @Sendable (DirectApprovalPeer, UUID) async throws -> Void
     private let handler: @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void
+    private var authority: AuthorityTrustLease?
     private var trust: DirectApprovalTrust?
     private var listener: (generation: UUID, value: any OwnedDirectListener)?
     private var enabled = false
@@ -64,12 +65,13 @@ public actor DirectApprovalTransportHost {
         if listener == nil { try open() }
     }
     public func stop() { enabled = false; invalidate(); state = .stopped }
-    public func close() { stop(); trust = nil; closed = true }
+    public func close() { stop(); authority?.invalidate(); trust = nil; closed = true }
 
     /// Call for each authenticated trust or policy change. A snapshot is not a phone-provided message.
     /// The IPC owner must reject old connection incarnations and out-of-order updates before calling this method.
     public func replaceTrust(_ value: DirectApprovalTrust) throws {
         guard !closed else { throw DirectHostError.stopped }
+        guard authority?.isActive != false else { throw DirectHostError.authorityUnavailable }
         invalidate(); trust = nil
         do {
             guard value.macID == macID, value.accountID == accountID,
@@ -84,8 +86,23 @@ public actor DirectApprovalTransportHost {
 
     /// Discard the snapshot on IPC loss. Reconnection needs a fresh authenticated snapshot before start can succeed.
     public func authorityDisconnected() {
+        authority?.invalidate()
         invalidate(); trust = nil
         state = enabled ? .authorityUnavailable : .stopped
+    }
+
+    func beginAuthority(_ lease: AuthorityTrustLease) throws {
+        guard !closed, lease.isActive else { throw DirectHostError.stopped }
+        authority?.invalidate(); invalidate(); trust = nil; authority = lease
+        state = enabled ? .authorityUnavailable : .stopped
+    }
+    func replaceTrust(_ value: DirectApprovalTrust, authority lease: AuthorityTrustLease) throws {
+        guard authority === lease, lease.isActive else { throw DirectHostError.authorityUnavailable }
+        try replaceTrust(value)
+    }
+    func authorityDisconnected(_ lease: AuthorityTrustLease) {
+        guard authority === lease else { return }
+        authorityDisconnected()
     }
 
     /// This is channel admission, not an execution permit. The root operation must recheck enrollment atomically with its own decision.
@@ -103,11 +120,11 @@ public actor DirectApprovalTransportHost {
         return session
     }
     private func requireCurrent(_ session: DirectApprovalSession) throws {
-        guard enabled, !closed, listener?.generation == session.generation,
+        guard enabled, !closed, authority?.isActive != false, listener?.generation == session.generation,
               trust?.revision == session.revision else { throw DirectHostError.staleSession }
     }
     private func open() throws {
-        guard let trust else { state = .authorityUnavailable; throw DirectHostError.authorityUnavailable }
+        guard authority?.isActive != false, let trust else { state = .authorityUnavailable; throw DirectHostError.authorityUnavailable }
         guard !trust.peers.isEmpty else { state = .noEligiblePhones; return }
         do {
             let generation = UUID(), handler = handler
