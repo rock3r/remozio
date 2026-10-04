@@ -99,7 +99,7 @@ The [relay connector](RELAY.md) supplies platform HTTPS authentication, scoped A
 
 ## Direct TCP carrier
 
-`DirectTCPConnector` supplies a bounded ciphertext stream for a resolved address. It performs no DNS lookup and rejects wildcard and multicast destinations. Discovery remains a source of route hints, not trust. A direct connection must use the same `PinnedTLSClient`, enrollment key, Mac pin, ALPN, and channel negotiation as a relay connection. No relay credential is sent on this carrier.
+`DirectTCPConnector` supplies a bounded ciphertext stream for a resolved address. It performs no DNS lookup and rejects wildcard and multicast destinations. The caller can supply a socket factory bound to the discovered Android network. This does not change the TLS identity checks. Discovery remains a source of route hints, not trust. A direct connection must use the same `PinnedTLSClient`, enrollment key, Mac pin, ALPN, and channel negotiation as a relay connection. No relay credential is sent on this carrier.
 
 The connection deadline is bounded. Cancellation closes the native socket during connect, read, or write. Each read chunk is at most the configured limit, and the receive queue applies backpressure. TCP preserves byte order but not the sender's chunk boundaries. Carrier EOF is not an authenticated TLS close or an approval outcome; the TLS session handles that distinction.
 

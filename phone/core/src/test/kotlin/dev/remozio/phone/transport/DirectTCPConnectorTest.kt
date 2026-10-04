@@ -75,7 +75,7 @@ class DirectTCPConnectorTest {
             val socket = BlockingSocket(blockConnect = true)
             val owner = SupervisorJob()
             val attempt = async {
-                runCatching { DirectTCPConnector { socket }.connect(CoroutineScope(owner), endpoint, timeoutMillis = if (mode == 0) 100 else 5_000) }
+                runCatching { DirectTCPConnector { socket }.connect(CoroutineScope(owner), endpoint, timeoutMillis = if (mode == 0) 1_000 else 5_000) }
             }
             try {
                 withTimeout(5_000) { socket.entered.await() }

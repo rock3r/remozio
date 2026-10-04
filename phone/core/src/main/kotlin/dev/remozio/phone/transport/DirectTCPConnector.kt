@@ -10,9 +10,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /** A resolved route is only a hint. Authenticate it with PinnedTLSClient before sending application data. */
-class DirectTCPConnector internal constructor(private val sockets: () -> Socket) {
-    constructor() : this(::Socket)
-
+class DirectTCPConnector(private val sockets: () -> Socket = ::Socket) {
     suspend fun connect(parent: CoroutineScope, endpoint: InetSocketAddress, timeoutMillis: Long = 5_000,
                         maximumMessageBytes: Int = 32_768, queueCapacity: Int = 1): EncryptedRecordTransport {
         require(!endpoint.isUnresolved && endpoint.port in 1..65_535)
