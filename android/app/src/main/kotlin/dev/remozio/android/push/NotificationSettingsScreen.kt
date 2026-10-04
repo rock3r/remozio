@@ -1,5 +1,6 @@
 package dev.remozio.android.push
 
+import dev.remozio.android.transport.LocalNetworkSettingsCard
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -117,6 +118,7 @@ internal fun NotificationSettingsScreen() {
                 TextButton(enabled = !busy, onClick = { refresh++ }) { Text(stringResource(R.string.notification_refresh)) }
             }
         }
+        LocalNetworkSettingsCard()
     }
 }
 
