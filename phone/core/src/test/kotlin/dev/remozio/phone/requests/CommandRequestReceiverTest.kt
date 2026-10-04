@@ -191,10 +191,15 @@ class CommandRequestReceiverTest {
         override fun close() { closed = true }
     }
 
-    @Test fun terminalReplacementReusesMetadataCapacityAndFailedPersistenceKeepsTheOwner() = runBlocking<Unit> {
+    @Test fun terminalReplacementReusesMetadataCapacityAndFailedPersistenceKeepsTheOwner() =
+        checkTerminalReplacement(1)
+
+    @Test fun sharedCapacityRetiresTerminalBeforeTheLocalWindowFills() = checkTerminalReplacement(128)
+
+    private fun checkTerminalReplacement(window: Int) = runBlocking<Unit> {
         val budget = CommandMemoryBudget(capture.size.toLong() + 1024, 10000)
         val index = Retired(); val mac = Mac()
-        val inbox = CommandRequestInbox(1, 1, budget)
+        val inbox = CommandRequestInbox(1, window, budget)
         val enrollment = mac.enroll(inbox, index)
         deliver(enrollment, mac, mac.issued(), mac.status(true))
         val previous = enrollment.sessions().single()

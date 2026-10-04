@@ -110,7 +110,7 @@ class CommandRequestEnrollment internal constructor(
                 if (!remembered.contentEquals(candidate.requestDigest.copyBytes())) reject(InboxRejection.CONFLICTING_REQUEST)
                 reject(InboxRejection.RETIRED_REQUEST)
             }
-            val terminal = if (requests.size >= maximumRequests) {
+            var terminal = if (requests.size >= maximumRequests) {
                 (if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() })
                     ?: reject(InboxRejection.CAPACITY)
             } else null
@@ -121,7 +121,14 @@ class CommandRequestEnrollment internal constructor(
                 Unit
             }
             if (memoryBudget != null) {
-                candidate.retainMemory(memoryBudget, terminal?.value?.terminalMemory(), persistRetirement)
+                try {
+                    candidate.retainMemory(memoryBudget, terminal?.value?.terminalMemory(), persistRetirement)
+                } catch (failure: InboxException) {
+                    if (failure.reason != InboxRejection.CAPACITY || terminal != null) throw failure
+                    terminal = (if (retired == null) null else requests.entries.firstOrNull { it.value.isTerminal() })
+                        ?: throw failure
+                    candidate.retainMemory(memoryBudget, terminal.value.terminalMemory(), persistRetirement)
+                }
             } else persistRetirement()
             terminal?.let {
                 requests.remove(it.key)
