@@ -12,7 +12,10 @@ protocol ApprovalByteStream: Sendable {
 }
 private struct NetworkApprovalStream: ApprovalByteStream {
     let channel: NetworkByteChannel
-    func awaitOpen(timeoutMilliseconds: UInt64) async throws { try await channel.start(timeoutMilliseconds: timeoutMilliseconds) }
+    var alreadyStarted = false
+    func awaitOpen(timeoutMilliseconds: UInt64) async throws {
+        if !alreadyStarted { try await channel.start(timeoutMilliseconds: timeoutMilliseconds) }
+    }
     func send(_ bytes: Data) async throws { try await channel.send(bytes) }
     func receive() async throws -> Data? { try await channel.receive() }
     func close() async { await channel.close() }
@@ -46,6 +49,15 @@ public actor NegotiatedNetworkChannel {
         try await accept(stream: NetworkApprovalStream(channel: channel), scope: scope, requests: requests, auditVersions: auditVersions,
             maximumPayloadBytes: maximumPayloadBytes, trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds)
     }
+    // Used only after the listener verifies the native TLS session and selects its enrolled peer.
+    static func acceptStarted(channel: NetworkByteChannel, scope: ChannelScope, requests: [ChannelRequestCapability],
+                              auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
+                              trustedMinimum: UInt64, timeoutMilliseconds: UInt64) async throws -> NegotiatedNetworkChannel {
+        try await accept(stream: NetworkApprovalStream(channel: channel, alreadyStarted: true), scope: scope,
+            requests: requests, auditVersions: auditVersions, maximumPayloadBytes: maximumPayloadBytes,
+            trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
     static func accept(stream: any ApprovalByteStream, scope: ChannelScope, requests: [ChannelRequestCapability],
                        auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
                        trustedMinimum: UInt64 = 1, timeoutMilliseconds: UInt64 = 15_000) async throws -> NegotiatedNetworkChannel {

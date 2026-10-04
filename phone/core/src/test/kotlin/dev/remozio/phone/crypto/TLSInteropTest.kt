@@ -432,6 +432,68 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun nativeListenerBindsEachTransportIdentityToItsOwnScope(): Unit = Fixture(negotiate = true, twoPhones = true).use { f ->
+        runBlocking {
+            withTimeout(20_000) {
+                for ((identity, phoneID) in listOf(f.phone to 3, requireNotNull(f.secondPhone) to 5)) {
+                    for (claimedPhone in listOf(phoneID, if (phoneID == 3) 5 else 3)) {
+                        val socket = Socket("127.0.0.1", f.port).apply { soTimeout = 4_000 }
+                        val session = TLSRecordSession(this, f.engine(identity = identity), SocketRecords(socket), handshakeTimeoutMillis = 4_000)
+                        try {
+                            val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { claimedPhone.toByte() }, ByteArray(16) { 4 })
+                            if (claimedPhone == phoneID) {
+                                val channel = NegotiatedTLSChannel.connect(session, scope, emptyList(), emptySet(), 65_536, timeoutMillis = 4_000)
+                                channel.send(byteArrayOf(1, 2, 3)); assertArrayEquals(byteArrayOf(1, 2, 3), channel.receive())
+                                channel.closeAndJoin()
+                            } else {
+                                var rejected = false
+                                try { NegotiatedTLSChannel.connect(session, scope, emptyList(), emptySet(), 65_536, timeoutMillis = 4_000) }
+                                catch (_: IOException) { rejected = true }
+                                assertTrue(rejected)
+                            }
+                        } finally { session.closeAndJoin() }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun nativeListenerRejectsExcessConnectionsBeforeStartingHandshake(): Unit = Fixture(negotiate = true, maximumConnections = 1).use { f ->
+        f.connect(f.port).use { first ->
+            first.startHandshake()
+            f.connect(f.port).use { excess ->
+                excess.soTimeout = 1_000
+                try { excess.startHandshake(); fail("An excess connection completed TLS") }
+                catch (timeout: java.net.SocketTimeoutException) { throw AssertionError("Excess connection was not closed promptly", timeout) }
+                catch (_: IOException) { }
+            }
+        }
+    }
+
+    @Test fun nativeListenerCloseAbortsAnExistingHandshakeAndStopsAccepting(): Unit = Fixture(negotiate = true).use { f ->
+        f.connect(f.port).use { socket ->
+            socket.startHandshake()
+            socket.soTimeout = 1_000
+            f.stopNativeListener()
+            try { assertEquals(-1, socket.inputStream.read()) }
+            catch (timeout: java.net.SocketTimeoutException) { throw AssertionError("Listener close left an active channel", timeout) }
+            catch (_: IOException) { }
+        }
+        try { f.connect(f.port).use { it.startHandshake(); fail("Stopped listener accepted a connection") } }
+        catch (timeout: java.net.SocketTimeoutException) { throw AssertionError("Stopped listener retained pending I/O", timeout) }
+        catch (_: IOException) { }
+    }
+
+    @Test fun nativeListenerRejectsUnknownIdentityAndWrongProtocol(): Unit = Fixture(negotiate = true).use { f ->
+        for (mode in 0..2) {
+            f.connect(f.port, identity = if (mode == 0) f.mac else f.phone).use { socket ->
+                if (mode == 1) socket.sslParameters = socket.sslParameters.apply { applicationProtocols = arrayOf("wrong/1") }
+                if (mode == 2) socket.enabledProtocols = arrayOf("TLSv1.2")
+                assertThrows(IOException::class.java) { socket.startHandshake(); exchange(socket, byteArrayOf(1)) }
+            }
+        }
+    }
+
     private class SocketRecords(private val socket: Socket) : EncryptedRecordTransport {
         override val maximumMessageBytes = 311
         override suspend fun send(ciphertext: ByteArray): Unit = withContext(Dispatchers.IO) {
@@ -517,10 +579,11 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
+        val secondPhone: Identity?
         private val process: Process
         val port: Int
         init {
@@ -528,11 +591,13 @@ class TLSInteropTest {
             try {
                 mac = generate("mac")
                 phone = generate("phone")
+                secondPhone = if (twoPhones) generate("second-phone") else null
                 val peer = requireNotNull(System.getProperty("remozio.test.tlsPeer")) { "Build the native TLS peer first" }
                 child = ProcessBuilder(peer, mac.path.toString()).redirectError(directory.resolve("peer.log").toFile()).start()
                 process = child
                 process.outputStream.bufferedWriter().also {
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + "}\n")
+                    val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + second + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()
@@ -561,7 +626,7 @@ class TLSInteropTest {
             Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
             return Identity(path)
         }
-        fun engine(pin: X509Certificate = mac.certificate, protocol: String = "remozio-experiment/1", budget: Int = 65_536, identity: Identity = phone) =
+        fun engine(pin: X509Certificate = mac.certificate, protocol: String = if (negotiate) "remozio/1" else "remozio-experiment/1", budget: Int = 65_536, identity: Identity = phone) =
             PinnedTLSClient(arrayOf(identity.clientManager), pin.publicKey.encoded, protocol, budget)
         fun connect(port: Int, identity: Identity? = phone, serverPin: X509Certificate = mac.certificate): SSLSocket {
             val context = SSLContext.getInstance("TLSv1.3")
@@ -578,14 +643,16 @@ class TLSInteropTest {
             return (context.socketFactory.createSocket("127.0.0.1", port) as SSLSocket).apply {
                 soTimeout = 4_000
                 enabledProtocols = arrayOf("TLSv1.3")
-                sslParameters = sslParameters.apply { applicationProtocols = arrayOf("remozio-experiment/1") }
+                sslParameters = sslParameters.apply { applicationProtocols = arrayOf(if (negotiate) "remozio/1" else "remozio-experiment/1") }
             }
         }
+        fun stopNativeListener() { process.outputStream.write(115); process.outputStream.flush() }
         fun closeControllerPipe() { process.outputStream.close() }
         fun waitForPeerExit(): Boolean = process.waitFor(3, TimeUnit.SECONDS)
         override fun close() {
             mac.clientManager.close()
             phone.clientManager.close()
+            secondPhone?.clientManager?.close()
             process.outputStream.close()
             process.destroy()
             if (!process.waitFor(3, TimeUnit.SECONDS)) { process.destroyForcibly(); process.waitFor(3, TimeUnit.SECONDS) }

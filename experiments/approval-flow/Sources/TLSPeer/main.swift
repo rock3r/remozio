@@ -7,7 +7,7 @@ import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -17,13 +17,9 @@ func emit(_ fields: [String: Int]) {
 final class Probe: @unchecked Sendable {
     let queue = DispatchQueue(label: "dev.remozio.experiment.tls")
     let listener: NWListener
-    let negotiate: Bool
-    let commandMessages: Bool
     var connections: [UUID: NetworkByteChannel] = [:]
 
-    init(identity: SecIdentity, peerPublicKey: Data, negotiate: Bool, commandMessages: Bool) throws {
-        self.negotiate = negotiate
-        self.commandMessages = commandMessages
+    init(identity: SecIdentity, peerPublicKey: Data) throws {
         let peer = try PinnedTLSPeer(subjectPublicKeyInfo: peerPublicKey)
         let tls = NWProtocolTLS.Options()
         let options = tls.securityProtocolOptions
@@ -72,19 +68,8 @@ final class Probe: @unchecked Sendable {
             connections[id] = channel
             Task {
                 do {
-                    if negotiate {
-                        let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-                            phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
-                        let framed = try await NegotiatedNetworkChannel.accept(channel: channel, scope: scope,
-                            requests: commandMessages ? [try ChannelRequestCapability(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])] : [],
-                            auditVersions: [], maximumPayloadBytes: 65_536, timeoutMilliseconds: 4_000)
-                        do { while let payload = try await framed.receive() { try await framed.send(payload) } }
-                        catch { await framed.closeAndWait(); throw error }
-                        await framed.closeAndWait()
-                    } else {
-                        try await channel.start(timeoutMilliseconds: 10_000)
-                        try await echoFrame(channel)
-                    }
+                    try await channel.start(timeoutMilliseconds: 10_000)
+                    try await echoFrame(channel)
                 } catch { }
                 await channel.close()
                 queue.async { self.connections.removeValue(forKey: id) }
@@ -139,7 +124,42 @@ let result = SecPKCS12Import(identityData as CFData, [kSecImportExportPassphrase
 guard result == errSecSuccess else { throw ProbeError.identityImport(result) }
 guard let items = imported as? [[String: Any]], let value = items.first?[kSecImportItemIdentity as String] else { throw ProbeError.invalidInput }
 let identity = value as! SecIdentity
-let probe = try Probe(identity: identity, peerPublicKey: peer, negotiate: setup.negotiate == true, commandMessages: setup.commandMessages == true)
+if setup.negotiate == true {
+    let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+        phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
+    let enrolled = try DirectApprovalPeer(scope: scope, transportPublicKey: peer,
+        requests: setup.commandMessages == true ? [try ChannelRequestCapability(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])] : [],
+        auditVersions: [], maximumPayloadBytes: 65_536)
+    var enrolledPeers = [enrolled]
+    if let second = setup.secondPeerPublicKey {
+        guard let key = Data(base64Encoded: second) else { throw ProbeError.invalidInput }
+        enrolledPeers.append(try DirectApprovalPeer(scope: ChannelScope(macID: Data(repeating: 1, count: 16),
+            accountID: Data(repeating: 2, count: 16), phoneID: Data(repeating: 5, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16)),
+            transportPublicKey: key, requests: [], auditVersions: [], maximumPayloadBytes: 65_536))
+    }
+    let direct = try DirectApprovalListener(identity: identity, peers: enrolledPeers, binding: .loopback,
+        maximumConnections: setup.maximumConnections ?? 8,
+        timeoutMilliseconds: 4_000, event: { event in
+            switch event {
+            case .ready(let port): emit(["port": Int(port)])
+            case .failed: exit(1)
+            case .stopped: break
+            }
+        }, handler: { _, channel in
+            while let payload = try await channel.receive() { try await channel.send(payload) }
+        })
+    try direct.start()
+    DispatchQueue.global().async {
+        let command = getchar()
+        if command == 115 {
+            direct.close()
+            exit(getchar() == EOF ? 0 : 1)
+        }
+        exit(command == EOF ? 0 : 1)
+    }
+    withExtendedLifetime(direct) { dispatchMain() }
+}
+let probe = try Probe(identity: identity, peerPublicKey: peer)
 probe.start()
 DispatchQueue.global().async {
     // The controller keeps this pipe open. EOF also handles controller crashes. No further commands are accepted.
