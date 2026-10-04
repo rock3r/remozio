@@ -212,6 +212,10 @@ final class EnrollmentJournal {
     }
 
     func requireDirectPeer(_ peer: DirectApprovalPeer, revision: UUID) throws {
+        try requireDirectBinding(AuthorityPeerBinding(peer: peer, revision: revision))
+    }
+    func requireDirectBinding(_ peer: AuthorityPeerBinding) throws {
+        let revision = peer.revision
         let trust = try snapshot()
         guard revision == trust.revision else { throw EnrollmentJournalError.staleRevision }
         guard peer.scope.macID == mac, peer.scope.accountID == account,
