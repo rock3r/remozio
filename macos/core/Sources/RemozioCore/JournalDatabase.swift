@@ -256,7 +256,7 @@ public final class JournalDatabase {
         if version >= 9 { queries.append("SELECT operation,revision,kind,candidate,payload,signature FROM main.gateway_reconciled_controls_v1 LIMIT 0") }
         if version >= 10 { queries.append("SELECT phone,enrollment,operation,payload,signature FROM main.gateway_recovered_revocations_v1 LIMIT 0") }
         if version >= 11 { queries.append("SELECT phone,kind,operation,payload,signature FROM main.gateway_trust_restrictions_v1 LIMIT 0") }
-        if version >= 12 { queries.append("SELECT setup,phone,epoch,transcript FROM main.pairing_commits_v1 LIMIT 0") }
+        if version >= 12 { queries.append("SELECT setup,phone,epoch,transcript,proof FROM main.pairing_commits_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -374,8 +374,8 @@ public final class JournalTransaction {
         try withEnrollment(write: false) { try $0.committedPairing(setupID: setupID, phoneID: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch) }
     }
 
-    func retainPairing(_ transcript: PairingTranscript, enrollment: StoredApprovalEnrollment) throws {
-        try withEnrollment(write: true) { try $0.retainPairing(transcript, enrollment: enrollment) }
+    func retainPairing(_ transcript: PairingTranscript, biometricProof: Data, enrollment: StoredApprovalEnrollment) throws {
+        try withEnrollment(write: true) { try $0.retainPairing(transcript, biometricProof: biometricProof, enrollment: enrollment) }
     }
 
     /// The host verifies administrator authorization and the biometric enrollment proof before calling this method.

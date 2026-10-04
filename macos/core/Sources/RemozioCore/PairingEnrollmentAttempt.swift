@@ -100,7 +100,7 @@ public final class PairingEnrollmentAttempt {
             }
             let next = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: expected,
                 eventID: addEventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: head)
-            try transaction.retainPairing(transcript, enrollment: enrollment)
+            try transaction.retainPairing(transcript, biometricProof: biometricProof, enrollment: enrollment)
             let finished = now()
             guard finished.epoch == started.epoch, finished.milliseconds >= current.milliseconds,
                   finished.milliseconds < deadline else { throw PairingEnrollmentError.expired }
