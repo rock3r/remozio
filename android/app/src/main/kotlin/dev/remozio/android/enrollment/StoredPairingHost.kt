@@ -1,0 +1,56 @@
+package dev.remozio.android.enrollment
+
+import dev.remozio.phone.enrollment.EncryptedEnrollmentStore
+import dev.remozio.phone.enrollment.EnrollmentSnapshot
+import dev.remozio.phone.enrollment.PhoneEnrollment
+import dev.remozio.protocol.CborValue
+import dev.remozio.protocol.PairingProofPurpose
+import dev.remozio.protocol.PairingTranscript
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+/** Trusted setup entry point. The caller authenticates the Mac and verifies the human code before preparation. */
+internal class StoredPairingHost(
+    private val openForSetup: () -> EncryptedEnrollmentStore,
+    private val openExisting: () -> EncryptedEnrollmentStore?,
+    private val enrollmentAccess: Mutex,
+    private val invalidateLocked: (Set<CborValue.Bytes>) -> Unit,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+    suspend fun prepare(enrollment: PhoneEnrollment, transcript: PairingTranscript, expectedRevision: ULong,
+        minimumEnvelopeVersion: ULong, replacingRecordID: CborValue.Bytes? = null): EnrollmentSnapshot =
+        withContext(dispatcher) {
+            enrollmentAccess.withLock {
+                openForSetup().use { it.preparePairing(enrollment, transcript, expectedRevision, minimumEnvelopeVersion, replacingRecordID?.copyBytes()) }
+            }
+        }
+
+    /** Reconstructs the pending attempt from storage; network input cannot supply a replacement transcript. */
+    suspend fun activate(recordID: CborValue.Bytes, receipt: CborValue.Bytes): EnrollmentSnapshot = withContext(dispatcher) {
+        enrollmentAccess.withLock {
+            checkNotNull(openExisting()).use { store ->
+                val attempt = store.recoverPairing(recordID.copyBytes())
+                val row = store.snapshot().entries.single { it.enrollment.recordID == recordID }
+                require(attempt.transcript.verify(receipt.copyBytes(), row.enrollment.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
+                val affected = setOfNotNull(recordID, row.pairing?.replacingRecordID)
+                invalidateLocked(affected)
+                attempt.activate(store, receipt.copyBytes())
+            }
+        }
+    }
+
+    /** Local removal does not claim that the Mac has revoked the phone. */
+    suspend fun remove(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot = withContext(dispatcher) {
+        enrollmentAccess.withLock {
+            checkNotNull(openExisting()).use { store ->
+                require(store.snapshot().revision == expectedRevision)
+                require(store.snapshot().entries.any { it.enrollment.recordID == recordID })
+                invalidateLocked(setOf(recordID))
+                store.remove(recordID.copyBytes(), expectedRevision)
+            }
+        }
+    }
+}
