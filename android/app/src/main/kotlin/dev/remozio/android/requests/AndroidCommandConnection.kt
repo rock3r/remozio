@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.annotation.WorkerThread
 import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.android.transport.AndroidTransportIdentities
+import dev.remozio.android.transport.LocalNetworkSettings
+import dev.remozio.android.transport.androidDirectRoutes
 import dev.remozio.android.transport.AndroidTransportIdentity
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
 import dev.remozio.phone.requests.CommandMemoryBudget
@@ -15,7 +17,7 @@ import dev.remozio.protocol.ChannelRequestCapability
 import dev.remozio.protocol.ChannelScope
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Uses the saved relay route. LAN discovery and setup must never replace the enrolled inner TLS pin. */
+/** Direct-first routing uses the same enrolled TLS pin and protocol scope on every path. */
 @WorkerThread
 internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrollment, limits: RequestLimits, memoryBudget: CommandMemoryBudget? = null): CommandConnection {
     require(record.phase == EnrollmentPhase.ACTIVE)
@@ -23,28 +25,22 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
     try {
         return CommandConnection(record, limits, open = { scope, enrollment ->
             val e = record.enrollment
-            val credential = checkNotNull(e.relayCredential)
             var identity: AndroidTransportIdentity? = null
-            var carrier: EncryptedRecordTransport? = null
-            var engine: PinnedTLSClient? = null
-            var session: TLSRecordSession? = null
             var channel: NegotiatedTLSChannel? = null
             try {
                 identity = AndroidTransportIdentities.load(e.transportKey.alias, e.transportKey.publicKey.copyBytes())
-                carrier = RelayConnector().connect(scope, credential)
-                engine = PinnedTLSClient(arrayOf(identity.keyManager), e.transportPublicKey.copyBytes(), "remozio/1", 1_048_576)
-                session = TLSRecordSession(scope, engine, carrier)
-                channel = NegotiatedTLSChannel.connect(session,
+                val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), e.transportPublicKey.copyBytes(),
                     ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
                     listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(),
-                    maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES)
+                    maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES,
+                    trustedMinimum = record.pairing?.minimumEnvelopeVersion ?: 1u)
+                val relay = e.relayCredential?.let { credential -> ApprovalCarrierRoute { parent -> RelayConnector().connect(parent, credential) } }
+                channel = connector.connect(scope, androidDirectRoutes(context, e.macID.copyBytes()), relay,
+                    directTimeoutMillis = LocalNetworkSettings(context).timeoutSeconds() * 1000L)
                 val receiver = CommandRequestReceiver.bind(enrollment, channel, e.phoneID.copyBytes(), e.epoch.copyBytes(), RequestElapsedClock::now)
                 NativeCommandWire(receiver, channel, identity)
             } catch (failure: Throwable) {
                 channel?.close()
-                session?.close()
-                engine?.close()
-                carrier?.close()
                 identity?.close()
                 throw failure
             }
