@@ -2,6 +2,8 @@
 """Build and inspect the Mac app without launching it or registering services."""
 from pathlib import Path
 import plistlib
+import os
+import subprocess
 
 from macos_build_checks import require, run, verify_executable
 
@@ -21,6 +23,18 @@ def check(configuration):
     identity = 'dev.remozio.mac.debug' if configuration == 'Debug' else 'dev.remozio.mac'
     run('codesign', '--verify', '--deep', '--strict', str(app))
     verify_executable(app / 'Contents/MacOS/Remozio', identity)
+    authority = app / 'Contents/Library/LaunchServices/RemozioAuthority'
+    authority_identity = 'dev.remozio.authority.debug' if configuration == 'Debug' else 'dev.remozio.authority'
+    require(authority.is_file(), 'Missing embedded authority executable')
+    verify_executable(authority, authority_identity)
+    original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioAuthority'
+    require(authority.read_bytes() == original.read_bytes(), 'Embedding changed the signed authority executable')
+    usage = subprocess.run([str(authority)], text=True, capture_output=True, timeout=5)
+    require(usage.returncode == 64 and 'Usage:' in usage.stderr, 'Authority must reject missing configuration')
+    if os.geteuid() != 0:
+        denied = subprocess.run([str(authority), '--configuration', '/nonexistent/remozio.cbor'],
+                                text=True, capture_output=True, timeout=5)
+        require(denied.returncode == 77, 'Authority must reject non-root startup before reading configuration')
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     require(info['CFBundleIdentifier'] == identity, 'Unexpected bundle identity')
     require(info['LSMinimumSystemVersion'] == '26.0', 'Unexpected deployment target')

@@ -41,3 +41,15 @@ swift run --package-path macos/app SetupPreviewSnapshots /tmp/remozio-preview-sn
 ```
 
 This Debug-only helper renders empty, error, and scope states in light/dark appearance. It does not open the product app, register services, select real files, or contact providers. Native controls, file-picker interaction, keyboard focus, cancellation timing, and VoiceOver still need the interactive session.
+
+## Embedded authority
+
+The `RemozioAuthority` Xcode target is embedded at `Contents/Library/LaunchServices/RemozioAuthority`. Debug and Release use separate signing identifiers. The app does not launch it, and the bundle contains no launchd registration manifests yet.
+
+The executable accepts `--configuration /absolute/protected/configuration.cbor`. It requires root before reading configuration. It loads the protected configuration, opens its existing journal without initialization or migration, and starts `AuthorityService`. SIGTERM and SIGINT stop the listener before closing the journal. Startup diagnostics omit identifiers, paths, and raw errors.
+
+The trust-query service uses storage ceilings of 16 MiB, depth 32, and 262,144 CBOR items, with a five-second SQLite busy timeout and a one-million consumption-row ceiling. These are startup bounds for the current read-only RPC surface. Approval execution and configurable storage policy remain follow-up work.
+
+Protected installation must validate the executable identity and release build floor before activation. It must protect the launch path, provision the service account and journal, and load the correct launchd registration. This build target does not satisfy those installation gates by itself. Do not deploy the ad-hoc build as a privileged service.
+
+The packaging check runs only rejection paths: missing arguments and, as a normal user, non-root startup. It verifies the embedded binary's architecture, signature identity, and runtime flags. It does not start the listener or open a journal. Root activation, signal shutdown with live IPC, and pre-login recovery remain unproven.
