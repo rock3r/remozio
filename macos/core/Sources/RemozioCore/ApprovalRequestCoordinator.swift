@@ -157,6 +157,24 @@ public final class ApprovalRequestCoordinator {
         return try replace(requestID, phase: RequestLifecycle.transition(from: retained.phase, event: .present), reason: .none, now: now)
     }
 
+    /// Expires elapsed pending requests without phone traffic. Audit commits before any live state changes.
+    public func expirePending(now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> [ApprovalRequestState] {
+        try checkClock(now)
+        let expired = entries.keys.filter { id in
+            guard let retained = entries[id]?.retained else { return false }
+            return (retained.phase == .queued || retained.phase == .presented) && now.milliseconds >= retained.deadlineMilliseconds
+        }.sorted { $0.lexicographicallyPrecedes($1) }
+        try database.write { tx in
+            _ = try head(tx)
+            for id in expired {
+                guard let entry = entries[id] else { throw ApprovalCoordinatorError.unknownRequest }
+                try append(tx, requestID: id, category: entry.category, kind: .expired, outcome: .expired,
+                    reason: .authorizationExpired, receiptTimeMs: receiptTimeMs)
+            }
+        }
+        return try expired.map { try replace($0, phase: .expired, reason: .authorizationExpired, now: now) }
+    }
+
     /// A Mac-observed pending lifecycle change. A phone decline must use its signed decision instead.
     public func retirePending(requestID: Data, reason: PendingRequestRetirement, now: AuthorityMoment,
                               receiptTimeMs: UInt64?) throws -> ApprovalRequestState {

@@ -110,6 +110,46 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         wait(for: [operation, reader], timeout: 3)
         try journal.close()
     }
+    func testExpirySweepHandlesOnlyElapsedPendingRequestsOnce() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let queued = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        let presented = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        _ = try owner.markPresented(requestID: presented.requestID, now: now(), receiptTimeMs: 1001)
+        let later = try owner.admit(draft(deadline: 300), now: now(), receiptTimeMs: 1001)
+        let authorized = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        _ = try consume(owner, authorized)
+        XCTAssertTrue(try owner.expirePending(now: now(199), receiptTimeMs: 1099).isEmpty)
+        let expired = try owner.expirePending(now: now(200), receiptTimeMs: 1100)
+        XCTAssertEqual(Set(expired.map(\.requestID)), Set([queued.requestID, presented.requestID]))
+        XCTAssertTrue(expired.allSatisfy { $0.phase == .expired && $0.reason == .authorizationExpired })
+        XCTAssertEqual(try owner.state(requestID: later.requestID).phase, .queued)
+        XCTAssertEqual(try owner.state(requestID: authorized.requestID).phase, .authorized)
+        let count = try events(db, writer).count
+        XCTAssertTrue(try owner.expirePending(now: now(201), receiptTimeMs: 1101).isEmpty)
+        XCTAssertEqual(try events(db, writer).count, count)
+        try db.close()
+    }
+    func testExpirySweepRollsBackEveryRequestWhenLaterAuditInsertFails() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let first = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        let second = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        let count = try events(db, writer).count
+        try fixture.sql("CREATE TRIGGER fail_sweep BEFORE INSERT ON audit_records_v1 WHEN (SELECT COUNT(*) FROM audit_records_v1) > \(count) BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try owner.expirePending(now: now(200), receiptTimeMs: 1100))
+        XCTAssertEqual(try owner.state(requestID: first.requestID).phase, .queued)
+        XCTAssertEqual(try owner.state(requestID: second.requestID).phase, .queued)
+        XCTAssertEqual(try events(db, writer).count, count)
+        try fixture.sql("DROP TRIGGER fail_sweep")
+        XCTAssertEqual(try owner.expirePending(now: now(200), receiptTimeMs: 1100).count, 2)
+        try db.close()
+    }
+    func testExpirySweepRejectsClosedStorageEvenWhenEmpty() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        try db.close()
+        XCTAssertThrowsError(try owner.expirePending(now: now(200), receiptTimeMs: 1100)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .closed)
+        }
+    }
     private func decision(_ request: IssuedRequestPayload, decline: Bool = false) throws -> (Data, Data) {
         let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
             requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
