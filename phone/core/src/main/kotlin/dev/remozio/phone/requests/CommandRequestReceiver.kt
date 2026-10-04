@@ -7,8 +7,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 
-class RequestCapacityException : IOException("Request memory capacity reached")
-
 internal interface RequestMessageChannel : AutoCloseable {
     val scope: ChannelScope
     val supportsCommands: Boolean
@@ -54,11 +52,6 @@ class CommandRequestReceiver private constructor(
         } catch (cancelled: CancellationException) {
             kotlin.coroutines.coroutineContext.ensureActive()
             if (!closed.get()) throw cancelled
-        } catch (failure: InboxException) {
-            if (!closed.get()) {
-                if (failure.reason == InboxRejection.CAPACITY) throw RequestCapacityException()
-                throw IOException("Request delivery stopped")
-            }
         } catch (_: Exception) { if (!closed.get()) throw IOException("Request delivery stopped") }
         finally { close() }
     }

@@ -40,6 +40,7 @@ internal class CommandConnection(
     private val state = MutableStateFlow(CommandConnectionState.DISCONNECTED)
     val connectionState = state.asStateFlow()
     val requests get() = enrollment.requestSessions
+    val capacityLimited get() = enrollment.capacityLimited
 
     init {
         require(record.phase == EnrollmentPhase.ACTIVE)
@@ -70,7 +71,6 @@ internal class CommandConnection(
                 }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (capacity: RequestCapacityException) { throw capacity }
         catch (_: Exception) { throw IOException("Command connection unavailable") }
         finally {
             synchronized(monitor) {
