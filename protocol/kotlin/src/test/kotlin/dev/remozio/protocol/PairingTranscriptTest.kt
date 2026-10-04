@@ -45,7 +45,7 @@ class PairingTranscriptTest {
         assertFalse(transcript.verify(signature, publicKey, PairingProofPurpose.MAC_COMMIT))
         val limits = CborLimits(132000, 4, 80)
         val fields = (DeterministicCbor.decode(transcript.encode(), limits) as CborValue.Fields).values
-        for (field in listOf(1uL, 2uL, 10uL)) {
+        for (field in listOf(1uL, 2uL, 10uL, 12uL)) {
             val changed = (fields.getValue(field) as CborValue.Bytes).copyBytes().also { it[0] = (it[0].toInt() xor 1).toByte() }
             val altered = PairingTranscript.decode(DeterministicCbor.encode(CborValue.Fields(fields + (field to CborValue.Bytes(changed))), limits))
             assertFalse(altered.verify(signature, publicKey, PairingProofPurpose.PHONE_BIOMETRIC))

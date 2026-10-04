@@ -34,7 +34,7 @@ Use deterministic CBOR. The outer map allows exactly keys 0 through 14. Unknown 
 | 9 | Three key rows in transport, decision, biometric order |
 | 10 | Fresh 32-byte enrollment notification tag |
 | 11 | Null for add, or [old phone ID, old enrollment epoch] for replacement |
-| 12 | Expected Mac trust revision |
+| 12 | Expected opaque 16-byte Mac trust revision |
 | 13 | Issue time, unsigned Unix milliseconds |
 | 14 | Expiry time, unsigned Unix milliseconds, after issue time |
 

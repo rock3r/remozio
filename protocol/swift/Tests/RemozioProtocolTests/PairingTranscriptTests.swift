@@ -40,7 +40,7 @@ final class PairingTranscriptTests: XCTestCase {
         XCTAssertFalse(try transcript.verify(signature: signature, publicKey: key.publicKey.x963Representation, purpose: .macCommit))
         let limits = try CBORLimits(maxBytes: 132000, maxDepth: 4, maxItems: 80)
         guard case let .map(fields) = try DeterministicCBOR.decode(transcript.encode(), limits: limits) else { return XCTFail() }
-        for field: UInt64 in [1, 2, 10] {
+        for field: UInt64 in [1, 2, 10, 12] {
             var changed = fields
             guard case var .bytes(bytes) = fields[field] else { return XCTFail() }
             bytes[0] ^= 1; changed[field] = .bytes(bytes)
