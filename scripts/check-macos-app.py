@@ -27,6 +27,7 @@ def check(configuration):
     authority_identity = 'dev.remozio.authority.debug' if configuration == 'Debug' else 'dev.remozio.authority'
     require(authority.is_file(), 'Missing embedded authority executable')
     verify_executable(authority, authority_identity)
+    run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(authority))
     original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioAuthority'
     require(authority.read_bytes() == original.read_bytes(), 'Embedding changed the signed authority executable')
     usage = subprocess.run([str(authority)], text=True, capture_output=True, timeout=5)
