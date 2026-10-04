@@ -38,34 +38,32 @@ Retain the returned revision with the listener. Before using a channel under the
 
 Journal tests cover empty and legacy snapshots, restart with a retained higher floor, a higher local floor, invalid proofs, contract and feature filtering, 64/65/128-feature boundaries, revocation, trust restriction of one among two phones, and stale or forged bindings. The higher-floor fixture tests retention; it does not add protocol-version-2 support.
 
-## Journal-owned listener lifecycle
+## Dedicated transport lifecycle
 
-`DirectApprovalHost` takes exclusive ownership of the journal and serializes its operations on an actor. It creates the native listener from the protected snapshot. An empty snapshot stops listening. A trust revision change closes the old listener and its channels before constructing the replacement. Ordinary writes with unchanged trust keep the current listener.
+`DirectApprovalTransportHost` runs in the dedicated, unprivileged transport service. It holds the transport identity and listener. It never owns the protected journal or authority key. The root authority remains behind authenticated local IPC.
 
-Each authenticated channel receives an opaque session with its listener generation and trust revision. A handler must call `transaction(session:)` for every journal operation. That method rechecks the generation and current enrollment in the same transaction as the operation. It never suspends inside that transaction. A session from an old listener fails even after stop/start with the same durable revision. Late events from an old listener cannot change the current state.
+The IPC owner supplies a protected `DirectApprovalTrust` snapshot and a validator that contacts the authority. It must authenticate the source, reject stale connection incarnations, and order trust updates before calling `replaceTrust`. Those IPC messages and their process authentication remain service integration work; this host does not implement that boundary.
 
-Policy changes close the listener before applying new limits or protocol floors. Listener creation failures leave the host in `failed` state. If a journal write already committed, a subsequent listener failure does not report that write as rolled back. The caller reads the host state separately and can retry `start()`. `stop()` closes channels while retaining the journal. `close()` stops listening and closes the journal permanently. The service must call `close()` during shutdown.
+A new snapshot closes the old listener and its channels before constructing a replacement. Empty peers stop listening. Policy changes use a new snapshot even if the journal revision is unchanged. `start()` is idempotent while the listener exists. Send snapshots on changes, not on an unchanged polling interval.
+
+Each channel receives a session bound to its listener generation and trust revision. Admission contacts the authority. `validate(session)` contacts it again and rechecks the local generation after the asynchronous reply. Replacement, shutdown, or authority disconnect during validation rejects the late result. This check grants no execution permit. The root operation must independently check enrollment and consumption atomically with its decision.
 
 ```mermaid
 sequenceDiagram
     participant Phone
-    participant Host as DirectApprovalHost actor
-    participant Journal
-    participant Listener
-    Phone->>Host: Authenticated session operation
-    Host->>Journal: Check generation, revision and enrollment; perform transaction
-    Journal-->>Host: Commit result
-    Host->>Journal: Read current listener trust
-    alt Trust changed
-        Host->>Listener: Close old channels
-        Host->>Listener: Start replacement if eligible peers remain
-    end
-    Host-->>Phone: Operation result
+    participant Transport as Dedicated transport service
+    participant Root as Root authority
+    Phone->>Transport: Pinned TLS connection
+    Transport->>Root: Validate peer and trust revision over authenticated IPC
+    Root-->>Transport: Current binding result
+    Transport->>Transport: Recheck listener generation
+    Root->>Transport: Authenticated trust update
+    Transport->>Transport: Close old channels; replace listener
 ```
 
-The synchronous transaction callback belongs to trusted service code. It must use the existing decision verifiers and cannot retain a transaction for later work. Returning data for asynchronous transport is not a final dispatch check. Request delivery still needs its negotiated-feature check and the coordinator's final handoff check.
+`authorityDisconnected()` closes channels and discards the snapshot. Reconnection needs a fresh authenticated snapshot. `stop()` retains current trust for an explicit restart; `close()` permanently stops the host. The service must call `close()` during shutdown. Listener creation failure is visible as `failed` and can be retried with `start()`.
 
-Lifecycle tests use a disposable real journal and a listener fixture. They cover revocation, stale sessions, policy replacement, stop/start, late events, rollback, unchanged trust, and a listener failure after a committed enrollment. The native listener's separate loopback tests cover TLS and channel cancellation. These tests do not prove the product service is installed or wired to request delivery.
+Lifecycle tests use synthetic trust and authority fixtures. They cover revocation, policy replacement, stale events and sessions, authority disconnect during validation, repeated validation, wrong scope, and failure recovery. Separate journal tests establish snapshot construction; native loopback tests establish TLS and channel cancellation. These tests do not prove authenticated IPC or product service installation.
 
 ## Evidence and remaining integration
 

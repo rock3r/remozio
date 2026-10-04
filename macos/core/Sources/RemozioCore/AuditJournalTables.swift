@@ -8,7 +8,7 @@ public enum AuditJournalError: Error, Equatable {
 }
 
 /// An epoch created by this table owner. Persisted epochs cannot acquire a new writer through this API.
-public final class AuditEpochWriter: Sendable {
+public final class AuditEpochWriter {
     fileprivate let owner: UUID
     public let epoch: Data
     fileprivate init(owner: UUID, epoch: Data) { self.owner = owner; self.epoch = epoch }
