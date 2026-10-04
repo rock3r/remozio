@@ -66,8 +66,9 @@ class EncryptedEnrollmentStore private constructor(
         return commit(state.entries + StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED))
     }
 
-    /** The setup owner verifies administrator authorization and phone biometric proof before this call. */
-    @Synchronized fun activate(recordID: ByteArray, expectedRevision: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot {
+    /** Internal transition used by the receipt-verifying pairing owner. */
+    @JvmSynthetic
+    @Synchronized internal fun activate(recordID: ByteArray, expectedRevision: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot {
         checkRevision(expectedRevision)
         val identifier = id(recordID)
         val prepared = state.entries.single { it.enrollment.recordID == identifier }

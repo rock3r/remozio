@@ -28,7 +28,7 @@ class StoredMacInventoryTest {
         val storage = Storage()
         val store = create(storage)
         val first = record(1); val second = record(2); val removed = record(3)
-        store.prepare(first, 0u); store.activate(first.recordID.copyBytes(), 1u)
+        store.prepare(first, 0u); store.activateSyntheticEnrollment(first.recordID.copyBytes(), 1u)
         store.prepare(second, 2u)
         store.prepare(removed, 3u); store.remove(removed.recordID.copyBytes(), 4u)
         val before = storage.writes

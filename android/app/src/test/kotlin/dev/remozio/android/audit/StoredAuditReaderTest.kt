@@ -47,7 +47,7 @@ class StoredAuditReaderTest {
             val authority = keys()
             val record = record(n, authority, mac)
             enrollment.prepare(record, revision++)
-            if (active) enrollment.activate(record.recordID.copyBytes(), revision++)
+            if (active) enrollment.activateSyntheticEnrollment(record.recordID.copyBytes(), revision++)
             if (removed) enrollment.remove(record.recordID.copyBytes(), revision++)
             return Archive(record, authority).also { archives[record.macID] = it }
         }
