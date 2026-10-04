@@ -28,6 +28,17 @@ final class AuthorityServiceTests: XCTestCase {
         let reopened = try database(fixture, initialize: false)
         try reopened.close()
     }
+    func testServiceClosesSuppliedJournalOwner() throws {
+        let fixture = try Fixture()
+        let journal = AuthorityJournal(database: try database(fixture))
+        let service = try AuthorityService(configuration: configuration(fixture), journal: journal)
+        XCTAssertFalse(try journal.read { try $0.approvalTrustSnapshot().allowedContracts.isEmpty })
+        try service.close()
+        XCTAssertThrowsError(try journal.read { try $0.approvalTrustSnapshot().revision }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .closed)
+        }
+        try assertReleased(fixture)
+    }
     func testCloseBeforeStartReleasesLeaseAndPreventsStart() throws {
         let fixture = try Fixture()
         let service = try AuthorityService(configuration: configuration(fixture), database: database(fixture))
