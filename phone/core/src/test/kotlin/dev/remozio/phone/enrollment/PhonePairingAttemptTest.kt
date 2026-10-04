@@ -37,20 +37,22 @@ class PhonePairingAttemptTest {
         Signature.getInstance("SHA256withECDSAinP1363Format").run {
             initSign(authority.private); update(t.signingInput(purpose)); sign()
         }
-    private fun store(): EncryptedEnrollmentStore {
+    private class Disk {
         val storage = object : EnrollmentStorage {
             var bytes: ByteArray? = null
             override fun read(maximumBytes: Int) = bytes?.copyOf()
             override fun replace(ciphertext: ByteArray) { bytes = ciphertext.copyOf() }
             override fun close() { }
         }
-        return EncryptedEnrollmentStore.create(storage,
-            EnrollmentCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey(), 65_536), 10)
+        val cipher = EnrollmentCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey(), 65_536)
+        fun create() = EncryptedEnrollmentStore.create(storage, cipher, 10)
+        fun open() = EncryptedEnrollmentStore.open(storage, cipher, 10)
     }
+    private fun store() = Disk().create()
 
     @Test fun onlyTheExactMacReceiptActivatesAndReplayCannotReviveRemoval() {
         val store = store(); val e = record(1); val t = transcript(e)
-        val prepared = store.prepare(e, 0u).entries.single()
+        val prepared = store.preparePairing(e, t, 0u, 1u).entries.single()
         val attempt = PhonePairingAttempt(t, prepared, null, 1u)
         assertFailsWith<IllegalArgumentException> { attempt.activate(store, ByteArray(64)) }
         assertFailsWith<IllegalArgumentException> { attempt.activate(store, sign(t, PairingProofPurpose.PHONE_BIOMETRIC)) }
@@ -64,7 +66,7 @@ class PhonePairingAttemptTest {
 
     @Test fun receiptCannotAuthorizeDifferentLocallyPreparedMaterial() {
         val e = record(1); val other = record(2); val t = transcript(e)
-        val encoded = (EnrollmentEncoding.encode(StoredPhoneEnrollment(e, EnrollmentPhase.PREPARED)) as CborValue.Fields).values
+        val encoded = (EnrollmentEncoding.encode(StoredPhoneEnrollment(e, EnrollmentPhase.PREPARED, PreparedPairing(t, null, 1u))) as CborValue.Fields).values
         val different = (EnrollmentEncoding.encode(StoredPhoneEnrollment(other, EnrollmentPhase.PREPARED)) as CborValue.Fields).values
         for (field in listOf(3uL, 4uL, 7uL, 8uL, 9uL, 10uL, 11uL)) {
             val changed = EnrollmentEncoding.decode(CborValue.Fields(encoded + (field to different.getValue(field))))
@@ -73,15 +75,30 @@ class PhonePairingAttemptTest {
         assertFailsWith<IllegalArgumentException> {
             PhonePairingAttempt(t, StoredPhoneEnrollment(e, EnrollmentPhase.PREPARED), null, 2u)
         }
-        val store = store(); store.prepare(e, 0u)
+        val store = store(); store.preparePairing(e, t, 0u, 1u)
         val attempt = PhonePairingAttempt(t, store.snapshot().entries.single(), null, 1u)
         assertFailsWith<IllegalArgumentException> { attempt.activate(store, sign(transcript(other))) }
+    }
+
+    @Test fun preparedTranscriptSurvivesReopenAndRemovedSetupCannotRecover() {
+        val disk = Disk(); val store = disk.create(); val e = record(1); val t = transcript(e)
+        store.preparePairing(e, t, 0u, 1u); store.close()
+        val reopened = disk.open(); val recovered = reopened.recoverPairing(e.recordID.copyBytes())
+        assertContentEquals(t.encode(), recovered.transcript.encode())
+        assertFailsWith<IllegalArgumentException> { recovered.activate(reopened, sign(PairingTranscript.decode(DeterministicCbor.encode(
+            CborValue.Fields((DeterministicCbor.decode(t.encode(), CborLimits(132000, 4, 80)) as CborValue.Fields).values +
+                (1uL to CborValue.Bytes(id(99)))), CborLimits(132000, 4, 80))))) }
+        recovered.activate(reopened, sign(t))
+        reopened.remove(e.recordID.copyBytes(), 2u); reopened.close()
+        val removed = disk.open()
+        assertFailsWith<IllegalArgumentException> { removed.recoverPairing(e.recordID.copyBytes()) }
     }
 
     @Test fun replacementRequiresTheExactActiveLocalSelection() {
         val store = store(); val old = record(1); val next = record(2)
         store.prepare(old, 0u); val active = store.activate(old.recordID.copyBytes(), 1u).entries.single()
-        val prepared = store.prepare(next, 2u).entries.last(); val t = transcript(next, old)
+        val t = transcript(next, old)
+        val prepared = store.preparePairing(next, t, 2u, 1u, old.recordID.copyBytes()).entries.last()
         assertFailsWith<IllegalArgumentException> { PhonePairingAttempt(t, prepared, null, 1u) }
         assertFailsWith<IllegalArgumentException> { PhonePairingAttempt(transcript(next), prepared, active, 1u) }
         assertFailsWith<IllegalArgumentException> {

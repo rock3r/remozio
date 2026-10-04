@@ -19,6 +19,10 @@ class PhonePairingAttempt(
 
     init {
         require(prepared.phase == EnrollmentPhase.PREPARED)
+        val retained = requireNotNull(prepared.pairing)
+        require(retained.transcript.encode().contentEquals(transcript.encode()))
+        require(retained.minimumEnvelopeVersion == minimumEnvelopeVersion)
+        require(retained.replacingRecordID == replacementID)
         require(transcript.minimumEnvelopeVersion == minimumEnvelopeVersion)
         require(transcript.phone.scope == ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),
             enrollment.phoneID.copyBytes(), enrollment.epoch.copyBytes()))

@@ -116,7 +116,7 @@ class EncryptedEnrollmentStoreTest {
         assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher(), 10) }
         storage.bytes = storage.bytes!!.also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
         assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
-        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(2u),
+        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(3u),
             1uL to CborValue.Unsigned(0u), 2uL to CborValue.ArrayValue(emptyList()))), CborLimits(100, 3, 10)))
         assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
         assertEquals(1, storage.writes)
@@ -134,7 +134,7 @@ class EncryptedEnrollmentStoreTest {
     @Test fun rejectsDuplicateAndAmbiguousRowsOnLoad() {
         val cipher = cipher(); val storage = Storage(); val a = record(1)
         val row = EnrollmentEncoding.encode(StoredPhoneEnrollment(a, EnrollmentPhase.ACTIVE))
-        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u),
+        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(2u),
             1uL to CborValue.Unsigned(5u), 2uL to CborValue.ArrayValue(listOf(row, row)))), CborLimits(65_536, 8, 1_000)))
         assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
         assertEquals(0, storage.writes)
@@ -153,9 +153,9 @@ class EncryptedEnrollmentStoreTest {
         val cipher = cipher(); val a = record(1)
         val valid = (EnrollmentEncoding.encode(StoredPhoneEnrollment(a, EnrollmentPhase.PREPARED)) as CborValue.Fields).values
         val changedBiometric = (valid.getValue(10u) as CborValue.Fields).values.toMutableMap().apply { this[2u] = a.decisionKey.publicKey }
-        for (changed in listOf(valid + (14uL to CborValue.Null), valid + (13uL to CborValue.Unsigned(99u)), valid + (10uL to CborValue.Fields(changedBiometric)))) {
+        for (changed in listOf(valid + (15uL to CborValue.Null), valid + (13uL to CborValue.Unsigned(99u)), valid + (10uL to CborValue.Fields(changedBiometric)))) {
             val storage = Storage()
-            storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u),
+            storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(2u),
                 1uL to CborValue.Unsigned(1u), 2uL to CborValue.ArrayValue(listOf(CborValue.Fields(changed))))), CborLimits(65_536, 8, 1_000)))
             assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
             assertEquals(0, storage.writes)
@@ -170,11 +170,26 @@ class EncryptedEnrollmentStoreTest {
         assertFailsWith<IllegalArgumentException> { store.prepare(record(3, scope = 1, tag = a.enrollmentTag.copyBytes()), 2u) }
         store.remove(a.recordID.copyBytes(), 2u)
         assertFailsWith<IllegalArgumentException> { store.prepare(duplicate, 3u) }
-        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u),
+        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(0uL to CborValue.Unsigned(2u),
             1uL to CborValue.Unsigned(4u), 2uL to CborValue.ArrayValue(listOf(
                 EnrollmentEncoding.encode(StoredPhoneEnrollment(a, EnrollmentPhase.REMOVED)),
                 EnrollmentEncoding.encode(StoredPhoneEnrollment(duplicate, EnrollmentPhase.PREPARED)))))), CborLimits(65_536, 8, 1_000)))
         assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
+    }
+
+    @Test fun legacyArchiveLoadsWithoutInventingPairingAndMigratesOnWrite() {
+        val storage = Storage(); val cipher = cipher(); val a = record(1)
+        val modern = (EnrollmentEncoding.encode(StoredPhoneEnrollment(a, EnrollmentPhase.PREPARED)) as CborValue.Fields).values
+        storage.bytes = cipher.encrypt(DeterministicCbor.encode(CborValue.Fields(mapOf(
+            0uL to CborValue.Unsigned(1u), 1uL to CborValue.Unsigned(7u),
+            2uL to CborValue.ArrayValue(listOf(CborValue.Fields(modern - 14uL))))), CborLimits(65_536, 8, 1000)))
+        val store = EncryptedEnrollmentStore.open(storage, cipher, 10)
+        assertNull(store.snapshot().entries.single().pairing)
+        assertFailsWith<IllegalArgumentException> { store.recoverPairing(a.recordID.copyBytes()) }
+        store.remove(a.recordID.copyBytes(), 7u); store.close()
+        val fields = (DeterministicCbor.decode(cipher.decrypt(storage.bytes!!), CborLimits(65_536, 8, 1000)) as CborValue.Fields).values
+        assertEquals(CborValue.Unsigned(2u), fields[0u])
+        assertEquals(EnrollmentPhase.REMOVED, EncryptedEnrollmentStore.open(storage, cipher, 10).snapshot().entries.single().phase)
     }
 
     @Test fun configurationPreflightRejectsLimitsThatCannotInitializeTheArchive() {

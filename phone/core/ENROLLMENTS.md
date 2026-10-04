@@ -52,7 +52,7 @@ sequenceDiagram
 
 Every mutation checks the current archive revision. Storage failure prevents further snapshots and mutations from that owner. Reopen reads the actual durable result. The host reconciles by record ID and phase instead of blindly repeating setup or removal.
 
-Creation and opening are separate operations. Missing, malformed, incompatible, oversized, or unauthentic archives are never reset. Version 1 uses strict deterministic CBOR inside a purpose-bound AES-256-GCM envelope. Unknown fields, phases, and schemas fail. Each encryption uses the provider's fresh nonce and a 128-bit authentication tag.
+Creation and opening are separate operations. Missing, malformed, incompatible, oversized, or unauthentic archives are never reset. Version 2 uses strict deterministic CBOR inside a purpose-bound AES-256-GCM envelope. Unknown fields, phases, and schemas fail. Each encryption uses the provider's fresh nonce and a 128-bit authentication tag.
 
 Storage limits are explicit caller inputs: at most 1,024 retained records and 16 MiB of plaintext. Removed records count toward the limit. The empty archive must fit before the Android adapter creates any persistent key or file. No automatic pruning or product retention default is selected.
 
@@ -88,4 +88,8 @@ Activation verifies the Mac commit signature with the authority key from that lo
 
 A receipt may arrive after the setup deadline because the Mac could have committed before expiry. Only the Mac's commit receipt can finish that ambiguous setup; an elapsed timeout does not prove failure. The host must independently authenticate the Mac and verify the human transcript before constructing this owner. It must hold the application enrollment mutex and invalidate runtime owners before activation.
 
-This owner remains in memory. Persisting the exact transcript with PREPARED state, recovering receipts after a process restart, native biometric enrollment signing, and the setup UI remain separate integration work. Reconstructing an owner from a newly received network transcript is not recovery. No network enrollment endpoint is added here.
+`preparePairing` atomically retains the canonical transcript, local protocol floor, and selected replacement record ID with the PREPARED enrollment. Call it after independent Mac authentication and human verification, before sending the biometric proof. `recoverPairing` reconstructs the owner only from this authenticated local state. A newly received network transcript cannot replace the retained one. Removed or already active setups cannot resume activation.
+
+Archive version 2 adds this optional pairing metadata. Version 1 archives load without inventing missing transcripts and migrate on the next successful write. Legacy prepared rows need a new authorized setup; existing active pairings remain intact. The existing archive byte limit also bounds retained transcripts.
+
+Native biometric enrollment signing, receipt transport retries, and the setup UI remain separate integration work. No network enrollment endpoint is added here.
