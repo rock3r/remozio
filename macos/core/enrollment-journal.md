@@ -75,7 +75,7 @@ The caller-supplied phone-trust overloads are internal fixture paths. Push regis
 
 ## Schema and evidence
 
-Root journal schema 11 retains authority policy, enrollment tables, and routing state. It preserves gateway acknowledgments, recovered delivery receipts, and recovered revocations, and adds unknown trust restrictions. Explicit migrations accept source versions 1 through 10.
+Root journal schema 12 retains authority policy, enrollment tables, and routing state. It preserves gateway acknowledgments, recovered delivery receipts, and recovered revocations, and retains unknown trust restrictions. Schema 12 adds pairing commit transcripts. Explicit migrations accept source versions 1 through 11.
 Existing audit, consumption, and gateway state survive migration. No migration creates enrollment authority from those records.
 A valid local database alone does not prove freshness against a complete backup restore. [Whole-Mac backup rollback is outside the accepted guarantee](../../docs/design-decisions.md#whole-mac-backup-rollback). Protected-state checks, replay prevention and ordinary crash recovery remain required.
 
@@ -100,3 +100,11 @@ Admission requires a trusted local wall-clock sample within the signed issue and
 The elapsed clock is checked after proof validation and immediately before the transaction returns. Expiry, clock changes, and regression reject the commit. The successful journal write advances the opaque trust revision, so the same proof cannot commit twice, including after reopening the database.
 
 This owner does not implement Authorization Services, human verification UI, setup transport, persisted prepared attempts, or signed receipt recovery. The host must recheck administrator authorization before commit and sign a receipt only after durable success. A process restart requires a new authorized attempt until setup recovery is integrated. No production enrollment endpoint is enabled by this component.
+
+## Pairing receipt recovery
+
+Schema 12 retains the canonical pairing transcript in `pairing_commits_v1`. The pairing owner stores it in the same transaction as enrollment and audit changes. A failed or expired commit leaves no receipt material. Each enrollment can retain one transcript; the existing enrollment limit bounds row count. Each transcript is limited to 132,000 bytes.
+
+After a restart, `committedPairing` returns the transcript only for the exact setup ID and active phone/epoch. The host obtains phone identity from its authenticated channel. Restricted or revoked phones receive no transcript. Recovery does not add keys, change trust, or append another audit event. The host signs the retained transcript with the Mac authority key using the `macCommit` purpose. The original setup expiry does not invalidate a completed commit.
+
+Migration preserves old enrollments without inventing pairing transcripts. Uncommitted attempts still require fresh local authorization after a restart. Transport delivery and authority-key receipt signing remain host integration work; unit tests use disposable software keys.
