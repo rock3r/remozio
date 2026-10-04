@@ -73,6 +73,46 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
     private func host(_ listeners: Listeners) -> DirectApprovalTransportHost {
         DirectApprovalTransportHost(macID: mac, accountID: account, factory: { _, _, _, _ in listeners.make() }, validatePeer: { _, _ in })
     }
+    func testServiceStartsAfterTrustAndRetiresOnClose() async throws {
+        let listeners = Listeners(), host = host(listeners), feed = feed(try Driver(trust()))
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        try await service.start()
+        XCTAssertEqual(listeners.values.count, 1)
+        do { try await service.start(); XCTFail("Duplicate start accepted") } catch { }
+        await service.close(); await service.close()
+        XCTAssertTrue(try XCTUnwrap(listeners.values.first).isClosed)
+        let state = await service.state; XCTAssertEqual(state, .stopped)
+        do { try await service.start(); XCTFail("Closed service restarted") } catch { }
+    }
+    func testServiceCloseBeforeStartNeverOpensListener() async throws {
+        let listeners = Listeners(), host = host(listeners), feed = feed(try Driver(trust()))
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        await service.close()
+        do { try await service.start(); XCTFail("Closed service started") } catch { }
+        XCTAssertTrue(listeners.values.isEmpty)
+    }
+    func testServiceCloseDuringHandshakePreventsLateListener() async throws {
+        let driver = try Driver(trust()), listeners = Listeners(), host = host(listeners), feed = feed(driver)
+        driver.holdSnapshot()
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        let starting = Task { try await service.start() }
+        await fulfillment(of: [driver.snapshotSent], timeout: 2)
+        await service.close(); driver.finishSnapshot()
+        do { try await starting.value; XCTFail("Closed startup succeeded") } catch { }
+        XCTAssertTrue(listeners.values.isEmpty)
+        let state = await service.state; XCTAssertEqual(state, .stopped)
+    }
+    func testServiceRejectsWrongScopeBeforeOpeningListener() async throws {
+        let listeners = Listeners(), host = host(listeners)
+        let driver = try Driver(trust())
+        let feed = AuthorityTrustFeed(macID: Data(repeating: 9, count: 16), accountID: account,
+            factory: { AuthorityXPCChannel(driver: driver, onClose: $0) })
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        do { try await service.start(); XCTFail("Wrong scope accepted") } catch { }
+        XCTAssertTrue(listeners.values.isEmpty)
+        let state = await service.state; XCTAssertEqual(state, .stopped)
+        do { try await service.start(); XCTFail("Failed service restarted") } catch { }
+    }
     func testUnchangedRefreshKeepsListenerAndRevocationStopsIt() async throws {
         let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
         try await feed.start(host: host); try await host.start()
