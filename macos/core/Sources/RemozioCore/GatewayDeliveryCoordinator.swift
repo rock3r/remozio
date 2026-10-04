@@ -92,14 +92,13 @@ public actor GatewayDeliveryCoordinator {
         let wakeSender: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
         if wakePolicy != nil { wakeSender = { try await sender.send($0, accessToken: $1) } }
         else { wakeSender = nil }
+        let clock = try AuthorityClock(epoch: clockEpoch)
         try self.init(database: database, identity: identity, tokens: tokens, policy: policy, sample: {
             let wall = Date().timeIntervalSince1970 * 1000
             guard wall.isFinite, wall >= 0, wall < Double(UInt64.max) else { throw GatewayDeliveryError.invalidClock }
-            var timebase = mach_timebase_info_data_t()
-            guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom != 0 else { throw GatewayDeliveryError.invalidClock }
-            let millis = Double(mach_continuous_time()) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000
-            guard millis.isFinite, millis >= 0, millis < Double(UInt64.max) else { throw GatewayDeliveryError.invalidClock }
-            return Sample(wall: UInt64(wall), moment: AuthorityMoment(epoch: clockEpoch, milliseconds: UInt64(millis)))
+            let moment: AuthorityMoment
+            do { moment = try clock.now() } catch { throw GatewayDeliveryError.invalidClock }
+            return Sample(wall: UInt64(wall), moment: moment)
         }, sleep: { try await Task.sleep(for: .milliseconds($0)) }, send: { try await sender.send($0, accessToken: $1) },
             wakePolicy: wakePolicy, sendWake: wakeSender)
     }
