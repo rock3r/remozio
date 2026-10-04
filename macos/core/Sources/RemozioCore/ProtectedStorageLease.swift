@@ -23,7 +23,7 @@ final class ProtectedStorageLease {
     init(anchor: String, relativeDirectory: String, owner: uid_t, ancestorOwner: uid_t, databaseName: String) throws {
         let components = relativeDirectory.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !components.isEmpty, !anchor.utf8.contains(0),
-              ["journal.sqlite", "gateway.sqlite"].contains(databaseName),
+              ["journal.sqlite", "gateway.sqlite", "continuity.sqlite"].contains(databaseName),
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }) else {
             throw JournalLeaseError.invalidPath
         }
