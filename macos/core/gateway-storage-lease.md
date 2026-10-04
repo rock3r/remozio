@@ -58,3 +58,5 @@ Normal-user fixtures override the internal test anchor and ancestor owner. That 
 
 No service account, root-owned fixture or privileged installation was created. A real mixed-ownership path under the installed service UID still needs validation.
 Gateway SQLite ownership, candidate admission, durable replay checks and service setup remain subsequent work.
+
+Protected storage also requires a root-owned local mount (`f_owner == 0`). This applies to every ancestor and private file during acquisition and revalidation. A user-owned mount cannot supply trusted journal, gateway, or service configuration state, even when its files report suitable owners and permissions. This uses the same mount validator as protected executable paths. Synthetic mount metadata tests cover root-owned local acceptance, user-owned local rejection, and remote rejection. A live disk-image mount experiment remains unperformed.

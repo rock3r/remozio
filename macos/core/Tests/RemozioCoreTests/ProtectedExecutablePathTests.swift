@@ -99,14 +99,14 @@ final class ProtectedExecutablePathTests: XCTestCase {
         var filesystem = statfs()
         filesystem.f_flags = UInt32(MNT_LOCAL)
         filesystem.f_owner = 0
-        XCTAssertNoThrow(try ProtectedExecutablePath.validateMount(filesystem))
+        XCTAssertNoThrow(try ProtectedStorageMetadata.validateMount(filesystem))
         filesystem.f_owner = 501
-        XCTAssertThrowsError(try ProtectedExecutablePath.validateMount(filesystem)) {
+        XCTAssertThrowsError(try ProtectedStorageMetadata.validateMount(filesystem)) {
             XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
         }
         filesystem.f_owner = 0
         filesystem.f_flags = 0
-        XCTAssertThrowsError(try ProtectedExecutablePath.validateMount(filesystem))
+        XCTAssertThrowsError(try ProtectedStorageMetadata.validateMount(filesystem))
     }
 
 }

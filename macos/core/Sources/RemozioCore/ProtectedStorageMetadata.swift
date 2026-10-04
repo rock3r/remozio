@@ -8,8 +8,13 @@ enum ProtectedStorageMetadata {
               directory || info.st_nlink == 1 else { throw JournalLeaseError.unsafeMetadata }
         var filesystem = statfs()
         guard fstatfs(fd, &filesystem) == 0 else { throw JournalLeaseError.system(errno) }
-        guard filesystem.f_flags & UInt32(MNT_LOCAL) != 0 else { throw JournalLeaseError.unsafeMetadata }
+        try validateMount(filesystem)
         try accessList(fd, privateObject: privateObject)
+    }
+    static func validateMount(_ filesystem: statfs) throws {
+        guard filesystem.f_flags & UInt32(MNT_LOCAL) != 0, filesystem.f_owner == 0 else {
+            throw JournalLeaseError.unsafeMetadata
+        }
     }
     private static func accessList(_ fd: Int32, privateObject: Bool) throws {
         guard let security = filesec_init() else { throw JournalLeaseError.system(errno) }
