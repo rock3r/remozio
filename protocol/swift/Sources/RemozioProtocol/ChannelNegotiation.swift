@@ -6,9 +6,14 @@ public enum ChannelNegotiationError: Error { case rejected }
 
 public struct ChannelScope: Equatable, Sendable, CustomStringConvertible {
     fileprivate let value: CBORValue
+    public let macID: Data
+    public let accountID: Data
+    public let phoneID: Data
+    public let enrollmentEpoch: Data
     public init(macID: Data, accountID: Data, phoneID: Data, enrollmentEpoch: Data) throws {
         let values = [macID, accountID, phoneID, enrollmentEpoch]
         try channelCheck(values.allSatisfy { $0.count == 16 })
+        self.macID = macID; self.accountID = accountID; self.phoneID = phoneID; self.enrollmentEpoch = enrollmentEpoch
         value = .array(values.map(CBORValue.bytes))
     }
     public var description: String { "ChannelScope(redacted)" }

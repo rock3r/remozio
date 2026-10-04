@@ -90,6 +90,13 @@ public actor NetworkByteChannel {
 
     deinit { deadline?.cancel(); driver.cancel() }
 
+    /// Invalidates pending operations immediately. Native I/O and actor cleanup follow without waiting for the caller.
+    public nonisolated func abort() {
+        cancellation.cancel()
+        driver.cancel()
+        Task { await self.close() }
+    }
+
     public func start(timeoutMilliseconds: UInt64 = 15_000) async throws {
         guard state == .new, (1...60_000).contains(timeoutMilliseconds) else { throw NetworkChannelError.invalidState }
         try Task.checkCancellation()

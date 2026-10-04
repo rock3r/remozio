@@ -88,6 +88,18 @@ final class NetworkByteChannelTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.cancelCount, 1)
     }
 
+    func testSynchronousAbortClosesNativeIOAndRejectsLateCallbacks() async throws {
+        let (channel, driver) = try await opened()
+        let read = Task { try await channel.receive() }
+        let write = Task { try await channel.send(Data([1])) }
+        await fulfillment(of: [driver.receiving, driver.sending], timeout: 2)
+        channel.abort()
+        XCTAssertGreaterThanOrEqual(driver.cancelCount, 1)
+        driver.completeRead(Data([9])); driver.completeWrite(); driver.emit(.ready)
+        await expectFailure(read); await expectFailure(write)
+        await expectFailure(Task { try await channel.send(Data([2])) })
+    }
+
     func testOpeningDeadlineAndCancellationSettleTheStart() async throws {
         let driver = Driver()
         let channel = NetworkByteChannel(driver: driver)
