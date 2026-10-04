@@ -38,8 +38,35 @@ Retain the returned revision with the listener. Before using a channel under the
 
 Journal tests cover empty and legacy snapshots, restart with a retained higher floor, a higher local floor, invalid proofs, contract and feature filtering, 64/65/128-feature boundaries, revocation, trust restriction of one among two phones, and stale or forged bindings. The higher-floor fixture tests retention; it does not add protocol-version-2 support.
 
+## Dedicated transport lifecycle
+
+`DirectApprovalTransportHost` runs in the dedicated, unprivileged transport service. It holds the transport identity and listener. It never owns the protected journal or authority key. The root authority remains behind authenticated local IPC.
+
+The IPC owner supplies a protected `DirectApprovalTrust` snapshot and a validator that contacts the authority. It must authenticate the source, reject stale connection incarnations, and order trust updates before calling `replaceTrust`. Those IPC messages and their process authentication remain service integration work; this host does not implement that boundary.
+
+A new snapshot closes the old listener and its channels before constructing a replacement. Empty peers stop listening. Policy changes use a new snapshot even if the journal revision is unchanged. `start()` is idempotent while the listener exists. Send snapshots on changes, not on an unchanged polling interval.
+
+Each channel receives a session bound to its listener generation and trust revision. Admission contacts the authority. `validate(session)` contacts it again and rechecks the local generation after the asynchronous reply. Replacement, shutdown, or authority disconnect during validation rejects the late result. This check grants no execution permit. The root operation must independently check enrollment and consumption atomically with its decision.
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Transport as Dedicated transport service
+    participant Root as Root authority
+    Phone->>Transport: Pinned TLS connection
+    Transport->>Root: Validate peer and trust revision over authenticated IPC
+    Root-->>Transport: Current binding result
+    Transport->>Transport: Recheck listener generation
+    Root->>Transport: Authenticated trust update
+    Transport->>Transport: Close old channels; replace listener
+```
+
+`authorityDisconnected()` closes channels and discards the snapshot. Reconnection needs a fresh authenticated snapshot. `stop()` retains current trust for an explicit restart; `close()` permanently stops the host. The service must call `close()` during shutdown. Listener creation failure is visible as `failed` and can be retried with `start()`.
+
+Lifecycle tests use synthetic trust and authority fixtures. They cover revocation, policy replacement, stale events and sessions, authority disconnect during validation, repeated validation, wrong scope, and failure recovery. Separate journal tests establish snapshot construction; native loopback tests establish TLS and channel cancellation. These tests do not prove authenticated IPC or product service installation.
+
 ## Evidence and remaining integration
 
 The synthetic TLS peer uses this listener for negotiated tests, with disposable software identities and loopback binding. The original raw TLS experiment stays separate. Native tests cover peer-to-scope mapping, renewal, invalid certificates, ambiguous enrollments, and immediate channel abort. Kotlin/native tests exercise negotiated exchange through the existing synthetic HTTPS relay, scope rejection, multiple enrolled phones, and excess connections.
 
-The product app does not start this listener yet. Protected identity provisioning, service ownership and listener replacement on journal changes, service installation, request delivery, and LAN advertisement on a real network remain integration work. The tests do not prove Android DNS-SD discovery, hardware-key lifecycle, firewall behavior, or physical LAN-to-relay handoff. They install no service and publish no LAN advertisement.
+The product app does not start this listener yet. Protected identity provisioning, product service ownership of the host, service installation, request delivery, and LAN advertisement on a real network remain integration work. The tests do not prove Android DNS-SD discovery, hardware-key lifecycle, firewall behavior, or physical LAN-to-relay handoff. They install no service and publish no LAN advertisement.
