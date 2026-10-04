@@ -108,6 +108,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         let first = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
         await fulfillment(of: [driver.validationSent], timeout: 2)
         let cancelled = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
+        try await waitForQueue(feed, count: 1)
         cancelled.cancel()
         do { try await cancelled.value; XCTFail("Cancellation ignored") } catch { }
         let next = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
@@ -126,6 +127,32 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         do { try await first.value; XCTFail("Denial ignored") } catch { }
         try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         XCTAssertEqual(driver.validationCount, 2)
+        await feed.close(); await host.close()
+    }
+    private func waitForQueue(_ feed: AuthorityTrustFeed, count: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await feed.waitingOperationCount != count {
+            guard ContinuousClock.now < deadline else { XCTFail("Queue did not reach expected count"); return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+    func testDueRefreshRunsBeforeQueuedValidationAndTicksCoalesce() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start(); driver.holdValidation()
+        let first = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
+        await fulfillment(of: [driver.validationSent], timeout: 2)
+        let queued = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
+        try await waitForQueue(feed, count: 1)
+        try driver.replace(self.trust(empty: true)); driver.holdSnapshot()
+        await feed.scheduleRefresh(); await feed.scheduleRefresh()
+        driver.finishValidation(); try await first.value
+        await fulfillment(of: [driver.snapshotSent], timeout: 2)
+        XCTAssertEqual(driver.validationCount, 1)
+        await feed.scheduleRefresh(); await feed.scheduleRefresh()
+        driver.finishSnapshot(); try await queued.value
+        XCTAssertEqual(driver.validationCount, 2)
+        XCTAssertTrue(try XCTUnwrap(listeners.values.last).isClosed)
+        let state = await host.state; XCTAssertEqual(state, .noEligiblePhones)
         await feed.close(); await host.close()
     }
     func testLossDuringValidationClearsHostAndRejectsLateAllow() async throws {

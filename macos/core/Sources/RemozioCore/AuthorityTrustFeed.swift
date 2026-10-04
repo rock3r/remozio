@@ -26,6 +26,9 @@ public actor AuthorityTrustFeed {
     private var ready = false
     private var closed = false
     private var busy = false
+    private var refreshDue = false
+    private var scheduledRefresh = false
+    var waitingOperationCount: Int { waiters.count }
     private var waiters: [(UUID, CheckedContinuation<Void, Error>)] = []
 
     public init(serviceName: String, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
@@ -68,14 +71,20 @@ public actor AuthorityTrustFeed {
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .milliseconds(Int64(refreshMilliseconds))) } catch { return }
                     guard let self else { return }
-                    do { try await self.refreshWhenIdle() } catch { return }
+                    await self.scheduleRefresh()
                 }
             }
         } catch { await close(); throw error }
     }
-    private func refreshWhenIdle() async throws {
-        guard !busy else { return }
-        try await refresh()
+    func scheduleRefresh() {
+        guard ready, !closed, !scheduledRefresh else { return }
+        refreshDue = true
+        if !busy { busy = true; release() }
+    }
+    private func runScheduledRefresh() async {
+        defer { scheduledRefresh = false; release() }
+        do { try await update(try activeChannel()) }
+        catch { await close() }
     }
     public func refresh() async throws {
         try await acquire()
@@ -96,7 +105,7 @@ public actor AuthorityTrustFeed {
     }
     public func close() async {
         if !closed {
-            closed = true; ready = false; lease.invalidate(); timer?.cancel(); timer = nil
+            closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil
             channel?.abort(); channel = nil; lastSnapshot = nil
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
@@ -136,7 +145,10 @@ public actor AuthorityTrustFeed {
         waiters.remove(at: index).1.resume(throwing: CancellationError())
     }
     private func release() {
-        if waiters.isEmpty { busy = false }
+        if refreshDue, !closed {
+            refreshDue = false; scheduledRefresh = true
+            Task { await self.runScheduledRefresh() }
+        } else if waiters.isEmpty { busy = false }
         else { waiters.removeFirst().1.resume() }
     }
 }
