@@ -90,6 +90,6 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             busy = true
         }
     }
-    private func end() { lock.withLock { busy = false }; budget.release() }
+    private func end() { lock.withLock { budget.release(); busy = false } }
     private func send(_ reply: () -> Void) { lock.withLock { if !closed { reply() } } }
 }
