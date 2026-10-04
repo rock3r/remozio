@@ -3,6 +3,8 @@ import Foundation
 /// Serial, non-overlapping authority maintenance. Callbacks must not reenter the service owner.
 final class AuthorityMaintenanceLoop: @unchecked Sendable {
     private let lock = NSRecursiveLock()
+    private let stopLock = NSLock()
+    private var stopRequested = false
     private let interval: Int
     private let work: @Sendable () throws -> Void
     private let failed: @Sendable () -> Void
@@ -19,7 +21,7 @@ final class AuthorityMaintenanceLoop: @unchecked Sendable {
 
     func start() throws {
         try lock.withLock {
-            guard !started, !closed else { throw AuthorityXPCEndpointError.unavailable }
+            guard !started, !closed, !stopLock.withLock({ stopRequested }) else { throw AuthorityXPCEndpointError.unavailable }
             started = true
             let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dev.remozio.authority.maintenance"))
             timer.schedule(deadline: .now(), repeating: .milliseconds(interval), leeway: .milliseconds(10))
@@ -29,11 +31,12 @@ final class AuthorityMaintenanceLoop: @unchecked Sendable {
         }
     }
     func close() {
+        stopLock.withLock { stopRequested = true }
         lock.withLock { closed = true; timer?.cancel(); timer = nil }
     }
     private func tick() {
         let failure = lock.withLock {
-            guard !closed else { return false }
+            guard !closed, !stopLock.withLock({ stopRequested }) else { return false }
             do { try work(); return false }
             catch { closed = true; timer?.cancel(); timer = nil; return true }
         }
