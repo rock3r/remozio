@@ -45,7 +45,7 @@ Storage or checkpoint failure is not permission to continue using stale authorit
 ## Storage and validation
 
 Root journal schema 10 introduced `gateway_recovered_revocations_v1`.
-Current schema 11 also retains unknown trust restrictions. Explicit migrations accept schemas 1 through 10 and preserve existing authority, delivery history, and audit records.
+Current schema 12 also retains unknown trust restrictions. Explicit migrations accept schemas 1 through 11 and preserve existing authority, delivery history, and audit records.
 Recovered revocations share the control storage bound. Known evidence can be retried idempotently when that bound is full.
 Historical rows recheck their root signatures and indexed scope when used by the gateway authority.
 

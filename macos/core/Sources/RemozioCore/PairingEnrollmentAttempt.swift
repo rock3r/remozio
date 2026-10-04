@@ -39,6 +39,18 @@ public final class PairingEnrollmentAttempt {
               startedAtUnixMillis < transcript.expiresAtUnixMillis else { throw PairingEnrollmentError.expired }
         let remaining = transcript.expiresAtUnixMillis - startedAtUnixMillis
         let lifetime = min(deadlineMilliseconds - started.milliseconds, remaining)
+        self.enrollment = try StoredApprovalEnrollment(epoch: epoch, notificationTag: transcript.enrollmentTag,
+            identityPublicKey: transcript.transportKey.publicKey,
+            approval: ApprovalEnrollment(phoneID: phone, active: true, capabilities: Self.capabilities(transcript), keys: [
+                EnrolledApprovalKey(id: transcript.decisionKey.keyID, keyClass: .decision, publicKey: transcript.decisionKey.publicKey),
+                EnrolledApprovalKey(id: transcript.biometricKey.keyID, keyClass: .biometric, publicKey: transcript.biometricKey.publicKey),
+            ]))
+        self.authorizedReplacement = authorizedReplacement
+        self.transcript = transcript; self.revision = trusted.revision
+        self.started = started; self.deadline = started.milliseconds + lifetime
+    }
+
+    static func capabilities(_ transcript: PairingTranscript) throws -> ContractCapabilities {
         var contracts: [RequestContract: Set<UInt64>] = [:]
         for capability in transcript.phone.requests {
             let kind: RequestKind
@@ -52,15 +64,7 @@ public final class PairingEnrollmentAttempt {
             let contract = try RequestContract(requestKind: kind, wireVersion: capability.wireVersion, schemaVersion: capability.schemaVersion)
             contracts[contract] = capability.features
         }
-        self.enrollment = try StoredApprovalEnrollment(epoch: epoch, notificationTag: transcript.enrollmentTag,
-            identityPublicKey: transcript.transportKey.publicKey,
-            approval: ApprovalEnrollment(phoneID: phone, active: true, capabilities: ContractCapabilities(contracts: contracts), keys: [
-                EnrolledApprovalKey(id: transcript.decisionKey.keyID, keyClass: .decision, publicKey: transcript.decisionKey.publicKey),
-                EnrolledApprovalKey(id: transcript.biometricKey.keyID, keyClass: .biometric, publicKey: transcript.biometricKey.publicKey),
-            ]))
-        self.authorizedReplacement = authorizedReplacement
-        self.transcript = transcript; self.revision = trusted.revision
-        self.started = started; self.deadline = started.milliseconds + lifetime
+        return ContractCapabilities(contracts: contracts)
     }
 
     /// Commits keys, optional old-phone revocation, and audit records in one transaction.
@@ -96,6 +100,7 @@ public final class PairingEnrollmentAttempt {
             }
             let next = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: expected,
                 eventID: addEventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: head)
+            try transaction.retainPairing(transcript, biometricProof: biometricProof, enrollment: enrollment)
             let finished = now()
             guard finished.epoch == started.epoch, finished.milliseconds >= current.milliseconds,
                   finished.milliseconds < deadline else { throw PairingEnrollmentError.expired }

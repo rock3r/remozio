@@ -69,7 +69,7 @@ Gateway unavailability alone does not require administrator recovery.
 ## Storage and validation
 
 This recovery step needs no schema change. Schema 9 introduced `gateway_reconciled_controls_v1` and preserves existing desired tokens and acknowledgments.
-Current root schema 11 also retains recovered revocations. Explicit migrations accept schemas 1 through 10. Migration does not invent recovered history.
+Current root schema 12 also retains recovered revocations. Explicit migrations accept schemas 1 through 11. Migration does not invent recovered history.
 The separate gateway database remains at schema 3.
 
 Synthetic tests use real root and gateway databases, signed controls, fresh gateway queries, and the complete history collector.

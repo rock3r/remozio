@@ -24,9 +24,9 @@ final class EnrollmentJournalTests: XCTestCase {
                 EnrolledApprovalKey(id: id(phone * 2 + 1), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
             ]))
     }
-    private func descriptor() throws -> AuditEpochDescriptor {
+    private func descriptor(epoch: UInt8 = 3) throws -> AuditEpochDescriptor {
         try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
-            0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(3)),
+            0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(epoch)),
             4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
         ]), limits: limits), limits: limits)
     }
@@ -130,6 +130,102 @@ final class EnrollmentJournalTests: XCTestCase {
             XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
         }
         XCTAssertEqual(try reopened.read { try $0.approvalEnrollments().count }, 1)
+    }
+
+    func testCommittedPairingSurvivesRestartButNotRevocation() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        let result = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        try db.close()
+        let reopened = try open(fixture)
+        let recovered = try XCTUnwrap(reopened.read {
+            try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10))
+        })
+        XCTAssertEqual(try recovered.encode(), try attempt.transcript.encode())
+        let receipt = try rootKey.signature(for: recovered.signingInput(purpose: .macCommit)).rawRepresentation
+        XCTAssertTrue(try attempt.transcript.verify(signature: receipt, publicKey: rootKey.publicKey.x963Representation, purpose: .macCommit))
+        for (setup, phone, epoch) in [(31, 8, 10), (30, 9, 10), (30, 8, 11)] {
+            XCTAssertNil(try reopened.read { try $0.committedPairing(setupID: id(UInt8(setup)),
+                authenticatedPhoneID: id(UInt8(phone)), authenticatedEnrollmentEpoch: id(UInt8(epoch))) })
+        }
+        let restartedWriter = try reopened.write { try $0.createEpoch(descriptor(epoch: 70)) }
+        _ = try reopened.write { try $0.revokeApprovalEnrollment(phoneID: id(8), epoch: id(10),
+            expectedTrustRevision: result.revision, eventID: id(41), receiptTimeMs: 3000, writer: restartedWriter, expectedAuditHead: 0) }
+        XCTAssertNil(try reopened.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10)) })
+    }
+
+    func testRecoveredPairingRejectsCanonicalCapabilityCorruption() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        guard case var .map(fields) = try DeterministicCBOR.decode(attempt.transcript.encode(), limits: limits),
+              case var .map(offer) = try DeterministicCBOR.decode(attempt.transcript.phone.encode(), limits: limits) else {
+            return XCTFail("Expected transcript and offer maps")
+        }
+        offer[5] = .array([.array([.unsigned(0), .unsigned(1), .unsigned(1), .array([.unsigned(42)])])])
+        fields[3] = .bytes(try DeterministicCBOR.encode(.map(offer), limits: limits))
+        let changed = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        _ = try PairingTranscript.decode(changed)
+        let hex = changed.map { String(format: "%02x", $0) }.joined()
+        try fixture.sql("UPDATE pairing_commits_v1 SET transcript=x'\(hex)'")
+        XCTAssertThrowsError(try db.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10)) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .corruptData)
+        }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
+    func testRecoveredPairingAuthenticatesChallengeAndProof() throws {
+        for alterProof in [false, true] {
+            let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+            let (attempt, proof) = try pairing(db, biometric: key)
+            _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+                expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+            if alterProof {
+                try fixture.sql("UPDATE pairing_commits_v1 SET proof=zeroblob(64)")
+            } else {
+                guard case var .map(fields) = try DeterministicCBOR.decode(attempt.transcript.encode(), limits: limits) else {
+                    return XCTFail("Expected transcript map")
+                }
+                fields[2] = .bytes(id(99, count: 32))
+                let changed = try DeterministicCBOR.encode(.map(fields), limits: limits)
+                _ = try PairingTranscript.decode(changed)
+                let hex = changed.map { String(format: "%02x", $0) }.joined()
+                try fixture.sql("UPDATE pairing_commits_v1 SET transcript=x'\(hex)'")
+            }
+            XCTAssertThrowsError(try db.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10)) }) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .corruptData)
+            }
+        }
+    }
+
+    func testPairingReceiptRecordRollsBackWithExpiredCommit() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        var calls = 0
+        XCTAssertThrowsError(try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: {
+                calls += 1
+                return .init(epoch: self.clock, milliseconds: calls == 1 ? 110 : 1100)
+            }))
+        _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        XCTAssertNotNil(try db.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10)) })
+    }
+
+    func testSchemaElevenMigrationDoesNotInventPairingReceipts() throws {
+        let fixture = try Fixture(), (db, writer, revision) = try setup(fixture)
+        _ = try add(db, writer: writer, revision: revision)
+        try db.close()
+        try fixture.sql("DROP TABLE pairing_commits_v1; PRAGMA user_version=11")
+        XCTAssertThrowsError(try open(fixture))
+        let migrated = try open(fixture, migrate: 11)
+        XCTAssertEqual(try migrated.read { try $0.approvalEnrollments().count }, 1)
+        XCTAssertNil(try migrated.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(9)) })
+        try migrated.close()
+        let reopened = try open(fixture)
+        XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 1)
     }
 
     func testPairingReplacementFailureRollsBackRevocation() throws {
@@ -370,7 +466,7 @@ final class EnrollmentJournalTests: XCTestCase {
     func testExplicitSchemaFiveMigrationKeepsAuditAndStartsUnconfigured() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         _ = try db.write { try $0.createEpoch(descriptor()) }; try db.close()
-        try fixture.sql("DROP TABLE gateway_trust_restrictions_v1; DROP TABLE gateway_recovered_revocations_v1; DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; PRAGMA user_version=5")
+        try fixture.sql("DROP TABLE pairing_commits_v1; DROP TABLE gateway_trust_restrictions_v1; DROP TABLE gateway_recovered_revocations_v1; DROP TABLE gateway_reconciled_controls_v1; DROP TABLE gateway_acknowledgment_v1; DROP TABLE routing_operations_v1; DROP TABLE routing_state_v1; DROP TABLE approval_enrollments_v1; DROP TABLE approval_authority_v1; PRAGMA user_version=5")
         XCTAssertThrowsError(try open(fixture))
         let migrated = try open(fixture, migrate: 5)
         XCTAssertNotNil(try migrated.read { try $0.epoch(id(3)) })
@@ -414,7 +510,7 @@ final class EnrollmentJournalTests: XCTestCase {
         _ = try add(db, writer: writer, revision: empty); try db.close()
         try fixture.sql("PRAGMA user_version=5")
         XCTAssertThrowsError(try open(fixture, migrate: 5))
-        try fixture.sql("PRAGMA user_version=11")
+        try fixture.sql("PRAGMA user_version=12")
         let reopened = try open(fixture)
         XCTAssertEqual(try reopened.read { try $0.approvalEnrollments().count }, 1)
         XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 1)
@@ -786,7 +882,7 @@ final class EnrollmentJournalTests: XCTestCase {
     func testSchemaNineMigrationPreservesEnrollmentAndStartsWithoutRecoveredRevocations() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
         try db.close()
-        try f.sql("DROP TABLE gateway_trust_restrictions_v1; DROP TABLE gateway_recovered_revocations_v1; PRAGMA user_version=9")
+        try f.sql("DROP TABLE pairing_commits_v1; DROP TABLE gateway_trust_restrictions_v1; DROP TABLE gateway_recovered_revocations_v1; PRAGMA user_version=9")
         XCTAssertThrowsError(try open(f))
         let migrated = try open(f, migrate: 9)
         XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().revision }, revision)
@@ -1002,7 +1098,7 @@ final class EnrollmentJournalTests: XCTestCase {
     func testSchemaTenMigrationPreservesKeysAuditAndStartsWithoutRestrictions() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f), revision = try add(db, writer: writer, revision: empty)
         try db.close()
-        try f.sql("DROP TABLE gateway_trust_restrictions_v1; PRAGMA user_version=10")
+        try f.sql("DROP TABLE pairing_commits_v1; DROP TABLE gateway_trust_restrictions_v1; PRAGMA user_version=10")
         XCTAssertThrowsError(try open(f))
         let migrated = try open(f, migrate: 10)
         XCTAssertEqual(try migrated.read { try $0.approvalTrustSnapshot().revision }, revision)

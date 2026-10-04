@@ -41,7 +41,7 @@ public final class JournalDatabase {
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
-                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9 || migrateFromVersion == 10,
+                  migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9 || migrateFromVersion == 10 || migrateFromVersion == 11,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
@@ -55,11 +55,11 @@ public final class JournalDatabase {
             guard sqlite3_busy_timeout(connection, Int32(busyMilliseconds)) == SQLITE_OK,
                   sqlite3_compileoption_used("OMIT_LOAD_EXTENSION") == 1 else { throw JournalDatabaseError.invalidConfiguration }
             _ = sqlite3_limit(connection, SQLITE_LIMIT_ATTACHED, 0)
-            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, max((gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768, 65536))))
+            _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, max((gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768, 136096))))
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 11) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 12) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -184,8 +184,9 @@ public final class JournalDatabase {
             try GatewayAuthorityJournal.createReconciledSchema(db!)
             try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!)
             try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!)
+            try EnrollmentJournal.createPairingSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
-            try exec("PRAGMA user_version=11")
+            try exec("PRAGMA user_version=12")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -204,8 +205,9 @@ public final class JournalDatabase {
             if version < 8 { try GatewayAuthorityJournal.createAcknowledgmentSchema(db!) }
             if version < 9 { try GatewayAuthorityJournal.createReconciledSchema(db!) }
             if version < 10 { try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db!) }
-            try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!)
-            try exec("PRAGMA user_version=11")
+            if version < 11 { try GatewayAuthorityJournal.createTrustRestrictionsSchema(db!) }
+            try EnrollmentJournal.createPairingSchema(db!)
+            try exec("PRAGMA user_version=12")
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
@@ -218,7 +220,7 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 11) throws {
+    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 12) throws {
         guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
             throw JournalDatabaseError.incompatibleStore
         }
@@ -254,6 +256,7 @@ public final class JournalDatabase {
         if version >= 9 { queries.append("SELECT operation,revision,kind,candidate,payload,signature FROM main.gateway_reconciled_controls_v1 LIMIT 0") }
         if version >= 10 { queries.append("SELECT phone,enrollment,operation,payload,signature FROM main.gateway_recovered_revocations_v1 LIMIT 0") }
         if version >= 11 { queries.append("SELECT phone,kind,operation,payload,signature FROM main.gateway_trust_restrictions_v1 LIMIT 0") }
+        if version >= 12 { queries.append("SELECT setup,phone,epoch,transcript,proof FROM main.pairing_commits_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -364,6 +367,15 @@ public final class JournalTransaction {
     }
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
+    }
+
+    /// Returns receipt material only for an active enrollment on an authenticated phone channel.
+    public func committedPairing(setupID: Data, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data) throws -> PairingTranscript? {
+        try withEnrollment(write: false) { try $0.committedPairing(setupID: setupID, phoneID: authenticatedPhoneID, epoch: authenticatedEnrollmentEpoch) }
+    }
+
+    func retainPairing(_ transcript: PairingTranscript, biometricProof: Data, enrollment: StoredApprovalEnrollment) throws {
+        try withEnrollment(write: true) { try $0.retainPairing(transcript, biometricProof: biometricProof, enrollment: enrollment) }
     }
 
     /// The host verifies administrator authorization and the biometric enrollment proof before calling this method.
