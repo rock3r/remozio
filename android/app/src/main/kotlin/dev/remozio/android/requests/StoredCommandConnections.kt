@@ -50,6 +50,12 @@ internal class StoredCommandConnections(
         closeAll(previous)
     }
 
+    /** The application enrollment host holds the shared mutex while retiring these records. */
+    internal fun invalidateRecordsLocked(recordIDs: Set<CborValue.Bytes>) {
+        val previous = recordIDs.mapNotNull { owners.remove(it) }
+        closeAll(previous)
+    }
+
     suspend fun invalidate() = withContext(dispatcher) {
         enrollmentAccess.withLock { invalidateLocked() }
     }

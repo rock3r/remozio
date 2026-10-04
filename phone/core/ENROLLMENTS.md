@@ -101,3 +101,9 @@ Native biometric enrollment signing, receipt transport retries, and the setup UI
 `PairingBiometricPrompt` owns one native strong-biometric prompt and its crypto operation. It cancels on screen stop, disposal, setup invalidation, or expiry. The host invokes it only after independent Mac authentication, human transcript verification, and durable preparation. The host supplies the current local setup check and closes the owner on replacement. This component is not wired to a production setup screen yet.
 
 Software-key tests cover transcript/purpose binding, late admission, cancellation, stale callbacks, and crypto-object substitution. Android compilation and lint validate API use; they do not prove a real Pixel biometric prompt or key custody for this flow.
+
+## Android setup coordinator
+
+`StoredPairingHost` serializes setup writes with inventory, audit access, and request connections through the application enrollment mutex. Preparation can create the archive. Activation and removal require existing storage. Activation recovers the locally retained attempt and verifies the Mac receipt before closing affected request connections. Replacement closes the old and new record owners before changing trust. Other Macs keep their connections.
+
+A close failure prevents the storage mutation. Invalid receipts and stale removal revisions do not interrupt connections. A failed write leaves affected owners closed until normal acquisition revalidates the durable archive. Local removal does not claim remote revocation. Human code verification, key provisioning, and the setup screen remain host integration work.

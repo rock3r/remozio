@@ -77,6 +77,19 @@ class StoredCommandConnectionsTest {
         registry.invalidate()
     }
 
+    @Test fun setupInvalidatesOnlySelectedRecordsUnderTheSharedLock() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
+        val mutex = Mutex()
+        val registry = StoredCommandConnections(::open, ::connection, mutex, Dispatchers.Unconfined)
+        val first = registry.acquire(a.recordID); val other = registry.acquire(b.recordID)
+        mutex.lock()
+        try { registry.invalidateRecordsLocked(setOf(a.recordID)) } finally { mutex.unlock() }
+        assertEquals(CommandConnectionState.CLOSED, first.connectionState.value)
+        assertSame(other, registry.acquire(b.recordID))
+        assertNotSame(first, registry.acquire(a.recordID))
+        registry.invalidate()
+    }
+
     @Test fun unreadableArchiveInvalidatesEveryOwnerAndRecoveryCreatesFreshOnes() = runBlocking {
         val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
         val registry = registry(); val first = registry.acquire(a.recordID); val second = registry.acquire(b.recordID)

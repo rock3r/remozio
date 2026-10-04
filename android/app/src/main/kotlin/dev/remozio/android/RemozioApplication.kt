@@ -3,6 +3,7 @@ package dev.remozio.android
 import android.app.Application
 import dev.remozio.android.audit.androidStoredAuditReader
 import dev.remozio.android.enrollment.AndroidEnrollmentStore
+import dev.remozio.android.enrollment.StoredPairingHost
 import dev.remozio.android.enrollment.StoredMacReader
 import dev.remozio.android.updates.androidUpdateHost
 import dev.remozio.android.requests.StoredCommandConnections
@@ -25,6 +26,13 @@ class RemozioApplication : Application() {
         StoredCommandConnections(
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             { androidCommandConnection(this, it, commandRequestLimits(), commandMemory) }, enrollmentAccess,
+        )
+    }
+    internal val pairing by lazy {
+        StoredPairingHost(
+            { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            enrollmentAccess, { commands.invalidateRecordsLocked(it) },
         )
     }
     internal val audits by lazy { androidStoredAuditReader(this, enrollmentAccess) }
