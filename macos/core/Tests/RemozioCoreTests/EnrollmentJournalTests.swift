@@ -190,6 +190,29 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.count }, 1)
     }
 
+    func testDirectTrustBoundsAdvertisedFeaturesWithoutChangingDurablePolicy() throws {
+        for count in [64, 65, 128] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true)
+            let features = Set((1...count).map(UInt64.init))
+            let policy = try ContractCapabilities(contracts: [contract: features])
+            let revision = try db.write { try $0.configureApprovalAuthority(capabilities: policy, allowedContracts: [contract]) }
+            let writer = try db.write { try $0.createEpoch(descriptor()) }
+            let original = try enrollment()
+            let row = try StoredApprovalEnrollment(epoch: original.epoch, notificationTag: original.notificationTag,
+                identityPublicKey: original.identityPublicKey, approval: ApprovalEnrollment(phoneID: original.approval.phoneID,
+                    active: true, capabilities: policy, keys: original.approval.keys))
+            _ = try db.write { try $0.addApprovalEnrollment(row, expectedTrustRevision: revision,
+                eventID: id(40), receiptTimeMs: 1000, writer: writer, expectedAuditHead: 0) }
+            let peer = try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+            XCTAssertEqual(peer.requests.first?.features, Set((1...64).map(UInt64.init)))
+            let offer = try ChannelOffer(role: .mac, scope: peer.scope, nonce: id(60, count: 32),
+                envelopeVersions: [1], requests: peer.requests, auditVersions: [])
+            XCTAssertEqual(try ChannelOffer.decode(offer.encode()).requests.first?.features, Set((1...64).map(UInt64.init)))
+            XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().authorityCapabilities.contracts[contract] }, features)
+            XCTAssertEqual(try db.read { try $0.approvalEnrollments().first?.approval.capabilities.contracts[contract] }, features)
+        }
+    }
+
     func testPairingProofCommitsExactKeysAndCannotReplayAfterReopen() throws {
         let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
         let (attempt, proof) = try pairing(db, biometric: key)

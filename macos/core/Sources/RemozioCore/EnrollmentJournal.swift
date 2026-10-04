@@ -198,7 +198,7 @@ final class EnrollmentJournal {
                 case .littleSnitch: kind = 3
                 }
                 return try ChannelRequestCapability(kind: kind, wireVersion: contract.wireVersion,
-                    schemaVersion: contract.schemaVersion, features: local.intersection(remote))
+                    schemaVersion: contract.schemaVersion, features: Set(local.intersection(remote).sorted().prefix(64)))
             }
             peers.append(try DirectApprovalPeer(scope: ChannelScope(macID: mac, accountID: account,
                 phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),

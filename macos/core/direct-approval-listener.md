@@ -30,13 +30,13 @@ Local-network binding publishes `_remozio._tcp.` with instance `Remozio-` follow
 
 `JournalTransaction.directApprovalTrust` reads the authority revision, eligible enrollments, and retained pairing proofs in one transaction. It returns an immutable `DirectApprovalTrust`. An empty peer array means no phone is eligible; the host must stop listening rather than create an unauthenticated listener.
 
-The result excludes revoked phones and phones with unresolved gateway trust restrictions. Transport pins are converted from the stored P-256 points to canonical SPKI. The advertised request contracts must be both locally allowed and present in the enrollment. Their feature sets are intersected. Audit versions and payload limits come from trusted local configuration.
+The result excludes revoked phones and phones with unresolved gateway trust restrictions. Transport pins are converted from the stored P-256 points to canonical SPKI. The advertised request contracts must be both locally allowed and present in the enrollment. Their feature sets are intersected. If that intersection exceeds the channel limit, only its lowest 64 feature IDs are advertised. Stored capabilities remain unchanged. The host must not deliver a request that requires a feature absent from the negotiated set. Audit versions and payload limits come from trusted local configuration.
 
 For a retained pairing, the same proof and binding checks used by receipt recovery verify the transcript against the stored enrollment. The listener floor is the maximum of that transcript's floor and current local policy. Legacy administrator-enrolled records without a pairing transcript retain the version-1 floor; reading them does not invent a proof or receipt. Malformed retained proofs fail the read and retire the journal owner. This does not add protection against privileged database edits or whole-Mac backup rollback.
 
 Retain the returned revision with the listener. Before using a channel under the authority's serialization, `requireDirectApprovalPeer` rechecks the revision, Mac/account/phone/epoch scope, active unrestricted enrollment, and transport key. Changing the supplied local policy also requires replacing the listener. These checks grant no request authority: execution, actions, and decision consumption still use their existing verifiers and journal transaction.
 
-Journal tests cover empty and legacy snapshots, restart with a retained higher floor, a higher local floor, invalid proofs, contract and feature filtering, revocation, trust restriction of one among two phones, and stale or forged bindings. The higher-floor fixture tests retention; it does not add protocol-version-2 support.
+Journal tests cover empty and legacy snapshots, restart with a retained higher floor, a higher local floor, invalid proofs, contract and feature filtering, 64/65/128-feature boundaries, revocation, trust restriction of one among two phones, and stale or forged bindings. The higher-floor fixture tests retention; it does not add protocol-version-2 support.
 
 ## Evidence and remaining integration
 
