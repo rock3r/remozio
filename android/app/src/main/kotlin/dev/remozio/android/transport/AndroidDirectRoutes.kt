@@ -72,6 +72,7 @@ internal fun androidDirectRoutes(context: Context, macID: ByteArray): Flow<Appro
             }
             if (!stopped.get()) try {
                 val request = DiscoveryRequest.Builder("_remozio._tcp.")
+                    .setFlags(DiscoveryRequest.FLAG_NO_PICKER)
                     .setServiceNameFilter(PatternMatcher(name, PatternMatcher.PATTERN_LITERAL)).build()
                 manager.discoverServices(request, executor, listener)
                 started = true
