@@ -17,7 +17,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import dev.remozio.android.R
 import dev.remozio.android.RemozioApplication
 import dev.remozio.android.enrollment.StoredMac
-import dev.remozio.phone.requests.RequestCapacityException
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.CommandRequestSnapshot
 import kotlinx.coroutines.CancellationException
@@ -45,7 +44,6 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: CommandEnrollmentUnavailable) { owner = null; selected = null; failure = R.string.commands_enrollment_unavailable }
             catch (_: CommandRegistryUnavailable) { owner = null; selected = null; failure = R.string.commands_storage_unavailable }
-            catch (_: RequestCapacityException) { failure = R.string.commands_capacity }
             catch (_: Exception) { failure = R.string.commands_connection_failed }
             awaitCancellation()
         }
@@ -56,13 +54,15 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
         Text(stringResource(R.string.commands_presence_unknown))
         owner?.let { connection ->
             val state by connection.connectionState.collectAsState()
+            val limited by connection.capacityLimited.collectAsState()
+            if (limited) Text(stringResource(R.string.commands_capacity))
             Text(stringResource(when (state) {
                 CommandConnectionState.CONNECTING -> R.string.commands_connecting
                 CommandConnectionState.CONNECTED -> R.string.commands_connected
                 CommandConnectionState.DISCONNECTED -> R.string.commands_disconnected
                 CommandConnectionState.CLOSED -> R.string.commands_enrollment_unavailable
             }))
-            if (state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED) {
+            if (limited || state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED) {
                 TextButton(onClick = { attempt++ }) { Text(stringResource(R.string.commands_reconnect)) }
             }
         } ?: run { if (failure == null) CircularProgressIndicator() }

@@ -86,6 +86,9 @@ class CommandRequestEnrollment internal constructor(
     private var receiver: AutoCloseable? = null
     private val publishedSessions = MutableStateFlow<List<CommandRequestSession>>(emptyList())
     val requestSessions = publishedSessions.asStateFlow()
+    private val limited = MutableStateFlow(false)
+    /** A request was omitted during this connection attempt. No omitted capture is retained. */
+    val capacityLimited = limited.asStateFlow()
     private var closed = false
 
     init { require(authorityKey.size == 65 && authorityKey[0] == 4.toByte()) }
@@ -149,6 +152,7 @@ class CommandRequestEnrollment internal constructor(
         if (closed) reject(InboxRejection.CLOSED)
         val previous = receiver
         receiver = owner
+        limited.value = false
         previous?.close()
     }
 
@@ -163,7 +167,11 @@ class CommandRequestEnrollment internal constructor(
         val signature = message.signature.copyBytes()
         when (message.type) {
             ApprovalMessageType.REQUEST -> try { accept(body, signature) } catch (failure: InboxException) {
-                if (failure.reason != InboxRejection.RETIRED_REQUEST) throw failure
+                when (failure.reason) {
+                    InboxRejection.CAPACITY -> limited.value = true
+                    InboxRejection.RETIRED_REQUEST -> Unit
+                    else -> throw failure
+                }
             }
             ApprovalMessageType.STATUS -> {
                 val claim = RequestStatusPayload.decode(body, limits.status)
@@ -172,12 +180,13 @@ class CommandRequestEnrollment internal constructor(
                 val session = requests[key]
                 if (session != null) session.observe(body, signature, receivedAt)
                 else {
-                    val digest = retired?.lookup(claim.requestID) ?: reject(InboxRejection.UNKNOWN_REQUEST)
-                    require(claim.macID.contentEquals(macID.copyBytes()) && claim.accountID.contentEquals(accountID.copyBytes()) &&
-                        claim.requestDigest.contentEquals(digest))
+                    val digest = retired?.lookup(claim.requestID)
+                    if (digest == null && !limited.value) reject(InboxRejection.UNKNOWN_REQUEST)
+                    require(claim.macID.contentEquals(macID.copyBytes()) && claim.accountID.contentEquals(accountID.copyBytes()))
+                    if (digest != null) require(claim.requestDigest.contentEquals(digest))
                     require(ApprovalSignature.verify(signature, authorityKey, 1u, ApprovalMessageType.STATUS, SigningPurpose.STATUS,
                         body, limits.status, limits.signing))
-                    // Authenticated repeats cannot recreate a retired terminal request, even with an older phase.
+                    // Unowned statuses are authenticated but cannot create a request or grant action authority.
                 }
             }
             ApprovalMessageType.DECISION -> throw IllegalArgumentException("Unexpected inbound decision")

@@ -68,7 +68,8 @@ class CommandRequestReceiverTest {
         // A duplicate needs no additional retained reservation.
         deliver(first, a, a.issued())
         assertSame(retained, first.sessions().single())
-        assertFailsWith<RequestCapacityException> { deliver(second, b, b.issued()) }
+        deliver(second, b, b.issued())
+        assertTrue(second.capacityLimited.value)
         assertTrue(second.sessions().isEmpty()); assertFalse(retained.closed.value)
         deliver(first, a, a.status(true))
         deliver(second, b, b.issued())
@@ -76,6 +77,45 @@ class CommandRequestReceiverTest {
         firstInbox.close(); secondInbox.close()
         val third = a.enroll(CommandRequestInbox(1, 128, budget))
         deliver(third, a, a.issued()); third.close()
+    }
+
+    @Test fun capacityRejectionDoesNotBlockLaterStatusesOrRequestReplay() = runBlocking<Unit> {
+        val mac = Mac(); val index = Retired()
+        val inbox = CommandRequestInbox(1, 1, CommandMemoryBudget(capture.size.toLong() + 1024, 10000))
+        val enrollment = mac.enroll(inbox, index)
+        val firstRequest = mac.issued(); val terminal = mac.status(true)
+        mac.requestID = 9
+        val nextRequest = mac.issued(); val nextStatus = mac.status()
+        deliver(enrollment, mac, firstRequest, nextRequest, nextStatus, terminal, nextRequest, nextStatus)
+        assertTrue(enrollment.capacityLimited.value)
+        val next = enrollment.sessions().single()
+        assertEquals(CborValue.Bytes(id(9)), next.identity.requestID)
+        assertEquals(RequestPhase.PRESENTED, next.snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
+        deliver(enrollment, mac, nextRequest, nextStatus)
+        assertFalse(enrollment.capacityLimited.value)
+        assertSame(next, enrollment.sessions().single())
+        inbox.close()
+    }
+
+    @Test fun unknownStatusesAfterCapacityStillRequireTheEnrolledSignatureAndScope() = runBlocking<Unit> {
+        for (wrongScope in listOf(false, true)) {
+            val mac = Mac(); val enrollment = mac.enroll(CommandRequestInbox(1, 1))
+            val first = mac.issued()
+            mac.requestID = 9
+            val skipped = mac.issued()
+            val status = if (wrongScope) {
+                val other = Mac(8)
+                val body = ApprovalMessage.decode(other.status(), bound.maxBytes).body.copyBytes()
+                mac.envelope(body, ApprovalMessageType.STATUS, SigningPurpose.STATUS)
+            } else {
+                val message = ApprovalMessage.decode(mac.status(), bound.maxBytes)
+                ApprovalMessage(1u, message.type, message.purpose, message.body.copyBytes(), ByteArray(64)).encode(bound.maxBytes)
+            }
+            assertFailsWith<IOException> { deliver(enrollment, mac, first, skipped, status) }
+            assertTrue(enrollment.capacityLimited.value)
+            assertEquals(CborValue.Bytes(id(5)), enrollment.sessions().single().identity.requestID)
+            enrollment.close()
+        }
     }
 
     @Test fun itemBudgetAndReservationReleaseAreIndependentOfByteCapacity() {
@@ -240,7 +280,8 @@ class CommandRequestReceiverTest {
         mac.requestID = 2; deliver(enrollment, mac, mac.issued(), mac.status())
         val pending = enrollment.sessions()
         mac.requestID = 3
-        assertFailsWith<IOException> { deliver(enrollment, mac, mac.issued()) }
+        deliver(enrollment, mac, mac.issued())
+        assertTrue(enrollment.capacityLimited.value)
         assertEquals(pending, enrollment.sessions()); assertTrue(index.digests.isEmpty())
         mac.requestID = 1; deliver(enrollment, mac, mac.status(true))
         index.failWrite = true; mac.requestID = 3

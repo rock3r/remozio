@@ -360,5 +360,5 @@
     <string name="commands_request_number">Command request %1$d</string>
     <string name="commands_waiting_status">Waiting for the Mac to confirm the request status.</string>
     <string name="commands_review">Review request</string>
-    <string name="commands_capacity">The request window is full. Existing requests are retained. Resolve requests on the Mac, then reconnect to refresh their status.</string>
+    <string name="commands_capacity">Some requests did not fit. Existing requests still receive updates while connected. After requests finish, reconnect to try loading the missing requests.</string>
 </resources>
