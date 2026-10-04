@@ -361,4 +361,7 @@
     <string name="commands_waiting_status">Waiting for the Mac to confirm the request status.</string>
     <string name="commands_review">Review request</string>
     <string name="commands_capacity">Some requests did not fit. Existing requests still receive updates while connected. After requests finish, reconnect to try loading the missing requests.</string>
+    <string name="pairing_biometric_title">Pair this Mac</string>
+    <string name="pairing_biometric_subtitle">Confirm the pairing you just verified</string>
+    <string name="pairing_biometric_cancel">Cancel</string>
 </resources>
