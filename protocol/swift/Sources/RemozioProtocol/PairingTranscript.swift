@@ -44,7 +44,7 @@ public struct PairingTranscript: Sendable, CustomStringConvertible {
     public let biometricKey: PairingKey
     public let enrollmentTag: Data
     public let replacement: PairingReplacement?
-    public let expectedTrustRevision: UInt64
+    public let expectedTrustRevision: Data
     public let issuedAtUnixMillis: UInt64
     public let expiresAtUnixMillis: UInt64
 
@@ -52,9 +52,9 @@ public struct PairingTranscript: Sendable, CustomStringConvertible {
                 minimumEnvelopeVersion: UInt64, selectedEnvelopeVersion: UInt64,
                 macAuthorityKey: Data, macTransportKey: Data, transportKey: PairingKey,
                 decisionKey: PairingKey, biometricKey: PairingKey, enrollmentTag: Data,
-                replacement: PairingReplacement?, expectedTrustRevision: UInt64,
+                replacement: PairingReplacement?, expectedTrustRevision: Data,
                 issuedAtUnixMillis: UInt64, expiresAtUnixMillis: UInt64) throws {
-        try pairingCheck(setupID.count == 16 && challenge.count == 32 && enrollmentTag.count == 32)
+        try pairingCheck(setupID.count == 16 && challenge.count == 32 && enrollmentTag.count == 32 && expectedTrustRevision.count == 16)
         try pairingCheck(phone.role == .phone && mac.role == .mac && phone.scope == mac.scope && phone.nonce != mac.nonce)
         try pairingCheck(minimumEnvelopeVersion > 0 && selectedEnvelopeVersion ==
             CompatibilityPolicy.envelopeVersion(local: phone.envelopeVersions, peer: mac.envelopeVersions, trustedMinimum: minimumEnvelopeVersion))
@@ -83,7 +83,7 @@ public struct PairingTranscript: Sendable, CustomStringConvertible {
             7: .bytes(macAuthorityKey), 8: .bytes(macTransportKey),
             9: .array([transportKey, decisionKey, biometricKey].map(\.value)),
             10: .bytes(enrollmentTag), 11: replacement?.value ?? .null,
-            12: .unsigned(expectedTrustRevision), 13: .unsigned(issuedAtUnixMillis), 14: .unsigned(expiresAtUnixMillis),
+            12: .bytes(expectedTrustRevision), 13: .unsigned(issuedAtUnixMillis), 14: .unsigned(expiresAtUnixMillis),
         ]), limits: pairingLimits())
     }
     public func digest() throws -> Data { Data(SHA256.hash(data: try signingInput(purpose: .phoneBiometric))) }
@@ -120,7 +120,7 @@ public struct PairingTranscript: Sendable, CustomStringConvertible {
         let result = try PairingTranscript(setupID: b(1), challenge: b(2), phone: ChannelOffer.decode(b(3)), mac: ChannelOffer.decode(b(4)),
             minimumEnvelopeVersion: u(5), selectedEnvelopeVersion: u(6), macAuthorityKey: b(7), macTransportKey: b(8),
             transportKey: key(0), decisionKey: key(1), biometricKey: key(2), enrollmentTag: b(10), replacement: replacement,
-            expectedTrustRevision: u(12), issuedAtUnixMillis: u(13), expiresAtUnixMillis: u(14))
+            expectedTrustRevision: b(12), issuedAtUnixMillis: u(13), expiresAtUnixMillis: u(14))
         try pairingCheck(result.encode() == bytes)
         return result
     }

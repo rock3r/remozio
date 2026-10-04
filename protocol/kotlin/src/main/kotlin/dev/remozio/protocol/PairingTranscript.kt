@@ -28,16 +28,17 @@ class PairingTranscript(
     val minimumEnvelopeVersion: ULong, val selectedEnvelopeVersion: ULong,
     macAuthorityKey: ByteArray, macTransportKey: ByteArray,
     val transportKey: PairingKey, val decisionKey: PairingKey, val biometricKey: PairingKey,
-    enrollmentTag: ByteArray, val replacement: PairingReplacement?, val expectedTrustRevision: ULong,
+    enrollmentTag: ByteArray, val replacement: PairingReplacement?, expectedTrustRevision: ByteArray,
     val issuedAtUnixMillis: ULong, val expiresAtUnixMillis: ULong,
 ) {
+    val expectedTrustRevision = CborValue.Bytes(expectedTrustRevision)
     val setupID = CborValue.Bytes(setupID)
     val challenge = CborValue.Bytes(challenge)
     val macAuthorityKey = CborValue.Bytes(macAuthorityKey)
     val macTransportKey = CborValue.Bytes(macTransportKey)
     val enrollmentTag = CborValue.Bytes(enrollmentTag)
     init {
-        require(setupID.size == 16 && challenge.size == 32 && enrollmentTag.size == 32)
+        require(setupID.size == 16 && challenge.size == 32 && enrollmentTag.size == 32 && expectedTrustRevision.size == 16)
         require(phone.role == ChannelRole.PHONE && mac.role == ChannelRole.MAC && phone.scope == mac.scope && phone.nonce != mac.nonce)
         require(minimumEnvelopeVersion > 0uL && selectedEnvelopeVersion ==
             CompatibilityPolicy.envelopeVersion(phone.envelopeVersions, mac.envelopeVersions, minimumEnvelopeVersion))
@@ -57,7 +58,7 @@ class PairingTranscript(
         7uL to macAuthorityKey, 8uL to macTransportKey,
         9uL to CborValue.ArrayValue(listOf(transportKey, decisionKey, biometricKey).map { it.value() }),
         10uL to enrollmentTag, 11uL to (replacement?.value() ?: CborValue.Null),
-        12uL to CborValue.Unsigned(expectedTrustRevision), 13uL to CborValue.Unsigned(issuedAtUnixMillis),
+        12uL to expectedTrustRevision, 13uL to CborValue.Unsigned(issuedAtUnixMillis),
         14uL to CborValue.Unsigned(expiresAtUnixMillis),
     )), LIMITS)
     fun digest(): ByteArray = MessageDigest.getInstance("SHA-256").digest(signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
@@ -86,7 +87,7 @@ class PairingTranscript(
             fun key(i: Int) = pair(keys[i]).let { PairingKey(it[0], it[1]) }
             val replacement = if (f[11u] == CborValue.Null) null else pair(f.getValue(11u)).let { PairingReplacement(it[0], it[1]) }
             return PairingTranscript(b(1u), b(2u), ChannelOffer.decode(b(3u)), ChannelOffer.decode(b(4u)), u(5u), u(6u),
-                b(7u), b(8u), key(0), key(1), key(2), b(10u), replacement, u(12u), u(13u), u(14u)).also {
+                b(7u), b(8u), key(0), key(1), key(2), b(10u), replacement, b(12u), u(13u), u(14u)).also {
                 require(it.encode().contentEquals(bytes))
             }
         }
