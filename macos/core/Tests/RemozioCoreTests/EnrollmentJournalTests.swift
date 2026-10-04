@@ -84,6 +84,114 @@ final class EnrollmentJournalTests: XCTestCase {
         }
     }
 
+    private func pairing(_ db: JournalDatabase, biometric: P256.Signing.PrivateKey,
+                         replacement: PairingReplacement? = nil) throws -> (PairingEnrollmentAttempt, Data) {
+        let trusted = try db.read { try $0.approvalTrustSnapshot() }
+        let scope = try ChannelScope(macID: id(1), accountID: id(2), phoneID: id(8), enrollmentEpoch: id(10))
+        let offers = try [ChannelRole.phone, .mac].enumerated().map { index, role in
+            try ChannelOffer(role: role, scope: scope, nonce: id(UInt8(20 + index), count: 32), envelopeVersions: [1],
+                requests: [ChannelRequestCapability(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [])
+        }
+        var revision = trusted.revision.uuid
+        let transport = P256.Signing.PrivateKey().publicKey.x963Representation
+        let transcript = try PairingTranscript(setupID: id(30), challenge: id(31, count: 32), phone: offers[0], mac: offers[1],
+            minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: rootKey.publicKey.x963Representation,
+            macTransportKey: transport,
+            transportKey: PairingKey(keyID: id(32), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            decisionKey: PairingKey(keyID: id(33), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            biometricKey: PairingKey(keyID: id(34), publicKey: biometric.publicKey.x963Representation),
+            enrollmentTag: id(35, count: 32), replacement: replacement,
+            expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+        let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trusted,
+            authorityPublicKey: rootKey.publicKey.x963Representation, transportPublicKey: transport, minimumEnvelopeVersion: 1,
+            started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)
+        return (attempt, try biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation)
+    }
+
+    func testPairingProofCommitsExactKeysAndCannotReplayAfterReopen() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        XCTAssertThrowsError(try attempt.commit(database: db, biometricProof: id(0, count: 64), writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)) {
+            XCTAssertEqual($0 as? PairingEnrollmentError, .invalidProof)
+        }
+        XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
+        let result = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        let row = try XCTUnwrap(db.read { try $0.approvalEnrollments().first })
+        XCTAssertEqual(row.approval.phoneID, id(8)); XCTAssertEqual(row.epoch, id(10))
+        XCTAssertEqual(row.identityPublicKey, attempt.transcript.transportKey.publicKey)
+        XCTAssertEqual(row.approval.keys.first { $0.keyClass == .biometric }?.publicKey, key.publicKey.x963Representation)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, result.revision)
+        try db.close()
+        let reopened = try open(fixture)
+        XCTAssertThrowsError(try attempt.commit(database: reopened, biometricProof: proof, writer: writer,
+            expectedAuditHead: 1, addEventID: id(41), receiptTimeMs: 1000, now: moment)) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        XCTAssertEqual(try reopened.read { try $0.approvalEnrollments().count }, 1)
+    }
+
+    func testPairingReplacementFailureRollsBackRevocation() throws {
+        let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
+        let revision = try add(db, writer: writer, revision: empty)
+        let replacement = try PairingReplacement(phoneID: id(5), epoch: id(9))
+        let (bad, badProof) = try pairing(db, biometric: key, replacement: replacement)
+        XCTAssertThrowsError(try bad.commit(database: db, biometricProof: badProof, writer: writer,
+            expectedAuditHead: 1, addEventID: id(42), removalEventID: id(41), receiptTimeMs: 1000, now: moment)) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .reusedIdentity)
+        }
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().enrollments.map(\.phoneID) }, [id(5)])
+        let (good, goodProof) = try pairing(db, biometric: P256.Signing.PrivateKey(), replacement: replacement)
+        _ = try good.commit(database: db, biometricProof: goodProof, writer: writer,
+            expectedAuditHead: 1, addEventID: id(42), removalEventID: id(41), receiptTimeMs: 1000, now: moment)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().enrollments.map(\.phoneID) }, [id(8)])
+        XCTAssertEqual(try db.read { try $0.approvalEnrollments().count }, 2)
+    }
+
+    func testPairingCannotSubstituteLocalAuthorityOrSecurityFloor() throws {
+        let fixture = try Fixture(), (db, _, _) = try setup(fixture)
+        let (attempt, _) = try pairing(db, biometric: key)
+        let trusted = try db.read { try $0.approvalTrustSnapshot() }
+        for wrongKey in [false, true] {
+            XCTAssertThrowsError(try PairingEnrollmentAttempt(transcript: attempt.transcript, trusted: trusted,
+                authorityPublicKey: wrongKey ? key.publicKey.x963Representation : rootKey.publicKey.x963Representation,
+                transportPublicKey: attempt.transcript.macTransportKey, minimumEnvelopeVersion: wrongKey ? 1 : 2,
+                started: .init(epoch: clock, milliseconds: 100), deadlineMilliseconds: 1100)) {
+                XCTAssertEqual($0 as? PairingEnrollmentError, .wrongContext)
+            }
+        }
+    }
+
+    func testPairingExpiryBeforeCommitRollsBackKeysAndAudit() throws {
+        let fixture = try Fixture(), (db, writer, revision) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        var reads = 0
+        XCTAssertThrowsError(try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: {
+                reads += 1
+                return AuthorityMoment(epoch: self.clock, milliseconds: reads == 1 ? 110 : 1100)
+            })) { XCTAssertEqual($0 as? PairingEnrollmentError, .expired) }
+        XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+        _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+    }
+
+    func testPairingElapsedDeadlineAndClockEpochPreventCommit() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        for now in [AuthorityMoment(epoch: clock, milliseconds: 1100), AuthorityMoment(epoch: clock, milliseconds: 99),
+                    AuthorityMoment(epoch: UUID(), milliseconds: 110)] {
+            XCTAssertThrowsError(try attempt.commit(database: db, biometricProof: proof, writer: writer,
+                expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: { now })) {
+                XCTAssertEqual($0 as? PairingEnrollmentError, .expired)
+            }
+        }
+        XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
+    }
+
     func testPublicConsumptionRequiresStoredEnrollmentAndUsesItsKeys() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true), writer = try db.write { try $0.createEpoch(descriptor()) }
         XCTAssertThrowsError(try db.write { try consume($0, writer: writer, revision: UUID(), head: 0) }) {
