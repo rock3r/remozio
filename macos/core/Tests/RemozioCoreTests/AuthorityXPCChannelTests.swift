@@ -119,6 +119,15 @@ final class AuthorityXPCChannelTests: XCTestCase, @unchecked Sendable {
             XCTAssertGreaterThan(driver.closeCount, 0)
         }
     }
+    func testMalformedTrustRetiresAuthenticatedConnection() async throws {
+        let (channel, driver) = try await opened()
+        let pending = Task { try await channel.fetchTrust(expectedMacID: Data(repeating: 1, count: 16), expectedAccountID: Data(repeating: 2, count: 16)) }
+        await fulfillment(of: [driver.snapshotSent], timeout: 2)
+        driver.completeSnapshot(.snapshot(Data([0])))
+        await failure(pending)
+        XCTAssertGreaterThan(driver.closeCount, 0)
+        await failure(Task { try await channel.trustSnapshot() })
+    }
     func testCloseNotifiesOwnerOnceEvenWithRepeatedInvalidation() async throws {
         let notification = XCTestExpectation(description: "owner notified")
         notification.assertForOverFulfill = true

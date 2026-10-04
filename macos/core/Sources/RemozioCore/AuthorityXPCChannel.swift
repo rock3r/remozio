@@ -106,6 +106,15 @@ public actor AuthorityXPCChannel {
         guard case .snapshot(let data) = try await perform(.snapshot) else { throw AuthorityXPCError.invalidMessage }
         return data
     }
+    /// Decode only after authenticating the authority; a malformed or wrong-scope snapshot retires the connection.
+    public func fetchTrust(expectedMacID: Data, expectedAccountID: Data) async throws -> DirectApprovalTrust {
+        let bytes = try await trustSnapshot()
+        do { return try AuthorityTrustCodec.decodeSnapshot(bytes, expectedMacID: expectedMacID, expectedAccountID: expectedAccountID) }
+        catch { finish(.invalidMessage); throw error }
+    }
+    public func validatePeer(_ binding: AuthorityPeerBinding) async throws -> Bool {
+        try await validatePeer(binding: AuthorityTrustCodec.encodeBinding(binding))
+    }
     public func validatePeer(binding: Data) async throws -> Bool {
         guard !binding.isEmpty, binding.count <= Self.maximumBindingBytes else { throw AuthorityXPCError.invalidMessage }
         guard case .validation(let allowed) = try await perform(.validation, binding: binding) else { throw AuthorityXPCError.invalidMessage }
