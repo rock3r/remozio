@@ -158,6 +158,7 @@ final class EnrollmentJournal {
                       transcript.phone.scope == (try ChannelScope(macID: mac, accountID: account, phoneID: phoneID, enrollmentEpoch: epoch)),
                       transcript.transportKey.publicKey == enrollment.identityPublicKey,
                       transcript.enrollmentTag == enrollment.notificationTag,
+                      try PairingEnrollmentAttempt.capabilities(transcript).contracts == enrollment.approval.capabilities.contracts,
                       enrollment.approval.keys.contains(where: { $0.keyClass == .decision && $0.id == transcript.decisionKey.keyID && $0.publicKey == transcript.decisionKey.publicKey }),
                       enrollment.approval.keys.contains(where: { $0.keyClass == .biometric && $0.id == transcript.biometricKey.keyID && $0.publicKey == transcript.biometricKey.publicKey }) else {
                     throw EnrollmentJournalError.corruptData

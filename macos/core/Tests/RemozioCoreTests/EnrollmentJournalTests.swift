@@ -155,6 +155,27 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertNil(try reopened.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10)) })
     }
 
+    func testRecoveredPairingRejectsCanonicalCapabilityCorruption() throws {
+        let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
+        let (attempt, proof) = try pairing(db, biometric: key)
+        _ = try attempt.commit(database: db, biometricProof: proof, writer: writer,
+            expectedAuditHead: 0, addEventID: id(40), receiptTimeMs: 1000, now: moment)
+        guard case var .map(fields) = try DeterministicCBOR.decode(attempt.transcript.encode(), limits: limits),
+              case var .map(offer) = try DeterministicCBOR.decode(attempt.transcript.phone.encode(), limits: limits) else {
+            return XCTFail("Expected transcript and offer maps")
+        }
+        offer[5] = .array([.array([.unsigned(0), .unsigned(1), .unsigned(1), .array([.unsigned(42)])])])
+        fields[3] = .bytes(try DeterministicCBOR.encode(.map(offer), limits: limits))
+        let changed = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        _ = try PairingTranscript.decode(changed)
+        let hex = changed.map { String(format: "%02x", $0) }.joined()
+        try fixture.sql("UPDATE pairing_commits_v1 SET transcript=x'\(hex)'")
+        XCTAssertThrowsError(try db.read { try $0.committedPairing(setupID: id(30), authenticatedPhoneID: id(8), authenticatedEnrollmentEpoch: id(10)) }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .corruptData)
+        }
+        XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
+    }
+
     func testPairingReceiptRecordRollsBackWithExpiredCommit() throws {
         let fixture = try Fixture(), (db, writer, _) = try setup(fixture)
         let (attempt, proof) = try pairing(db, biometric: key)
