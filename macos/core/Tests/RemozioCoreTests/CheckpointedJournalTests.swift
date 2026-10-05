@@ -220,6 +220,29 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertFalse(try fixture.store.read().recoveryRequired)
     }
 
+    func testStorageOwnerHoldsAndReleasesBothLeases() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close(); fixture.store.close()
+        var storage: AuthorityStorage? = try AuthorityStorage(openJournal: { try fixture.openJournal() },
+            openContinuity: { try fixture.openStore() })
+        XCTAssertNotNil(storage)
+        XCTAssertThrowsError(try fixture.openJournal())
+        XCTAssertThrowsError(try fixture.openStore())
+        storage = nil
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
+    }
+
+    func testFailedContinuityOpenReleasesJournalAndPreservesError() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close()
+        XCTAssertThrowsError(try AuthorityStorage(openJournal: { try fixture.openJournal() }, openContinuity: {
+            throw Fault.injected
+        })) { XCTAssertTrue($0 is Fault) }
+        fixture.journal = try fixture.openJournal()
+        XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
