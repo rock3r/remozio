@@ -79,6 +79,7 @@ public final class ApprovalRequestCoordinator {
     private let auditLimits: CBORLimits
     private var lastTime: UInt64?
     private var stopped = false
+    private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
     private struct Entry {
         var state: ApprovalRequestState
@@ -106,6 +107,18 @@ public final class ApprovalRequestCoordinator {
         self.signingLimits = signingLimits; self.auditLimits = auditLimits
     }
 
+    /// The host retains both store leases and completes startup recovery before supplying the writer.
+    convenience init(database: JournalDatabase, continuity: ContinuityStore, writer: AuditEpochWriter, clockEpoch: UUID,
+                     maximumRequests: Int, maximumRetainedBytes: Int, requestLimits: CBORLimits, captureLimits: CBORLimits,
+                     decisionLimits: CBORLimits, signingLimits: CBORLimits, auditLimits: CBORLimits) throws {
+        try self.init(database: database, writer: writer, clockEpoch: clockEpoch, maximumRequests: maximumRequests,
+            maximumRetainedBytes: maximumRetainedBytes, requestLimits: requestLimits, captureLimits: captureLimits,
+            decisionLimits: decisionLimits, signingLimits: signingLimits, auditLimits: auditLimits)
+        let commits = CheckpointedJournal(journal: database, continuity: continuity)
+        try commits.read { _ in () }
+        checkpointed = commits
+    }
+
     public func admit(_ draft: ApprovalRequestDraft, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
         try checkClock(now)
         guard draft.firstObservedAt.epoch == clockEpoch, draft.firstObservedAt.milliseconds <= now.milliseconds,
@@ -123,7 +136,7 @@ public final class ApprovalRequestCoordinator {
         let retained = try RetainedApprovalRequest(payload: payload, phase: .queued, admittedAt: draft.firstObservedAt,
             deadlineMilliseconds: draft.deadlineMilliseconds)
         let category = category(payload.contract.requestKind)
-        try database.write { tx in
+        try write { tx in
             let trust = try tx.approvalTrustSnapshot()
             guard trust.allowedContracts.contains(payload.contract), let features = trust.authorityCapabilities.contracts[payload.contract],
                   payload.requiredFeatures.isSubset(of: features) else { throw DecisionVerificationError.unsupportedContract }
@@ -141,7 +154,7 @@ public final class ApprovalRequestCoordinator {
 
     public func state(requestID: Data) throws -> ApprovalRequestState {
         try running()
-        _ = try database.read { try head($0) }
+        _ = try read { try head($0) }
         guard let entry = entries[requestID] else { throw ApprovalCoordinatorError.unknownRequest }
         return entry.state
     }
@@ -164,7 +177,7 @@ public final class ApprovalRequestCoordinator {
             guard let retained = entries[id]?.retained else { return false }
             return (retained.phase == .queued || retained.phase == .presented) && now.milliseconds >= retained.deadlineMilliseconds
         }.sorted { $0.lexicographicallyPrecedes($1) }
-        try database.write { tx in
+        try write { tx in
             _ = try head(tx)
             for id in expired {
                 guard let entry = entries[id] else { throw ApprovalCoordinatorError.unknownRequest }
@@ -194,7 +207,7 @@ public final class ApprovalRequestCoordinator {
         let phase = try RequestLifecycle.transition(from: retained.phase, event: event)
         let kind: AuditEventKind = phase == .expired ? .expired : phase == .unknown ? .unknownOutcome : .cancelled
         let outcome: AuditOutcome = phase == .expired ? .expired : phase == .unknown ? .unresolved : .noDispatch
-        try database.write { try append($0, requestID: requestID, category: entry.category, kind: kind,
+        try write { try append($0, requestID: requestID, category: entry.category, kind: kind,
             outcome: outcome, reason: auditReason, receiptTimeMs: receiptTimeMs) }
         return try replace(requestID, phase: phase, reason: statusReason, now: now)
     }
@@ -206,7 +219,7 @@ public final class ApprovalRequestCoordinator {
         let decision = try DecisionPayload.decode(canonicalDecision, limits: decisionLimits)
         guard decision.phoneID == authenticatedPhoneID else { throw ApprovalCoordinatorError.wrongPhone }
         let retained = try pending(decision.requestID, now: now, receiptTimeMs: receiptTimeMs)
-        let receipt = try database.write { tx in
+        let receipt = try write { tx in
             let trust = try tx.requestDeliveryTrust()
             guard trust.enrollments.contains(where: {
                 $0.approval.phoneID == authenticatedPhoneID && $0.epoch == authenticatedEnrollmentEpoch && $0.approval.active
@@ -229,7 +242,7 @@ public final class ApprovalRequestCoordinator {
             return delivery.close(current: current, routing: routing, now: now)
         }
         guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
-        let trust = try database.read { try $0.requestDeliveryTrust() }
+        let trust = try read { try $0.requestDeliveryTrust() }
         return delivery.reconcile(current: retained, routing: routing, trust: trust, now: now, enqueue: enqueue)
     }
 
@@ -244,7 +257,7 @@ public final class ApprovalRequestCoordinator {
             return RequestDeliveryDispatch(delivery: nil, update: delivery.close(current: current, routing: routing, now: now))
         }
         guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
-        let trust = try database.read { try $0.requestDeliveryTrust() }
+        let trust = try read { try $0.requestDeliveryTrust() }
         return delivery.handoff(id: deliveryID, current: retained, routing: routing, trust: trust, now: now, accept: accept)
     }
 
@@ -260,7 +273,7 @@ public final class ApprovalRequestCoordinator {
     /// Original binding for the root executor's separate checkpoint and target checks. This snapshot grants no dispatch permission.
     public func consumedRequest(requestID: Data, now: AuthorityMoment) throws -> RetainedApprovalRequest {
         try checkClock(now)
-        _ = try database.read { try head($0) }
+        _ = try read { try head($0) }
         guard let entry = entries[requestID], let retained = entry.retained,
               retained.phase == .authorized || retained.phase == .executing else { throw ApprovalCoordinatorError.notPending }
         return retained
@@ -269,7 +282,7 @@ public final class ApprovalRequestCoordinator {
     /// Retained winner and result for Already handled responses. It cannot recreate a live request after restart.
     public func historicalOutcome(requestID: Data) throws -> ConsumptionOutcome? {
         try running()
-        return try database.read { try $0.consumptionOutcome(requestID: requestID) }
+        return try read { try $0.consumptionOutcome(requestID: requestID) }
     }
 
     /// Only controller-verified outcomes belong here. This records an observation and grants no permission to execute.
@@ -279,7 +292,7 @@ public final class ApprovalRequestCoordinator {
         guard let entry = entries[requestID], entry.state.phase == .authorized || entry.state.phase == .executing else {
             throw ApprovalCoordinatorError.notPending
         }
-        let outcome = try database.write { tx in
+        let outcome = try write { tx in
             try tx.transitionConsumption(requestID: requestID, expectedRevision: expectedRevision, event: event,
                 eventID: random(16), receiptTimeMs: receiptTimeMs, writer: writer, expectedHead: head(tx))
         }
@@ -306,7 +319,7 @@ public final class ApprovalRequestCoordinator {
         try checkClock(now)
         guard let entry = entries[id], let retained = entry.retained,
               retained.phase == .queued || retained.phase == .presented else { throw ApprovalCoordinatorError.notPending }
-        _ = try database.read { try head($0) }
+        _ = try read { try head($0) }
         if now.milliseconds >= retained.deadlineMilliseconds {
             _ = try retirePending(requestID: id, reason: .deadlineElapsed, now: now, receiptTimeMs: receiptTimeMs)
             throw ApprovalCoordinatorError.expired
@@ -348,7 +361,21 @@ public final class ApprovalRequestCoordinator {
         guard let epoch = try tx.epoch(writer.epoch) else { throw AuditJournalError.unavailableEpoch }
         return epoch.head
     }
-    private func running() throws { if stopped { throw ApprovalCoordinatorError.unavailable } }
+    private func read<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
+        try running()
+        if let checkpointed { return try checkpointed.read(body) }
+        return try database.read(body)
+    }
+
+    private func write<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
+        try running()
+        if let checkpointed {
+            return try checkpointed.write(epoch: writer.epoch, recoverRejectedBody: true, body)
+        }
+        return try database.write(body)
+    }
+
+    private func running() throws { if stopped || checkpointed?.retired == true { throw ApprovalCoordinatorError.unavailable } }
     private func checkClock(_ now: AuthorityMoment) throws {
         try running()
         guard now.epoch == clockEpoch, lastTime == nil || now.milliseconds >= lastTime! else {

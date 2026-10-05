@@ -8,7 +8,7 @@ final class CheckpointedJournal {
     }
     private let journal: JournalDatabase
     private let continuity: ContinuityStore
-    private var retired = false
+    private(set) var retired = false
     private var active = false
 
     /// Both connections remain confined to the caller's synchronous serialization boundary.
@@ -19,19 +19,24 @@ final class CheckpointedJournal {
 
     /// The callback may mutate the journal only. It must not publish results or cause external effects.
     /// `epoch` identifies the resulting audit epoch, including when the callback creates a fresh epoch.
-    func write<Value>(epoch: Data, _ body: (JournalTransaction) throws -> Value) throws -> Value {
+    func write<Value>(epoch: Data, recoverRejectedBody: Bool = false, _ body: (JournalTransaction) throws -> Value) throws -> Value {
         guard !retired else { throw Failure.retired }
         guard !active else { throw Failure.reentrant }
         active = true
         defer { active = false }
+        var original: ContinuityState?
+        var bodyRejected = false
         do {
             let before = try continuity.read()
+            original = before
             guard !before.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
             guard before.pending == nil else { throw Failure.unresolvedPreparation }
             guard before.committed.generation < UInt64.max else { throw Failure.generationExhausted }
             let (value, candidate) = try journal.write { transaction in
                 guard try Self.matches(before.committed, transaction: transaction) else { throw Failure.boundaryMismatch }
-                let value = try body(transaction)
+                let value: Value
+                do { value = try body(transaction) }
+                catch { bodyRejected = true; throw error }
                 guard let boundary = try transaction.epoch(epoch) else { throw Failure.missingEpoch }
                 let digests = try transaction.continuityDigests()
                 let candidate = try before.committed.successor(authorityDigest: digests.authority,
@@ -48,7 +53,37 @@ final class CheckpointedJournal {
         } catch {
             // A failed call never releases its result. Recovery must inspect both stores independently.
             retired = true
+            if recoverRejectedBody, bodyRejected, let original {
+                // Only a proved rollback can preserve a writer after a rejected request.
+                do {
+                    let current = try continuity.read()
+                    if current == original, !current.recoveryRequired, current.pending == nil,
+                       try journal.read({ try Self.matches(current.committed, transaction: $0) }) {
+                        retired = false
+                    }
+                } catch { /* Preserve the original failure and retire uncertain storage. */ }
+            }
             throw error
+        }
+    }
+
+    /// Validates the independent checkpoint in the same journal transaction as the caller's read.
+    func read<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
+        guard !retired else { throw Failure.retired }
+        guard !active else { throw Failure.reentrant }
+        active = true
+        defer { active = false }
+        let checkpoint: ContinuityState
+        do {
+            checkpoint = try continuity.read()
+            guard !checkpoint.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            guard checkpoint.pending == nil else { throw Failure.unresolvedPreparation }
+        } catch { retired = true; throw error }
+        return try journal.read { transaction in
+            do {
+                guard try Self.matches(checkpoint.committed, transaction: transaction) else { throw Failure.boundaryMismatch }
+            } catch { retired = true; throw error }
+            return try body(transaction)
         }
     }
 

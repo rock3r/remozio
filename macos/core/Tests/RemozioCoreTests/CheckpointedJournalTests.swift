@@ -8,6 +8,39 @@ import RemozioProtocol
 final class CheckpointedJournalTests: XCTestCase {
     private enum Fault: Error { case injected }
 
+    func testRejectedBodyCanContinueOnlyAfterVerifiedRollback() throws {
+        let fixture = try Fixture(), before = try fixture.store.read()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try commits.write(epoch: fixture.epoch, recoverRejectedBody: true) { transaction in
+            try fixture.append(transaction)
+            throw Fault.injected
+        })
+        XCTAssertFalse(commits.retired)
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertEqual(try commits.read { try $0.epoch(fixture.epoch)?.head }, 0)
+        try commits.write(epoch: fixture.epoch, recoverRejectedBody: true) { try fixture.append($0) }
+        XCTAssertEqual(try fixture.store.read().committed.journalHead, 1)
+    }
+
+    func testRequestModeDoesNotRecoverAfterCheckpointPreparationOrFinalizationFailure() throws {
+        for finalize in [false, true] {
+            let fixture = try Fixture()
+            let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
+            try fixture.sql("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END")
+            let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+            XCTAssertThrowsError(try commits.write(epoch: fixture.epoch, recoverRejectedBody: true) { try fixture.append($0) })
+            XCTAssertTrue(commits.retired)
+            XCTAssertThrowsError(try commits.read { _ in XCTFail("retired read ran") })
+        }
+    }
+
+    func testCheckpointReadRejectsChangedBoundaryBeforeCallingReader() throws {
+        let fixture = try Fixture(), commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try fixture.journal.write { try fixture.append($0) }
+        XCTAssertThrowsError(try commits.read { _ in XCTFail("mismatched read ran") })
+        XCTAssertTrue(commits.retired)
+    }
+
     func testResultReturnsAfterBothStoresCommitAndSurvivesReopen() throws {
         let fixture = try Fixture()
         let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
