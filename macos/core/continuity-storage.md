@@ -175,8 +175,10 @@ on this owner; there is no dispatch path.
 
 A history discontinuity remains distinct from a persisted repair marker. The
 executable reports history recovery as pending with a temporary-failure exit code.
-Journal and continuity storage errors also receive temporary-failure status. A
-confirmed repair marker has a separate diagnostic. Automatic history recovery,
+Lock contention and explicit temporary SQLite or system failures also receive
+temporary-failure status. Wrong scope, incompatible stores, unsafe metadata, and
+unknown errors receive configuration-failure status. Extended SQLite codes use
+their primary error class. A confirmed repair marker has a separate diagnostic. Automatic history recovery,
 fresh action-epoch preparation, and bounded retry scheduling remain required.
 
 Tests exercise paired ownership through service shutdown and construction failure.

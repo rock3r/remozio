@@ -27,17 +27,18 @@ struct AuthorityMain {
             termination.resume(); interruption.resume()
             try service.start()
             withExtendedLifetime((service, termination, interruption)) { dispatchMain() }
-        } catch AuthorityStorageStartupError.historyRecoveryRequired {
-            fail("Authority starting: history recovery is pending.", code: EX_TEMPFAIL)
-        } catch AuthorityStorageStartupError.repairRequired {
-            fail("Authority continuity requires repair.", code: EX_CONFIG)
-        } catch is ContinuityStoreError {
-            fail("Authority starting: continuity storage is unavailable.", code: EX_TEMPFAIL)
-        } catch is JournalDatabaseError {
-            fail("Authority starting: journal storage is unavailable.", code: EX_TEMPFAIL)
         } catch {
             // Startup inputs can contain private identifiers. Do not print them or storage paths.
-            fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG)
+            switch AuthorityStartupFailure(error: error) {
+            case .historyRecoveryRequired:
+                fail("Authority starting: history recovery is pending.", code: EX_TEMPFAIL)
+            case .repairRequired:
+                fail("Authority continuity requires repair.", code: EX_CONFIG)
+            case .temporaryStorageFailure:
+                fail("Authority starting: storage is temporarily unavailable.", code: EX_TEMPFAIL)
+            case .configurationFailure:
+                fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG)
+            }
         }
     }
     private static func fail(_ message: String, code: Int32) -> Never {
