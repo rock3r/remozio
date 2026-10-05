@@ -167,6 +167,59 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read(), before)
     }
 
+    func testStartupWithholdsWriterUntilCheckpointedRecoveryCompletes() throws {
+        let fixture = try Fixture()
+        try fixture.reopen()
+        let startup = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+            maximumRecords: 1, maximumBytes: 16384)
+        XCTAssertThrowsError(try startup.completedWriter())
+        let next = Data(repeating: 9, count: 16)
+        guard case .recovering = try startup.start(descriptor: fixture.descriptor(next)) else { return XCTFail("startup did not begin") }
+        XCTAssertThrowsError(try startup.completedWriter())
+        XCTAssertEqual(try fixture.store.read().committed.journalEpoch, next)
+        guard case .complete = try startup.advance() else { return XCTFail("empty recovery did not finish") }
+        XCTAssertEqual(try startup.completedWriter().epoch, next)
+        XCTAssertThrowsError(try startup.start(descriptor: fixture.descriptor(Data(repeating: 10, count: 16))))
+        try fixture.reopen()
+        XCTAssertNil(try fixture.store.read().pending)
+        XCTAssertEqual(try fixture.store.read().committed.journalEpoch, next)
+    }
+
+    func testStartupFailureNeverReleasesWriterAndCanRecoverAfterReopen() throws {
+        let fixture = try Fixture()
+        try fixture.reopen()
+        let startup = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+            maximumRecords: 1, maximumBytes: 16384)
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try startup.start(descriptor: fixture.descriptor(Data(repeating: 9, count: 16))))
+        XCTAssertThrowsError(try startup.completedWriter())
+        XCTAssertThrowsError(try startup.advance())
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        try fixture.reopen()
+        let retry = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+            maximumRecords: 1, maximumBytes: 16384)
+        let next = Data(repeating: 10, count: 16)
+        guard case .recovering = try retry.start(descriptor: fixture.descriptor(next)) else { return XCTFail("retry did not begin") }
+        guard case .complete = try retry.advance() else { return XCTFail("retry did not complete") }
+        XCTAssertEqual(try retry.completedWriter().epoch, next)
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+    }
+
+    func testStartupPreservesHistoryDiscontinuityWithoutCreatingEpoch() throws {
+        let fixture = try Fixture()
+        try fixture.journal.write { try fixture.append($0) }
+        try fixture.reopen()
+        let startup = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+            maximumRecords: 1, maximumBytes: 16384)
+        let next = Data(repeating: 9, count: 16)
+        guard case .historyDiscontinuity = try startup.start(descriptor: fixture.descriptor(next)) else {
+            return XCTFail("history loss was not surfaced")
+        }
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(next) })
+        XCTAssertThrowsError(try startup.completedWriter())
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
@@ -213,6 +266,12 @@ final class CheckpointedJournalTests: XCTestCase {
         }
         func observed(generation: UInt64) throws -> ContinuityCheckpoint {
             try journal.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: generation) }
+        }
+        func descriptor(_ next: Data) throws -> AuditEpochDescriptor {
+            try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                0: .unsigned(1), 1: .bytes(Data(repeating: 1, count: 16)), 2: .bytes(Data(repeating: 2, count: 16)),
+                3: .bytes(next), 4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+            ]), limits: limits), limits: limits)
         }
         func append(_ transaction: JournalTransaction) throws {
             let event = try AuditEventMetadata(eventID: Data(repeating: 4, count: 16), macID: Data(repeating: 1, count: 16),

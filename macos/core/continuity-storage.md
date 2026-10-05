@@ -111,3 +111,37 @@ flowchart LR
 Revisiting a committed page adds no duplicate terminal events. This path never grants a permit or retries an external action. When separate retained evidence proves no dispatch, the host must record that specific outcome before this conservative fallback. Unenumerable missing history still needs an explicit gap record. The startup host must keep admission closed, create the fresh epoch only after continuity checks, and use checkpointed writes for every batch. Those startup connections remain unimplemented.
 
 Tests cover request ordering, row and byte boundaries, corruption, reopening, expired access, idempotent Unknown records, live-epoch rejection, stale empty-batch heads, and atomic rollback when the second recovery audit insert fails. Physical recovery remains untested.
+
+## Checkpointed startup sequence
+
+`JournalStartupRecovery` combines checkpoint reconciliation, fresh epoch creation,
+and bounded recovery batches. It withholds its epoch writer until every batch and
+its checkpoint commit. A failed operation retires that sequence; the host must
+reopen storage and start a new sequence with a fresh epoch before retrying.
+
+```mermaid
+flowchart TD
+    A[Admission closed] --> B[Reconcile independent checkpoint]
+    B --> C{Storage result}
+    C -->|Exact boundary| D[Commit fresh epoch and checkpoint]
+    C -->|History loss| H[Preserve evidence for history recovery]
+    C -->|Authority mismatch| R[Keep repair required]
+    D --> E[Commit bounded outcome batch and checkpoint]
+    E --> F{More records?}
+    F -->|Yes| E
+    F -->|No| G[Release writer for remaining host gates]
+```
+
+The sequence does not dispatch actions or restore request payloads. Reopening
+between batches starts enumeration again; terminal outcomes remain unchanged.
+Unresolved observations become Unknown through the existing conservative recovery
+path. The host must record independently proven no-dispatch outcomes before that
+fallback. A matching checkpoint alone does not prove that an action was never
+executed.
+
+The caller must hold exclusive ownership, validate external authority state, and
+supply a fresh descriptor bound to current trust. Automatic history-gap recovery,
+no-dispatch proof integration, retry scheduling, and service admission wiring are
+not yet implemented by this sequence. Its completed writer proves storage
+completion only. Tests cover interrupted epoch finalization and restart between
+nonempty batches; they do not simulate physical power loss or service installation.

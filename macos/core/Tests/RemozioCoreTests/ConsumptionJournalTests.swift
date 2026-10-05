@@ -309,6 +309,55 @@ final class ConsumptionJournalTests: XCTestCase {
             eventID: id(eventID), receiptTimeMs: 12400, writer: writer, expectedHead: head)
     }
 
+    func testCheckpointedStartupResumesAcrossBatchesWithoutRewritingTerminalOutcomes() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request(4)) }
+        _ = try database.write { try consume($0, writer, request: request(6), head: 1, event: 11) }
+        _ = try database.write { try transition($0, writer, request: 6, eventID: 12, head: 2) }
+        let directory = fixture.root.appendingPathComponent("continuity")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        for name in ["writer.lock", "continuity.sqlite"] {
+            let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+            guard fd >= 0 else { throw Failure.injected }
+            Darwin.close(fd)
+        }
+        func openStore(_ initial: ContinuityCheckpoint? = nil) throws -> ContinuityStore {
+            try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+                relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: initial)
+        }
+        let initial = try database.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: id(3), generation: 1) }
+        let store = try openStore(initial)
+        try database.close()
+        let reopened = try open(fixture)
+        let startup = try JournalStartupRecovery(journal: reopened, continuity: store, maximumRecords: 1, maximumBytes: 16384)
+        guard case .recovering = try startup.start(descriptor: descriptor(20)) else { return XCTFail("startup did not begin") }
+        guard case .recovering = try startup.advance() else { return XCTFail("first batch ended too soon") }
+        XCTAssertThrowsError(try startup.completedWriter())
+        let first = try XCTUnwrap(reopened.read { try $0.consumptionOutcome(requestID: id(4)) })
+        XCTAssertEqual(first.phase, .unknown)
+        XCTAssertEqual(try reopened.read { try $0.consumptionOutcome(requestID: id(6))?.phase }, .executing)
+        XCTAssertEqual(try store.read().committed.journalHead, 1)
+        try reopened.close(); store.close()
+        let restarted = try open(fixture), restartedStore = try openStore()
+        defer { try? restarted.close(); restartedStore.close() }
+        let retry = try JournalStartupRecovery(journal: restarted, continuity: restartedStore,
+            maximumRecords: 1, maximumBytes: 16384)
+        guard case .recovering = try retry.start(descriptor: descriptor(21)) else { return XCTFail("restart did not begin") }
+        guard case .recovering = try retry.advance() else { return XCTFail("terminal page ended too soon") }
+        XCTAssertThrowsError(try retry.completedWriter())
+        guard case .complete = try retry.advance() else { return XCTFail("second page did not finish") }
+        XCTAssertEqual(try retry.completedWriter().epoch, id(21))
+        XCTAssertEqual(try restarted.read { try $0.consumptionOutcome(requestID: id(4)) }, first)
+        let second = try XCTUnwrap(restarted.read { try $0.consumptionOutcome(requestID: id(6)) })
+        XCTAssertEqual(second.phase, .unknown)
+        XCTAssertEqual(second.event.journalEpoch, id(21))
+        XCTAssertEqual(second.revision, 2)
+        XCTAssertEqual(try restartedStore.read().committed.journalHead, 1)
+        XCTAssertNil(try restartedStore.read().pending)
+    }
+
     func testRecoveryPagesAreOrderedBoundedAndKeepOutcomeEvidence() throws {
         let fixture = try Fixture(), database = try open(fixture, initialize: true)
         let writer = try database.write { try $0.createEpoch(descriptor()) }
