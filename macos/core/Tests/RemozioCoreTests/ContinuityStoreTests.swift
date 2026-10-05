@@ -203,11 +203,17 @@ final class ContinuityStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.prepareHistoryRecovery(intent))
         XCTAssertEqual(try store.historyRecovery(), intent)
         let candidate = try recoveredCheckpoint(intent)
+        XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: candidate))
+        try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)
+        store.close()
+        store = try open(fixture)
+        XCTAssertEqual(try store.historyRecoveryCandidate(), candidate)
         try store.finalizeHistoryRecovery(expected: intent, candidate: candidate)
         store.close()
         store = try open(fixture)
         defer { store.close() }
         XCTAssertNil(try store.historyRecovery())
+        XCTAssertNil(try store.historyRecoveryCandidate())
         XCTAssertEqual(try store.read().committed, candidate)
         XCTAssertNil(try store.read().pending)
         XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: candidate))
@@ -240,6 +246,7 @@ final class ContinuityStoreTests: XCTestCase {
         var store = try open(fixture, initial: first)
         let intent = try recovery(store.read()), candidate = try recoveredCheckpoint(intent)
         try store.prepareHistoryRecovery(intent)
+        try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)
         try fixture.sql("CREATE TRIGGER fail_update BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: candidate))
         XCTAssertEqual(try store.historyRecovery(), intent)
@@ -261,6 +268,19 @@ final class ContinuityStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.prepareHistoryRecovery(stale))
         let intent = try recovery(store.read()), candidate = try recoveredCheckpoint(intent)
         try store.prepareHistoryRecovery(intent)
+        XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: stale, candidate: candidate))
+        XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: second))
+        for field in 0..<4 {
+            let invalid = try ContinuityCheckpoint(generation: candidate.generation + (field == 0 ? 1 : 0),
+                authorityDigest: field == 1 ? Data(repeating: 6, count: 32) : candidate.authorityDigest,
+                ledgerDigest: candidate.ledgerDigest,
+                journalEpoch: field == 2 ? Data(repeating: 6, count: 16) : candidate.journalEpoch,
+                journalHead: candidate.journalHead,
+                authorityGeneration: field == 3 ? candidate.authorityGeneration! + 1 : candidate.authorityGeneration)
+            XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: invalid))
+        }
+        XCTAssertNil(try store.historyRecoveryCandidate())
+        try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)
         XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: stale, candidate: candidate))
         XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: second))
         XCTAssertEqual(try store.historyRecovery(), intent)
@@ -269,6 +289,10 @@ final class ContinuityStoreTests: XCTestCase {
         store = try open(fixture)
         defer { store.close() }
         XCTAssertThrowsError(try store.historyRecovery()) { XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired) }
+        XCTAssertThrowsError(try store.historyRecoveryCandidate()) { XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired) }
+        XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+        }
         XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: candidate)) {
             XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
         }
@@ -280,6 +304,55 @@ final class ContinuityStoreTests: XCTestCase {
             let fixture = try Fixture(), first = try checkpoint(1), store = try open(fixture, initial: first)
             try store.prepare(expected: first, candidate: checkpoint(2))
             try store.prepareHistoryRecovery(recovery(store.read()))
+            store.close()
+            try fixture.sql(corruption)
+            XCTAssertThrowsError(try open(fixture))
+        }
+    }
+
+    func testCandidatePreparationIsAtomicAndCannotBeReplaced() throws {
+        let fixture = try Fixture(), first = try checkpoint(1)
+        var store = try open(fixture, initial: first)
+        let intent = try recovery(store.read()), candidate = try recoveredCheckpoint(intent)
+        try store.prepareHistoryRecovery(intent)
+        XCTAssertNil(try store.historyRecoveryCandidate())
+        try fixture.sql("CREATE TRIGGER fail_update BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate))
+        store.close()
+        store = try open(fixture)
+        XCTAssertEqual(try store.historyRecovery(), intent)
+        XCTAssertNil(try store.historyRecoveryCandidate())
+        try fixture.sql("DROP TRIGGER fail_update")
+        try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)
+        store.close()
+        store = try open(fixture)
+        defer { store.close() }
+        try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: candidate)
+        let different = try ContinuityCheckpoint(generation: candidate.generation,
+            authorityDigest: candidate.authorityDigest, ledgerDigest: Data(repeating: 6, count: 32),
+            journalEpoch: candidate.journalEpoch, journalHead: candidate.journalHead + 1,
+            authorityGeneration: candidate.authorityGeneration)
+        XCTAssertThrowsError(try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: different))
+        XCTAssertThrowsError(try store.finalizeHistoryRecovery(expected: intent, candidate: different))
+        XCTAssertEqual(try store.historyRecoveryCandidate(), candidate)
+        XCTAssertThrowsError(try store.read())
+        try store.finalizeHistoryRecovery(expected: intent, candidate: candidate)
+        XCTAssertEqual(try store.read().committed, candidate)
+        let nextIntent = try HistoryRecoveryIntent(previous: store.read(), authorityDigest: candidate.authorityDigest,
+            ledgerDigest: candidate.ledgerDigest, recoveryEpoch: Data(repeating: 5, count: 16))
+        try store.prepareHistoryRecovery(nextIntent)
+        XCTAssertNil(try store.historyRecoveryCandidate())
+    }
+
+    func testMalformedOrOrphanedHistoryCandidateFailsReopen() throws {
+        for corruption in ["UPDATE continuity_v1 SET history_candidate=x'00'",
+                           "UPDATE continuity_v1 SET history_candidate=zeroblob(257)",
+                           "UPDATE continuity_v1 SET history=NULL",
+                           "UPDATE continuity_v1 SET history_candidate=committed"] {
+            let fixture = try Fixture(), store = try open(fixture, initial: checkpoint(1))
+            let intent = try recovery(store.read())
+            try store.prepareHistoryRecovery(intent)
+            try store.prepareHistoryRecoveryCandidate(expected: intent, candidate: recoveredCheckpoint(intent))
             store.close()
             try fixture.sql(corruption)
             XCTAssertThrowsError(try open(fixture))
