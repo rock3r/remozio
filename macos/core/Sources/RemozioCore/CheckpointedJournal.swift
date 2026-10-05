@@ -32,8 +32,10 @@ final class CheckpointedJournal {
             let (value, candidate) = try journal.write { transaction in
                 guard try Self.matches(before.committed, transaction: transaction) else { throw Failure.boundaryMismatch }
                 let value = try body(transaction)
-                let candidate = try Self.checkpoint(transaction: transaction, epoch: epoch,
-                                                    generation: before.committed.generation + 1)
+                guard let boundary = try transaction.epoch(epoch) else { throw Failure.missingEpoch }
+                let digests = try transaction.continuityDigests()
+                let candidate = try before.committed.successor(authorityDigest: digests.authority,
+                    ledgerDigest: digests.ledger, journalEpoch: epoch, journalHead: boundary.head)
                 // SQLite has not committed the journal. Its rollback journal protects the old boundary.
                 try continuity.prepare(expected: before.committed, candidate: candidate)
                 return (value, candidate)
@@ -50,11 +52,12 @@ final class CheckpointedJournal {
         }
     }
 
-    static func checkpoint(transaction: JournalTransaction, epoch: Data, generation: UInt64) throws -> ContinuityCheckpoint {
+    static func checkpoint(transaction: JournalTransaction, epoch: Data, generation: UInt64,
+                           authorityGeneration: UInt64? = nil) throws -> ContinuityCheckpoint {
         guard let boundary = try transaction.epoch(epoch) else { throw Failure.missingEpoch }
         let digests = try transaction.continuityDigests()
         return try ContinuityCheckpoint(generation: generation, authorityDigest: digests.authority,
-            ledgerDigest: digests.ledger, journalEpoch: epoch, journalHead: boundary.head)
+            ledgerDigest: digests.ledger, journalEpoch: epoch, journalHead: boundary.head, authorityGeneration: authorityGeneration)
     }
 
     private static func matches(_ checkpoint: ContinuityCheckpoint, transaction: JournalTransaction) throws -> Bool {

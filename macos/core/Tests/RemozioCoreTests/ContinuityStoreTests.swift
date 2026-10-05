@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import SQLite3
 import XCTest
+import RemozioProtocol
 @testable import RemozioCore
 
 final class ContinuityStoreTests: XCTestCase {
@@ -9,7 +10,7 @@ final class ContinuityStoreTests: XCTestCase {
     private func checkpoint(_ generation: UInt64) throws -> ContinuityCheckpoint {
         try ContinuityCheckpoint(generation: generation, authorityDigest: Data(repeating: 3, count: 32),
             ledgerDigest: Data(repeating: UInt8(generation), count: 32), journalEpoch: Data(repeating: 4, count: 16),
-            journalHead: generation)
+            journalHead: generation, authorityGeneration: 1)
     }
     private func open(_ fixture: Fixture, initial: ContinuityCheckpoint? = nil) throws -> ContinuityStore {
         try ContinuityStore(lease: fixture.acquire(), macID: mac, accountID: account, initialize: initial)
@@ -125,6 +126,50 @@ final class ContinuityStoreTests: XCTestCase {
                                                        journalEpoch: epoch, journalHead: 0))
         XCTAssertThrowsError(try ContinuityCheckpoint(generation: 1, authorityDigest: authority, ledgerDigest: authority,
                                                        journalEpoch: Data(), journalHead: 0))
+    }
+
+    func testVersionedCheckpointsRoundTripAndRejectMalformedGenerationFields() throws {
+        let legacy = try ContinuityCheckpoint(generation: 5, authorityDigest: mac + mac,
+            ledgerDigest: account + account, journalEpoch: mac, journalHead: 0)
+        let legacyBytes = try legacy.bytes
+        XCTAssertEqual(try ContinuityCheckpoint.decode(legacyBytes).bytes, legacyBytes)
+        XCTAssertNil(try ContinuityCheckpoint.decode(legacyBytes).authorityGeneration)
+        let current = try legacy.successor(authorityDigest: legacy.authorityDigest, ledgerDigest: legacy.ledgerDigest,
+            journalEpoch: legacy.journalEpoch, journalHead: legacy.journalHead)
+        XCTAssertEqual(current.authorityGeneration, 5)
+        XCTAssertEqual(try ContinuityCheckpoint.decode(current.bytes), current)
+        let limits = try CBORLimits(maxBytes: 256, maxDepth: 2, maxItems: 64)
+        guard case .map(let fields) = try DeterministicCBOR.decode(current.bytes, limits: limits) else { return XCTFail("not a map") }
+        for replacement: CBORValue? in [nil, .null, .unsigned(0), .text("5")] {
+            var invalid = fields; invalid[6] = replacement
+            XCTAssertThrowsError(try ContinuityCheckpoint.decode(DeterministicCBOR.encode(.map(invalid), limits: limits)))
+        }
+        for version: UInt64 in [0, 1, 3] {
+            var invalid = fields; invalid[0] = .unsigned(version)
+            XCTAssertThrowsError(try ContinuityCheckpoint.decode(DeterministicCBOR.encode(.map(invalid), limits: limits)))
+        }
+    }
+
+    func testGenerationTransitionRulesRejectFalseAdvancesAndDowngrades() throws {
+        let fixture = try Fixture(), first = try checkpoint(1), store = try open(fixture, initial: first)
+        defer { store.close() }
+        for (digest, generation): (Data, UInt64?) in [
+            (first.authorityDigest, 2), (Data(repeating: 9, count: 32), 1),
+            (Data(repeating: 9, count: 32), 3), (first.authorityDigest, nil)
+        ] {
+            let invalid = try ContinuityCheckpoint(generation: 2, authorityDigest: digest,
+                ledgerDigest: first.ledgerDigest, journalEpoch: first.journalEpoch, journalHead: 0,
+                authorityGeneration: generation)
+            XCTAssertThrowsError(try store.prepare(expected: first, candidate: invalid)) {
+                XCTAssertEqual($0 as? ContinuityStoreError, .invalidCheckpoint)
+            }
+            XCTAssertNil(try store.read().pending)
+        }
+        let valid = try first.successor(authorityDigest: Data(repeating: 9, count: 32),
+            ledgerDigest: first.ledgerDigest, journalEpoch: first.journalEpoch, journalHead: 0)
+        XCTAssertEqual(valid.authorityGeneration, 2)
+        try store.prepare(expected: first, candidate: valid)
+        XCTAssertEqual(try store.read().pending, valid)
     }
 
     private final class Fixture {

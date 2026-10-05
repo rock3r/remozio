@@ -397,6 +397,95 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
     }
 
+    func testTrustGenerationChangesOnlyForAuthorityStateAndBindsFreshEpoch() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        _ = try commits.write(epoch: fixture.epoch) {
+            try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+        }
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+        try commits.write(epoch: fixture.epoch) { _ in () }
+        try commits.write(epoch: fixture.epoch) { try fixture.append($0) }
+        XCTAssertEqual(try fixture.store.read().committed.generation, 4)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(fixture.epoch)?.descriptor.generation }, 7)
+        let next = Data(repeating: 9, count: 16)
+        let stale = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+            maximumRecords: 1, maximumBytes: 16384)
+        XCTAssertThrowsError(try stale.start(descriptor: fixture.descriptor(next))) {
+            guard case JournalStartupRecovery.Failure.invalidEpoch = $0 else { return XCTFail("wrong error") }
+        }
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(next) })
+        let current = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+            maximumRecords: 1, maximumBytes: 16384)
+        guard case .recovering = try current.start(descriptor: fixture.descriptor(next, generation: 8)) else {
+            return XCTFail("startup did not begin")
+        }
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(next)?.descriptor.generation }, 8)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+        guard case .complete = try current.advance() else { return XCTFail("recovery did not complete") }
+    }
+
+    func testTrustGenerationRecoveryFinalizesOnlyOnce() throws {
+        let fixture = try Fixture()
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        XCTAssertThrowsError(try commits.write(epoch: fixture.epoch) {
+            try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+        })
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 7)
+        XCTAssertEqual(try fixture.store.read().pending?.authorityGeneration, 8)
+        try fixture.reopen()
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        _ = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+        let recovered = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try recovered.write(epoch: fixture.epoch) { _ in () }
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+    }
+
+    func testLegacyPreparedBoundaryAndInterruptedUpgradeRemainRecoverable() throws {
+        let fixture = try Fixture(authorityGeneration: nil)
+        let legacy = try fixture.store.read().committed
+        XCTAssertNil(legacy.authorityGeneration)
+        let pending = try fixture.observed(generation: 2, authorityGeneration: nil)
+        try fixture.store.prepare(expected: legacy, candidate: pending)
+        try fixture.reopen()
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .finalized(pending))
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try commits.write(epoch: fixture.epoch) { _ in () })
+        XCTAssertNil(try fixture.store.read().committed.authorityGeneration)
+        XCTAssertEqual(try fixture.store.read().pending?.authorityGeneration, 2)
+        try fixture.reopen()
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        _ = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 2)
+        XCTAssertEqual(try fixture.store.read().committed.generation, 3)
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(fixture.epoch)?.descriptor.generation }, 7)
+    }
+
+    func testTrustGenerationExhaustionRollsBackTrustButAllowsAuditWrites() throws {
+        let fixture = try Fixture(authorityGeneration: .max)
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try commits.write(epoch: fixture.epoch) { try fixture.append($0) }
+        let before = try fixture.store.read()
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        XCTAssertThrowsError(try commits.write(epoch: fixture.epoch) {
+            try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+        })
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+        XCTAssertThrowsError(try fixture.journal.read { try $0.approvalTrustSnapshot() }) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unconfigured)
+        }
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
@@ -404,7 +493,7 @@ final class CheckpointedJournalTests: XCTestCase {
         var journal: JournalDatabase!
         var store: ContinuityStore!
         var writer: AuditEpochWriter!
-        init() throws {
+        init(authorityGeneration: UInt64? = 7) throws {
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Fault.injected }
             defer { free(canonical) }
             root = URL(fileURLWithPath: String(cString: canonical)).appendingPathComponent(UUID().uuidString)
@@ -424,7 +513,7 @@ final class CheckpointedJournalTests: XCTestCase {
                 3: .bytes(epoch), 4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
             ]), limits: limits), limits: limits)
             writer = try journal.write { try $0.createEpoch(descriptor) }
-            store = try openStore(initial: observed(generation: 1))
+            store = try openStore(initial: observed(generation: 1, authorityGeneration: authorityGeneration))
         }
         deinit { try? journal?.close(); store?.close(); try? FileManager.default.removeItem(at: root) }
         func openJournal(initialize: Bool = false) throws -> sending JournalDatabase {
@@ -442,8 +531,8 @@ final class CheckpointedJournalTests: XCTestCase {
             try journal.close(); store.close()
             journal = try openJournal(); store = try openStore()
         }
-        func observed(generation: UInt64) throws -> ContinuityCheckpoint {
-            try journal.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: generation) }
+        func observed(generation: UInt64, authorityGeneration: UInt64? = 7) throws -> ContinuityCheckpoint {
+            try journal.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: generation, authorityGeneration: authorityGeneration) }
         }
         func openTransferredStorage() throws -> sending AuthorityStorage {
             try Self.openTransferredStorage(anchor: root.path, limits: limits)
@@ -460,10 +549,10 @@ final class CheckpointedJournalTests: XCTestCase {
                     macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: nil)
             })
         }
-        func descriptor(_ next: Data) throws -> AuditEpochDescriptor {
+        func descriptor(_ next: Data, generation: UInt64 = 7) throws -> AuditEpochDescriptor {
             try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
                 0: .unsigned(1), 1: .bytes(Data(repeating: 1, count: 16)), 2: .bytes(Data(repeating: 2, count: 16)),
-                3: .bytes(next), 4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+                3: .bytes(next), 4: .unsigned(generation), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
             ]), limits: limits), limits: limits)
         }
         func append(_ transaction: JournalTransaction) throws {
