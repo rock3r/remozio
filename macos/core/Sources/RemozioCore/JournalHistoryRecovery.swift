@@ -6,6 +6,7 @@ enum JournalHistoryRecovery {
     enum Failure: Error { case changedHistory, missingEvidence, invalidEpoch }
 
     /// Resume one retained recovery attempt under exclusive ownership of both stores.
+    /// Requires installed authority code policy; schema-12 stores must complete installation before preparing recovery.
     /// No writer escapes: ordinary startup must create its own fresh epoch after this returns.
     static func resume(journal: JournalDatabase, continuity: ContinuityStore,
                        macID: Data, accountID: Data) throws -> ContinuityCheckpoint {
@@ -15,6 +16,12 @@ enum JournalHistoryRecovery {
         guard observed.authority == intent.authorityDigest else {
             try continuity.requireRecovery()
             throw ContinuityStoreError.recoveryRequired
+        }
+        try journal.read { transaction in
+            guard let entry = try transaction.codePolicy()?.policy.entries.first(where: { $0.role == .authority }) else {
+                throw AuthoritySelfValidationError.unconfigured
+            }
+            _ = try AuthoritySelfValidation.requirement(for: entry)
         }
         if let retainedCandidate, try journal.read({ try matches(retainedCandidate, intent: intent, transaction: $0) }) {
             try continuity.finalizeHistoryRecovery(expected: intent, candidate: retainedCandidate)

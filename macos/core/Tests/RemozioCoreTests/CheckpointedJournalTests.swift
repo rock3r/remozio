@@ -742,6 +742,27 @@ final class CheckpointedJournalTests: XCTestCase {
             macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
     }
 
+    func testHistoryResumeRejectsUnconfiguredSchemaBeforeMutatingJournal() throws {
+        let fixture = try Fixture(), previous = try fixture.store.read()
+        try fixture.journal.write { try fixture.append($0) }
+        let before = try fixture.journal.read { try $0.continuityDigests() }
+        let intent = try HistoryRecoveryIntent(previous: previous, authorityDigest: before.authority,
+            ledgerDigest: before.ledger, recoveryEpoch: Data(repeating: 9, count: 16))
+        try fixture.store.prepareHistoryRecovery(intent)
+        XCTAssertThrowsError(try resumeHistory(fixture)) {
+            XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
+        }
+        XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests() }, before)
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch) })
+        XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+        XCTAssertNil(try fixture.store.historyRecoveryCandidate())
+        try fixture.reopen()
+        XCTAssertThrowsError(try resumeHistory(fixture)) {
+            XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
+        }
+        XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests() }, before)
+    }
+
     func testHistoryResumeCommitsGapAndPreservesOldEvidenceAcrossReopen() throws {
         let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
         let result = try resumeHistory(fixture)
