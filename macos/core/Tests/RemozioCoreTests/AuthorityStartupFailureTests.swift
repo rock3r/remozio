@@ -5,6 +5,7 @@ import XCTest
 
 final class AuthorityStartupFailureTests: XCTestCase {
     func testRecoveryOutcomesRemainDistinct() {
+        XCTAssertEqual(AuthorityStartupFailure(error: ContinuityStoreError.historyRecoveryPending), .historyRecoveryRequired)
         XCTAssertEqual(AuthorityStartupFailure(error: AuthorityStorageStartupError.historyRecoveryRequired), .historyRecoveryRequired)
         XCTAssertEqual(AuthorityStartupFailure(error: AuthorityStorageStartupError.repairRequired), .repairRequired)
     }

@@ -3,6 +3,7 @@ import RemozioProtocol
 
 public enum ContinuityStoreError: Error, Equatable {
     case invalidCheckpoint, incompatibleStore, wrongScope, staleState, recoveryRequired, closed, unavailable
+    case historyRecoveryPending
     case storage(Int32)
 }
 
