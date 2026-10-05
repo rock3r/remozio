@@ -93,16 +93,38 @@ final class AuthorityXPCEndpointTests: XCTestCase {
     func testBudgetRejectsWithoutQueuingAndReleasesAfterFailure() throws {
         let budget = try AuthorityXPCWorkBudget(maximum: 1), calls = Counter(), trust = trust()
         XCTAssertThrowsError(try AuthorityXPCWorkBudget(maximum: 0))
-        XCTAssertTrue(budget.acquire())
         let denied = AuthorityXPCEndpoint(macID: mac, accountID: account, budget: budget, verify: {}, invalidate: {},
             snapshot: { calls.increment(); return trust }, validate: { _ in true })
-        denied.hello { XCTAssertEqual($0, 1) }; denied.trustSnapshot { XCTAssertNil($0) }
+        denied.hello { XCTAssertEqual($0, 1) }
+        XCTAssertTrue(budget.acquire())
+        denied.trustSnapshot { XCTAssertNil($0) }
         XCTAssertEqual(calls.value, 0); budget.release()
         let failed = AuthorityXPCEndpoint(macID: mac, accountID: account, budget: budget, verify: {}, invalidate: {},
             snapshot: { throw AuthorityXPCEndpointError.unavailable }, validate: { _ in true })
         failed.hello { XCTAssertEqual($0, 1) }; failed.trustSnapshot { XCTAssertNil($0) }
         XCTAssertTrue(budget.acquire()); budget.release()
     }
+    func testPolicyReadsUseBudgetForHandshakeAndOperationsAndReleaseItOnFailure() throws {
+        let budget = try AuthorityXPCWorkBudget(maximum: 1), reads = Counter(), handlers = Counter(), trust = trust()
+        XCTAssertTrue(budget.acquire())
+        let denied = AuthorityXPCEndpoint(macID: mac, accountID: account, budget: budget, verify: {},
+            verifyHandshakePolicy: { reads.increment() }, invalidate: {}, snapshot: { handlers.increment(); return trust }, validate: { _ in true })
+        denied.hello { XCTAssertEqual($0, 0) }
+        XCTAssertEqual(reads.value, 0)
+        budget.release()
+        let changed = AuthorityXPCEndpoint(macID: mac, accountID: account, budget: budget, verify: {},
+            verifyHandshakePolicy: { reads.increment() }, invalidate: {},
+            snapshot: { reads.increment(); throw AuthorityTransportAccessError.policyMismatch }, validate: { _ in true })
+        changed.hello { XCTAssertEqual($0, 1) }
+        XCTAssertEqual(reads.value, 1)
+        changed.trustSnapshot { XCTAssertNil($0) }
+        XCTAssertEqual(reads.value, 2)
+        XCTAssertEqual(handlers.value, 0)
+        XCTAssertTrue(budget.acquire()); budget.release()
+        changed.hello { XCTAssertEqual($0, 0) }
+        XCTAssertEqual(reads.value, 2)
+    }
+
     func testCloseSuppressesLateSuccessfulReplyAndKeepsWorkSlotUntilReturn() throws {
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
         let budget = try AuthorityXPCWorkBudget(maximum: 1), replies = Counter(), trust = trust()

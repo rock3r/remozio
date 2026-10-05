@@ -342,7 +342,10 @@ final class CheckpointedJournalTests: XCTestCase {
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
             _ = try commits.write(epoch: fixture.epoch) {
-                try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+                _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+                return try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
+                    identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                    codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
             }
             try fixture.journal.close(); fixture.store.close()
             let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())

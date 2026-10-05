@@ -11,7 +11,7 @@ final class AuthorityServiceTests: XCTestCase {
             serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ",
             transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501)
     }
-    private func database(_ fixture: Fixture, initialize: Bool = true, configure: Bool = true) throws -> sending JournalDatabase {
+    private func database(_ fixture: Fixture, initialize: Bool = true, configure: Bool = true, configureCode: Bool = true) throws -> sending JournalDatabase {
         let anchor = fixture.root.path
         let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
         let database = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
@@ -21,6 +21,13 @@ final class AuthorityServiceTests: XCTestCase {
         if initialize && configure {
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             _ = try database.write { try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract]) }
+        }
+        if initialize && configureCode {
+            _ = try database.write {
+                try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
+                    identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                    codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
+            }
         }
         return database
     }
@@ -74,6 +81,16 @@ final class AuthorityServiceTests: XCTestCase {
         }
         try reopened.close()
     }
+    func testServiceRejectsAbsentCodePolicyAndReleasesStorageWithoutInitializingIt() throws {
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture), database: database(fixture, configureCode: false))) {
+            XCTAssertEqual($0 as? AuthorityTransportAccessError, .unconfigured)
+        }
+        let reopened = try database(fixture, initialize: false)
+        XCTAssertNil(try reopened.read { try $0.codePolicy() })
+        try reopened.close()
+    }
+
     func testDeinitializationReleasesLease() throws {
         let fixture = try Fixture()
         var service: AuthorityService? = try AuthorityService(configuration: configuration(fixture), database: database(fixture))

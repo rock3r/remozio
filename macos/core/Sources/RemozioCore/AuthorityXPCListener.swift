@@ -92,6 +92,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let macID: Data
     private let accountID: Data
     private let budget: AuthorityXPCWorkBudget
+    private let verifyHandshakePolicy: @Sendable () throws -> Void
     private let snapshot: @Sendable () throws -> DirectApprovalTrust
     private let validate: @Sendable (AuthorityPeerBinding) throws -> Bool
     private var running = false
@@ -100,6 +101,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     public init(serviceName: String, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
                 maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
                 maximumOperations: Int = 8,
+                verifyHandshakePolicy: @escaping @Sendable () throws -> Void = {},
                 snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
                 validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool) throws {
         guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
@@ -109,7 +111,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         listener = NSXPCListener(machServiceName: serviceName)
         policy = peerPolicy; self.macID = macID; self.accountID = accountID
-        self.snapshot = snapshot; self.validate = validate
+        self.verifyHandshakePolicy = verifyHandshakePolicy; self.snapshot = snapshot; self.validate = validate
         super.init()
         policy.configure(listener)
         listener.delegate = self
@@ -120,15 +122,12 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                             minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [],
                             maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
                             maximumOperations: Int = 8) throws {
-        let trust = try journal.trustSnapshot(maximumPayloadBytes: maximumPayloadBytes,
-            minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
-        guard trust.macID == macID, trust.accountID == accountID else { throw AuthorityXPCEndpointError.invalidConfiguration }
+        let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peerPolicy, macID: macID, accountID: accountID,
+            maximumPayloadBytes: maximumPayloadBytes, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
         try self.init(serviceName: serviceName, peerPolicy: peerPolicy, macID: macID, accountID: accountID,
             maximumConnections: maximumConnections, handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds,
-            maximumOperations: maximumOperations,
-            snapshot: { try journal.trustSnapshot(maximumPayloadBytes: maximumPayloadBytes,
-                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions) },
-            validate: { try journal.validatePeer($0) })
+            maximumOperations: maximumOperations, verifyHandshakePolicy: { try access.verifyCurrent() },
+            snapshot: { try access.snapshot() }, validate: { try access.validate($0) })
     }
     deinit { listener.invalidate(); registry.close() }
     public func start() throws {
@@ -146,7 +145,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             guard listener === self.listener, running, !closed, let id = registry.reserve() else { connection.invalidate(); return false }
             do {
                 let endpoint = try AuthorityXPCEndpoint(connection: connection, peerPolicy: policy, macID: macID, accountID: accountID,
-                    budget: budget, onHandshake: { [weak registry] in registry?.handshake(id) },
+                    budget: budget, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
                     onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate)
                 let owner = NativeAuthorityConnection(connection: connection, endpoint: endpoint)
                 guard registry.install(owner, id: id) else { return false }
