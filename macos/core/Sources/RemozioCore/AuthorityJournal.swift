@@ -15,6 +15,22 @@ public final class AuthorityJournal: @unchecked Sendable {
     /// Transfer exclusive ownership. The caller must not keep another user of this connection.
     public init(database: sending JournalDatabase) { self.database = database }
 
+    /// Validates running code before recovering paired stores. Request admission remains closed.
+    /// Both stores must already have been opened with the same configured Mac and account scope.
+    init(recovering storage: sending AuthorityStorage, macID: Data, accountID: Data,
+         validateSelf: (JournalTransaction) throws -> Void = AuthoritySelfValidation.validate) throws {
+        do {
+            try storage.journal.read { try validateSelf($0) }
+            _ = try JournalHistoryRecovery.recover(journal: storage.journal, continuity: storage.continuity,
+                macID: macID, accountID: accountID)
+            database = storage.journal
+            self.storage = storage
+        } catch {
+            try? storage.close()
+            throw error
+        }
+    }
+
     /// Owns the configured stores for trust-only service work. Action recovery remains a separate gate.
     init(storage: sending AuthorityStorage) throws {
         do {

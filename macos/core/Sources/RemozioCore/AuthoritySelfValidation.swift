@@ -5,12 +5,15 @@ public enum AuthoritySelfValidationError: Error, Equatable { case unconfigured, 
 /// Defense in depth for authority startup. Protected installation must independently prevent launching obsolete code.
 enum AuthoritySelfValidation {
     static func validate(journal: AuthorityJournal) throws {
-        try journal.read { transaction in
-            guard let entry = try transaction.codePolicy()?.policy.entries.first(where: { $0.role == .authority }) else {
-                throw AuthoritySelfValidationError.unconfigured
-            }
-            try DynamicCodeValidation.validateSelf(requirement: requirement(for: entry))
+        try journal.read { try validate(transaction: $0) }
+    }
+
+    /// Startup validation before history reconciliation can expose the ordinary journal reader.
+    static func validate(transaction: JournalTransaction) throws {
+        guard let entry = try transaction.codePolicy()?.policy.entries.first(where: { $0.role == .authority }) else {
+            throw AuthoritySelfValidationError.unconfigured
         }
+        try DynamicCodeValidation.validateSelf(requirement: requirement(for: entry))
     }
 
     static func requirement(for entry: AuthorityCodeEntry) throws -> String {
