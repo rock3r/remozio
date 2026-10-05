@@ -725,6 +725,124 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(noOp, upgraded)
     }
 
+    private func prepareLostHistory(_ fixture: Fixture) throws -> HistoryRecoveryIntent {
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        let previous = try fixture.store.read()
+        try fixture.journal.write { try fixture.append($0) }
+        let digests = try fixture.journal.read { try $0.continuityDigests() }
+        let intent = try HistoryRecoveryIntent(previous: previous, authorityDigest: digests.authority,
+            ledgerDigest: digests.ledger, recoveryEpoch: Data(repeating: 9, count: 16))
+        try fixture.store.prepareHistoryRecovery(intent)
+        return intent
+    }
+
+    private func resumeHistory(_ fixture: Fixture) throws -> ContinuityCheckpoint {
+        try JournalHistoryRecovery.resume(journal: fixture.journal, continuity: fixture.store,
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+    }
+
+    func testHistoryResumeCommitsGapAndPreservesOldEvidenceAcrossReopen() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        let result = try resumeHistory(fixture)
+        XCTAssertEqual(result.journalHead, 1)
+        XCTAssertEqual(result.journalEpoch, intent.recoveryEpoch)
+        XCTAssertEqual(result.authorityDigest, intent.authorityDigest)
+        XCTAssertEqual(result.authorityGeneration, intent.authorityGeneration)
+        let page = try fixture.journal.read {
+            try $0.page(epoch: intent.recoveryEpoch, after: 0, maximumRecords: 2, maximumBytes: 16384)
+        }
+        XCTAssertEqual(page.canonicalRecords.count, 1)
+        let gap = try AuditEventMetadata.decode(XCTUnwrap(page.canonicalRecords.first), limits: fixture.limits)
+        XCTAssertEqual(gap.kind, .recovery)
+        XCTAssertEqual(gap.outcome, .unresolved)
+        XCTAssertNil(gap.requestID)
+        XCTAssertNil(gap.droppedEventCount)
+        XCTAssertNil(gap.eventTimeMs)
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read().committed, result)
+        XCTAssertNil(try fixture.store.historyRecovery())
+        XCTAssertEqual(try fixture.journal.read { try $0.historyRecovery(epoch: intent.recoveryEpoch) }, intent)
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(fixture.epoch)?.head }, 1)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(result))
+        XCTAssertThrowsError(try resumeHistory(fixture))
+    }
+
+    func testHistoryResumeAfterFailedFinalizationDoesNotAppendAgain() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.history IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try resumeHistory(fixture))
+        let candidate = try XCTUnwrap(fixture.store.historyRecoveryCandidate())
+        XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+        try fixture.reopen()
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        XCTAssertEqual(try resumeHistory(fixture), candidate)
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch)?.head }, 1)
+    }
+
+    func testHistoryPreparationFailureRollsBackGapAndCanResume() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        try fixture.sql("CREATE TRIGGER fail_prepare BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try resumeHistory(fixture))
+        XCTAssertNil(try fixture.store.historyRecoveryCandidate())
+        try fixture.reopen()
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch) })
+        XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests().ledger }, intent.ledgerDigest)
+        try fixture.sql("DROP TRIGGER fail_prepare")
+        _ = try resumeHistory(fixture)
+    }
+
+    func testHistoryResumeReconstructsExactCandidateAfterJournalCommitFailure() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        try fixture.withJournalReader {
+            XCTAssertThrowsError(try resumeHistory(fixture)) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_BUSY))
+            }
+        }
+        let candidate = try XCTUnwrap(fixture.store.historyRecoveryCandidate())
+        try fixture.reopen()
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch) })
+        XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests().ledger }, intent.ledgerDigest)
+        XCTAssertEqual(try resumeHistory(fixture), candidate)
+        XCTAssertEqual(try fixture.store.read().committed, candidate)
+    }
+
+    func testHistoryResumeRejectsNewLossWithoutDiscardingRetainedEvidence() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        _ = try fixture.journal.write { try $0.createEpoch(fixture.descriptor(Data(repeating: 6, count: 16))) }
+        XCTAssertThrowsError(try resumeHistory(fixture))
+        XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+        XCTAssertNil(try fixture.store.historyRecoveryCandidate())
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch) })
+    }
+
+    func testHistoryResumeDoesNotBlessChangesAfterCandidateCommit() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.history IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try resumeHistory(fixture))
+        let candidate = try XCTUnwrap(fixture.store.historyRecoveryCandidate())
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        _ = try fixture.journal.write { try $0.createEpoch(fixture.descriptor(Data(repeating: 6, count: 16))) }
+        try fixture.reopen()
+        XCTAssertThrowsError(try resumeHistory(fixture))
+        XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+        XCTAssertEqual(try fixture.store.historyRecoveryCandidate(), candidate)
+        XCTAssertThrowsError(try fixture.store.read())
+    }
+
+    func testHistoryResumeMarksChangedAuthorityForRepair() throws {
+        let fixture = try Fixture()
+        _ = try prepareLostHistory(fixture)
+        try fixture.sql("DELETE FROM authority_code_policy_v1", journal: true)
+        XCTAssertThrowsError(try resumeHistory(fixture)) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+        }
+        try fixture.reopen()
+        XCTAssertThrowsError(try fixture.store.historyRecovery()) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+        }
+    }
+
     private func codePolicy(installed: UInt64 = 4, minimum: UInt64 = 2, active: Bool = true) throws -> AuthorityCodePolicy {
         try AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.remozio.authority",
             installedGeneration: installed, minimumGeneration: minimum, codeDirectoryHash: Data(repeating: 8, count: 20), active: active)])
@@ -806,6 +924,17 @@ final class CheckpointedJournalTests: XCTestCase {
                 decisionPhoneID: nil, authentication: .system, outcome: .accepted, reason: .none,
                 droppedEventCount: nil, peerDeviceID: nil).encode(limits: limits)
             try transaction.append(event, writer: writer, expectedHead: 0)
+        }
+        func withJournalReader(_ body: () throws -> Void) throws {
+            var connection: OpaquePointer?
+            guard sqlite3_open(root.appendingPathComponent("journal/journal.sqlite").path, &connection) == SQLITE_OK,
+                  let connection else { throw Fault.injected }
+            defer { sqlite3_close(connection) }
+            guard sqlite3_exec(connection, "BEGIN; SELECT count(*) FROM sqlite_schema", nil, nil, nil) == SQLITE_OK else {
+                throw Fault.injected
+            }
+            defer { sqlite3_exec(connection, "ROLLBACK", nil, nil, nil) }
+            try body()
         }
         func sql(_ query: String, journal: Bool = false) throws {
             var connection: OpaquePointer?
