@@ -16,7 +16,8 @@ public final class AuthorityService: @unchecked Sendable {
     public convenience init(configuration: AuthorityServiceConfiguration) throws {
         let journal: AuthorityJournal
         if configuration.continuityDirectory != nil {
-            journal = try AuthorityJournal(storage: AuthorityStorage.open(configuration: configuration))
+            journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration),
+                macID: configuration.macID, accountID: configuration.accountID)
         } else {
             let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
             journal = try AuthorityJournal(database: JournalDatabase.open(directoryPath: configuration.journalDirectory,

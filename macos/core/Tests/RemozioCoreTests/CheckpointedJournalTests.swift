@@ -725,6 +725,129 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(noOp, upgraded)
     }
 
+    private func recoveringOwner(_ fixture: Fixture,
+                                 validateSelf: (JournalTransaction) throws -> Void = { transaction in
+                                     let entry = try XCTUnwrap(transaction.codePolicy()?.policy.entries.first { $0.role == .authority })
+                                     _ = try AuthoritySelfValidation.requirement(for: entry)
+                                 }) throws -> AuthorityJournal {
+        try fixture.journal.close(); fixture.store.close()
+        return try AuthorityJournal(recovering: fixture.openTransferredStorage(), macID: Data(repeating: 1, count: 16),
+            accountID: Data(repeating: 2, count: 16), validateSelf: validateSelf)
+    }
+
+    func testRecoveringOwnerValidatesBeforeAnyRecoveryWriteAndReleasesStoresOnFailure() throws {
+        for prepared in [false, true] {
+            let fixture = try Fixture()
+            if prepared { _ = try prepareLostHistory(fixture) }
+            else { try fixture.journal.write { try fixture.append($0) } }
+            let before = try fixture.journal.read { try $0.continuityDigests() }
+            let intent = try fixture.store.historyRecovery()
+            XCTAssertThrowsError(try recoveringOwner(fixture, validateSelf: { _ in throw Fault.injected })) {
+                guard case Fault.injected = $0 else { return XCTFail("wrong validation failure") }
+            }
+            try fixture.reopen()
+            XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests() }, before)
+            XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+            XCTAssertNil(try fixture.store.historyRecoveryCandidate())
+        }
+    }
+
+    func testRecoveringOwnerRequiresRealSelfValidationByDefault() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        try fixture.journal.close(); fixture.store.close()
+        // The unit-test process cannot satisfy this fixture's signed authority requirement.
+        XCTAssertThrowsError(try AuthorityJournal(recovering: fixture.openTransferredStorage(),
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16)))
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+        XCTAssertNil(try fixture.store.historyRecoveryCandidate())
+        XCTAssertNil(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch) })
+    }
+
+    func testRecoveringOwnerKeepsRequestsClosedUntilFreshStartupEpoch() throws {
+        let fixture = try Fixture()
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        _ = try commits.write(epoch: fixture.epoch) {
+            try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+        }
+        let intent = try prepareLostHistory(fixture)
+        let owner = try recoveringOwner(fixture)
+        XCTAssertThrowsError(try owner.withRequests { _ in XCTFail("request admission escaped history recovery") })
+        XCTAssertEqual(try owner.read { try $0.epoch(intent.recoveryEpoch)?.head }, 1)
+        let clock = try AuthorityClock()
+        try owner.prepareRequests(clockEpoch: clock.epoch, maximumPayloadBytes: 16384)
+        XCTAssertTrue(try owner.withRequests { try $0.expirePending(now: clock.now(), receiptTimeMs: nil).isEmpty })
+        try owner.close()
+        try fixture.reopen()
+        let current = try fixture.store.read().committed
+        XCTAssertNotEqual(current.journalEpoch, intent.recoveryEpoch)
+        XCTAssertNotEqual(current.journalEpoch, fixture.epoch)
+        let descriptor = try XCTUnwrap(fixture.journal.read { try $0.epoch(current.journalEpoch)?.descriptor })
+        XCTAssertEqual(descriptor.cause, .restart)
+        XCTAssertEqual(descriptor.previousEpoch, intent.recoveryEpoch)
+        XCTAssertNil(try fixture.store.historyRecovery())
+    }
+
+    func testServiceRecoversHistoryThenPreparesRequestOwnerBeforeMaintenance() throws {
+        let fixture = try Fixture()
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let authority = try XCTUnwrap(codePolicy().entries.first)
+        _ = try commits.write(epoch: fixture.epoch) {
+            _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+            return try $0.installCodePolicy(AuthorityCodePolicy(entries: [authority, AuthorityCodeEntry(role: .transport,
+                teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
+        }
+        try fixture.journal.write { try fixture.append($0) }
+        let owner = try recoveringOwner(fixture)
+        let configuration = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            journalDirectory: fixture.root.appendingPathComponent("journal").path, serviceName: "dev.remozio.authority.test",
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)],
+            transportUID: 501, continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
+        let clock = try AuthorityClock()
+        let service = try AuthorityService(configuration: configuration, journal: owner, expiryClock: { try clock.now() },
+            reconcileExpired: { _ in }, validateSelf: { _ in })
+        XCTAssertTrue(try owner.withRequests { try $0.expirePending(now: clock.now(), receiptTimeMs: nil).isEmpty })
+        try service.close()
+        try fixture.reopen()
+        let current = try fixture.store.read().committed
+        let descriptor = try XCTUnwrap(fixture.journal.read { try $0.epoch(current.journalEpoch)?.descriptor })
+        XCTAssertEqual(descriptor.cause, .restart)
+        let recoveryEpoch = try XCTUnwrap(descriptor.previousEpoch)
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(recoveryEpoch)?.descriptor.cause }, .recovery)
+        XCTAssertNotNil(try fixture.journal.read { try $0.historyRecovery(epoch: recoveryEpoch) })
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(current))
+    }
+
+    func testRecoveringOwnerRetriesFailedFinalizationWithoutAnotherGap() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.history IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try recoveringOwner(fixture))
+        try fixture.reopen()
+        let candidate = try XCTUnwrap(fixture.store.historyRecoveryCandidate())
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        let owner = try recoveringOwner(fixture)
+        XCTAssertEqual(try owner.read { try $0.epoch(intent.recoveryEpoch)?.head }, 1)
+        try owner.close()
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read().committed, candidate)
+    }
+
+    func testRecoveringOwnerReportsAuthorityMismatchAsRepairAndReleasesStores() throws {
+        let fixture = try Fixture()
+        _ = try prepareLostHistory(fixture)
+        try fixture.sql("DELETE FROM authority_code_policy_v1", journal: true)
+        XCTAssertThrowsError(try recoveringOwner(fixture, validateSelf: { _ in })) {
+            XCTAssertEqual(AuthorityStartupFailure(error: $0), .repairRequired)
+        }
+        try fixture.reopen()
+        XCTAssertThrowsError(try fixture.store.historyRecovery()) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+        }
+    }
+
     private func recoverHistory(_ fixture: Fixture) throws -> ContinuityCheckpoint {
         try JournalHistoryRecovery.recover(journal: fixture.journal, continuity: fixture.store,
             macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
