@@ -355,9 +355,9 @@ final class CheckpointedJournalTests: XCTestCase {
                 transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
                 continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
             if wrongScope {
-                XCTAssertThrowsError(try AuthorityService(configuration: configuration, journal: owner))
+                XCTAssertThrowsError(try AuthorityService(configuration: configuration, journal: owner, validateSelf: { _ in }))
             } else {
-                let service = try AuthorityService(configuration: configuration, journal: owner)
+                let service = try AuthorityService(configuration: configuration, journal: owner, validateSelf: { _ in })
                 XCTAssertThrowsError(try fixture.openJournal())
                 XCTAssertThrowsError(try fixture.openStore())
                 try service.close()

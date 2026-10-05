@@ -32,11 +32,20 @@ public final class AuthorityService: @unchecked Sendable {
     }
 
     /// Shares the prepared request owner with the service. Service closure retires that owner too.
-    public init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
-                maintenanceIntervalMilliseconds: Int = 1000,
-                maintain: (@Sendable () throws -> Void)? = nil) throws {
+    public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
+                            maintenanceIntervalMilliseconds: Int = 1000,
+                            maintain: (@Sendable () throws -> Void)? = nil) throws {
+        try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
+            maintain: maintain, validateSelf: AuthoritySelfValidation.validate)
+    }
+
+    /// Internal lifecycle fixture. Public constructors always validate the running authority against retained policy.
+    init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
+         maintenanceIntervalMilliseconds: Int = 1000, maintain: (@Sendable () throws -> Void)? = nil,
+         validateSelf: @Sendable (AuthorityJournal) throws -> Void) throws {
         self.journal = journal
         do {
+            try validateSelf(journal)
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,
                 peerPolicy: configuration.transportPolicy, macID: configuration.macID,
                 accountID: configuration.accountID, journal: journal,
