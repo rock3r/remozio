@@ -20,17 +20,20 @@ final class AuthorityStorage {
                 macID: configuration.macID, accountID: configuration.accountID,
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
                 maximumConsumptions: 1_000_000, busyMilliseconds: 5000)
-        }, openContinuity: {
+        }, openContinuity: { journalDirectory in
             try ContinuityStore.open(directoryPath: directory,
-                macID: configuration.macID, accountID: configuration.accountID)
+                macID: configuration.macID, accountID: configuration.accountID, excludingDirectory: journalDirectory)
         })
     }
 
     /// Internal factory seam for protected fixture stores. Both factories transfer exclusive ownership.
-    init(openJournal: () throws -> sending JournalDatabase, openContinuity: () throws -> sending ContinuityStore) throws {
+    init(openJournal: () throws -> sending JournalDatabase, openContinuity: (ProtectedStorageLease.DirectoryIdentity) throws -> sending ContinuityStore) throws {
         let journal = try openJournal()
         do {
-            let continuity = try openContinuity()
+            guard let journalDirectory = try journal.directoryIdentities().last else {
+                throw AuthorityServiceConfigurationError.invalidConfiguration
+            }
+            let continuity = try openContinuity(journalDirectory)
             do {
                 let journalPath = try journal.directoryIdentities()
                 let continuityPath = try continuity.directoryIdentities()

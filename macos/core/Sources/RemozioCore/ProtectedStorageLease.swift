@@ -30,7 +30,8 @@ final class ProtectedStorageLease {
     private var invalidated = false
     private var isClosed = false
 
-    init(anchor: String, relativeDirectory: String, owner: uid_t, ancestorOwner: uid_t, databaseName: String) throws {
+    init(anchor: String, relativeDirectory: String, owner: uid_t, ancestorOwner: uid_t, databaseName: String,
+         excludingDirectory: DirectoryIdentity? = nil) throws {
         let components = relativeDirectory.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !components.isEmpty, !anchor.utf8.contains(0),
               ["journal.sqlite", "gateway.sqlite", "continuity.sqlite"].contains(databaseName),
@@ -51,6 +52,10 @@ final class ProtectedStorageLease {
                 guard fd >= 0 else { throw JournalLeaseError.system(errno) }
                 try add(fd, parent: parent, name: component, directory: true, privateObject: index == components.count - 1)
                 parent = fd
+            }
+            if let excludingDirectory, let directory = nodes.last,
+               excludingDirectory == DirectoryIdentity(device: directory.device, inode: directory.inode) {
+                throw JournalLeaseError.invalidPath
             }
             let lock = try openFile("writer.lock", parent: parent)
             guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {

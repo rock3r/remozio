@@ -13,15 +13,22 @@ public final class ProtectedContinuityLease {
 
     /// Setup must already have provisioned the root-owned directory and both 0600 files.
     public static func acquire(directoryPath: String) throws -> ProtectedContinuityLease {
+        try acquire(directoryPath: directoryPath, excludingDirectory: nil)
+    }
+
+    static func acquire(directoryPath: String,
+                        excludingDirectory: ProtectedStorageLease.DirectoryIdentity?) throws -> ProtectedContinuityLease {
         guard geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard directoryPath.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
-        return try ProtectedContinuityLease(anchor: "/", relativeDirectory: String(directoryPath.dropFirst()), owner: 0)
+        return try ProtectedContinuityLease(anchor: "/", relativeDirectory: String(directoryPath.dropFirst()), owner: 0,
+            excludingDirectory: excludingDirectory)
     }
 
     /// Internal fixture entry point. Production starts at / and requires UID 0 through acquire.
-    init(anchor: String, relativeDirectory: String, owner: uid_t) throws {
+    init(anchor: String, relativeDirectory: String, owner: uid_t,
+         excludingDirectory: ProtectedStorageLease.DirectoryIdentity? = nil) throws {
         storage = try ProtectedStorageLease(anchor: anchor, relativeDirectory: relativeDirectory,
-            owner: owner, ancestorOwner: owner, databaseName: "continuity.sqlite")
+            owner: owner, ancestorOwner: owner, databaseName: "continuity.sqlite", excludingDirectory: excludingDirectory)
     }
 
     /// Call before opening SQLite and at continuity commit/recovery boundaries. Failure retires this lease.

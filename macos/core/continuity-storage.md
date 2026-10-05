@@ -158,7 +158,9 @@ empty or traversal components. Neither directory may contain the other.
 or migrating either. A failed continuity open closes the journal. The owner holds
 both leases until close or destruction. It compares the validated device/inode
 ancestry of both opened directories and rejects containment in either direction,
-including path aliases on case-insensitive volumes. Runtime lease checks remain necessary:
+including path aliases on case-insensitive volumes. Before acquiring the second lock,
+it rejects a continuity directory with the journal directory identity. This keeps
+self-contention from being reported as a retryable failure. Runtime lease checks remain necessary:
 configuration path validation alone does not prove filesystem identity.
 
 This entry point requires version 2 configuration. The executable selects this joint owner for version 2. Version 1
