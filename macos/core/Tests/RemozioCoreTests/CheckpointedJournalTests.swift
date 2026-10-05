@@ -319,6 +319,56 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
     }
 
+    private func requestStartupOwner(_ fixture: Fixture) throws -> AuthorityJournal {
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        _ = try commits.write(epoch: fixture.epoch) {
+            try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+        }
+        try fixture.journal.close(); fixture.store.close()
+        return try AuthorityJournal(storage: fixture.openTransferredStorage())
+    }
+
+    func testStartupCreatesFreshEpochAndEnablesCheckpointedRequestsOnlyAfterRecovery() throws {
+        let fixture = try Fixture(), owner = try requestStartupOwner(fixture), clock = try AuthorityClock()
+        XCTAssertThrowsError(try owner.withRequests { _ in true })
+        try owner.prepareRequests(clockEpoch: clock.epoch, maximumPayloadBytes: 16384)
+        XCTAssertThrowsError(try owner.prepareRequests(clockEpoch: clock.epoch, maximumPayloadBytes: 16384))
+        let now = try clock.now()
+        let draft = try ApprovalRequestDraft(contract: RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1),
+            requiredFeatures: [], capture: Data([0xa0]), actions: [CapturedAction(choice: .execute, scope: .currentRequest)],
+            firstObservedAt: now, deadlineMilliseconds: now.milliseconds + 10000, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 11000)
+        _ = try owner.withRequests { try $0.admit(draft, now: now, receiptTimeMs: nil) }
+        XCTAssertThrowsError(try fixture.openJournal())
+        XCTAssertThrowsError(try fixture.openStore())
+        try owner.close()
+        try fixture.reopen()
+        let checkpoint = try fixture.store.read().committed
+        XCTAssertNotEqual(checkpoint.journalEpoch, fixture.epoch)
+        let epoch = try XCTUnwrap(fixture.journal.read { try $0.epoch(checkpoint.journalEpoch) })
+        XCTAssertEqual(epoch.descriptor.cause, .restart)
+        XCTAssertEqual(epoch.descriptor.previousEpoch, fixture.epoch)
+        XCTAssertEqual(epoch.descriptor.previousSequence, 0)
+        XCTAssertEqual(epoch.descriptor.generation, checkpoint.currentAuthorityGeneration)
+        XCTAssertEqual(epoch.head, 1)
+        XCTAssertNil(try fixture.store.read().pending)
+    }
+
+    func testStartupFailureClosesBothStoresAndPreservesPreparedEpochForRecovery() throws {
+        let fixture = try Fixture(), owner = try requestStartupOwner(fixture), clock = try AuthorityClock()
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try owner.prepareRequests(clockEpoch: clock.epoch, maximumPayloadBytes: 16384))
+        XCTAssertThrowsError(try owner.withRequests { _ in XCTFail("request owner escaped failed startup") })
+        try fixture.reopen()
+        let prepared = try fixture.store.read()
+        XCTAssertNotNil(prepared.pending)
+        XCTAssertFalse(prepared.recoveryRequired)
+        XCTAssertNotEqual(prepared.pending?.journalEpoch, fixture.epoch)
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        _ = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertNil(try fixture.store.read().pending)
+    }
+
     func testPairedAuthorityOwnerChecksContinuityAndClosesBothStores() throws {
         let fixture = try Fixture()
         try fixture.journal.close(); fixture.store.close()
@@ -365,6 +415,33 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertThrowsError(try AuthorityJournal(storage: fixture.openTransferredStorage())) {
             guard case AuthorityStorageStartupError.historyRecoveryRequired = $0 else { return XCTFail("wrong startup failure") }
         }
+        try fixture.reopen()
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+    }
+
+    func testExpiryServicePreparesRequestsWithTheCallerClockEpoch() throws {
+        let fixture = try Fixture()
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        _ = try commits.write(epoch: fixture.epoch) {
+            _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+            return try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
+                identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
+        }
+        try fixture.journal.close(); fixture.store.close()
+        let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
+        let configuration = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            journalDirectory: fixture.root.appendingPathComponent("journal").path, serviceName: "dev.remozio.authority.test",
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)],
+            transportUID: 501, continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
+        let clock = try AuthorityClock()
+        let service = try AuthorityService(configuration: configuration, journal: owner, expiryClock: { try clock.now() },
+            reconcileExpired: { _ in }, validateSelf: { _ in })
+        // This is the operation the first maintenance tick performs, without activating a privileged listener.
+        XCTAssertTrue(try owner.withRequests { try $0.expirePending(now: clock.now(), receiptTimeMs: nil).isEmpty })
+        XCTAssertTrue(try owner.withRequests { try $0.expirePending(now: clock.now(), receiptTimeMs: nil).isEmpty })
+        try service.close()
         try fixture.reopen()
         XCTAssertFalse(try fixture.store.read().recoveryRequired)
     }

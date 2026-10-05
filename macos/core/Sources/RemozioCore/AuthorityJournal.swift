@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 import RemozioProtocol
 
 /// Owns the authority's sole journal connection. Only Sendable results can leave a serialized transaction.
@@ -8,6 +10,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var storage: AuthorityStorage?
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
+    private var requestStartupAttempted = false
 
     /// Transfer exclusive ownership. The caller must not keep another user of this connection.
     public init(database: sending JournalDatabase) { self.database = database }
@@ -25,6 +28,69 @@ public final class AuthorityJournal: @unchecked Sendable {
         } catch {
             try? storage.close()
             throw error
+        }
+    }
+
+    /// Runs once after host identity validation, before activating a listener or admitting request work.
+    /// An incomplete attempt retires both stores. The next attempt must reopen and reconcile them.
+    func prepareRequests(clockEpoch: UUID, maximumPayloadBytes: Int) throws {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard let storage else { return }
+            try database.read { _ in () }
+            guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
+            requestStartupAttempted = true
+            do {
+                let limits = try CBORLimits(maxBytes: maximumPayloadBytes, maxDepth: 32, maxItems: 262_144)
+                let auditLimits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
+                let retainedBytes = 67_108_864
+                guard maximumPayloadBytes <= retainedBytes else { throw ApprovalCoordinatorError.invalidConfiguration }
+                let checkpoint = try storage.continuity.read().committed
+                var fresh = Data(count: 16)
+                guard fresh.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }) == errSecSuccess else {
+                    throw ApprovalCoordinatorError.unavailable
+                }
+                let epoch = fresh
+                let descriptor = try read { transaction in
+                    guard let previous = try transaction.epoch(checkpoint.journalEpoch),
+                          try transaction.epoch(epoch) == nil else { throw JournalStartupRecovery.Failure.invalidEpoch }
+                    var previousID: CBORValue = .null, previousHead: CBORValue = .null, previousDigest: CBORValue = .null
+                    if previous.head == 0 {
+                        previousID = .bytes(previous.descriptor.epoch); previousHead = .unsigned(0)
+                    } else if previous.retainedAfter < previous.head {
+                        let page = try transaction.page(epoch: previous.descriptor.epoch, after: previous.head - 1,
+                            maximumRecords: 1, maximumBytes: auditLimits.maxBytes)
+                        guard let last = page.canonicalRecords.first else { throw AuditJournalError.corruptData }
+                        previousID = .bytes(previous.descriptor.epoch); previousHead = .unsigned(previous.head)
+                        previousDigest = .bytes(Data(SHA256.hash(data: last)))
+                    }
+                    // Fully pruned predecessors have no retained event digest. Do not invent a verified link.
+                    return try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                        0: .unsigned(1), 1: .bytes(previous.descriptor.macID), 2: .bytes(previous.descriptor.accountID),
+                        3: .bytes(epoch), 4: .unsigned(checkpoint.currentAuthorityGeneration), 5: .unsigned(AuditEpochCause.restart.rawValue),
+                        6: previousID, 7: previousHead, 8: previousDigest,
+                    ]), limits: auditLimits), limits: auditLimits)
+                }
+                let recovery = try JournalStartupRecovery(journal: database, continuity: storage.continuity,
+                    maximumRecords: 128, maximumBytes: 16_777_216)
+                var progress = try recovery.start(descriptor: descriptor)
+                while true {
+                    switch progress {
+                    case .recovering: progress = try recovery.advance()
+                    case .historyDiscontinuity: throw AuthorityStorageStartupError.historyRecoveryRequired
+                    case .repairRequired: throw AuthorityStorageStartupError.repairRequired
+                    case .complete:
+                        requests = try ApprovalRequestCoordinator(database: database, continuity: storage.continuity,
+                            writer: recovery.completedWriter(), clockEpoch: clockEpoch, maximumRequests: 1024,
+                            maximumRetainedBytes: retainedBytes, requestLimits: limits, captureLimits: limits,
+                            decisionLimits: limits, signingLimits: auditLimits, auditLimits: auditLimits)
+                        return
+                    }
+                }
+            } catch {
+                try? close()
+                throw error
+            }
         }
     }
 

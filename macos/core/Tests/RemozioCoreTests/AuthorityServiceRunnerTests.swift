@@ -24,6 +24,7 @@ final class AuthorityServiceRunnerTests: XCTestCase {
             case 1: throw JournalLeaseError.busy
             case 2: throw ContinuityStoreError.storage(SQLITE_BUSY)
             case 3: throw JournalDatabaseError.storage(SQLITE_IOERR)
+            case 4: throw AuditJournalError.storage(SQLITE_FULL)
             default: return { probe.close() }
             }
         }, report: {
@@ -36,9 +37,9 @@ final class AuthorityServiceRunnerTests: XCTestCase {
         XCTAssertEqual(runner.status, .running)
         XCTAssertEqual(probe.statuses.compactMap { status -> Int? in
             if case .waiting(let delay) = status { return delay }; return nil
-        }, [100, 200, 200])
+        }, [100, 200, 200, 200])
         try runner.close(); try runner.close()
-        XCTAssertEqual(probe.counts.opens, 4)
+        XCTAssertEqual(probe.counts.opens, 5)
         XCTAssertEqual(probe.counts.closes, 1)
         XCTAssertEqual(runner.status, .closed)
     }

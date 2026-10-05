@@ -18,6 +18,7 @@ final class AuthorityStartupFailureTests: XCTestCase {
             for code in [primary, primary | (1 << 8)] {
                 XCTAssertEqual(AuthorityStartupFailure(error: JournalDatabaseError.storage(code)), .temporaryStorageFailure)
                 XCTAssertEqual(AuthorityStartupFailure(error: ContinuityStoreError.storage(code)), .temporaryStorageFailure)
+                XCTAssertEqual(AuthorityStartupFailure(error: AuditJournalError.storage(code)), .temporaryStorageFailure)
             }
         }
     }
@@ -39,6 +40,7 @@ final class AuthorityStartupFailureTests: XCTestCase {
         for code in [SQLITE_CORRUPT, SQLITE_NOTADB, SQLITE_CANTOPEN, SQLITE_READONLY, SQLITE_MISUSE, SQLITE_SCHEMA] {
             XCTAssertEqual(AuthorityStartupFailure(error: JournalDatabaseError.storage(code)), .configurationFailure)
             XCTAssertEqual(AuthorityStartupFailure(error: ContinuityStoreError.storage(code)), .configurationFailure)
+            XCTAssertEqual(AuthorityStartupFailure(error: AuditJournalError.storage(code)), .configurationFailure)
         }
     }
 }
