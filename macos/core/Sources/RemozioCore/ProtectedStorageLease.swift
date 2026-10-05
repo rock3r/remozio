@@ -3,6 +3,16 @@ import Foundation
 
 /// Internal path and lock mechanics. Public wrappers fix the production ownership policy and file name.
 final class ProtectedStorageLease {
+    struct DirectoryIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    func directoryIdentities() throws -> [DirectoryIdentity] {
+        try validate()
+        return nodes.filter(\.directory).map { DirectoryIdentity(device: $0.device, inode: $0.inode) }
+    }
+
     let databasePath: String
     private struct Node {
         let fd: Int32

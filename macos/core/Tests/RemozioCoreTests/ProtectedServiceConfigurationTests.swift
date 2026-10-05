@@ -23,13 +23,13 @@ final class ProtectedServiceConfigurationTests: XCTestCase {
             try ProtectedServiceConfiguration.read(anchor: root.path, relativePath: "config/authority.cbor", owner: getuid())
         }
     }
-    private func configuration() throws -> AuthorityServiceConfiguration {
+    private func configuration(continuity: String? = nil) throws -> AuthorityServiceConfiguration {
         try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.remozio.authority",
             teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
             transportHashes: [Data(repeating: 3, count: 20), Data(repeating: 4, count: 20)], transportUID: 501,
             maximumPayloadBytes: 4096, minimumEnvelopeVersion: 2, auditVersions: [1, 2],
-            maximumConnections: 4, handshakeTimeoutMilliseconds: 1234, maximumOperations: 3)
+            maximumConnections: 4, handshakeTimeoutMilliseconds: 1234, maximumOperations: 3, continuityDirectory: continuity)
     }
     func testProtectedReadAndConfigurationRoundTrip() throws {
         let value = try configuration(), fixture = try Fixture(value.canonicalBytes)
@@ -43,6 +43,34 @@ final class ProtectedServiceConfigurationTests: XCTestCase {
         XCTAssertEqual(decoded.auditVersions, [1, 2]); XCTAssertEqual(decoded.maximumConnections, 4)
         XCTAssertEqual(decoded.handshakeTimeoutMilliseconds, 1234); XCTAssertEqual(decoded.maximumOperations, 3)
     }
+    func testVersionTwoCarriesIndependentContinuityPathAndPreservesVersionOne() throws {
+        let old = try configuration()
+        XCTAssertNil(try AuthorityServiceConfiguration.decode(old.canonicalBytes).continuityDirectory)
+        let path = "/Library/Application Support/Remozio/continuity"
+        let value = try configuration(continuity: path)
+        let decoded = try AuthorityServiceConfiguration.decode(value.canonicalBytes)
+        XCTAssertEqual(decoded.continuityDirectory, path)
+        XCTAssertEqual(decoded.canonicalBytes, value.canonicalBytes)
+        for invalid in ["", "/", "relative", "/tmp/../continuity", "/tmp//continuity", "/tmp/continuity/",
+                        old.journalDirectory, old.journalDirectory + "/continuity", "/Library/Application Support/Remozio"] {
+            XCTAssertThrowsError(try configuration(continuity: invalid), invalid)
+        }
+    }
+
+    func testVersionTwoRejectsMissingExtraAndWronglyTypedContinuityFields() throws {
+        let value = try configuration(continuity: "/Library/Application Support/Remozio/continuity")
+        let limits = try CBORLimits(maxBytes: 65536, maxDepth: 3, maxItems: 128)
+        guard case .map(let fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: limits) else {
+            return XCTFail("Expected map")
+        }
+        for (key, replacement): (UInt64, CBORValue?) in [(15, nil), (15, .null), (15, .unsigned(1)),
+            (16, .text("extra")), (0, .unsigned(1)), (0, .unsigned(3))] {
+            var changed = fields; changed[key] = replacement
+            XCTAssertThrowsError(try AuthorityServiceConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+        XCTAssertNoThrow(try configuration(continuity: "/Library/Application Support/Remozio/journal-backup"))
+    }
+
     func testProductionReaderRequiresRoot() throws {
         guard geteuid() != 0 else { throw XCTSkip("Requires normal user") }
         let fixture = try Fixture()

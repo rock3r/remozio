@@ -220,6 +220,48 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertFalse(try fixture.store.read().recoveryRequired)
     }
 
+    func testStorageOwnerHoldsAndReleasesBothLeases() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close(); fixture.store.close()
+        var storage: AuthorityStorage? = try AuthorityStorage(openJournal: { try fixture.openJournal() },
+            openContinuity: { try fixture.openStore() })
+        XCTAssertNotNil(storage)
+        XCTAssertThrowsError(try fixture.openJournal())
+        XCTAssertThrowsError(try fixture.openStore())
+        storage = nil
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
+    }
+
+    func testStorageRejectsNestedDirectoryIdentitiesAndReleasesBothLeases() throws {
+        for useCaseAlias in [false, true] {
+            let fixture = try Fixture()
+            try fixture.journal.close(); fixture.store.close()
+            try FileManager.default.moveItem(at: fixture.root.appendingPathComponent("continuity"),
+                to: fixture.root.appendingPathComponent("journal/continuity"))
+            let directory = useCaseAlias ? "JOURNAL/continuity" : "journal/continuity"
+            if useCaseAlias && !FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent(directory).path) {
+                continue // The non-alias case still exercises containment on case-sensitive volumes.
+            }
+            XCTAssertThrowsError(try AuthorityStorage(openJournal: { try fixture.openJournal() },
+                openContinuity: { try fixture.openStore(directory: directory) })) {
+                XCTAssertTrue($0 is AuthorityServiceConfigurationError)
+            }
+            let journal = try fixture.openJournal(), continuity = try fixture.openStore(directory: directory)
+            try journal.close(); continuity.close()
+        }
+    }
+
+    func testFailedContinuityOpenReleasesJournalAndPreservesError() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close()
+        XCTAssertThrowsError(try AuthorityStorage(openJournal: { try fixture.openJournal() }, openContinuity: {
+            throw Fault.injected
+        })) { XCTAssertTrue($0 is Fault) }
+        fixture.journal = try fixture.openJournal()
+        XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
@@ -256,8 +298,8 @@ final class CheckpointedJournalTests: XCTestCase {
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits, maximumConsumptions: 10,
                 busyMilliseconds: 100, initialize: initialize)
         }
-        func openStore(initial: ContinuityCheckpoint? = nil) throws -> ContinuityStore {
-            try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: geteuid()),
+        func openStore(initial: ContinuityCheckpoint? = nil, directory: String = "continuity") throws -> ContinuityStore {
+            try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: directory, owner: geteuid()),
                 macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: initial)
         }
         func reopen() throws {

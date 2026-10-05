@@ -145,3 +145,23 @@ no-dispatch proof integration, retry scheduling, and service admission wiring ar
 not yet implemented by this sequence. Its completed writer proves storage
 completion only. Tests cover interrupted epoch finalization and restart between
 nonempty batches; they do not simulate physical power loss or service installation.
+
+## Protected launch paths
+
+Authority configuration version 2 adds the independent continuity directory at
+CBOR key 15. Version 1 retains its exact original fields and canonical encoding.
+Version 2 requires the new text field; missing fields, extra fields, wrong types,
+and unsupported versions are rejected. Both paths must be absolute and contain no
+empty or traversal components. Neither directory may contain the other.
+
+`AuthorityStorage.open` acquires both root-protected stores without initializing
+or migrating either. A failed continuity open closes the journal. The owner holds
+both leases until close or destruction. It compares the validated device/inode
+ancestry of both opened directories and rejects containment in either direction,
+including path aliases on case-insensitive volumes. Runtime lease checks remain necessary:
+configuration path validation alone does not prove filesystem identity.
+
+This entry point requires version 2 configuration. The existing executable still
+uses its version 1 journal-only startup path. Connecting the joint owner to startup
+recovery and the service lifecycle remains required before action admission can
+use it. Configuration decoding alone grants no approval authority.

@@ -4,6 +4,9 @@ import SQLite3
 /// Root-owned independent checkpoint storage. Serialize calls and close before releasing authority ownership.
 /// This store neither executes journal mutations nor grants dispatch permission.
 public final class ContinuityStore {
+    func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
+        try lease.directoryIdentities()
+    }
     private let lease: ProtectedContinuityLease
     private var db: OpaquePointer?
     private var unavailable = false
