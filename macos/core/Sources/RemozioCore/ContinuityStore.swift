@@ -44,7 +44,7 @@ public final class ContinuityStore {
                 try requireEmptyStore()
             } else {
                 guard try scalar("PRAGMA application_id") == 0x524D5A43,
-                      [1, 2].contains(try scalar("PRAGMA user_version")) else { throw ContinuityStoreError.incompatibleStore }
+                      [1, 2, 3].contains(try scalar("PRAGMA user_version")) else { throw ContinuityStoreError.incompatibleStore }
             }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
@@ -105,17 +105,46 @@ public final class ContinuityStore {
         }
     }
 
+    /// The exact proposed boundary survives a crash before or after the journal commit.
+    func historyRecoveryCandidate() throws -> ContinuityCheckpoint? {
+        try transaction(write: false) {
+            let state = try self.load()
+            guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            return try self.loadHistoryCandidate(intent: self.loadHistoryRecovery(state: state))
+        }
+    }
+
+    /// Call inside the journal transaction, after its mutations and before its commit.
+    /// A retained candidate can only be retried unchanged; it cannot be replaced with newly observed bytes.
+    func prepareHistoryRecoveryCandidate(expected: HistoryRecoveryIntent, candidate: ContinuityCheckpoint) throws {
+        try transaction(write: true) {
+            let state = try self.load()
+            guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            guard try self.loadHistoryRecovery(state: state) == expected else { throw ContinuityStoreError.staleState }
+            try self.validateHistoryCandidate(candidate, intent: expected)
+            if let retained = try self.loadHistoryCandidate(intent: expected) {
+                guard retained == candidate else { throw ContinuityStoreError.staleState }
+                return
+            }
+            if try self.scalar("PRAGMA user_version") == 2 {
+                try self.exec("ALTER TABLE continuity_v1 ADD COLUMN history_candidate BLOB")
+                try self.exec("PRAGMA user_version=3")
+            }
+            try self.statement("UPDATE continuity_v1 SET history_candidate=? WHERE id=1",
+                [try candidate.bytes]) { try self.done($0) }
+        }
+    }
+
     /// Call only after verifying the durable journal contains the gap evidence at this exact candidate boundary.
     func finalizeHistoryRecovery(expected: HistoryRecoveryIntent, candidate: ContinuityCheckpoint) throws {
         try transaction(write: true) {
             let state = try self.load()
             guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
             guard try self.loadHistoryRecovery(state: state) == expected else { throw ContinuityStoreError.staleState }
-            guard candidate.generation == expected.checkpointGeneration,
-                  candidate.authorityGeneration == expected.authorityGeneration,
-                  candidate.authorityDigest == expected.authorityDigest,
-                  candidate.journalEpoch == expected.recoveryEpoch else { throw ContinuityStoreError.invalidCheckpoint }
-            try self.statement("UPDATE continuity_v1 SET committed=?,pending=NULL,history=NULL WHERE id=1",
+            guard try self.loadHistoryCandidate(intent: expected) == candidate else {
+                throw ContinuityStoreError.invalidCheckpoint
+            }
+            try self.statement("UPDATE continuity_v1 SET committed=?,pending=NULL,history=NULL,history_candidate=NULL WHERE id=1",
                 [try candidate.bytes]) { try self.done($0) }
         }
     }
@@ -127,8 +156,8 @@ public final class ContinuityStore {
     private func loadHistoryRecovery(state: ContinuityState) throws -> HistoryRecoveryIntent? {
         let version = try scalar("PRAGMA user_version")
         if version == 1 { return nil }
-        guard version == 2 else { throw ContinuityStoreError.incompatibleStore }
-        return try statement("SELECT history FROM continuity_v1 WHERE id=1") { stmt in
+        guard version == 2 || version == 3 else { throw ContinuityStoreError.incompatibleStore }
+        let intent: HistoryRecoveryIntent? = try statement("SELECT history FROM continuity_v1 WHERE id=1") { stmt in
             try self.row(stmt)
             if sqlite3_column_type(stmt, 0) == SQLITE_NULL { return nil }
             let intent = try HistoryRecoveryIntent.decode(self.blob(stmt, 0, maximumBytes: 1024))
@@ -137,6 +166,27 @@ public final class ContinuityStore {
             }
             return intent
         }
+        _ = try loadHistoryCandidate(intent: intent)
+        return intent
+    }
+
+    private func loadHistoryCandidate(intent: HistoryRecoveryIntent?) throws -> ContinuityCheckpoint? {
+        guard try scalar("PRAGMA user_version") == 3 else { return nil }
+        return try statement("SELECT history_candidate FROM continuity_v1 WHERE id=1") { stmt in
+            try self.row(stmt)
+            if sqlite3_column_type(stmt, 0) == SQLITE_NULL { return nil }
+            guard let intent else { throw ContinuityStoreError.incompatibleStore }
+            let candidate = try ContinuityCheckpoint.decode(self.blob(stmt, 0))
+            try self.validateHistoryCandidate(candidate, intent: intent)
+            return candidate
+        }
+    }
+
+    private func validateHistoryCandidate(_ candidate: ContinuityCheckpoint, intent: HistoryRecoveryIntent) throws {
+        guard candidate.generation == intent.checkpointGeneration,
+              candidate.authorityGeneration == intent.authorityGeneration,
+              candidate.authorityDigest == intent.authorityDigest,
+              candidate.journalEpoch == intent.recoveryEpoch else { throw ContinuityStoreError.invalidCheckpoint }
     }
 
     /// Persist both boundaries before changing the journal. A return is not permission to dispatch.
