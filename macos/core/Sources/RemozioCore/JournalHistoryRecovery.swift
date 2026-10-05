@@ -1,9 +1,69 @@
 import Foundation
 import RemozioProtocol
+import Security
 
 /// Storage recovery only. The host must validate external authority and keep action admission closed.
 enum JournalHistoryRecovery {
     enum Failure: Error { case changedHistory, missingEvidence, invalidEpoch }
+
+    /// Reconcile history and retain each interrupted attempt before replacing it.
+    /// The caller must hold exclusive ownership and validate external authority before calling.
+    static func recover(journal: JournalDatabase, continuity: ContinuityStore,
+                        macID: Data, accountID: Data) throws -> ContinuityCheckpoint {
+        if try continuity.historyRecovery() == nil {
+            switch try JournalCheckpointRecovery.reconcile(journal: journal, continuity: continuity) {
+            case let .unchanged(checkpoint), let .finalized(checkpoint), let .discarded(checkpoint):
+                return checkpoint
+            case .repairRequired:
+                throw ContinuityStoreError.recoveryRequired
+            case let .historyDiscontinuity(previous):
+                try journal.read { transaction in
+                    try requireInstalledPolicy(transaction)
+                    let digests = try transaction.continuityDigests()
+                    let intent = try HistoryRecoveryIntent(previous: previous, authorityDigest: digests.authority,
+                        ledgerDigest: digests.ledger, recoveryEpoch: freshEpoch(transaction, continuity: continuity))
+                    try continuity.prepareHistoryRecovery(intent)
+                }
+            }
+        }
+        do {
+            return try resume(journal: journal, continuity: continuity, macID: macID, accountID: accountID)
+        } catch Failure.changedHistory {
+            try journal.read { transaction in
+                guard let intent = try continuity.historyRecovery() else { throw Failure.missingEvidence }
+                let candidate = try continuity.historyRecoveryCandidate()
+                let digests = try transaction.continuityDigests()
+                guard digests.authority == intent.authorityDigest else {
+                    try continuity.requireRecovery()
+                    throw ContinuityStoreError.recoveryRequired
+                }
+                try requireInstalledPolicy(transaction)
+                // Matching bytes with missing evidence are not a new history-loss boundary.
+                guard digests.ledger != intent.ledgerDigest, digests.ledger != candidate?.ledgerDigest else {
+                    throw Failure.changedHistory
+                }
+                let replacement = try HistoryRecoveryIntent(previous: intent.previous, authorityDigest: digests.authority,
+                    ledgerDigest: digests.ledger, recoveryEpoch: freshEpoch(transaction, continuity: continuity))
+                try continuity.supersedeHistoryRecovery(expected: intent, expectedCandidate: candidate, replacement: replacement)
+            }
+            return try resume(journal: journal, continuity: continuity, macID: macID, accountID: accountID)
+        }
+    }
+
+    private static func freshEpoch(_ transaction: JournalTransaction, continuity: ContinuityStore) throws -> Data {
+        var epoch = Data(count: 16)
+        guard epoch.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }) == errSecSuccess,
+              try transaction.epoch(epoch) == nil, try transaction.historyRecovery(epoch: epoch) == nil,
+              try continuity.supersededHistoryRecovery(epoch: epoch) == nil else { throw Failure.invalidEpoch }
+        return epoch
+    }
+
+    private static func requireInstalledPolicy(_ transaction: JournalTransaction) throws {
+        guard let entry = try transaction.codePolicy()?.policy.entries.first(where: { $0.role == .authority }) else {
+            throw AuthoritySelfValidationError.unconfigured
+        }
+        _ = try AuthoritySelfValidation.requirement(for: entry)
+    }
 
     /// Resume one retained recovery attempt under exclusive ownership of both stores.
     /// Requires installed authority code policy; schema-12 stores must complete installation before preparing recovery.
@@ -17,12 +77,7 @@ enum JournalHistoryRecovery {
             try continuity.requireRecovery()
             throw ContinuityStoreError.recoveryRequired
         }
-        try journal.read { transaction in
-            guard let entry = try transaction.codePolicy()?.policy.entries.first(where: { $0.role == .authority }) else {
-                throw AuthoritySelfValidationError.unconfigured
-            }
-            _ = try AuthoritySelfValidation.requirement(for: entry)
-        }
+        try journal.read { try requireInstalledPolicy($0) }
         if let retainedCandidate, try journal.read({ try matches(retainedCandidate, intent: intent, transaction: $0) }) {
             try continuity.finalizeHistoryRecovery(expected: intent, candidate: retainedCandidate)
             return retainedCandidate
