@@ -22,3 +22,25 @@ The registry serializes installation and activation with expiration. If setup fi
 Seven registry fixture tests cover admission bounds, setup failure, expiration during setup, completed handshakes, shutdown during activation, recursive removal, and an actual timer firing. An endpoint test verifies the handshake notification occurs once before its successful reply. These tests do not activate a Mach service or prove live release-signed process authentication.
 
 Protected service registration, the serialized root journal owner, ordered trust notifications, and service packaging remain outstanding. No service is installed by this change or its tests.
+
+## Retained transport policy
+
+The journal-backed initializer requires an active transport entry in the retained code policy. It reads that entry with the initial trust snapshot. The configured signing requirement must exactly match the retained team, identifier, and code hash. A broader hash allowlist cannot admit staged or obsolete code. The transport UID and audit-session restriction still come from protected launch configuration.
+
+Every call checks the OS-bound connection identity first. It then reserves a shared work slot before reading retained policy, including during hello. A missing or changed transport entry rejects the call and closes the endpoint. Hello reads the current entry. Snapshot retrieval and peer validation check the entry inside the same transaction as their trust operation. Each RPC opens one journal read, not separate policy and data reads. A successful earlier check cannot authorize a read after a concurrent policy commit.
+
+```mermaid
+flowchart TD
+    Call[Incoming IPC call] --> OS[Verify bound connection and kernel credentials]
+    OS --> Budget{Work slot available?}
+    Budget -->|No| Close[Close connection]
+    Budget -->|Yes| Read[Begin one journal read]
+    Read --> Policy{Retained transport entry unchanged?}
+    Policy -->|No| Close
+    Policy -->|Yes| Result[Complete hello or trust operation in that transaction]
+    Result --> Reply[Release slot and return result]
+```
+
+A hash, security generation, minimum generation, or active-state change replaces the role's retained revision and invalidates the old listener's access. Returning to the original hash or active state cannot restore that revision. Its next call closes that endpoint. A fresh listener must pass the new policy check. Updating another component leaves this transport entry valid. A rolled-back policy update also leaves access unchanged.
+
+This requires trusted installation to validate the signed metadata before retaining each hash and generation. The storage record is not remote attestation. Root self-validation, release activation, receiving-key isolation, and live signed update tests remain pending. These trust endpoints still expose no target action or signing operation. The lower-level initializer with custom callbacks remains an explicit host integration boundary; the service uses the journal-backed initializer.

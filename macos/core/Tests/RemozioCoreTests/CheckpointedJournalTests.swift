@@ -342,7 +342,10 @@ final class CheckpointedJournalTests: XCTestCase {
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
             _ = try commits.write(epoch: fixture.epoch) {
-                try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+                _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+                return try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
+                    identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                    codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
             }
             try fixture.journal.close(); fixture.store.close()
             let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
@@ -590,6 +593,26 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertThrowsError(try fixture.journal.write { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }) {
             XCTAssertEqual($0 as? AuthorityCodePolicyError, .corruptData)
         }
+    }
+
+    func testLegacyCodePolicyUpgradePreservesUnchangedRoleRevisionAcrossReopen() throws {
+        let fixture = try Fixture()
+        let initial = try fixture.journal.write { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        let legacyBytes = try initial.policy.bytes.map { String(format: "%02x", $0) }.joined()
+        try fixture.sql("UPDATE authority_code_policy_v1 SET policy=x'\(legacyBytes)'", journal: true)
+        try fixture.reopen()
+        let legacy = try XCTUnwrap(fixture.journal.read { try $0.codePolicy() })
+        XCTAssertEqual(legacy.roleRevisions[.authority], initial.revision)
+        let unrelated = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+        let extended = try AuthorityCodePolicy(entries: legacy.policy.entries + [unrelated])
+        let upgraded = try fixture.journal.write { try $0.installCodePolicy(extended, expectedRevision: legacy.revision) }
+        XCTAssertEqual(upgraded.roleRevisions[.authority], legacy.roleRevisions[.authority])
+        XCTAssertNotNil(upgraded.roleRevisions[.transport])
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, upgraded)
+        let noOp = try fixture.journal.write { try $0.installCodePolicy(extended, expectedRevision: upgraded.revision) }
+        XCTAssertEqual(noOp, upgraded)
     }
 
     private func codePolicy(installed: UInt64 = 4, minimum: UInt64 = 2, active: Bool = true) throws -> AuthorityCodePolicy {

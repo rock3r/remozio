@@ -71,6 +71,28 @@ final class AuthorityCodePolicyTests: XCTestCase {
         }
     }
 
+    func testStoredPolicyVersionsPreserveRoleTokensAndRejectIncompleteTokens() throws {
+        let policy = try AuthorityCodePolicy(entries: AuthorityCodeRole.allCases.map { try entry(role: $0) })
+        let revision = UUID()
+        let legacy = try AuthorityCodePolicySnapshot.decodeStored(policy.bytes, revision: revision)
+        XCTAssertEqual(Set(legacy.roleRevisions.keys), Set(AuthorityCodeRole.allCases))
+        XCTAssertTrue(legacy.roleRevisions.values.allSatisfy { $0 == revision })
+        XCTAssertEqual(try AuthorityCodePolicySnapshot.decodeStored(legacy.storedBytes, revision: revision), legacy)
+        guard case .map(let fields) = try DeterministicCBOR.decode(legacy.storedBytes, limits: limits),
+              case .map(let roles) = fields[2] else { return XCTFail("bad fixture") }
+        var missing = roles; missing.removeValue(forKey: AuthorityCodeRole.transport.rawValue)
+        var extra = roles; extra[99] = .bytes(Data(repeating: 1, count: 16))
+        var malformed = roles; malformed[AuthorityCodeRole.transport.rawValue] = .bytes(Data(repeating: 1, count: 15))
+        for roles in [missing, extra, malformed] {
+            var changed = fields; changed[2] = .map(roles)
+            XCTAssertThrowsError(try AuthorityCodePolicySnapshot.decodeStored(DeterministicCBOR.encode(.map(changed), limits: limits), revision: revision)) {
+                XCTAssertEqual($0 as? AuthorityCodePolicyError, .corruptData)
+            }
+        }
+        var unknown = fields; unknown[0] = .unsigned(3)
+        XCTAssertThrowsError(try AuthorityCodePolicySnapshot.decodeStored(DeterministicCBOR.encode(.map(unknown), limits: limits), revision: revision))
+    }
+
     private func entry(role: AuthorityCodeRole = .authority, team: String = "ABCDEF1234", identifier: String = "dev.remozio.authority",
                        installed: UInt64 = 1, minimum: UInt64 = 1, active: Bool = true) throws -> AuthorityCodeEntry {
         try AuthorityCodeEntry(role: role, teamID: team, identifier: identifier, installedGeneration: installed,
