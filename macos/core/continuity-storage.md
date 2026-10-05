@@ -91,3 +91,23 @@ History differences preserve both boundaries and return a discontinuity classifi
 These results describe journal storage only. External root-key and installation continuity must also pass. Before admission resumes, the host still must record history gaps and unresolved outcomes, create a fresh audit epoch, and retire old requests. A finalized preparation is not evidence of an external effect and never authorizes replay. This recovery helper is not yet connected to authority startup.
 
 Tests exercise finalize and discard after reopening, idempotence, history-only differences, transient finalization failure and retry, authority mismatch, failed marker persistence, and marker retention after the original trust bytes return. No physical power-loss test was run.
+
+## Retained outcome reconciliation
+
+Recovery can enumerate consumption outcomes by request ID with `JournalTransaction.consumptionOutcomes`. Each page has a record limit and a byte budget for stored decision and event bodies. An oversized first record returns `pageTooSmall`; it is never silently skipped. The returned cursor advances only past included records. Decoding still validates each receipt and outcome. The host must hold its recovery lock across pages to preserve a stable view.
+
+The internal `reconcileInterruptedConsumptions` operation processes one page in the journal write transaction. It records `Unknown / authorityRestarted` for retained authorized or executing observations from an earlier epoch. Terminal outcomes remain unchanged. The outcome updates and their new audit events commit or roll back together. The caller supplies a fresh epoch writer and the current audit head; unresolved observations in that same epoch are rejected as live work.
+
+```mermaid
+flowchart LR
+    Page[Read bounded outcome page] --> Phase{Earlier unresolved observation?}
+    Phase -->|Yes| Unknown[Record Unknown in fresh epoch]
+    Phase -->|No| Preserve[Preserve terminal evidence]
+    Unknown --> Commit[Commit journal and checkpoint]
+    Preserve --> Commit
+    Commit --> Next[Advance returned cursor]
+```
+
+Revisiting a committed page adds no duplicate terminal events. This path never grants a permit or retries an external action. When separate retained evidence proves no dispatch, the host must record that specific outcome before this conservative fallback. Unenumerable missing history still needs an explicit gap record. The startup host must keep admission closed, create the fresh epoch only after continuity checks, and use checkpointed writes for every batch. Those startup connections remain unimplemented.
+
+Tests cover request ordering, row and byte boundaries, corruption, reopening, expired access, idempotent Unknown records, live-epoch rejection, stale empty-batch heads, and atomic rollback when the second recovery audit insert fails. Physical recovery remains untested.

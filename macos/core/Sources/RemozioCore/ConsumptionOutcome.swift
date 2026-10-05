@@ -2,7 +2,7 @@ import Foundation
 import RemozioProtocol
 
 public enum ConsumptionOutcomeError: Error, Equatable {
-    case missingConsumption, staleRevision, corruptData
+    case missingConsumption, staleRevision, corruptData, pageTooSmall
 }
 
 /// Persisted observation, not a live authorization or dispatch permit. Revision zero is the initial receipt.
@@ -54,4 +54,17 @@ public struct ConsumptionOutcome: Equatable, Sendable {
             droppedEventCount: nil, peerDeviceID: nil)
         return try ConsumptionOutcome(receipt: receipt, revision: revision + 1, event: event)
     }
+}
+
+/// A bounded page of historical observations. The cursor carries no authorization.
+public struct ConsumptionOutcomePage: Equatable, Sendable {
+    public let outcomes: [ConsumptionOutcome]
+    public let nextRequestID: Data?
+}
+
+/// Recovery progress only. The host keeps admission closed until every batch and its checkpoint commit.
+struct ConsumptionRecoveryBatch: Equatable, Sendable {
+    let nextRequestID: Data?
+    let changedCount: Int
+    let journalHead: UInt64
 }
