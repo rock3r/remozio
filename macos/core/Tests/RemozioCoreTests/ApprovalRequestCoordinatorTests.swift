@@ -192,6 +192,31 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             epoch: writer.epoch, generation: state.committed.generation, authorityGeneration: state.committed.authorityGeneration) })
     }
 
+    func testPairedStartupMarksInterruptedConsumptionUnknownWithoutRestoringRequest() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let (requests, store) = try checkpointedOwner(fixture, db, writer)
+        let request = try requests.admit(draft(), now: now(), receiptTimeMs: nil)
+        _ = try consume(requests, request)
+        try db.close(); store.close()
+        let limits = try limits, anchor = fixture.root.path
+        let storage = try AuthorityStorage(openJournal: {
+            try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+                macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), recordLimits: limits,
+                descriptorLimits: limits, decisionLimits: limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: false)
+        }, openContinuity: { excluded in
+            try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid(),
+                excludingDirectory: excluded), macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: nil)
+        })
+        let restarted = try AuthorityJournal(storage: storage)
+        try restarted.prepareRequests(clock: AuthorityClock(), maximumPayloadBytes: 4096)
+        let requestID = request.requestID
+        let outcome = try restarted.withRequests { try $0.historicalOutcome(requestID: requestID) }
+        XCTAssertEqual(outcome?.phase, .unknown)
+        XCTAssertEqual(outcome?.event.reason, .authorityRestarted)
+        XCTAssertThrowsError(try restarted.withRequests { try $0.state(requestID: requestID) })
+        try restarted.close()
+    }
+
     func testRequestLifecycleCommitsIndependentCheckpointBeforeEachResult() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (owner, store) = try checkpointedOwner(fixture, db, writer)

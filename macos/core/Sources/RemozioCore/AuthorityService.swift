@@ -8,6 +8,7 @@ public final class AuthorityService: @unchecked Sendable {
     private let journal: AuthorityJournal
     private let listener: AuthorityXPCListener
     private var maintenance: AuthorityMaintenanceLoop?
+    private let clock: AuthorityClock
     private var started = false
     private var closed = false
 
@@ -44,6 +45,8 @@ public final class AuthorityService: @unchecked Sendable {
          maintenanceIntervalMilliseconds: Int = 1000, maintain: (@Sendable () throws -> Void)? = nil,
          validateSelf: @Sendable (AuthorityJournal) throws -> Void) throws {
         self.journal = journal
+        do { self.clock = try AuthorityClock() }
+        catch { try? journal.close(); throw error }
         do {
             try validateSelf(journal)
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,
@@ -55,6 +58,7 @@ public final class AuthorityService: @unchecked Sendable {
                 maximumConnections: configuration.maximumConnections,
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations)
+            try journal.prepareRequests(clock: clock, maximumPayloadBytes: configuration.maximumPayloadBytes)
             if let maintain {
                 maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: maintenanceIntervalMilliseconds,
                     work: maintain, failed: { [weak self] in try? self?.close() })
