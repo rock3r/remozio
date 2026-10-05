@@ -27,6 +27,63 @@ final class JournalDatabaseTests: XCTestCase {
                             recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize)
     }
 
+    private func installRecoveryPolicy(_ database: JournalDatabase) throws -> AuthorityCodePolicySnapshot {
+        let entry = try AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.remozio.authority",
+            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 7, count: 20), active: true)
+        return try database.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
+    }
+
+    private func recoveryIntent(_ digests: JournalContinuityDigests) throws -> HistoryRecoveryIntent {
+        let checkpoint = try ContinuityCheckpoint(generation: 1, authorityDigest: digests.authority,
+            ledgerDigest: digests.ledger, journalEpoch: id(3), journalHead: 0, authorityGeneration: 1)
+        return try HistoryRecoveryIntent(previous: ContinuityState(committed: checkpoint, pending: nil, recoveryRequired: false),
+            authorityDigest: digests.authority, ledgerDigest: digests.ledger, recoveryEpoch: id(9))
+    }
+
+    func testHistoryEvidenceChangesOnlyLedgerAndSurvivesReopen() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let policy = try installRecoveryPolicy(database)
+        let before = try database.read { try $0.continuityDigests() }
+        let intent = try recoveryIntent(before)
+        XCTAssertNil(try database.read { try $0.historyRecovery(epoch: id(9)) })
+        try database.write { try $0.recordHistoryRecovery(intent) }
+        let after = try database.read { try $0.continuityDigests() }
+        XCTAssertEqual(before.authority, after.authority)
+        XCTAssertNotEqual(before.ledger, after.ledger)
+        XCTAssertEqual(try database.read { try $0.historyRecovery(epoch: id(9)) }, intent)
+        XCTAssertEqual(try database.read { try $0.codePolicy() }, policy)
+        try database.close()
+        let reopened = try open(fixture)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.historyRecovery(epoch: id(9)) }, intent)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, after)
+        XCTAssertEqual(try reopened.read { try $0.codePolicy() }, policy)
+        try fixture.sql("UPDATE history_recoveries_v1 SET evidence=x'00'")
+        XCTAssertNotEqual(try reopened.read { try $0.continuityDigests().ledger }, after.ledger)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests().authority }, after.authority)
+        XCTAssertThrowsError(try reopened.read { try $0.historyRecovery(epoch: id(9)) })
+    }
+
+    func testHistoryEvidenceMigrationRollsBackAndRejectsDuplicateAndReadOnlyWrites() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        _ = try installRecoveryPolicy(database)
+        let before = try database.read { try $0.continuityDigests() }, intent = try recoveryIntent(before)
+        XCTAssertThrowsError(try database.write { tx in
+            try tx.recordHistoryRecovery(intent)
+            throw Failure.injected
+        })
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, before)
+        XCTAssertNil(try database.read { try $0.historyRecovery(epoch: id(9)) })
+        XCTAssertThrowsError(try database.read { try $0.recordHistoryRecovery(intent) })
+        try database.write { try $0.recordHistoryRecovery(intent) }
+        let after = try database.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try database.write { try $0.recordHistoryRecovery(intent) })
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, after)
+        let escaped = try database.read { $0 }
+        XCTAssertThrowsError(try escaped.historyRecovery(epoch: id(9)))
+    }
+
     func testContinuityDigestsSeparateHistoryAndSurviveReopen() throws {
         let fixture = try Fixture(), database = try open(fixture, initialize: true)
         let initial = try database.read { try $0.continuityDigests() }
