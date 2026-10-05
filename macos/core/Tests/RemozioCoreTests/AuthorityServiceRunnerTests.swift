@@ -67,18 +67,26 @@ final class AuthorityServiceRunnerTests: XCTestCase {
     }
 
     func testCloseCancelsScheduledRetry() throws {
-        let probe = Probe(), waiting = expectation(description: "retry scheduled")
-        let repeated = expectation(description: "cancelled retry")
+        let probe = Probe(), waiting = DispatchSemaphore(value: 0)
+        let repeated = expectation(description: "attempt after close")
         repeated.isInverted = true
         let runner = try AuthorityServiceRunner(initialRetryMilliseconds: 200, maximumRetryMilliseconds: 200, open: {
-            if probe.open() > 1 { repeated.fulfill() }
+            _ = probe.open()
+            if probe.counts.closes > 0 { repeated.fulfill() }
             throw JournalLeaseError.busy
-        }, report: { if case .waiting = $0 { waiting.fulfill() } })
+        }, report: {
+            if case .waiting = $0 { waiting.signal() }
+            if $0 == .closed { probe.close() }
+        })
+        defer { try? runner.close() }
         try runner.start()
-        wait(for: [waiting], timeout: 2)
+        XCTAssertEqual(waiting.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(waiting.wait(timeout: .now() + 2), .success)
         try runner.close()
+        let opensAtClose = probe.counts.opens
+        XCTAssertGreaterThanOrEqual(opensAtClose, 2)
         wait(for: [repeated], timeout: 0.4)
-        XCTAssertEqual(probe.counts.opens, 1)
+        XCTAssertEqual(probe.counts.opens, opensAtClose)
         XCTAssertEqual(runner.status, .closed)
     }
 
