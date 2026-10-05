@@ -78,8 +78,9 @@ public final class AuthorityJournal: @unchecked Sendable {
     public func close() throws {
         try lock.withLock {
             try requireNoRequestOperation()
-            defer { storage?.continuity.close(); requests = nil }
             try database.close()
+            storage?.continuity.close()
+            requests = nil
         }
     }
 

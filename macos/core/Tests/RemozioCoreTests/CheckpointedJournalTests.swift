@@ -277,6 +277,30 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertTrue(try fixture.store.read().recoveryRequired)
     }
 
+    func testRejectedReentrantClosePreservesBothStores() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close(); fixture.store.close()
+        let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
+        let head = try owner.read { transaction in
+            XCTAssertThrowsError(try owner.close()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+            return try transaction.epoch(Data(repeating: 3, count: 16))?.head
+        }
+        XCTAssertEqual(head, 0)
+        XCTAssertThrowsError(try fixture.openJournal()) {
+            XCTAssertEqual($0 as? JournalLeaseError, .busy)
+        }
+        XCTAssertThrowsError(try fixture.openStore()) {
+            XCTAssertEqual($0 as? JournalLeaseError, .busy)
+        }
+        XCTAssertEqual(try owner.read { try $0.epoch(Data(repeating: 3, count: 16))?.head }, 0)
+        try owner.close()
+        try owner.close()
+        try fixture.reopen()
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+    }
+
     func testPairedAuthorityOwnerRejectsHistoryLossAndReleasesBothStores() throws {
         let fixture = try Fixture()
         try fixture.journal.write { try fixture.append($0) }
