@@ -44,7 +44,7 @@ public final class ContinuityStore {
                 try requireEmptyStore()
             } else {
                 guard try scalar("PRAGMA application_id") == 0x524D5A43,
-                      try scalar("PRAGMA user_version") == 1 else { throw ContinuityStoreError.incompatibleStore }
+                      [1, 2].contains(try scalar("PRAGMA user_version")) else { throw ContinuityStoreError.incompatibleStore }
             }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
@@ -65,18 +65,86 @@ public final class ContinuityStore {
                     try self.exec("PRAGMA user_version=1")
                 }
             }
-            _ = try read()
+            try transaction(write: false) {
+                let state = try self.load()
+                _ = try self.loadHistoryRecovery(state: state)
+            }
         } catch { close(); throw error }
     }
     deinit { close() }
 
-    public func read() throws -> ContinuityState { try transaction(write: false) { try self.load() } }
+    public func read() throws -> ContinuityState {
+        try transaction(write: false) {
+            let state = try self.load()
+            try self.requireNoHistoryRecovery(state: state)
+            return state
+        }
+    }
+
+    /// Read retained recovery evidence without opening ordinary checkpoint operations.
+    func historyRecovery() throws -> HistoryRecoveryIntent? {
+        try transaction(write: false) {
+            let state = try self.load()
+            guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            return try self.loadHistoryRecovery(state: state)
+        }
+    }
+
+    /// Persist recovery evidence before changing any journal bytes. Migration and preparation are atomic.
+    func prepareHistoryRecovery(_ intent: HistoryRecoveryIntent) throws {
+        try transaction(write: true) {
+            let state = try self.load()
+            guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            try self.requireNoHistoryRecovery(state: state)
+            guard state == intent.previous else { throw ContinuityStoreError.staleState }
+            if try self.scalar("PRAGMA user_version") == 1 {
+                try self.exec("ALTER TABLE continuity_v1 ADD COLUMN history BLOB")
+                try self.exec("PRAGMA user_version=2")
+            }
+            try self.statement("UPDATE continuity_v1 SET history=? WHERE id=1", [try intent.bytes]) { try self.done($0) }
+        }
+    }
+
+    /// Call only after verifying the durable journal contains the gap evidence at this exact candidate boundary.
+    func finalizeHistoryRecovery(expected: HistoryRecoveryIntent, candidate: ContinuityCheckpoint) throws {
+        try transaction(write: true) {
+            let state = try self.load()
+            guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            guard try self.loadHistoryRecovery(state: state) == expected else { throw ContinuityStoreError.staleState }
+            guard candidate.generation == expected.checkpointGeneration,
+                  candidate.authorityGeneration == expected.authorityGeneration,
+                  candidate.authorityDigest == expected.authorityDigest,
+                  candidate.journalEpoch == expected.recoveryEpoch else { throw ContinuityStoreError.invalidCheckpoint }
+            try self.statement("UPDATE continuity_v1 SET committed=?,pending=NULL,history=NULL WHERE id=1",
+                [try candidate.bytes]) { try self.done($0) }
+        }
+    }
+
+    private func requireNoHistoryRecovery(state: ContinuityState) throws {
+        guard try loadHistoryRecovery(state: state) == nil else { throw ContinuityStoreError.historyRecoveryPending }
+    }
+
+    private func loadHistoryRecovery(state: ContinuityState) throws -> HistoryRecoveryIntent? {
+        let version = try scalar("PRAGMA user_version")
+        if version == 1 { return nil }
+        guard version == 2 else { throw ContinuityStoreError.incompatibleStore }
+        return try statement("SELECT history FROM continuity_v1 WHERE id=1") { stmt in
+            try self.row(stmt)
+            if sqlite3_column_type(stmt, 0) == SQLITE_NULL { return nil }
+            let intent = try HistoryRecoveryIntent.decode(self.blob(stmt, 0, maximumBytes: 1024))
+            guard intent.previous.committed == state.committed, intent.previous.pending == state.pending else {
+                throw ContinuityStoreError.incompatibleStore
+            }
+            return intent
+        }
+    }
 
     /// Persist both boundaries before changing the journal. A return is not permission to dispatch.
     public func prepare(expected: ContinuityCheckpoint, candidate: ContinuityCheckpoint) throws {
         try transaction(write: true) {
             let state = try self.load()
             guard !state.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            try self.requireNoHistoryRecovery(state: state)
             guard state.committed == expected, state.pending == nil else { throw ContinuityStoreError.staleState }
             _ = try ContinuityState(committed: expected, pending: candidate, recoveryRequired: false)
             try self.statement("UPDATE continuity_v1 SET pending=? WHERE id=1", [try candidate.bytes]) { try self.done($0) }
@@ -87,6 +155,7 @@ public final class ContinuityStore {
     public func finalize(expected: ContinuityState) throws {
         try transaction(write: true) {
             guard !expected.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            try self.requireNoHistoryRecovery(state: self.load())
             guard let pending = expected.pending, try self.load() == expected else { throw ContinuityStoreError.staleState }
             try self.statement("UPDATE continuity_v1 SET committed=?,pending=NULL WHERE id=1", [try pending.bytes]) { try self.done($0) }
         }
@@ -96,6 +165,7 @@ public final class ContinuityStore {
     public func discardPreparation(expected: ContinuityState) throws {
         try transaction(write: true) {
             guard !expected.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
+            try self.requireNoHistoryRecovery(state: self.load())
             guard expected.pending != nil, try self.load() == expected else { throw ContinuityStoreError.staleState }
             try self.exec("UPDATE continuity_v1 SET pending=NULL WHERE id=1")
         }
@@ -178,9 +248,9 @@ public final class ContinuityStore {
             return sqlite3_column_int64($0, 0)
         }
     }
-    private func blob(_ stmt: OpaquePointer, _ column: Int32) throws -> Data {
+    private func blob(_ stmt: OpaquePointer, _ column: Int32, maximumBytes: Int = 256) throws -> Data {
         let count = sqlite3_column_bytes(stmt, column)
-        guard sqlite3_column_type(stmt, column) == SQLITE_BLOB, count > 0, count <= 256,
+        guard sqlite3_column_type(stmt, column) == SQLITE_BLOB, count > 0, count <= maximumBytes,
               let bytes = sqlite3_column_blob(stmt, column) else { throw ContinuityStoreError.incompatibleStore }
         return Data(bytes: bytes, count: Int(count))
     }
