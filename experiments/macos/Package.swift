@@ -5,5 +5,6 @@ let package = Package(
     name: "RemozioMacExperiments",
     platforms: [.macOS("26.0")],
     products: [.executable(name: "remozio-xpc-probe", targets: ["XPCProbe"]), .executable(name: "remozio-presence-probe", targets: ["PresenceProbe"])],
-    targets: [.executableTarget(name: "XPCProbe"), .executableTarget(name: "PresenceProbe")]
+    dependencies: [.package(path: "../../macos/core")],
+    targets: [.executableTarget(name: "XPCProbe", dependencies: [.product(name: "RemozioCore", package: "core")]), .executableTarget(name: "PresenceProbe")]
 )
