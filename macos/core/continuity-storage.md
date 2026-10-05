@@ -161,7 +161,23 @@ ancestry of both opened directories and rejects containment in either direction,
 including path aliases on case-insensitive volumes. Runtime lease checks remain necessary:
 configuration path validation alone does not prove filesystem identity.
 
-This entry point requires version 2 configuration. The existing executable still
-uses its version 1 journal-only startup path. Connecting the joint owner to startup
-recovery and the service lifecycle remains required before action admission can
-use it. Configuration decoding alone grants no approval authority.
+This entry point requires version 2 configuration. The executable selects this joint owner for version 2. Version 1
+keeps its existing journal-only trust service path. Neither path enables action
+admission. Configuration decoding alone grants no approval authority.
+
+## Trust service lifetime
+
+The version-2 service reconciles exact checkpoint boundaries before constructing
+its trust listener. It holds both leases until shutdown, failed construction, or
+destruction. Each trust read checks the independent checkpoint and the journal
+boundary within the serialized owner. Raw writes and request work remain disabled
+on this owner; there is no dispatch path.
+
+A history discontinuity remains distinct from a persisted repair marker. The
+executable reports history recovery as pending with a temporary-failure exit code.
+Journal and continuity storage errors also receive temporary-failure status. A
+confirmed repair marker has a separate diagnostic. Automatic history recovery,
+fresh action-epoch preparation, and bounded retry scheduling remain required.
+
+Tests exercise paired ownership through service shutdown and construction failure.
+They do not install launchd services or prove prelogin, logout, or reboot behavior.

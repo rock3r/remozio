@@ -262,6 +262,61 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
     }
 
+    func testPairedAuthorityOwnerChecksContinuityAndClosesBothStores() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close(); fixture.store.close()
+        let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
+        XCTAssertEqual(try owner.read { try $0.epoch(Data(repeating: 3, count: 16))?.head }, 0)
+        XCTAssertThrowsError(try owner.write { _ in XCTFail("raw write callback ran") }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        try fixture.sql("UPDATE continuity_v1 SET repair=1")
+        XCTAssertThrowsError(try owner.read { _ in XCTFail("read callback ran after repair marker") })
+        try owner.close()
+        try fixture.reopen()
+        XCTAssertTrue(try fixture.store.read().recoveryRequired)
+    }
+
+    func testPairedAuthorityOwnerRejectsHistoryLossAndReleasesBothStores() throws {
+        let fixture = try Fixture()
+        try fixture.journal.write { try fixture.append($0) }
+        try fixture.journal.close(); fixture.store.close()
+        XCTAssertThrowsError(try AuthorityJournal(storage: fixture.openTransferredStorage())) {
+            guard case AuthorityStorageStartupError.historyRecoveryRequired = $0 else { return XCTFail("wrong startup failure") }
+        }
+        try fixture.reopen()
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+    }
+
+    func testServiceClosesPairedStoresOnShutdownAndConstructionFailure() throws {
+        for wrongScope in [false, true] {
+            let fixture = try Fixture()
+            let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+            let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+            _ = try commits.write(epoch: fixture.epoch) {
+                try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
+            }
+            try fixture.journal.close(); fixture.store.close()
+            let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
+            let configuration = try AuthorityServiceConfiguration(macID: Data(repeating: wrongScope ? 9 : 1, count: 16),
+                accountID: Data(repeating: 2, count: 16), journalDirectory: fixture.root.appendingPathComponent("journal").path,
+                serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
+                transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
+                continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
+            if wrongScope {
+                XCTAssertThrowsError(try AuthorityService(configuration: configuration, journal: owner))
+            } else {
+                let service = try AuthorityService(configuration: configuration, journal: owner)
+                XCTAssertThrowsError(try fixture.openJournal())
+                XCTAssertThrowsError(try fixture.openStore())
+                try service.close()
+            }
+            XCTAssertThrowsError(try owner.read { _ in 1 })
+            try fixture.reopen()
+            XCTAssertFalse(try fixture.store.read().recoveryRequired)
+        }
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
@@ -292,13 +347,13 @@ final class CheckpointedJournalTests: XCTestCase {
             store = try openStore(initial: observed(generation: 1))
         }
         deinit { try? journal?.close(); store?.close(); try? FileManager.default.removeItem(at: root) }
-        func openJournal(initialize: Bool = false) throws -> JournalDatabase {
+        func openJournal(initialize: Bool = false) throws -> sending JournalDatabase {
             try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "journal", owner: geteuid()),
                 macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits, maximumConsumptions: 10,
                 busyMilliseconds: 100, initialize: initialize)
         }
-        func openStore(initial: ContinuityCheckpoint? = nil, directory: String = "continuity") throws -> ContinuityStore {
+        func openStore(initial: ContinuityCheckpoint? = nil, directory: String = "continuity") throws -> sending ContinuityStore {
             try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: directory, owner: geteuid()),
                 macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: initial)
         }
@@ -308,6 +363,18 @@ final class CheckpointedJournalTests: XCTestCase {
         }
         func observed(generation: UInt64) throws -> ContinuityCheckpoint {
             try journal.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: generation) }
+        }
+        func openTransferredStorage() throws -> sending AuthorityStorage {
+            let anchor = root.path, limits = self.limits
+            return try AuthorityStorage(openJournal: {
+                try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "journal", owner: geteuid()),
+                    macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+                    recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                    maximumConsumptions: 10, busyMilliseconds: 100, initialize: false)
+            }, openContinuity: {
+                try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: geteuid()),
+                    macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: nil)
+            })
         }
         func descriptor(_ next: Data) throws -> AuditEpochDescriptor {
             try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([

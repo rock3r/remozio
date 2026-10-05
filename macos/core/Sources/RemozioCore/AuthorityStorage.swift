@@ -1,6 +1,10 @@
 import Foundation
 import RemozioProtocol
 
+public enum AuthorityStorageStartupError: Error {
+    case historyRecoveryRequired, repairRequired
+}
+
 /// Confined ownership of both stores before recovery. Opening never initializes or repairs persisted state.
 final class AuthorityStorage {
     let journal: JournalDatabase
@@ -23,7 +27,7 @@ final class AuthorityStorage {
     }
 
     /// Internal factory seam for protected fixture stores. Both factories transfer exclusive ownership.
-    init(openJournal: () throws -> JournalDatabase, openContinuity: () throws -> ContinuityStore) throws {
+    init(openJournal: () throws -> sending JournalDatabase, openContinuity: () throws -> sending ContinuityStore) throws {
         let journal = try openJournal()
         do {
             let continuity = try openContinuity()
