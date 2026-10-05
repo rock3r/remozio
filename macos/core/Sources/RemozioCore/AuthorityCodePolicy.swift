@@ -92,4 +92,46 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
 public struct AuthorityCodePolicySnapshot: Equatable, Sendable {
     public let revision: UUID
     public let policy: AuthorityCodePolicy
+    /// Retained change tokens. Only the journal generates them; callers cannot choose a successor token.
+    public let roleRevisions: [AuthorityCodeRole: UUID]
+
+    var storedBytes: Data {
+        get throws {
+            guard Set(roleRevisions.keys) == Set(policy.entries.map(\.role)) else { throw AuthorityCodePolicyError.corruptData }
+            let roles = Dictionary(uniqueKeysWithValues: roleRevisions.map { role, revision in
+                var value = revision.uuid
+                return (role.rawValue, CBORValue.bytes(withUnsafeBytes(of: &value) { Data($0) }))
+            })
+            return try DeterministicCBOR.encode(.map([0: .unsigned(2), 1: .bytes(policy.bytes), 2: .map(roles)]), limits: Self.limits())
+        }
+    }
+
+    static func decodeStored(_ bytes: Data, revision: UUID) throws -> Self {
+        do {
+            guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
+                  case .unsigned(let version) = fields[0] else { throw AuthorityCodePolicyError.corruptData }
+            if version == 1 {
+                let policy = try AuthorityCodePolicy.decode(bytes)
+                // Legacy rows use their protected global revision until the first changed write retains role tokens.
+                return Self(revision: revision, policy: policy,
+                    roleRevisions: Dictionary(uniqueKeysWithValues: policy.entries.map { ($0.role, revision) }))
+            }
+            guard version == 2, Set(fields.keys) == [0, 1, 2], case .bytes(let policyBytes) = fields[1],
+                  case .map(let roles) = fields[2] else { throw AuthorityCodePolicyError.corruptData }
+            let policy = try AuthorityCodePolicy.decode(policyBytes)
+            var revisions = [AuthorityCodeRole: UUID]()
+            for (key, value) in roles {
+                guard let role = AuthorityCodeRole(rawValue: key), case .bytes(let bytes) = value, bytes.count == 16 else {
+                    throw AuthorityCodePolicyError.corruptData
+                }
+                revisions[role] = bytes.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
+            }
+            let result = Self(revision: revision, policy: policy, roleRevisions: revisions)
+            guard try result.storedBytes == bytes else { throw AuthorityCodePolicyError.corruptData }
+            return result
+        } catch { throw AuthorityCodePolicyError.corruptData }
+    }
+    private static func limits() throws -> CBORLimits {
+        try CBORLimits(maxBytes: AuthorityCodePolicy.maximumBytes, maxDepth: 4, maxItems: 256)
+    }
 }

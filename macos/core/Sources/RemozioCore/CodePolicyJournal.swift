@@ -16,9 +16,9 @@ final class CodePolicyJournal {
             let revisionBytes = try blob(row, column: 1, maximum: 16)
             guard revisionBytes.count == 16 else { throw AuthorityCodePolicyError.corruptData }
             let revision = revisionBytes.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
-            let policy = try AuthorityCodePolicy.decode(blob(row, column: 2, maximum: AuthorityCodePolicy.maximumBytes))
+            let snapshot = try AuthorityCodePolicySnapshot.decodeStored(blob(row, column: 2, maximum: AuthorityCodePolicy.maximumBytes), revision: revision)
             guard try step(row) == SQLITE_DONE else { throw AuthorityCodePolicyError.corruptData }
-            return AuthorityCodePolicySnapshot(revision: revision, policy: policy)
+            return snapshot
         }
     }
 
@@ -39,13 +39,19 @@ final class CodePolicyJournal {
         let revision = UUID()
         var raw = revision.uuid
         let revisionBytes = withUnsafeBytes(of: &raw) { Data($0) }
-        let bytes = try policy.bytes
+        let revisions = Dictionary(uniqueKeysWithValues: policy.entries.map { entry -> (AuthorityCodeRole, UUID) in
+            if let previous, previous.policy.entries.first(where: { $0.role == entry.role }) == entry,
+               let revision = previous.roleRevisions[entry.role] { return (entry.role, revision) }
+            return (entry.role, UUID())
+        })
+        let snapshot = AuthorityCodePolicySnapshot(revision: revision, policy: policy, roleRevisions: revisions)
+        let bytes = try snapshot.storedBytes
         try statement("INSERT INTO main.authority_code_policy_v1 VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,policy=excluded.policy") { row in
             try bind(revisionBytes, column: 1, row: row)
             try bind(bytes, column: 2, row: row)
             guard try step(row) == SQLITE_DONE else { throw AuthorityCodePolicyError.corruptData }
         }
-        return AuthorityCodePolicySnapshot(revision: revision, policy: policy)
+        return snapshot
     }
 
     private func schemaVersion() throws -> Int64 {

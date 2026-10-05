@@ -41,6 +41,6 @@ flowchart TD
     Result --> Reply[Release slot and return result]
 ```
 
-A hash, security generation, minimum generation, or active-state change invalidates the old listener's access. Its next call closes that endpoint. A fresh listener must pass the new policy check. Updating another component leaves this transport entry valid. A rolled-back policy update also leaves access unchanged.
+A hash, security generation, minimum generation, or active-state change replaces the role's retained revision and invalidates the old listener's access. Returning to the original hash or active state cannot restore that revision. Its next call closes that endpoint. A fresh listener must pass the new policy check. Updating another component leaves this transport entry valid. A rolled-back policy update also leaves access unchanged.
 
 This requires trusted installation to validate the signed metadata before retaining each hash and generation. The storage record is not remote attestation. Root self-validation, release activation, receiving-key isolation, and live signed update tests remain pending. These trust endpoints still expose no target action or signing operation. The lower-level initializer with custom callbacks remains an explicit host integration boundary; the service uses the journal-backed initializer.

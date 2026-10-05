@@ -181,6 +181,28 @@ final class AuthorityJournalTests: XCTestCase {
         }
     }
 
+    func testTransportPolicyABAInvalidatesPreTransitionListener() throws {
+        for intermediate in [try transportEntry(active: false), try transportEntry(hash: 9)] {
+            let fixture = try Fixture(), journal = try owner(fixture)
+            _ = try configure(journal)
+            let original = try transportEntry()
+            let initial = try install(original, journal: journal)
+            let access = try transportAccess(journal, peer: transportPeer())
+            let changed = try install(intermediate, journal: journal, revision: initial.revision)
+            let restored = try install(original, journal: journal, revision: changed.revision)
+            XCTAssertEqual(restored.policy, initial.policy)
+            XCTAssertNotEqual(restored.roleRevisions[.transport], initial.roleRevisions[.transport])
+            XCTAssertNotEqual(restored.roleRevisions[.transport], changed.roleRevisions[.transport])
+            XCTAssertThrowsError(try access.verifyCurrent()) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
+            XCTAssertThrowsError(try access.snapshot()) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
+            XCTAssertNoThrow(try transportAccess(journal, peer: transportPeer()).snapshot())
+            try journal.close()
+            let reopened = try owner(fixture, initialize: false)
+            XCTAssertEqual(try reopened.read { try $0.codePolicy()?.roleRevisions }, restored.roleRevisions)
+            try reopened.close()
+        }
+    }
+
     func testUnrelatedCodeUpdateAndRolledBackTransportUpdatePreserveAccess() throws {
         let fixture = try Fixture(), journal = try owner(fixture)
         _ = try configure(journal)
@@ -190,6 +212,7 @@ final class AuthorityJournalTests: XCTestCase {
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 8, count: 20), active: true)
         let policy = try AuthorityCodePolicy(entries: initial.policy.entries + [unrelated])
         let added = try journal.write { try $0.installCodePolicy(policy, expectedRevision: initial.revision) }
+        XCTAssertEqual(added.roleRevisions[.transport], initial.roleRevisions[.transport])
         XCTAssertNoThrow(try access.verifyCurrent())
         XCTAssertTrue(try access.snapshot().peers.isEmpty)
         let changed = try AuthorityCodePolicy(entries: [transportEntry(minimum: 2), unrelated])
