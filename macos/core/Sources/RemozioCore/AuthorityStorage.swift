@@ -26,8 +26,20 @@ final class AuthorityStorage {
     init(openJournal: () throws -> JournalDatabase, openContinuity: () throws -> ContinuityStore) throws {
         let journal = try openJournal()
         do {
-            continuity = try openContinuity()
-            self.journal = journal
+            let continuity = try openContinuity()
+            do {
+                let journalPath = try journal.directoryIdentities()
+                let continuityPath = try continuity.directoryIdentities()
+                guard let journalDirectory = journalPath.last, let continuityDirectory = continuityPath.last,
+                      !journalPath.contains(continuityDirectory), !continuityPath.contains(journalDirectory) else {
+                    throw AuthorityServiceConfigurationError.invalidConfiguration
+                }
+                self.continuity = continuity
+                self.journal = journal
+            } catch {
+                continuity.close()
+                throw error
+            }
         } catch {
             try? journal.close()
             throw error

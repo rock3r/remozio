@@ -10,6 +10,9 @@ public enum JournalLeaseError: Error, Equatable {
 /// Serialize access. This lease does not validate journal contents or permit dispatch.
 public final class ProtectedJournalLease {
     private let storage: ProtectedStorageLease
+    func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
+        try storage.directoryIdentities()
+    }
     public var databasePath: String { storage.databasePath }
 
     /// Setup must already have provisioned the root-owned directory and both 0600 files.

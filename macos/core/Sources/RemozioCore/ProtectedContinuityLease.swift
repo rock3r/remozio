@@ -6,6 +6,9 @@ import Foundation
 /// The lease proves file ownership, not checkpoint contents or permission to dispatch.
 public final class ProtectedContinuityLease {
     private let storage: ProtectedStorageLease
+    func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
+        try storage.directoryIdentities()
+    }
     public var databasePath: String { storage.databasePath }
 
     /// Setup must already have provisioned the root-owned directory and both 0600 files.

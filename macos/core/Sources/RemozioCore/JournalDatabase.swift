@@ -11,6 +11,9 @@ public enum JournalDatabaseError: Error, Equatable {
 /// This storage layer has no admission, checkpoint or dispatch authority.
 public final class JournalDatabase {
     private static let applicationID: Int64 = 0x524D5A4F
+    func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
+        try lease.directoryIdentities()
+    }
     private let lease: ProtectedJournalLease
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?

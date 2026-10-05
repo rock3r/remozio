@@ -156,7 +156,9 @@ empty or traversal components. Neither directory may contain the other.
 
 `AuthorityStorage.open` acquires both root-protected stores without initializing
 or migrating either. A failed continuity open closes the journal. The owner holds
-both leases until close or destruction. Runtime lease checks remain necessary:
+both leases until close or destruction. It compares the validated device/inode
+ancestry of both opened directories and rejects containment in either direction,
+including path aliases on case-insensitive volumes. Runtime lease checks remain necessary:
 configuration path validation alone does not prove filesystem identity.
 
 This entry point requires version 2 configuration. The existing executable still
