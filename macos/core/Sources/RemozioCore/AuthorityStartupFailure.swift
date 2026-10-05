@@ -7,7 +7,7 @@ public enum AuthorityStartupFailure: Equatable, Sendable {
 
     public init(error: any Error) {
         switch error {
-        case AuthorityStorageStartupError.historyRecoveryRequired: self = .historyRecoveryRequired
+        case AuthorityStorageStartupError.historyRecoveryRequired, ContinuityStoreError.historyRecoveryPending: self = .historyRecoveryRequired
         case AuthorityStorageStartupError.repairRequired: self = .repairRequired
         case JournalLeaseError.busy: self = .temporaryStorageFailure
         case JournalLeaseError.system(let code):

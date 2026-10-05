@@ -193,7 +193,10 @@ final class ContinuityStoreTests: XCTestCase {
         store.close()
         store = try open(fixture)
         XCTAssertEqual(try store.historyRecovery(), intent)
-        XCTAssertThrowsError(try store.read()) { XCTAssertEqual($0 as? ContinuityStoreError, .historyRecoveryPending) }
+        XCTAssertThrowsError(try store.read()) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .historyRecoveryPending)
+            XCTAssertEqual(AuthorityStartupFailure(error: $0), .historyRecoveryRequired)
+        }
         XCTAssertThrowsError(try store.prepare(expected: first, candidate: second))
         XCTAssertThrowsError(try store.finalize(expected: previous))
         XCTAssertThrowsError(try store.discardPreparation(expected: previous))
