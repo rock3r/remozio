@@ -309,6 +309,116 @@ final class ConsumptionJournalTests: XCTestCase {
             eventID: id(eventID), receiptTimeMs: 12400, writer: writer, expectedHead: head)
     }
 
+    func testRecoveryPagesAreOrderedBoundedAndKeepOutcomeEvidence() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request(6), event: 10) }
+        _ = try database.write { try consume($0, writer, request: request(4), head: 1, event: 11) }
+        _ = try database.write { try transition($0, writer, request: 6, eventID: 12, head: 2) }
+        let first = try database.read { try $0.consumptionOutcomes(maximumRecords: 1, maximumBytes: 16384) }
+        XCTAssertEqual(first.outcomes.map { $0.receipt.decision.requestID }, [id(4)])
+        XCTAssertEqual(first.outcomes.first?.phase, .authorized)
+        XCTAssertEqual(first.nextRequestID, id(4))
+        let second = try database.read { try $0.consumptionOutcomes(afterRequestID: first.nextRequestID, maximumRecords: 1, maximumBytes: 16384) }
+        XCTAssertEqual(second.outcomes.map { $0.receipt.decision.requestID }, [id(6)])
+        XCTAssertEqual(second.outcomes.first?.phase, .executing)
+        XCTAssertNil(second.nextRequestID)
+        XCTAssertThrowsError(try database.read { try $0.consumptionOutcomes(maximumRecords: 1, maximumBytes: 1) }) {
+            XCTAssertEqual($0 as? ConsumptionOutcomeError, .pageTooSmall)
+        }
+        let escaped = try database.read { $0 }
+        XCTAssertThrowsError(try escaped.consumptionOutcomes(maximumRecords: 1, maximumBytes: 16384))
+        try database.close()
+        let reopened = try open(fixture)
+        let all = try reopened.read { try $0.consumptionOutcomes(maximumRecords: 256, maximumBytes: 16384) }
+        XCTAssertEqual(all.outcomes, first.outcomes + second.outcomes)
+        XCTAssertNil(all.nextRequestID)
+    }
+
+    func testRecoveryBatchRecordsUnknownOnceInFreshEpoch() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request(4)) }
+        _ = try database.write { try consume($0, writer, request: request(6), head: 1, event: 11) }
+        _ = try database.write { try transition($0, writer, request: 6, eventID: 12, head: 2) }
+        try database.close()
+        let reopened = try open(fixture)
+        let fresh = try reopened.write { try $0.createEpoch(descriptor(20)) }
+        let first = try reopened.write { try $0.reconcileInterruptedConsumptions(maximumRecords: 1, maximumBytes: 16384,
+                                                                               writer: fresh, expectedHead: 0) }
+        XCTAssertEqual(first.changedCount, 1)
+        XCTAssertEqual(first.nextRequestID, id(4))
+        let second = try reopened.write { try $0.reconcileInterruptedConsumptions(afterRequestID: first.nextRequestID,
+            maximumRecords: 1, maximumBytes: 16384, writer: fresh, expectedHead: first.journalHead) }
+        XCTAssertEqual(second.changedCount, 1)
+        XCTAssertNil(second.nextRequestID)
+        XCTAssertEqual(second.journalHead, 2)
+        for requestID in [id(4), id(6)] {
+            let outcome = try XCTUnwrap(reopened.read { try $0.consumptionOutcome(requestID: requestID) })
+            XCTAssertEqual(outcome.phase, .unknown)
+            XCTAssertEqual(outcome.event.reason, .authorityRestarted)
+            XCTAssertEqual(outcome.event.journalEpoch, id(20))
+        }
+        let retry = try reopened.write { try $0.reconcileInterruptedConsumptions(maximumRecords: 256, maximumBytes: 16384,
+                                                                               writer: fresh, expectedHead: 2) }
+        XCTAssertEqual(retry.changedCount, 0)
+        XCTAssertEqual(retry.journalHead, 2)
+    }
+
+    func testRecoveryPageByteBoundaryAndCorruptOutcomeFailWithoutSkipping() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        let receipt = try database.write { try consume($0, writer, request: request(4)) }
+        _ = try database.write { try consume($0, writer, request: request(6), head: 1, event: 11) }
+        let size = try receipt.decision.encode(limits: bounds).count + receipt.event.encode(limits: bounds).count
+        let page = try database.read { try $0.consumptionOutcomes(maximumRecords: 256, maximumBytes: size) }
+        XCTAssertEqual(page.outcomes.count, 1)
+        XCTAssertEqual(page.nextRequestID, id(4))
+        XCTAssertThrowsError(try database.read { try $0.consumptionOutcomes(maximumRecords: 1, maximumBytes: size - 1) })
+        try fixture.sql("UPDATE consumptions_v1 SET event=x'00' WHERE request=x'06060606060606060606060606060606'")
+        XCTAssertThrowsError(try database.read { try $0.consumptionOutcomes(afterRequestID: page.nextRequestID,
+                                                                         maximumRecords: 256, maximumBytes: 16384) })
+    }
+
+    func testRecoveryBatchRollsBackEarlierOutcomesWhenLaterAuditInsertFails() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request(4)) }
+        _ = try database.write { try consume($0, writer, request: request(6), head: 1, event: 11) }
+        try database.close()
+        let reopened = try open(fixture)
+        let fresh = try reopened.write { try $0.createEpoch(descriptor(20)) }
+        try fixture.sql("CREATE TRIGGER fail_second BEFORE INSERT ON audit_records_v1 WHEN NEW.sequence=x'0000000000000002' BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try reopened.write { transaction in
+            XCTAssertThrowsError(try transaction.reconcileInterruptedConsumptions(maximumRecords: 256, maximumBytes: 16384,
+                                                                                  writer: fresh, expectedHead: 0))
+        })
+        for requestID in [id(4), id(6)] {
+            XCTAssertEqual(try reopened.read { try $0.consumptionOutcome(requestID: requestID)?.phase }, .authorized)
+        }
+        XCTAssertEqual(try reopened.read { try $0.epoch(id(20))?.head }, 0)
+        try fixture.sql("DROP TRIGGER fail_second")
+        let retried = try reopened.write { try $0.reconcileInterruptedConsumptions(maximumRecords: 256, maximumBytes: 16384,
+                                                                                 writer: fresh, expectedHead: 0) }
+        XCTAssertEqual(retried.changedCount, 2)
+        XCTAssertEqual(retried.journalHead, 2)
+    }
+
+    func testRecoveryRejectsLiveEpochAndStaleEmptyBatchHead() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let writer = try database.write { try $0.createEpoch(descriptor()) }
+        _ = try database.write { try consume($0, writer, request: request()) }
+        XCTAssertThrowsError(try database.write { try $0.reconcileInterruptedConsumptions(maximumRecords: 1, maximumBytes: 16384,
+                                                                                       writer: writer, expectedHead: 1) }) {
+            XCTAssertEqual($0 as? ConsumptionJournalError, .invalidConfiguration)
+        }
+        XCTAssertEqual(try database.read { try $0.consumptionOutcome(requestID: id(4))?.phase }, .authorized)
+        XCTAssertThrowsError(try database.write { try $0.reconcileInterruptedConsumptions(afterRequestID: id(255),
+            maximumRecords: 1, maximumBytes: 16384, writer: writer, expectedHead: 0) }) {
+            XCTAssertEqual($0 as? AuditJournalError, .headMismatch)
+        }
+    }
+
     func testDurableVerifiedOutcomesKeepTheWinnerAcrossReopen() throws {
         for (event, phase) in [(RequestEvent.verifySuccess, RequestPhase.succeeded), (.verifyFailure, .failed)] {
             let fixture = try Fixture(), database = try open(fixture, initialize: true)

@@ -598,6 +598,34 @@ public final class JournalTransaction {
         }
     }
 
+    /// Enumerate retained observations under the authority's recovery lock. Never restore requests from this page.
+    public func consumptionOutcomes(afterRequestID: Data? = nil, maximumRecords: Int, maximumBytes: Int) throws -> ConsumptionOutcomePage {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.ledger(token).outcomePage(after: afterRequestID, maximumRecords: maximumRecords, maximumBytes: maximumBytes)
+    }
+
+    /// Startup only, after authority continuity checks and fresh epoch creation. Never use for live requests.
+    func reconcileInterruptedConsumptions(afterRequestID: Data? = nil, maximumRecords: Int, maximumBytes: Int,
+                                          writer: AuditEpochWriter, expectedHead: UInt64) throws -> ConsumptionRecoveryBatch {
+        try mutate { audit in
+            guard try audit.epoch(writer.epoch)?.head == expectedHead else { throw AuditJournalError.headMismatch }
+            let page = try consumptionOutcomes(afterRequestID: afterRequestID, maximumRecords: maximumRecords, maximumBytes: maximumBytes)
+            let unresolved = page.outcomes.filter { $0.phase == .authorized || $0.phase == .executing }
+            guard unresolved.allSatisfy({ $0.event.journalEpoch != writer.epoch }) else {
+                throw ConsumptionJournalError.invalidConfiguration
+            }
+            var head = expectedHead
+            for outcome in unresolved {
+                var eventID = UUID().uuid
+                _ = try transitionConsumption(requestID: outcome.receipt.decision.requestID, expectedRevision: outcome.revision,
+                    event: .restartAuthority, eventID: withUnsafeBytes(of: &eventID) { Data($0) }, receiptTimeMs: nil,
+                    writer: writer, expectedHead: head)
+                head += 1 // transitionConsumption rejects overflow before appending.
+            }
+            return ConsumptionRecoveryBatch(nextRequestID: page.nextRequestID, changedCount: unresolved.count, journalHead: head)
+        }
+    }
+
     public func consumptionOutcome(requestID: Data) throws -> ConsumptionOutcome? {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.ledger(token).outcome(requestID: requestID)

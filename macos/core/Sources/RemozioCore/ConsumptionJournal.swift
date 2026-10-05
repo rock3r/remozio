@@ -154,6 +154,39 @@ extension ConsumptionJournal {
         }
     }
 
+    func outcomePage(after: Data?, maximumRecords: Int, maximumBytes: Int) throws -> ConsumptionOutcomePage {
+        guard after == nil || after?.count == 16, (1...256).contains(maximumRecords),
+              (1...67_108_864).contains(maximumBytes) else { throw ConsumptionJournalError.invalidConfiguration }
+        let cursor = after == nil ? "" : " AND c.request>?"
+        let values = [macID, accountID] + (after.map { [$0] } ?? [])
+        return try statement("""
+            SELECT c.request,length(c.decision)+length(c.event)+coalesce(length(o.event),0)
+            FROM main.consumptions_v1 c LEFT JOIN main.consumption_outcomes_v1 o
+            ON c.mac=o.mac AND c.account=o.account AND c.request=o.request
+            WHERE c.mac=? AND c.account=?\(cursor) ORDER BY c.request LIMIT \(maximumRecords + 1)
+            """, values) { statement in
+            var outcomes = [ConsumptionOutcome](), used = 0
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { return ConsumptionOutcomePage(outcomes: outcomes, nextRequestID: nil) }
+                guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+                let request = try blob(statement, 0, maximum: 16)
+                guard request.count == 16, sqlite3_column_type(statement, 1) == SQLITE_INTEGER else {
+                    throw ConsumptionOutcomeError.corruptData
+                }
+                let bytes = sqlite3_column_int64(statement, 1)
+                guard bytes > 0 else { throw ConsumptionOutcomeError.corruptData }
+                if outcomes.count == maximumRecords || bytes > Int64(maximumBytes - used) {
+                    guard let last = outcomes.last else { throw ConsumptionOutcomeError.pageTooSmall }
+                    return ConsumptionOutcomePage(outcomes: outcomes, nextRequestID: last.receipt.decision.requestID)
+                }
+                guard let outcome = try outcome(requestID: request) else { throw ConsumptionOutcomeError.missingConsumption }
+                outcomes.append(outcome)
+                used += Int(bytes)
+            }
+        }
+    }
+
     func transition(requestID: Data, expectedRevision: UInt64, event: RequestEvent, eventID: Data,
                     receiptTimeMs: UInt64?, writer: AuditEpochWriter, expectedHead: UInt64,
                     audit: AuditJournalTables) throws -> ConsumptionOutcome {
