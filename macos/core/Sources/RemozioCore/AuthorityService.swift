@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 
 /// Owns one authority listener and its journal for a single service lifetime.
 /// Protected installation and configuration loading must precede construction.
@@ -9,6 +10,21 @@ public final class AuthorityService: @unchecked Sendable {
     private var maintenance: AuthorityMaintenanceLoop?
     private var started = false
     private var closed = false
+
+    /// Opens the provisioned launch stores. Version 2 retains independent continuity ownership until shutdown.
+    public convenience init(configuration: AuthorityServiceConfiguration) throws {
+        let journal: AuthorityJournal
+        if configuration.continuityDirectory != nil {
+            journal = try AuthorityJournal(storage: AuthorityStorage.open(configuration: configuration))
+        } else {
+            let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
+            journal = try AuthorityJournal(database: JournalDatabase.open(directoryPath: configuration.journalDirectory,
+                macID: configuration.macID, accountID: configuration.accountID,
+                recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                maximumConsumptions: 1_000_000, busyMilliseconds: 5000))
+        }
+        try self.init(configuration: configuration, journal: journal)
+    }
 
     /// Transfers the database to this service. Construction failure releases its writer lease.
     public convenience init(configuration: AuthorityServiceConfiguration, database: sending JournalDatabase) throws {

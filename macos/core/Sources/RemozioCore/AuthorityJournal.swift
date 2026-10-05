@@ -5,11 +5,28 @@ import RemozioProtocol
 public final class AuthorityJournal: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let database: JournalDatabase
+    private var storage: AuthorityStorage?
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
 
     /// Transfer exclusive ownership. The caller must not keep another user of this connection.
     public init(database: sending JournalDatabase) { self.database = database }
+
+    /// Owns the configured stores for trust-only service work. Action recovery remains a separate gate.
+    init(storage: sending AuthorityStorage) throws {
+        do {
+            switch try JournalCheckpointRecovery.reconcile(journal: storage.journal, continuity: storage.continuity) {
+            case .unchanged, .finalized, .discarded: break
+            case .historyDiscontinuity: throw AuthorityStorageStartupError.historyRecoveryRequired
+            case .repairRequired: throw AuthorityStorageStartupError.repairRequired
+            }
+            database = storage.journal
+            self.storage = storage
+        } catch {
+            try? storage.close()
+            throw error
+        }
+    }
 
     /// Transfers the database and epoch writer into one serialization boundary.
     /// Recovery and admission-storage gates must pass before construction.
@@ -36,13 +53,35 @@ public final class AuthorityJournal: @unchecked Sendable {
     }
 
     public func read<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
-        try lock.withLock { try requireNoRequestOperation(); return try database.read(body) }
+        try lock.withLock {
+            try requireNoRequestOperation()
+            if let storage {
+                let checkpoint = try storage.continuity.read()
+                guard !checkpoint.recoveryRequired, checkpoint.pending == nil else { throw JournalDatabaseError.unavailable }
+                return try database.read { transaction in
+                    let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
+                        epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation)
+                    guard actual == checkpoint.committed else { throw JournalDatabaseError.unavailable }
+                    return try body(transaction)
+                }
+            }
+            return try database.read(body)
+        }
     }
     public func write<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
-        try lock.withLock { try requireNoRequestOperation(); return try database.write(body) }
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard storage == nil else { throw JournalDatabaseError.readOnly }
+            return try database.write(body)
+        }
     }
     public func close() throws {
-        try lock.withLock { try requireNoRequestOperation(); try database.close(); requests = nil }
+        try lock.withLock {
+            try requireNoRequestOperation()
+            try database.close()
+            storage?.continuity.close()
+            requests = nil
+        }
     }
 
     public func trustSnapshot(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64 = 1,

@@ -19,6 +19,12 @@ public final class ContinuityStore {
                             macID: macID, accountID: accountID, initialize: initialize)
     }
 
+    static func open(directoryPath: String, macID: Data, accountID: Data,
+                     excludingDirectory: ProtectedStorageLease.DirectoryIdentity) throws -> ContinuityStore {
+        try ContinuityStore(lease: ProtectedContinuityLease.acquire(directoryPath: directoryPath,
+            excludingDirectory: excludingDirectory), macID: macID, accountID: accountID, initialize: nil)
+    }
+
     init(lease: ProtectedContinuityLease, macID: Data, accountID: Data, initialize: ContinuityCheckpoint?) throws {
         self.lease = lease; self.macID = macID; self.accountID = accountID
         do {
