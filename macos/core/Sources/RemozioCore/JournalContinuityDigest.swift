@@ -28,17 +28,18 @@ enum JournalContinuityDigest {
             guard let name = sqlite3_column_text(row, 0) else { throw JournalDatabaseError.incompatibleStore }
             tables.insert(String(cString: name))
         }
-        guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
         var version: Int64?
         try rows(db, "PRAGMA main.user_version") { version = sqlite3_column_int64($0, 0) }
-        guard version == 12 else { throw JournalDatabaseError.incompatibleStore }
-        return try JournalContinuityDigests(authority: digest(db, tables: authorityTables, domain: "authority"),
+        guard version == 12 || version == 13 else { throw JournalDatabaseError.incompatibleStore }
+        let authorityTables = Self.authorityTables + (version == 13 ? ["authority_code_policy_v1"] : [])
+        guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
+        return try JournalContinuityDigests(authority: digest(db, tables: authorityTables, domain: "authority", schema: version!),
                                             ledger: digest(db, tables: ledgerTables, domain: "ledger"))
     }
 
-    private static func digest(_ db: OpaquePointer, tables: [String], domain: String) throws -> Data {
+    private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12) throws -> Data {
         var hash = SHA256()
-        field(Data("remozio/journal-continuity/v1/schema12/\(domain)".utf8), into: &hash)
+        field(Data("remozio/journal-continuity/v1/schema\(schema)/\(domain)".utf8), into: &hash)
         for table in tables.sorted() {
             field(Data(table.utf8), into: &hash)
             var columns = [String]()

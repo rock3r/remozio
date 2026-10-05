@@ -62,7 +62,7 @@ public final class JournalDatabase {
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
-            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion ?? 12) }
+            else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion) }
             try exec("PRAGMA journal_mode=DELETE")
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
@@ -159,6 +159,12 @@ public final class JournalDatabase {
         return enrollment
     }
 
+    fileprivate func codePolicyLedger(_ token: UUID) throws -> CodePolicyJournal {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        return CodePolicyJournal(connection: db)
+    }
+
     fileprivate func routingLedger(_ token: UUID) throws -> RoutingJournal {
         _ = try access(token)
         guard let routing else { throw RoutingJournalError.disabled }
@@ -229,8 +235,10 @@ public final class JournalDatabase {
         }
     }
 
-    private func validateIdentity(macID: Data, accountID: Data, version: Int64 = 12) throws {
-        guard try integer("PRAGMA application_id") == Self.applicationID, try integer("PRAGMA user_version") == version else {
+    private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
+        let version = try integer("PRAGMA user_version")
+        guard try integer("PRAGMA application_id") == Self.applicationID,
+              expectedVersion.map({ version == $0 }) ?? (version == 12 || version == 13) else {
             throw JournalDatabaseError.incompatibleStore
         }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
@@ -266,6 +274,7 @@ public final class JournalDatabase {
         if version >= 10 { queries.append("SELECT phone,enrollment,operation,payload,signature FROM main.gateway_recovered_revocations_v1 LIMIT 0") }
         if version >= 11 { queries.append("SELECT phone,kind,operation,payload,signature FROM main.gateway_trust_restrictions_v1 LIMIT 0") }
         if version >= 12 { queries.append("SELECT setup,phone,epoch,transcript,proof FROM main.pairing_commits_v1 LIMIT 0") }
+        if version >= 13 { queries.append("SELECT id,revision,policy FROM main.authority_code_policy_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -329,6 +338,28 @@ public final class JournalTransaction {
     public func continuityDigests() throws -> JournalContinuityDigests {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.continuityDigests(token)
+    }
+
+    public func codePolicy() throws -> AuthorityCodePolicySnapshot? {
+        try withCodePolicy(write: false) { try $0.read() }
+    }
+
+    /// Protected installer input, after signature, placement, compatibility and quiescence checks.
+    /// Commit through CheckpointedJournal before activating code. This storage call cannot perform those checks.
+    public func installCodePolicy(_ policy: AuthorityCodePolicy, expectedRevision: UUID?) throws -> AuthorityCodePolicySnapshot {
+        try withCodePolicy(write: true) { try $0.install(policy, expectedRevision: expectedRevision) }
+    }
+
+    private func withCodePolicy<T>(write: Bool, _ body: (CodePolicyJournal) throws -> T) throws -> T {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.codePolicyLedger(token))
+        } catch {
+            failed = true
+            if error as? AuthorityCodePolicyError == .corruptData { headMismatch = true }
+            throw error
+        }
     }
 
     public func epoch(_ id: Data) throws -> AuditEpochRead? { try tables().epoch(id) }

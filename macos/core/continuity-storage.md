@@ -43,7 +43,7 @@ Tests cover all four mutation failures, rollback and retry, reopening each check
 
 The versioned SHA-256 format separates the two domains. It sorts tables and rows, includes column names, and frames each value with its type and length. Integer values use eight big-endian bytes. Text and blob bytes remain distinct; null and empty values remain distinct. Hashing streams rows instead of retaining the complete journal in memory. SQLite can use temporary storage to sort rows.
 
-The schema-12 table catalog must match exactly. An added or missing table or a different schema version fails the snapshot rather than silently weakening coverage. This digest checks byte continuity; it does not replace semantic record validation. Protected state outside this database, including future installation floors and root-key identities, still needs its own binding before startup admission can use a complete authority checkpoint.
+The schema-12 or schema-13 table catalog must match exactly. Unknown tables or versions fail the snapshot. Schema 13 adds retained code policy to the authority digest and changes its domain to `schema13/authority`. The ledger retains the schema-12 domain because its format and tables are unchanged. Existing schema-12 digest bytes remain unchanged. This digest checks byte continuity; it does not replace semantic validation. External root-key identities and actual installed binaries still need validation before admission.
 
 Tests cover insertion-order independence, trust changes, consumption and outcome changes, history separation, transaction rollback, reopen stability, expired transaction access, and an uncovered table. Commit coordination and recovery admission remain unimplemented. No physical power-loss test was run.
 
@@ -257,3 +257,28 @@ Tests cover authority changes versus audit writes, reopen, interrupted upgrade
 and finalization, legacy preparation, stale epoch descriptors, malformed version
 fields, invalid transitions, and exhausted counters. No physical crash or
 power-loss test was run.
+
+## Retained code policy
+
+`JournalTransaction.codePolicy()` returns the retained policy and its revision. A schema-12 journal returns no policy. Opening it never creates a policy or migrates the schema.
+
+The protected installer calls `installCodePolicy` inside a coordinated write after it verifies signatures, placement, release compatibility, and quiescence. The first installation creates schema 13 and the complete policy in that transaction. The independent checkpoint retains both the old schema-12 boundary and the new schema-13 boundary until commit completes. Restart reconciliation can therefore finalize the new boundary or discard a rolled-back migration.
+
+```mermaid
+flowchart TD
+    Checks[Installer verifies staged components and stops affected work] --> CAS{Expected policy revision matches?}
+    CAS -->|No| Reject[Reject stale update]
+    CAS -->|Yes| Floors{All retained roles and floors preserved?}
+    Floors -->|No| Reject
+    Floors -->|Yes| Write[Write complete policy and prepare checkpoint]
+    Write --> Commit[Commit journal, verify it, finalize checkpoint]
+    Commit --> Activate[Installer may proceed with activation]
+```
+
+Each role retains its team, identifier, code directory hash, installed security generation, minimum generation, and active flag. The catalog includes the app, authority, GUI agent, transport, command frontend, notification gateway, tunnel client, setup controller, bridge endpoint, and bridge command. Storage accepts a subset; the release validator must enforce required components and compatibility.
+
+Normal updates cannot remove a retained role, change its signing identity, or lower either generation. Disabling a component marks it inactive and preserves its floor. The complete policy uses one compare-and-swap revision. An identical update preserves that revision and the authority generation. Any policy change advances the retained authority generation through the coordinated checkpoint. Security generations use the full positive UInt64 range.
+
+A missing policy row in schema 13 is corruption, never permission to initialize again. Encoding is canonical and bounded. Tests cover invalid roles and identities, stale revisions, retained inactive floors, read-only and expired transactions, rollback, preparation failure, finalization failure, and restart reconciliation across both schema versions. The migration does not change the ledger digest.
+
+This is storage infrastructure. It does not authenticate installer input, validate a release manifest, inspect live processes, or activate a binary. The protected installer and each privileged XPC request must consume this retained policy before action admission is enabled. Physical update and power-loss tests remain pending.
