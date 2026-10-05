@@ -38,7 +38,7 @@ final class AuthorityServiceTests: XCTestCase {
     func testServiceClosesSuppliedJournalOwner() throws {
         let fixture = try Fixture()
         let journal = AuthorityJournal(database: try database(fixture))
-        let service = try AuthorityService(configuration: configuration(fixture), journal: journal)
+        let service = try AuthorityService(configuration: configuration(fixture), journal: journal, validateSelf: { _ in })
         XCTAssertFalse(try journal.read { try $0.approvalTrustSnapshot().allowedContracts.isEmpty })
         try service.close()
         XCTAssertThrowsError(try journal.read { try $0.approvalTrustSnapshot().revision }) {
@@ -48,7 +48,7 @@ final class AuthorityServiceTests: XCTestCase {
     }
     func testCloseBeforeStartReleasesLeaseAndPreventsStart() throws {
         let fixture = try Fixture()
-        let service = try AuthorityService(configuration: configuration(fixture), database: database(fixture))
+        let service = try AuthorityService(configuration: configuration(fixture), journal: AuthorityJournal(database: database(fixture)), validateSelf: { _ in })
         XCTAssertThrowsError(try fixture.lease()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
         try service.close(); try service.close()
         XCTAssertThrowsError(try service.start()) { XCTAssertEqual($0 as? AuthorityXPCEndpointError, .unavailable) }
@@ -57,7 +57,7 @@ final class AuthorityServiceTests: XCTestCase {
     func testFailedStartRetiresInstanceAndReleasesLease() throws {
         guard geteuid() != 0 else { throw XCTSkip("Requires normal user") }
         let fixture = try Fixture()
-        let service = try AuthorityService(configuration: configuration(fixture), database: database(fixture))
+        let service = try AuthorityService(configuration: configuration(fixture), journal: AuthorityJournal(database: database(fixture)), validateSelf: { _ in })
         XCTAssertThrowsError(try service.start()) { XCTAssertEqual($0 as? AuthorityXPCEndpointError, .unavailable) }
         try assertReleased(fixture)
         XCTAssertThrowsError(try service.start())
@@ -65,14 +65,14 @@ final class AuthorityServiceTests: XCTestCase {
     }
     func testWrongScopeConstructionReleasesLease() throws {
         let fixture = try Fixture()
-        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture, wrongScope: true), database: database(fixture))) {
+        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture, wrongScope: true), journal: AuthorityJournal(database: database(fixture)), validateSelf: { _ in })) {
             XCTAssertEqual($0 as? AuthorityXPCEndpointError, .invalidConfiguration)
         }
         try assertReleased(fixture)
     }
     func testUnconfiguredStoreIsNotInitializedByService() throws {
         let fixture = try Fixture()
-        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture), database: database(fixture, configure: false))) {
+        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture), journal: AuthorityJournal(database: database(fixture, configure: false)), validateSelf: { _ in })) {
             XCTAssertEqual($0 as? EnrollmentJournalError, .unconfigured)
         }
         let reopened = try database(fixture, initialize: false)
@@ -83,7 +83,7 @@ final class AuthorityServiceTests: XCTestCase {
     }
     func testServiceRejectsAbsentCodePolicyAndReleasesStorageWithoutInitializingIt() throws {
         let fixture = try Fixture()
-        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture), database: database(fixture, configureCode: false))) {
+        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture), journal: AuthorityJournal(database: database(fixture, configureCode: false)), validateSelf: { _ in })) {
             XCTAssertEqual($0 as? AuthorityTransportAccessError, .unconfigured)
         }
         let reopened = try database(fixture, initialize: false)
@@ -91,9 +91,30 @@ final class AuthorityServiceTests: XCTestCase {
         try reopened.close()
     }
 
+    func testPublicConstructionRequiresAuthoritySelfPolicyAndReleasesStorage() throws {
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture), database: database(fixture))) {
+            XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
+        }
+        try assertReleased(fixture)
+    }
+
+    func testSelfValidationFailurePrecedesListenerConstructionAndClosesJournal() throws {
+        enum Failure: Error { case injected }
+        let fixture = try Fixture(), journal = AuthorityJournal(database: try database(fixture))
+        // Wrong scope would fail listener construction if startup reached that stage.
+        XCTAssertThrowsError(try AuthorityService(configuration: configuration(fixture, wrongScope: true), journal: journal,
+            validateSelf: { owner in
+                XCTAssertFalse(try owner.read { try $0.approvalTrustSnapshot().allowedContracts.isEmpty })
+                throw Failure.injected
+            })) { guard case Failure.injected = $0 else { return XCTFail("wrong failure") } }
+        XCTAssertThrowsError(try journal.read { _ in true }) { XCTAssertEqual($0 as? JournalDatabaseError, .closed) }
+        try assertReleased(fixture)
+    }
+
     func testDeinitializationReleasesLease() throws {
         let fixture = try Fixture()
-        var service: AuthorityService? = try AuthorityService(configuration: configuration(fixture), database: database(fixture))
+        var service: AuthorityService? = try AuthorityService(configuration: configuration(fixture), journal: AuthorityJournal(database: database(fixture)), validateSelf: { _ in })
         XCTAssertNotNil(service)
         service = nil
         try assertReleased(fixture)
