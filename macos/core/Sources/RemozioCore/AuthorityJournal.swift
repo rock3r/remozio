@@ -33,7 +33,7 @@ public final class AuthorityJournal: @unchecked Sendable {
 
     /// Runs once after host identity validation, before activating a listener or admitting request work.
     /// An incomplete attempt retires both stores. The next attempt must reopen and reconcile them.
-    func prepareRequests(clock: AuthorityClock, maximumPayloadBytes: Int) throws {
+    func prepareRequests(clockEpoch: UUID, maximumPayloadBytes: Int) throws {
         try lock.withLock {
             try requireNoRequestOperation()
             guard let storage else { return }
@@ -81,7 +81,7 @@ public final class AuthorityJournal: @unchecked Sendable {
                     case .repairRequired: throw AuthorityStorageStartupError.repairRequired
                     case .complete:
                         requests = try ApprovalRequestCoordinator(database: database, continuity: storage.continuity,
-                            writer: recovery.completedWriter(), clockEpoch: clock.epoch, maximumRequests: 1024,
+                            writer: recovery.completedWriter(), clockEpoch: clockEpoch, maximumRequests: 1024,
                             maximumRetainedBytes: retainedBytes, requestLimits: limits, captureLimits: limits,
                             decisionLimits: limits, signingLimits: auditLimits, auditLimits: auditLimits)
                         return

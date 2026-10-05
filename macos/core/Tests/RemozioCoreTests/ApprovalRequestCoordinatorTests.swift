@@ -208,7 +208,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                 excludingDirectory: excluded), macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: nil)
         })
         let restarted = try AuthorityJournal(storage: storage)
-        try restarted.prepareRequests(clock: AuthorityClock(), maximumPayloadBytes: 4096)
+        try restarted.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 4096)
         let requestID = request.requestID
         let outcome = try restarted.withRequests { try $0.historicalOutcome(requestID: requestID) }
         XCTAssertEqual(outcome?.phase, .unknown)
