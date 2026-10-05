@@ -3,18 +3,28 @@ import Foundation
 @objc public protocol TransportAuthorityXPCProtocol {
     /// Harmless first call. Contains no scope, key, request, or credential material.
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
+    /// Optional request-delivery extension. Zero means unavailable; version one uses requestFrame.
+    func requestDeliveryVersion(reply: @escaping @Sendable (UInt64) -> Void)
+    func requestFrame(_ binding: Data, requestID: Data, reply: @escaping @Sendable (Data?) -> Void)
     func trustSnapshot(reply: @escaping @Sendable (Data?) -> Void)
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void)
 }
 
-public enum AuthorityXPCError: Error { case invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case hello(UInt64), snapshot(Data), validation(Bool), failed }
+public enum AuthorityXPCError: Error { case unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
+enum AuthorityXPCReply: Sendable { case hello(UInt64), deliveryVersion(UInt64), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func validate(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func close()
+}
+
+extension AuthorityXPCDriver {
+    func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.deliveryVersion(0)) }
+    func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
 }
 
 private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable {
@@ -41,6 +51,16 @@ private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable 
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.hello { [self] version in checked(.hello(version), reply) }
+    }
+    func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.requestDeliveryVersion { [self] version in checked(.deliveryVersion(version), reply) }
+    }
+    func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.requestFrame(binding, requestID: requestID) { [self] bytes in
+            checked(bytes.map(AuthorityXPCReply.requestFrame) ?? .failed, reply)
+        }
     }
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
@@ -69,7 +89,8 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case hello, snapshot, validation }
+    private enum Operation { case hello, deliveryVersion, requestFrame, snapshot, validation }
+    private var deliveryVersion: UInt64?
     private let driver: any AuthorityXPCDriver
     private let cancellation = XPCLifetime()
     private let timeoutMilliseconds: UInt64
@@ -120,13 +141,32 @@ public actor AuthorityXPCChannel {
         guard case .validation(let allowed) = try await perform(.validation, binding: binding) else { throw AuthorityXPCError.invalidMessage }
         return allowed
     }
+    /// Fetch a frame for a known request. Empty means no currently eligible frame, never a confirmed request outcome.
+    /// This does not authorize an action. The root owns the queued frame and revalidates its recipient.
+    public func requestFrame(binding: AuthorityPeerBinding, requestID: Data) async throws -> Data? {
+        guard requestID.count == 16 else { throw AuthorityXPCError.invalidMessage }
+        if deliveryVersion == nil {
+            guard case .deliveryVersion(let version) = try await perform(.deliveryVersion) else { throw AuthorityXPCError.invalidMessage }
+            deliveryVersion = version
+        }
+        guard deliveryVersion == 1 else { throw AuthorityXPCError.unsupportedRequestDelivery }
+        let encoded = try AuthorityTrustCodec.encodeBinding(binding)
+        guard case .requestFrame(let bytes) = try await perform(.requestFrame, binding: encoded, requestID: requestID) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        if bytes.isEmpty { return nil }
+        do { try AuthorityRequestFrame.validate(bytes, binding: binding, requestID: requestID) }
+        catch { finish(.invalidMessage); throw error }
+        return bytes
+    }
+
     public nonisolated func abort() {
         cancellation.cancel(); driver.close()
         Task { await self.close() }
     }
     public func close() { finish(.closed) }
 
-    private func perform(_ operation: Operation, binding: Data? = nil) async throws -> AuthorityXPCReply {
+    private func perform(_ operation: Operation, binding: Data? = nil, requestID: Data? = nil) async throws -> AuthorityXPCReply {
         guard state == .open || (state == .opening && operation == .hello) else { throw AuthorityXPCError.closed }
         guard pending == nil else { throw AuthorityXPCError.concurrentOperation }
         try Task.checkCancellation()
@@ -151,6 +191,8 @@ public actor AuthorityXPCChannel {
                 guard cancellation.ifActive({
                     switch operation {
                     case .hello: driver.hello(reply)
+                    case .deliveryVersion: driver.deliveryVersion(reply)
+                    case .requestFrame: driver.requestFrame(binding!, requestID: requestID!, reply)
                     case .snapshot: driver.snapshot(reply)
                     case .validation: driver.validate(binding!, reply)
                     }
@@ -169,7 +211,8 @@ public actor AuthorityXPCChannel {
         guard cancellation.ifActive({}) else { finish(.closed); return }
         if case .failed = reply { finish(.failed); return }
         switch (current.operation, reply) {
-        case (.hello, .hello(1)), (.validation, .validation): break
+        case (.hello, .hello(1)), (.validation, .validation), (.deliveryVersion, .deliveryVersion): break
+        case (.requestFrame, .requestFrame(let bytes)) where bytes.count <= AuthorityRequestFrame.maximumBytes: break
         case (.snapshot, .snapshot(let bytes)) where !bytes.isEmpty && bytes.count <= Self.maximumSnapshotBytes: break
         default: finish(.invalidMessage); return
         }

@@ -130,6 +130,15 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Keeps policy and recipient validation under the same lock as request work.
+    func withValidatedRequests<Value: Sendable>(validate: @Sendable (JournalTransaction) throws -> Void,
+                                               body: @Sendable (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
+        try lock.withLock {
+            try read(validate)
+            return try withRequests(body)
+        }
+    }
+
     private func requireNoRequestOperation() throws {
         guard !requestOperationActive else { throw JournalDatabaseError.transactionActive }
     }
