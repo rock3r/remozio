@@ -486,6 +486,117 @@ final class CheckpointedJournalTests: XCTestCase {
         }
     }
 
+    func testCodePolicyMigrationCommitsWithAuthorityGenerationAndLeavesLedgerUnchanged() throws {
+        let fixture = try Fixture(), before = try fixture.store.read().committed
+        XCTAssertNil(try fixture.journal.read { try $0.codePolicy() })
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let initial = try coordinator.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        let installed = try fixture.store.read().committed
+        XCTAssertNotEqual(installed.authorityDigest, before.authorityDigest)
+        XCTAssertEqual(installed.authorityGeneration, 8)
+        XCTAssertEqual(installed.ledgerDigest, before.ledgerDigest)
+        XCTAssertEqual(installed.journalHead, before.journalHead)
+        let noOp = try coordinator.write(epoch: fixture.epoch) { try $0.installCodePolicy(initial.policy, expectedRevision: initial.revision) }
+        XCTAssertEqual(noOp, initial)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
+        XCTAssertEqual(try fixture.store.read().committed.authorityDigest, installed.authorityDigest)
+        let inactive = try coordinator.write(epoch: fixture.epoch) {
+            try $0.installCodePolicy(codePolicy(installed: 4, minimum: 3, active: false), expectedRevision: initial.revision)
+        }
+        XCTAssertNotEqual(inactive.revision, initial.revision)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 9)
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, inactive)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+            .unchanged(try fixture.store.read().committed))
+        let next = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let active = try next.write(epoch: fixture.epoch) {
+            try $0.installCodePolicy(codePolicy(installed: 5, minimum: 3), expectedRevision: inactive.revision)
+        }
+        XCTAssertTrue(active.policy.entries[0].active)
+        XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 10)
+    }
+
+    func testCodePolicyStaleRevisionAndRollbackCannotCommitEvenWhenCaught() throws {
+        let fixture = try Fixture()
+        let initial = try fixture.journal.write { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        for revision in [nil, UUID()] {
+            XCTAssertThrowsError(try fixture.journal.write { try $0.installCodePolicy(initial.policy, expectedRevision: revision) }) {
+                XCTAssertEqual($0 as? AuthorityCodePolicyError, .staleRevision)
+            }
+        }
+        XCTAssertThrowsError(try fixture.journal.write { transaction in
+            _ = try transaction.installCodePolicy(codePolicy(installed: 5, minimum: 3), expectedRevision: initial.revision)
+            XCTAssertThrowsError(try transaction.installCodePolicy(initial.policy, expectedRevision: initial.revision))
+        }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, initial)
+        XCTAssertThrowsError(try fixture.journal.write {
+            try $0.installCodePolicy(codePolicy(installed: 3, minimum: 2), expectedRevision: initial.revision)
+        }) { XCTAssertEqual($0 as? AuthorityCodePolicyError, .rollback) }
+        XCTAssertThrowsError(try fixture.journal.read { try $0.installCodePolicy(initial.policy, expectedRevision: initial.revision) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        let escaped = try fixture.journal.read { $0 }
+        XCTAssertThrowsError(try escaped.codePolicy()) { XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction) }
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, initial)
+    }
+
+    func testCodePolicyMigrationPreparationFailureRestoresSchema12() throws {
+        let fixture = try Fixture(), before = try fixture.store.read()
+        try fixture.sql("CREATE TRIGGER fail_prepare BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) })
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertNil(try fixture.journal.read { try $0.codePolicy() })
+        XCTAssertEqual(try fixture.observed(generation: 1), before.committed)
+    }
+
+    func testCodePolicyMigrationRollbackAfterPreparationDiscardsCandidate() throws {
+        let fixture = try Fixture(), before = try fixture.store.read().committed
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { transaction in
+            _ = try transaction.installCodePolicy(codePolicy(), expectedRevision: nil)
+            XCTAssertThrowsError(try transaction.installCodePolicy(codePolicy(), expectedRevision: nil))
+        })
+        let candidate = try XCTUnwrap(fixture.store.read().pending)
+        XCTAssertNotEqual(candidate.authorityDigest, before.authorityDigest)
+        XCTAssertEqual(candidate.ledgerDigest, before.ledgerDigest)
+        try fixture.reopen()
+        XCTAssertNil(try fixture.journal.read { try $0.codePolicy() })
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .discarded(before))
+    }
+
+    func testCodePolicyMigrationFinalizationFailureRecoversSchema13Once() throws {
+        let fixture = try Fixture(), before = try fixture.store.read().committed
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) })
+        let candidate = try XCTUnwrap(fixture.store.read().pending)
+        XCTAssertEqual(candidate.authorityGeneration, 8)
+        XCTAssertEqual(candidate.ledgerDigest, before.ledgerDigest)
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy()?.policy }, try codePolicy())
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .finalized(candidate))
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(candidate))
+    }
+
+    func testMissingSchema13PolicyCannotBeTreatedAsNewInstallation() throws {
+        let fixture = try Fixture()
+        _ = try fixture.journal.write { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        try fixture.sql("DELETE FROM authority_code_policy_v1", journal: true)
+        try fixture.reopen()
+        XCTAssertThrowsError(try fixture.journal.write { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }) {
+            XCTAssertEqual($0 as? AuthorityCodePolicyError, .corruptData)
+        }
+    }
+
+    private func codePolicy(installed: UInt64 = 4, minimum: UInt64 = 2, active: Bool = true) throws -> AuthorityCodePolicy {
+        try AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.remozio.authority",
+            installedGeneration: installed, minimumGeneration: minimum, codeDirectoryHash: Data(repeating: 8, count: 20), active: active)])
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
