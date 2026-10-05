@@ -180,8 +180,36 @@ executable reports history recovery as pending with a temporary-failure exit cod
 Lock contention and explicit temporary SQLite or system failures also receive
 temporary-failure status. Wrong scope, incompatible stores, unsafe metadata, and
 unknown errors receive configuration-failure status. Extended SQLite codes use
-their primary error class. A confirmed repair marker has a separate diagnostic. Automatic history recovery,
-fresh action-epoch preparation, and bounded retry scheduling remain required.
+their primary error class. A confirmed repair marker has a separate diagnostic.
+Automatic history recovery and fresh action-epoch preparation remain required.
 
 Tests exercise paired ownership through service shutdown and construction failure.
 They do not install launchd services or prove prelogin, logout, or reboot behavior.
+
+
+## Automatic startup retries
+
+The executable now retains an `AuthorityServiceRunner` while startup is pending.
+It retries explicit temporary storage failures automatically. Each attempt reloads
+protected configuration, reacquires both configured stores, and runs the existing
+checkpoint validation before starting the trust service.
+
+Retries use one timer and exponential backoff: one second initially, capped at
+30 seconds by default. The runner accepts bounded delay settings for later app
+settings integration. Attempts never overlap. Persistent unavailability remains
+visible in bounded diagnostic messages. Wrong scope, unsafe paths, incompatible
+stores, and confirmed repair are terminal. Pending history recovery keeps its
+separate result; the automatic history-recovery operation is still required.
+
+Termination cancels a pending retry and waits for any active attempt. If that
+attempt acquires a service during shutdown, shutdown disposes of it without
+reporting it as running. Failed attempts must release all resources before retry.
+This loop never retries a command, consumes a request, or clears a repair marker.
+
+Tests cover capped backoff, permanent failures, cancellation during backoff and
+acquisition, retained shutdown ownership after a close error, and real contention
+on a protected fixture store. The contention test checks release of the first
+lease before retry and ownership of both leases after recovery. No launchd
+installation, signal lifecycle test, or physical reboot test was run. Phone health
+and authenticated no-admission responses still need transport integration; these
+local diagnostic statuses do not provide that proof.

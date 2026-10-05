@@ -365,6 +365,38 @@ final class CheckpointedJournalTests: XCTestCase {
         }
     }
 
+    func testStartupRetryReleasesJournalWhileContinuityIsBusy() throws {
+        let fixture = try Fixture()
+        try fixture.journal.close()
+        let anchor = fixture.root.path, limits = fixture.limits
+        let waiting = expectation(description: "continuity contention")
+        waiting.assertForOverFulfill = false
+        let running = expectation(description: "paired storage acquired")
+        let runner = try AuthorityServiceRunner(initialRetryMilliseconds: 1000, maximumRetryMilliseconds: 1000, open: {
+            let owner = try AuthorityJournal(storage: Fixture.openTransferredStorage(anchor: anchor, limits: limits))
+            return { try owner.close() }
+        }, report: {
+            if case .waiting = $0 { waiting.fulfill() }
+            if $0 == .running { running.fulfill() }
+        })
+        defer { try? runner.close() }
+        try runner.start()
+        wait(for: [waiting], timeout: 3)
+        let availableJournal = try fixture.openJournal()
+        try availableJournal.close()
+        fixture.store.close()
+        wait(for: [running], timeout: 5)
+        XCTAssertThrowsError(try fixture.openJournal()) {
+            XCTAssertEqual($0 as? JournalLeaseError, .busy)
+        }
+        XCTAssertThrowsError(try fixture.openStore()) {
+            XCTAssertEqual($0 as? JournalLeaseError, .busy)
+        }
+        try runner.close()
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read().committed, try fixture.observed(generation: 1))
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
@@ -414,7 +446,9 @@ final class CheckpointedJournalTests: XCTestCase {
             try journal.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: generation) }
         }
         func openTransferredStorage() throws -> sending AuthorityStorage {
-            let anchor = root.path, limits = self.limits
+            try Self.openTransferredStorage(anchor: root.path, limits: limits)
+        }
+        static func openTransferredStorage(anchor: String, limits: CBORLimits) throws -> sending AuthorityStorage {
             return try AuthorityStorage(openJournal: {
                 try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "journal", owner: geteuid()),
                     macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
