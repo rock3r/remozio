@@ -168,6 +168,103 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         } }
     }
 
+    private func checkpointedOwner(_ fixture: Fixture, _ db: JournalDatabase, _ writer: AuditEpochWriter) throws -> (ApprovalRequestCoordinator, ContinuityStore) {
+        let directory = fixture.root.appendingPathComponent("continuity")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        for name in ["writer.lock", "continuity.sqlite"] {
+            let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+            guard fd >= 0 else { throw Failure.fixture }; Darwin.close(fd)
+        }
+        let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
+            generation: 1, authorityGeneration: 3) }
+        let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path, relativeDirectory: "continuity", owner: getuid()),
+            macID: id(1), accountID: id(2), initialize: initial)
+        let owner = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        return (owner, store)
+    }
+
+    private func assertCheckpoint(_ db: JournalDatabase, _ store: ContinuityStore, _ writer: AuditEpochWriter) throws {
+        let state = try store.read()
+        XCTAssertNil(state.pending)
+        XCTAssertEqual(state.committed, try db.read { try CheckpointedJournal.checkpoint(transaction: $0,
+            epoch: writer.epoch, generation: state.committed.generation, authorityGeneration: state.committed.authorityGeneration) })
+    }
+
+    func testRequestLifecycleCommitsIndependentCheckpointBeforeEachResult() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let (owner, store) = try checkpointedOwner(fixture, db, writer)
+        defer { store.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        try assertCheckpoint(db, store, writer)
+        XCTAssertEqual(try store.read().committed.generation, 2)
+        _ = try consume(owner, request)
+        try assertCheckpoint(db, store, writer)
+        XCTAssertEqual(try store.read().committed.generation, 3)
+        _ = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch, now: now(120), receiptTimeMs: nil)
+        try assertCheckpoint(db, store, writer)
+        let result = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 1, event: .loseOutcome, now: now(130), receiptTimeMs: nil)
+        XCTAssertEqual(result.phase, .unknown)
+        try assertCheckpoint(db, store, writer)
+        XCTAssertEqual(try store.read().committed.generation, 5)
+        XCTAssertEqual(try store.read().committed.currentAuthorityGeneration, 3)
+    }
+
+    func testInvalidSignatureDoesNotRetireHealthyCheckpointedRequestOwner() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let (owner, store) = try checkpointedOwner(fixture, db, writer)
+        defer { store.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let (body, _) = try decision(request), before = try store.read()
+        XCTAssertThrowsError(try owner.consume(canonicalDecision: body, signature: Data(repeating: 0, count: 64),
+            authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil))
+        XCTAssertEqual(try store.read(), before)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
+        XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
+        _ = try consume(owner, request)
+        try assertCheckpoint(db, store, writer)
+    }
+
+    func testAdmissionAndConsumptionWithholdResultsOnCheckpointFailure() throws {
+        for consumption in [false, true] {
+            for finalize in [false, true] {
+                let fixture = try Fixture(), (db, writer) = try setup(fixture)
+                let (owner, store) = try checkpointedOwner(fixture, db, writer)
+                defer { store.close() }
+                let request = try consumption ? owner.admit(draft(), now: now(), receiptTimeMs: nil) : nil
+                let before = try store.read()
+                let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
+                try fixture.sql("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END", continuity: true)
+                if let request {
+                    XCTAssertThrowsError(try consume(owner, request))
+                    XCTAssertThrowsError(try owner.consumedRequest(requestID: request.requestID, now: now()))
+                    XCTAssertEqual(try db.read { try $0.consumption(requestID: request.requestID) != nil }, finalize)
+                } else {
+                    XCTAssertThrowsError(try owner.admit(draft(), now: now(), receiptTimeMs: nil))
+                }
+                XCTAssertThrowsError(try owner.admit(draft(), now: now(), receiptTimeMs: nil))
+                let after = try store.read()
+                XCTAssertEqual(after.committed, before.committed)
+                XCTAssertEqual(after.pending != nil, finalize)
+            }
+        }
+    }
+
+    func testCheckpointedExpiryAndCancellationCommitBeforeReleasingCapture() throws {
+        for expire in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture)
+            let (owner, store) = try checkpointedOwner(fixture, db, writer)
+            defer { store.close() }
+            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+            if expire { _ = try owner.expirePending(now: now(200), receiptTimeMs: nil) }
+            else { _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(), receiptTimeMs: nil) }
+            XCTAssertEqual(try owner.state(requestID: request.requestID).phase, expire ? .expired : .cancelled)
+            try assertCheckpoint(db, store, writer)
+            XCTAssertEqual(try store.read().committed.generation, 3)
+        }
+    }
+
     func testAdmissionCreatesFreshBindingsAndAuditsMetadataBeforeReturning() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         let secret = try DeterministicCBOR.encode(.map([0: .text("synthetic-sensitive-capture")]), limits: limits)
@@ -573,9 +670,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func lease() throws -> ProtectedJournalLease { try .init(anchor: root.path, relativeDirectory: "store", owner: getuid()) }
-        func sql(_ sql: String) throws {
+        func sql(_ sql: String, continuity: Bool = false) throws {
             var db: OpaquePointer?
-            guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw Failure.fixture }
+            guard sqlite3_open(continuity ? root.appendingPathComponent("continuity/continuity.sqlite").path : path, &db) == SQLITE_OK, let db else { throw Failure.fixture }
             defer { sqlite3_close(db) }
             guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw Failure.fixture }
         }
