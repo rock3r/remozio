@@ -725,6 +725,98 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(noOp, upgraded)
     }
 
+    private func recoverHistory(_ fixture: Fixture) throws -> ContinuityCheckpoint {
+        try JournalHistoryRecovery.recover(journal: fixture.journal, continuity: fixture.store,
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+    }
+
+    func testHistoryRecoveryClassifiesLossAndDoesNotRepeatCompletedRecovery() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        let before = try fixture.store.read().committed
+        XCTAssertEqual(try recoverHistory(fixture), before)
+        try fixture.journal.write { try fixture.append($0) }
+        let result = try recoverHistory(fixture)
+        XCTAssertNotEqual(result.journalEpoch, before.journalEpoch)
+        XCTAssertEqual(result.authorityDigest, before.authorityDigest)
+        XCTAssertEqual(result.journalHead, 1)
+        let intent = try XCTUnwrap(fixture.journal.read { try $0.historyRecovery(epoch: result.journalEpoch) })
+        XCTAssertEqual(intent.previous.committed, before)
+        XCTAssertEqual(result.generation, before.generation + 1)
+        try fixture.reopen()
+        XCTAssertEqual(try recoverHistory(fixture), result)
+        XCTAssertNil(try fixture.store.historyRecovery())
+    }
+
+    func testHistoryRecoveryRejectsUnconfiguredPolicyBeforePreparingIntent() throws {
+        let fixture = try Fixture()
+        try fixture.journal.write { try fixture.append($0) }
+        let before = try fixture.journal.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try recoverHistory(fixture)) {
+            XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
+        }
+        XCTAssertNil(try fixture.store.historyRecovery())
+        XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests() }, before)
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+    }
+
+    func testHistoryRecoveryArchivesFurtherLossBeforeAndAfterCandidateCommit() throws {
+        for commitCandidate in [false, true] {
+            let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+            if commitCandidate {
+                try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.history IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+                XCTAssertThrowsError(try resumeHistory(fixture))
+                try fixture.sql("DROP TRIGGER fail_finalize")
+            }
+            let candidate = try fixture.store.historyRecoveryCandidate()
+            _ = try fixture.journal.write { try $0.createEpoch(fixture.descriptor(Data(repeating: 6, count: 16))) }
+            try fixture.reopen()
+            let result = try recoverHistory(fixture)
+            XCTAssertNotEqual(result.journalEpoch, intent.recoveryEpoch)
+            XCTAssertEqual(result.authorityDigest, intent.authorityDigest)
+            XCTAssertEqual(result.generation, intent.checkpointGeneration)
+            try fixture.reopen()
+            let archive = try XCTUnwrap(fixture.store.supersededHistoryRecovery(epoch: intent.recoveryEpoch))
+            XCTAssertEqual(archive.intent, intent)
+            XCTAssertEqual(archive.candidate, candidate)
+            XCTAssertEqual(try recoverHistory(fixture), result)
+        }
+    }
+
+    func testHistoryRecoveryArchiveFailurePreservesOriginalAttemptForRetry() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        _ = try fixture.journal.write { try $0.createEpoch(fixture.descriptor(Data(repeating: 6, count: 16))) }
+        try fixture.sql("CREATE TRIGGER fail_replace BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try recoverHistory(fixture))
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.historyRecovery(), intent)
+        XCTAssertNil(try fixture.store.supersededHistoryRecovery(epoch: intent.recoveryEpoch))
+        try fixture.sql("DROP TRIGGER fail_replace")
+        let result = try recoverHistory(fixture)
+        XCTAssertEqual(try fixture.store.read().committed, result)
+        XCTAssertEqual(try fixture.store.supersededHistoryRecovery(epoch: intent.recoveryEpoch)?.intent, intent)
+    }
+
+    func testHistoryRecoveryRequiresRepairForChangedAuthorityWithOrWithoutAnIntent() throws {
+        for prepared in [false, true] {
+            let fixture = try Fixture()
+            if prepared { _ = try prepareLostHistory(fixture) }
+            else {
+                let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+                _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+            }
+            try fixture.sql("DELETE FROM authority_code_policy_v1", journal: true)
+            XCTAssertThrowsError(try recoverHistory(fixture)) {
+                XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+            }
+            try fixture.reopen()
+            XCTAssertThrowsError(try fixture.store.historyRecovery()) {
+                XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+            }
+        }
+    }
+
     private func prepareLostHistory(_ fixture: Fixture) throws -> HistoryRecoveryIntent {
         let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
         _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
