@@ -679,6 +679,112 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
     }
 
+    func testSignedHandoffBindsExactRetainedPayloadAndHonorsBackpressure() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        var frames: [Data] = []
+        for accepted in [false, true] {
+            let result = try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+                signer: { try self.key.signature(for: $0).rawRepresentation }) { recipient, frame in
+                    XCTAssertEqual(recipient, queued); frames.append(frame); return accepted
+                }
+            XCTAssertEqual(result.delivery, accepted ? queued : nil)
+        }
+        XCTAssertEqual(frames.count, 2)
+        for frame in frames {
+            let message = try ApprovalMessage.decode(frame, maximumBodyBytes: 4096)
+            XCTAssertEqual(message.type, .request); XCTAssertEqual(message.purpose, .issuedRequest)
+            XCTAssertEqual(message.body, try request.encode(limits: limits))
+            XCTAssertTrue(try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey.x963Representation,
+                wireVersion: 1, messageType: .request, purpose: .issuedRequest, canonicalPayload: message.body,
+                payloadLimits: limits, inputLimits: limits))
+            XCTAssertFalse(try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey.x963Representation,
+                wireVersion: 1, messageType: .status, purpose: .status, canonicalPayload: message.body,
+                payloadLimits: limits, inputLimits: limits))
+        }
+        let duplicate = try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation }) { _, _ in XCTFail("Duplicate handoff"); return true }
+        XCTAssertNil(duplicate.delivery)
+        XCTAssertEqual(duplicate.update.dispatched, [queued])
+    }
+
+    func testSignedHandoffSamplesExpiryAndPresenceAfterSigning() throws {
+        for expired in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            let (request, delivery, queued) = try queuedDelivery(owner)
+            var signed = false
+            let result = try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(signed && expired ? 200 : 120) },
+                routing: { try self.routing(signed && !expired ? .present : .away) }, receiptTimeMs: nil,
+                signer: { signed = true; return try self.key.signature(for: $0).rawRepresentation }) { _, _ in
+                    XCTFail("No bytes may leave after expiry or local presence"); return true
+                }
+            XCTAssertTrue(signed); XCTAssertNil(result.delivery)
+            if expired {
+                XCTAssertEqual(result.update.withdrawn, [queued])
+                XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
+            } else { XCTAssertEqual(result.update.active, [queued]); XCTAssertTrue(result.update.dispatched.isEmpty) }
+        }
+    }
+
+    func testSignedHandoffRejectsBadSignerWithoutConsumingQueueOwnership() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        for signature in [Data(repeating: 0, count: 64), Data(), try decisionKey.signature(for: Data([1])).rawRepresentation] {
+            XCTAssertThrowsError(try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil, signer: { _ in signature }) { _, _ in
+                    XCTFail("Invalid signature escaped"); return true
+                }) { XCTAssertEqual($0 as? DecisionVerificationError, .invalidSignature) }
+        }
+        let accepted = try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation }) { _, _ in true }
+        XCTAssertEqual(accepted.delivery, queued)
+    }
+
+    func testSignedHandoffRejectsBadKeyAndBodyBudgetBeforeSigning() throws {
+        for (publicKey, maximum) in [(Data(), 4096), (key.publicKey.x963Representation, 1),
+                                     (key.publicKey.x963Representation, 16_777_216)] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            let (request, delivery, queued) = try queuedDelivery(owner)
+            XCTAssertThrowsError(try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+                authorityPublicKey: publicKey, maximumBodyBytes: maximum,
+                now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+                signer: { _ in XCTFail("Invalid configuration reached signer"); return Data() }) { _, _ in XCTFail(); return true })
+        }
+    }
+
+    func testSignedHandoffWithdrawsRevokedEnrollmentWithoutSending() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+        _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: id(5), epoch: id(9), expectedTrustRevision: revision,
+            eventID: id(31), receiptTimeMs: nil, writer: writer, expectedAuditHead: 2) }
+        let result = try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation }) { _, _ in XCTFail("Revoked recipient"); return true }
+        XCTAssertNil(result.delivery); XCTAssertEqual(result.update.withdrawn, [queued])
+    }
+
+    func testSignedHandoffClosesTerminalRequestWithoutSigning() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let (request, delivery, queued) = try queuedDelivery(owner)
+        _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(120), receiptTimeMs: nil)
+        let result = try owner.handoffSignedDelivery(requestID: request.requestID, delivery: delivery, deliveryID: queued.id,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Terminal request reached signer"); return Data() }) { _, _ in XCTFail(); return true }
+        XCTAssertNil(result.delivery); XCTAssertEqual(result.update.withdrawn, [queued])
+    }
+
     private final class Fixture {
         let root: URL
         var path: String { root.appendingPathComponent("store/journal.sqlite").path }

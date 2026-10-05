@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import RemozioProtocol
 import Security
@@ -259,6 +260,44 @@ public final class ApprovalRequestCoordinator {
         guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
         let trust = try read { try $0.requestDeliveryTrust() }
         return delivery.handoff(id: deliveryID, current: retained, routing: routing, trust: trust, now: now, accept: accept)
+    }
+
+    /// Builds the signed frame from retained authority state, never from caller-supplied request bytes.
+    /// Production supplies its non-exportable authority signer and public key from current local trust.
+    /// Keep this call serialized with authority changes. Callbacks must not reenter or mutate this owner.
+    /// Sample the clock and presence again after signing; transport acceptance has the same contract as handoffDelivery.
+    public func handoffSignedDelivery(requestID: Data, delivery: PendingRequestDelivery, deliveryID: UUID,
+                                      authorityPublicKey: Data, maximumBodyBytes: Int,
+                                      now: () throws -> AuthorityMoment, routing: () throws -> PresenceRouting,
+                                      receiptTimeMs: UInt64?, signer: (Data) throws -> Data,
+                                      accept: (PhoneRequestDelivery, Data) -> Bool) throws -> RequestDeliveryDispatch {
+        let initialTime = try now()
+        let current = try deliveryState(requestID: requestID, now: initialTime, receiptTimeMs: receiptTimeMs)
+        guard current.phase == .queued || current.phase == .presented else {
+            return RequestDeliveryDispatch(delivery: nil, update: delivery.close(current: current, routing: try routing(), now: initialTime))
+        }
+        guard let retained = entries[requestID]?.retained else { throw ApprovalCoordinatorError.notPending }
+        guard authorityPublicKey.count == 65, authorityPublicKey.first == 4,
+              (try? P256.Signing.PublicKey(x963Representation: authorityPublicKey)) != nil else {
+            throw DecisionVerificationError.invalidTrustedState
+        }
+        let body = try retained.payload.encode(limits: requestLimits)
+        guard (1...(16_777_216 - ApprovalMessage.overheadBytes)).contains(maximumBodyBytes),
+              body.count <= maximumBodyBytes else { throw ApprovalCoordinatorError.capacityExceeded }
+        let input = try SigningInput.make(wireVersion: retained.payload.contract.wireVersion,
+            messageType: .request, purpose: .issuedRequest, canonicalPayload: body,
+            payloadLimits: requestLimits, inputLimits: signingLimits)
+        let signature = try signer(input)
+        guard try ApprovalSignature.verify(signature: signature, publicKey: authorityPublicKey,
+            wireVersion: retained.payload.contract.wireVersion, messageType: .request, purpose: .issuedRequest,
+            canonicalPayload: body, payloadLimits: requestLimits, inputLimits: signingLimits) else {
+            throw DecisionVerificationError.invalidSignature
+        }
+        let frame = try ApprovalMessage(wireVersion: retained.payload.contract.wireVersion,
+            type: .request, purpose: .issuedRequest, body: body, signature: signature).encode(maximumBodyBytes: maximumBodyBytes)
+        let finalRouting = try routing()
+        return try handoffDelivery(requestID: requestID, delivery: delivery, deliveryID: deliveryID,
+            routing: finalRouting, now: now(), receiptTimeMs: receiptTimeMs) { accept($0, frame) }
     }
 
     private func deliveryState(requestID: Data, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> ApprovalRequestState {
