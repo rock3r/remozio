@@ -20,7 +20,7 @@ Tests hold both stores, replace the journal while preserving the continuity leas
 
 `ContinuityStore` opens only an existing protected file. Explicit setup can initialize an empty file; normal open never creates or repairs a missing, corrupt, or unsupported store. Its schema binds the Mac and account and stores one committed checkpoint, an optional prepared checkpoint, and a sticky recovery marker.
 
-Each checkpoint contains a generation, authority-state digest, ledger digest, journal epoch, and journal head. Digests are fixed-width inputs from the trusted authority's canonical state encoder, which remains to be integrated. They contain no target labels or command text. The prepared generation must immediately follow the committed generation; overflow is rejected.
+Each checkpoint contains a commit generation, authority-state digest, ledger digest, journal epoch, and journal head. Version 2 also retains a separate authority generation. Digests are fixed-width inputs from the trusted authority's canonical state encoder, which remains to be integrated. They contain no target labels or command text. The prepared generation must immediately follow the committed generation; overflow is rejected.
 
 ```mermaid
 stateDiagram-v2
@@ -213,3 +213,47 @@ lease before retry and ownership of both leases after recovery. No launchd
 installation, signal lifecycle test, or physical reboot test was run. Phone health
 and authenticated no-admission responses still need transport integration; these
 local diagnostic statuses do not provide that proof.
+
+
+## Retained authority generation
+
+Checkpoint encoding version 2 adds a positive authority generation. The commit
+counter still advances for every checkpointed write. The authority generation
+advances exactly once when the canonical authority digest changes. Audit-only
+writes, epoch creation, and no-op transactions retain the authority generation.
+Old audit headers remain immutable when current trust changes.
+
+```mermaid
+flowchart LR
+    A[Commit 10 / authority 3] -->|Audit write| B[Commit 11 / authority 3]
+    B -->|Authority change| C[Commit 12 / authority 4]
+    C -->|Fresh audit epoch| D[Commit 13 / authority 4]
+```
+
+Preparation validates both counters against the previous checkpoint and the
+candidate authority digest. It rejects skipped or false authority advances,
+format downgrade after version 2, and overflow. Journal rollback retains the old
+generation; interrupted finalization retains both generations until exact
+checkpoint reconciliation selects the durable candidate. Recovery does not
+increment the authority generation a second time.
+
+Version 1 remains readable with its original bytes and compare-and-set identity,
+including a pending version-1 preparation. It has no dedicated authority
+counter. The next validated checkpointed commit seeds that counter from the
+retained commit generation, then applies any authority change in that commit.
+This is a compatibility baseline, not an inferred historical trust revision.
+It neither reads a generation from replaceable audit history nor rewrites old
+epoch descriptors. New candidates use version 2; unknown versions fail closed.
+
+Startup recovery rejects a supplied epoch descriptor whose generation differs
+from the retained authority generation or the defined legacy baseline. A fresh
+epoch and its checkpoint still commit before its writer can leave recovery.
+This generation currently covers the authority tables included in the journal
+digest. Binding external identity keys, installed code generations, and security
+floors to the combined authority state remains required before action admission.
+The counter alone proves none of those unimplemented integrations.
+
+Tests cover authority changes versus audit writes, reopen, interrupted upgrade
+and finalization, legacy preparation, stale epoch descriptors, malformed version
+fields, invalid transitions, and exhausted counters. No physical crash or
+power-loss test was run.

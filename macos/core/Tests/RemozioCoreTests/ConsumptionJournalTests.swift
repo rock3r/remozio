@@ -327,7 +327,7 @@ final class ConsumptionJournalTests: XCTestCase {
             try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
                 relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: initial)
         }
-        let initial = try database.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: id(3), generation: 1) }
+        let initial = try database.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: id(3), generation: 1, authorityGeneration: try descriptor().generation) }
         let store = try openStore(initial)
         try database.close()
         let reopened = try open(fixture)

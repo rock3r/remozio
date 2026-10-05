@@ -36,7 +36,9 @@ final class JournalStartupRecovery {
         case .historyDiscontinuity(let evidence): return .historyDiscontinuity(evidence)
         case .unchanged, .finalized, .discarded: break
         }
-        guard descriptor.cause == .restart || descriptor.cause == .recovery,
+        let checkpoint = try continuity.read().committed
+        guard descriptor.generation == checkpoint.currentAuthorityGeneration,
+              descriptor.cause == .restart || descriptor.cause == .recovery,
               try journal.read({ try $0.epoch(descriptor.epoch) }) == nil else { throw Failure.invalidEpoch }
         let commits = CheckpointedJournal(journal: journal, continuity: continuity)
         let writer = try commits.write(epoch: descriptor.epoch) { try $0.createEpoch(descriptor) }

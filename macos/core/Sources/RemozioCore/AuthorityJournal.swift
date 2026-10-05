@@ -60,7 +60,8 @@ public final class AuthorityJournal: @unchecked Sendable {
                 guard !checkpoint.recoveryRequired, checkpoint.pending == nil else { throw JournalDatabaseError.unavailable }
                 return try database.read { transaction in
                     let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
-                        epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation)
+                        epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation,
+                        authorityGeneration: checkpoint.committed.authorityGeneration)
                     guard actual == checkpoint.committed else { throw JournalDatabaseError.unavailable }
                     return try body(transaction)
                 }
