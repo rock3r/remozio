@@ -68,3 +68,26 @@ sequenceDiagram
 The callback must not dispatch actions or publish results. The host must serialize both connections and establish complete authority continuity before constructing the primitive. The helper binds current journal state only; it does not yet include external root-key or installation state. Existing request writes do not use it yet.
 
 Any failure withholds the result and retires that coordinator instance. A transient failure does not set the durable recovery marker. Reopening must inspect both boundaries before retrying storage work; it must never retry an action. Tests inject SQLite preparation and finalization failures, a journal rollback after preparation, and callback failure. They verify retained evidence after reopening and reject a mismatched or unresolved boundary before running a mutation. These are process-level storage tests, not physical power-loss evidence. Automatic recovery and admission integration remain separate work.
+
+## Interrupted preparation recovery
+
+`JournalCheckpointRecovery` reads the independent checkpoint and compares both boundaries with one journal snapshot. It finalizes a matching candidate or discards preparation when the old boundary still matches. Repeating a completed recovery returns the unchanged checkpoint. It reconstructs no requests, permits, or callback results.
+
+```mermaid
+flowchart TD
+    Start[Read checkpoint and journal snapshot] --> Marker{Repair marker set?}
+    Marker -->|Yes| Repair[Keep admission closed]
+    Marker -->|No| Candidate{Candidate matches?}
+    Candidate -->|Yes| Finalize[Finalize checkpoint]
+    Candidate -->|No| Old{Old boundary matches?}
+    Old -->|Yes| Discard[Discard preparation if present]
+    Old -->|No| Trust{Either authority digest matches?}
+    Trust -->|Yes| Gap[Preserve evidence for history recovery]
+    Trust -->|No| Mark[Persist repair marker]
+```
+
+History differences preserve both boundaries and return a discontinuity classification. They do not set the repair marker. A mismatch in journal authority state persists the sticky marker. SQLite and lease failures propagate; they are not converted into a repair diagnosis. A failed marker write also propagates, so the host must keep admission closed and independently check again on restart.
+
+These results describe journal storage only. External root-key and installation continuity must also pass. Before admission resumes, the host still must record history gaps and unresolved outcomes, create a fresh audit epoch, and retire old requests. A finalized preparation is not evidence of an external effect and never authorizes replay. This recovery helper is not yet connected to authority startup.
+
+Tests exercise finalize and discard after reopening, idempotence, history-only differences, transient finalization failure and retry, authority mismatch, failed marker persistence, and marker retention after the original trust bytes return. No physical power-loss test was run.

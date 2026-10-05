@@ -95,6 +95,78 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.observed(generation: 1), before.committed)
     }
 
+    func testRecoveryFinalizesCommittedCandidateAndIsIdempotent() throws {
+        let fixture = try Fixture()
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { try fixture.append($0) })
+        try fixture.reopen()
+        let candidate = try XCTUnwrap(fixture.store.read().pending)
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .finalized(candidate))
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(candidate))
+        XCTAssertNil(try fixture.store.read().pending)
+        XCTAssertEqual(try fixture.observed(generation: 2), candidate)
+    }
+
+    func testRecoveryDiscardsPreparationWhenJournalRolledBack() throws {
+        let fixture = try Fixture(), before = try fixture.store.read().committed
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { transaction in
+            try fixture.append(transaction)
+            XCTAssertThrowsError(try transaction.append(Data([0]), writer: fixture.writer, expectedHead: 1))
+        })
+        try fixture.reopen()
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .discarded(before))
+        XCTAssertEqual(try fixture.observed(generation: 1), before)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(before))
+    }
+
+    func testRecoveryPreservesHistoryMismatchWithoutRequiringAdministratorRepair() throws {
+        let fixture = try Fixture(), before = try fixture.store.read()
+        try fixture.journal.write { try fixture.append($0) }
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .historyDiscontinuity(before))
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertEqual(try fixture.journal.read { try $0.epoch(fixture.epoch)?.head }, 1)
+    }
+
+    func testRecoveryFailurePreservesPreparationAndAllowsStorageRetry() throws {
+        let fixture = try Fixture()
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { try fixture.append($0) })
+        let before = try fixture.store.read()
+        XCTAssertThrowsError(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store))
+        XCTAssertEqual(try fixture.store.read(), before)
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                       .finalized(try XCTUnwrap(before.pending)))
+    }
+
+    func testRecoveryPersistsTrustMismatchAndMarkerFailureDoesNotHideIt() throws {
+        let fixture = try Fixture()
+        try fixture.sql("INSERT INTO approval_enrollments_v1 VALUES(zeroblob(16),zeroblob(16),0,x'01')", journal: true)
+        try fixture.sql("CREATE TRIGGER fail_marker BEFORE UPDATE ON continuity_v1 WHEN NEW.repair=1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store))
+        XCTAssertFalse(try fixture.store.read().recoveryRequired)
+        try fixture.reopen()
+        try fixture.sql("DROP TRIGGER fail_marker")
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .repairRequired)
+        XCTAssertTrue(try fixture.store.read().recoveryRequired)
+        try fixture.sql("DELETE FROM approval_enrollments_v1", journal: true)
+        try fixture.reopen()
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .repairRequired)
+    }
+
+    func testRecoveryDoesNotTurnClosedJournalIntoRepairMarker() throws {
+        let fixture = try Fixture(), before = try fixture.store.read()
+        try fixture.journal.close()
+        XCTAssertThrowsError(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .closed)
+        }
+        XCTAssertEqual(try fixture.store.read(), before)
+    }
+
     private final class Fixture {
         let root: URL
         let epoch = Data(repeating: 3, count: 16)
@@ -150,9 +222,9 @@ final class CheckpointedJournalTests: XCTestCase {
                 droppedEventCount: nil, peerDeviceID: nil).encode(limits: limits)
             try transaction.append(event, writer: writer, expectedHead: 0)
         }
-        func sql(_ query: String) throws {
+        func sql(_ query: String, journal: Bool = false) throws {
             var connection: OpaquePointer?
-            guard sqlite3_open(root.appendingPathComponent("continuity/continuity.sqlite").path, &connection) == SQLITE_OK,
+            guard sqlite3_open(root.appendingPathComponent(journal ? "journal/journal.sqlite" : "continuity/continuity.sqlite").path, &connection) == SQLITE_OK,
                   let connection else { throw Fault.injected }
             defer { sqlite3_close(connection) }
             guard sqlite3_exec(connection, query, nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
