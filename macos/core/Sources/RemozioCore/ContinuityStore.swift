@@ -66,6 +66,9 @@ public final class ContinuityStore {
                 }
             }
             try transaction(write: false) {
+                if try self.scalar("PRAGMA user_version") == 4 {
+                    try self.exec("SELECT epoch,intent,candidate FROM history_attempts_v1 LIMIT 0")
+                }
                 let state = try self.load()
                 _ = try self.loadHistoryRecovery(state: state)
             }

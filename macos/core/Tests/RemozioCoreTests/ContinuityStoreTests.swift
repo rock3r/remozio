@@ -436,6 +436,22 @@ final class ContinuityStoreTests: XCTestCase {
         XCTAssertEqual(try store.supersededHistoryRecovery(epoch: intent.recoveryEpoch)?.intent, intent)
     }
 
+    func testMissingOrMalformedArchiveFailsReopenAfterFinalization() throws {
+        for corruption in ["DROP TABLE history_attempts_v1",
+                           "ALTER TABLE history_attempts_v1 RENAME COLUMN candidate TO missing_candidate"] {
+            let fixture = try Fixture(), store = try open(fixture, initial: checkpoint(1))
+            let intent = try recovery(store.read()), next = try replacement(intent)
+            try store.prepareHistoryRecovery(intent)
+            try store.supersedeHistoryRecovery(expected: intent, expectedCandidate: nil, replacement: next)
+            let candidate = try recoveredCheckpoint(next)
+            try store.prepareHistoryRecoveryCandidate(expected: next, candidate: candidate)
+            try store.finalizeHistoryRecovery(expected: next, candidate: candidate)
+            store.close()
+            try fixture.sql(corruption)
+            XCTAssertThrowsError(try open(fixture))
+        }
+    }
+
     private final class Fixture {
         let root: URL
         init() throws {
