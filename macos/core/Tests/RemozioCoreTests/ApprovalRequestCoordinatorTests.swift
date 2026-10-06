@@ -1278,7 +1278,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
         func now() -> AuthorityMoment { lock.withLock { AuthorityMoment(epoch: epoch, milliseconds: time) } }
         func route() throws -> PresenceRouting {
-            let mode = lock.withLock { mode }
+            let mode = lock.withLock { self.mode }
             var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
             return router.evaluate(mode: mode, snapshot: .init(), now: .init(epoch: epoch, milliseconds: now().milliseconds))
         }
