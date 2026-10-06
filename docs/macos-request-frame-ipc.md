@@ -110,3 +110,5 @@ The default handler returns after the snapshot. The listener closes its fetch co
 The write deadline defaults to 30 seconds and has a constructor setting. No new write starts after that deadline; a blocked write closes the channel. Authority operations retain their separate bounded IPC deadlines and ordered queue. Cancellation, stale-session checks, invalid frames, and failed writes close the channel. A failed write stops the scan before fetching another frame.
 
 Tests use synthetic authority IPC and a negotiated in-memory phone stream. They verify exact signed bytes and sequences, absent requests, runtime features, wrong scopes, changed sessions, service closure, payload bounds, write failure, timeout, cancellation, and custom-handler ownership. These tests do not exercise native TLS sockets, Android hardware, protected installation, production key custody, push, or relay delivery. Production root providers and bidirectional decision/status assembly remain required.
+
+The [state and decision exchange](macos-request-exchange-ipc.md) adds a separately negotiated IPC extension for signed status and consumption. The default network fetch handler is unchanged.

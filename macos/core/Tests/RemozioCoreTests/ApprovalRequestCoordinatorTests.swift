@@ -877,6 +877,198 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             now: { self.now(140) }, routing: { try self.routing() }, receiptTimeMs: nil,
             signer: { _ in XCTFail("Stale binding signed"); throw Failure.fixture }))
     }
+    private func exchangeDecision(_ request: IssuedRequestPayload, phone: UInt8 = 5, keyID: UInt8 = 6,
+                                  decline: Bool = false, purpose: SigningPurpose? = nil,
+                                  signer: P256.Signing.PrivateKey? = nil) throws -> Data {
+        let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
+            requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
+            phoneID: id(phone), keyID: id(keyID), action: request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
+        let purpose = purpose ?? (decline ? .cancellation : .biometricAuthorization)
+        let signature = try (signer ?? (decline ? decisionKey : key)).signature(for: SigningInput.make(wireVersion: 1,
+            messageType: .decision, purpose: purpose, canonicalPayload: body, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+        return try ApprovalMessage(wireVersion: 1, type: .decision, purpose: purpose,
+            body: body, signature: signature).encode(maximumBodyBytes: 3968)
+    }
+    private func exchangeStatus(_ bytes: Data?) throws -> RequestStatusPayload {
+        let message = try ApprovalMessage.decode(XCTUnwrap(bytes), maximumBodyBytes: 3968)
+        XCTAssertEqual(message.type, .status); XCTAssertEqual(message.purpose, .status)
+        XCTAssertTrue(try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey.x963Representation,
+            wireVersion: 1, messageType: .status, purpose: .status, canonicalPayload: message.body,
+            payloadLimits: limits, inputLimits: limits))
+        return try RequestStatusPayload.decode(message.body, limits: limits)
+    }
+    private func exchange(_ owner: ApprovalRequestCoordinator, _ binding: AuthorityPeerBinding, _ requestID: Data,
+                          decision: Data? = nil, time: UInt64 = 120) throws -> Data? {
+        try owner.exchangeRequest(binding: binding, requestID: requestID, decisionFrame: decision,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
+            now: { self.now(time) }, receiptTimeMs: nil, signer: { try self.key.signature(for: $0).rawRepresentation })
+    }
+    func testExchangeStatusKeepsObservationAndAdvancesAgeWithoutChangingRequestPhase() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let original = try draft()
+        let observed = ApprovalRequestDraft(contract: original.contract, requiredFeatures: original.requiredFeatures,
+            capture: original.capture, actions: original.actions, firstObservedAt: original.firstObservedAt,
+            deadlineMilliseconds: original.deadlineMilliseconds, createdUnixMilliseconds: original.createdUnixMilliseconds,
+            expiresUnixMilliseconds: original.expiresUnixMilliseconds, observationID: id(40),
+            estimatedLifetimeMilliseconds: 60_000, lateObservation: true)
+        let request = try owner.admit(observed, now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let first = try exchangeStatus(exchange(owner, binding, request.requestID))
+        let later = try exchangeStatus(exchange(owner, binding, request.requestID, time: 140))
+        XCTAssertEqual(first.phase, .queued); XCTAssertEqual(later.phase, .queued)
+        XCTAssertEqual(first.observationID, id(40)); XCTAssertEqual(later.observationID, first.observationID)
+        XCTAssertEqual(first.revision, 1); XCTAssertEqual(later.revision, 2)
+        XCTAssertEqual(first.observedAgeMs, 20); XCTAssertEqual(later.observedAgeMs, 40)
+        XCTAssertEqual(first.authorizationRemainingMs, 80); XCTAssertEqual(later.authorizationRemainingMs, 60)
+        XCTAssertEqual(later.estimatedLifetimeMs, 60_000); XCTAssertTrue(later.lateObservation)
+        XCTAssertEqual(later.requestDigest, try request.requestDigest(bodyLimits: limits, signingLimits: limits))
+        XCTAssertEqual(later.challenge, request.challenge)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).revision, 1)
+    }
+    func testExchangeConsumesBiometricDecisionAndRetainsWinnerOnRetry() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let decision = try exchangeDecision(request)
+        let winner = try exchangeStatus(exchange(owner, binding, request.requestID, decision: decision))
+        XCTAssertEqual(winner.phase, .authorized); XCTAssertEqual(winner.decisionPhoneID, id(5))
+        let count = try events(db, writer).count
+        let retry = try exchangeStatus(exchange(owner, binding, request.requestID, decision: decision, time: 130))
+        XCTAssertEqual(retry.phase, .authorized); XCTAssertEqual(retry.decisionPhoneID, id(5))
+        XCTAssertGreaterThan(retry.revision, winner.revision)
+        XCTAssertEqual(try events(db, writer).count, count)
+        XCTAssertEqual(try owner.historicalOutcome(requestID: request.requestID)?.phase, .authorized)
+    }
+    func testExchangeDeclineUsesDecisionKeyAndTerminalStatusReleasesCapture() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let first = try exchangeStatus(exchange(owner, binding, request.requestID,
+            decision: exchangeDecision(request, keyID: 7, decline: true)))
+        XCTAssertEqual(first.phase, .declined); XCTAssertEqual(first.reason, .declined)
+        XCTAssertEqual(first.terminalAgeMs, 20); XCTAssertNil(first.authorizationRemainingMs)
+        let later = try exchangeStatus(exchange(owner, binding, request.requestID, time: 150))
+        XCTAssertEqual(later.terminalAgeMs, first.terminalAgeMs); XCTAssertEqual(later.observedAgeMs, 50)
+        XCTAssertThrowsError(try owner.consumedRequest(requestID: request.requestID, now: now(150)))
+    }
+    func testExchangeSecondPhoneReceivesFirstWinnerWithoutAnotherConsumption() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+        let otherKey = P256.Signing.PrivateKey()
+        let second = try StoredApprovalEnrollment(epoch: id(19), notificationTag: id(20, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(15), active: true, capabilities: capabilities, keys: [
+                EnrolledApprovalKey(id: id(16), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                EnrolledApprovalKey(id: id(17), keyClass: .decision, publicKey: otherKey.publicKey.x963Representation)]))
+        _ = try db.write { try $0.addApprovalEnrollment(second, expectedTrustRevision: revision,
+            eventID: id(31), receiptTimeMs: nil, writer: writer, expectedAuditHead: head($0, writer)) }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        let first = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(5) }), revision: trust.revision)
+        let other = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(15) }), revision: trust.revision)
+        _ = try exchange(owner, first, request.requestID, decision: exchangeDecision(request))
+        let count = try events(db, writer).count
+        let loser = try exchangeStatus(exchange(owner, other, request.requestID,
+            decision: exchangeDecision(request, phone: 15, keyID: 17, decline: true, signer: otherKey), time: 130))
+        XCTAssertEqual(loser.phase, .authorized); XCTAssertEqual(loser.decisionPhoneID, id(5))
+        XCTAssertEqual(try events(db, writer).count, count)
+    }
+    func testExchangeRejectsForgedDecisionBindingsPurposeAndSignatureBeforeConsumption() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let other = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        for bytes in [try exchangeDecision(request, phone: 15), try exchangeDecision(other),
+                      try exchangeDecision(request, purpose: .cancellation),
+                      try exchangeDecision(request, keyID: 7, signer: decisionKey),
+                      try exchangeDecision(request, signer: P256.Signing.PrivateKey())] {
+            XCTAssertThrowsError(try exchange(owner, binding, request.requestID, decision: bytes))
+            XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
+            XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
+        }
+        _ = try exchange(owner, binding, request.requestID, decision: exchangeDecision(request))
+        XCTAssertThrowsError(try exchange(owner, binding, request.requestID,
+            decision: exchangeDecision(request, signer: P256.Signing.PrivateKey())))
+    }
+    func testExchangeDiscardsPendingStatusWhenSigningCrossesDeadline() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        var signs = 0
+        let bytes = try owner.exchangeRequest(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
+            now: { self.now(signs == 0 ? 120 : 200) }, receiptTimeMs: nil,
+            signer: { signs += 1; return try self.key.signature(for: $0).rawRepresentation })
+        let status = try exchangeStatus(bytes)
+        XCTAssertEqual(signs, 2); XCTAssertEqual(status.phase, .expired)
+        XCTAssertEqual(status.revision, 2); XCTAssertEqual(status.terminalAgeMs, 100)
+        XCTAssertEqual(status.reason, .authorizationExpired)
+        XCTAssertEqual(try events(db, writer).filter { $0.kind == .expired }.count, 1)
+    }
+    func testExchangeDecisionCrossingDeadlineReturnsExpiryWithoutConsumption() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        var samples = 0
+        let bytes = try owner.exchangeRequest(binding: binding, requestID: request.requestID,
+            decisionFrame: exchangeDecision(request), authorityPublicKey: key.publicKey.x963Representation,
+            maximumBodyBytes: 3968, now: { samples += 1; return self.now(samples == 1 ? 120 : 200) },
+            receiptTimeMs: nil, signer: { try self.key.signature(for: $0).rawRepresentation })
+        XCTAssertEqual(try exchangeStatus(bytes).phase, .expired)
+        XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
+    }
+    func testExchangeWithPairedStorageCommitsConsumptionBeforeStatusReply() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let (owner, store) = try checkpointedOwner(fixture, db, writer)
+        defer { store.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let status = try exchangeStatus(exchange(owner, binding, request.requestID, decision: exchangeDecision(request)))
+        XCTAssertEqual(status.phase, .authorized)
+        try assertCheckpoint(db, store, writer)
+        XCTAssertEqual(try owner.historicalOutcome(requestID: request.requestID)?.phase, .authorized)
+    }
+    func testExchangeLostSignedReplyPreservesCommittedConsumption() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID,
+            decisionFrame: exchangeDecision(request), authorityPublicKey: key.publicKey.x963Representation,
+            maximumBodyBytes: 3968, now: { self.now(120) }, receiptTimeMs: nil, signer: { _ in throw Failure.fixture }))
+        XCTAssertEqual(try owner.historicalOutcome(requestID: request.requestID)?.phase, .authorized)
+        let status = try exchangeStatus(exchange(owner, binding, request.requestID, time: 130))
+        XCTAssertEqual(status.phase, .authorized); XCTAssertEqual(status.revision, 2)
+    }
+    func testExchangeUnknownAndForgottenRequestAreAbsenceNotTerminalClaims() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer), binding = try frameBinding(db)
+        XCTAssertNil(try exchange(owner, binding, id(99)))
+        let request = try owner.admit(draft(), now: now(120), receiptTimeMs: nil)
+        _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(120), receiptTimeMs: nil)
+        let disappeared = try exchangeStatus(exchange(owner, binding, request.requestID, time: 130))
+        XCTAssertEqual(disappeared.phase, .cancelled); XCTAssertEqual(disappeared.reason, .targetDisappeared)
+        try owner.forgetTerminal(requestID: request.requestID)
+        XCTAssertNil(try exchange(owner, binding, request.requestID, time: 140))
+        try db.close()
+        XCTAssertThrowsError(try exchange(owner, binding, request.requestID, time: 150))
+    }
+    func testExchangeRejectsStaleBindingBeforeSignerAndChecksOutputBudget() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let stale = AuthorityPeerBinding(peer: try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096).peers.first }), revision: UUID())
+        XCTAssertThrowsError(try owner.exchangeRequest(binding: stale, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
+            now: { self.now(120) }, receiptTimeMs: nil, signer: { _ in XCTFail("Stale binding signed"); throw Failure.fixture }))
+        XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 20,
+            now: { self.now(120) }, receiptTimeMs: nil, signer: { _ in XCTFail("Oversized body signed"); throw Failure.fixture }))
+    }
+    func testExchangeRejectsWrongAuthoritySignatureAndRegressingFinalClock() throws {
+        for regression in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            var signed = false
+            XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
+                now: { self.now(regression && signed ? 100 : 120) }, receiptTimeMs: nil,
+                signer: { signed = true; return try (regression ? self.key : self.decisionKey).signature(for: $0).rawRepresentation }))
+        }
+    }
+    private func head(_ transaction: JournalTransaction, _ writer: AuditEpochWriter) throws -> UInt64 {
+        try XCTUnwrap(transaction.epoch(writer.epoch)).head
+    }
+
     func testSignedHandoffBindsExactRetainedPayloadAndHonorsBackpressure() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         let (request, delivery, queued) = try queuedDelivery(owner)
@@ -1027,6 +1219,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try access.pendingRequestIDs(binding: stale) { _, _ in
             XCTFail("Stale enrollment reached discovery"); return []
         }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        XCTAssertThrowsError(try access.exchangeRequest(binding: stale, requestID: payload.requestID, decisionFrame: nil) { _, _, _, _ in
+            XCTFail("Stale enrollment reached exchange"); return nil
+        }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
         let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
             installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
         _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: installed.revision) }
@@ -1036,6 +1231,10 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try access.pendingRequestIDs(binding: binding) { _, _ in
             XCTFail("Obsolete transport reached discovery"); return []
         }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
+        XCTAssertThrowsError(try access.exchangeRequest(binding: binding, requestID: payload.requestID, decisionFrame: nil) { _, _, _, _ in
+            XCTFail("Obsolete transport reached exchange"); return nil
+        }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
+
     }
 
     private final class Fixture {

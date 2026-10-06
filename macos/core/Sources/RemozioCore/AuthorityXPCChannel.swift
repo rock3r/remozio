@@ -9,12 +9,15 @@ import Foundation
     func requestDiscoveryVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func pendingRequestIDs(_ binding: Data, reply: @escaping @Sendable (Data?) -> Void)
     func requestFrame(_ binding: Data, requestID: Data, reply: @escaping @Sendable (Data?) -> Void)
+    /// Optional state/decision extension. Negotiate before sending request IDs or signed decisions.
+    func requestExchangeVersion(reply: @escaping @Sendable (UInt64) -> Void)
+    func exchangeRequest(_ binding: Data, query: Data, reply: @escaping @Sendable (Data?) -> Void)
     func trustSnapshot(reply: @escaping @Sendable (Data?) -> Void)
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void)
 }
 
-public enum AuthorityXPCError: Error { case unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
+public enum AuthorityXPCError: Error { case unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
+enum AuthorityXPCReply: Sendable { case exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -22,12 +25,16 @@ protocol AuthorityXPCDriver: Sendable {
     func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func validate(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func close()
 }
 
 extension AuthorityXPCDriver {
+    func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.exchangeVersion(0)) }
+    func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.discoveryVersion(0)) }
     func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.deliveryVersion(0)) }
@@ -77,6 +84,14 @@ private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable 
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.pendingRequestIDs(binding) { [self] bytes in checked(bytes.map(AuthorityXPCReply.pendingRequests) ?? .failed, reply) }
     }
+    func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.requestExchangeVersion { [self] version in checked(.exchangeVersion(version), reply) }
+    }
+    func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.exchangeRequest(binding, query: query) { [self] bytes in checked(bytes.map(AuthorityXPCReply.exchange) ?? .failed, reply) }
+    }
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.trustSnapshot { [self] data in checked(data.map(AuthorityXPCReply.snapshot) ?? .failed, reply) }
@@ -104,7 +119,8 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private enum Operation { case exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private var exchangeVersion: UInt64?
     private var discoveryVersion: UInt64?
     private var deliveryVersion: UInt64?
     private let driver: any AuthorityXPCDriver
@@ -191,13 +207,31 @@ public actor AuthorityXPCChannel {
         catch { finish(.invalidMessage); throw error }
     }
 
+    /// Returns authority-signed state. A decision can commit before a lost reply; query status to reconcile it.
+    public func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
+        let query = try AuthorityRequestExchange.encode(requestID: requestID, decisionFrame: decisionFrame)
+        if exchangeVersion == nil {
+            guard case .exchangeVersion(let version) = try await perform(.exchangeVersion) else { throw AuthorityXPCError.invalidMessage }
+            exchangeVersion = version
+        }
+        guard exchangeVersion == 1 else { throw AuthorityXPCError.unsupportedRequestExchange }
+        let encoded = try AuthorityTrustCodec.encodeBinding(binding)
+        guard case .exchange(let bytes) = try await perform(.exchange, binding: encoded, query: query) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        if bytes.isEmpty { return nil }
+        do { try AuthorityRequestExchange.validateResponse(bytes, binding: binding, requestID: requestID) }
+        catch { finish(.invalidMessage); throw error }
+        return bytes
+    }
+
     public nonisolated func abort() {
         cancellation.cancel(); driver.close()
         Task { await self.close() }
     }
     public func close() { finish(.closed) }
 
-    private func perform(_ operation: Operation, binding: Data? = nil, requestID: Data? = nil) async throws -> AuthorityXPCReply {
+    private func perform(_ operation: Operation, binding: Data? = nil, requestID: Data? = nil, query: Data? = nil) async throws -> AuthorityXPCReply {
         guard state == .open || (state == .opening && operation == .hello) else { throw AuthorityXPCError.closed }
         guard pending == nil else { throw AuthorityXPCError.concurrentOperation }
         try Task.checkCancellation()
@@ -221,6 +255,8 @@ public actor AuthorityXPCChannel {
                 }
                 guard cancellation.ifActive({
                     switch operation {
+                    case .exchangeVersion: driver.exchangeVersion(reply)
+                    case .exchange: driver.exchange(binding!, query: query!, reply)
                     case .hello: driver.hello(reply)
                     case .discoveryVersion: driver.discoveryVersion(reply)
                     case .pendingRequests: driver.pendingRequests(binding!, reply)
@@ -245,6 +281,8 @@ public actor AuthorityXPCChannel {
         if case .failed = reply { finish(.failed); return }
         switch (current.operation, reply) {
         case (.hello, .hello(1)), (.validation, .validation), (.deliveryVersion, .deliveryVersion), (.discoveryVersion, .discoveryVersion): break
+        case (.exchangeVersion, .exchangeVersion): break
+        case (.exchange, .exchange(let bytes)) where bytes.count <= AuthorityRequestExchange.maximumFrameBytes: break
         case (.pendingRequests, .pendingRequests(let bytes)) where !bytes.isEmpty && bytes.count <= AuthorityPendingRequests.maximumBytes: break
         case (.requestFrame, .requestFrame(let bytes)) where bytes.count <= AuthorityRequestFrame.maximumBytes: break
         case (.snapshot, .snapshot(let bytes)) where !bytes.isEmpty && bytes.count <= Self.maximumSnapshotBytes: break
