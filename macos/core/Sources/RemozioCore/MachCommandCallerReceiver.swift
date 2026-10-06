@@ -184,7 +184,7 @@ public struct ReceivedMachCommandInputSubmission {
 }
 
 public enum RetainedCommandInputError: Error, Equatable {
-    case closed
+    case closed, invalidBinding, notReadable
     case system(Int32)
 }
 
@@ -211,6 +211,44 @@ public final class RetainedCommandInputDescriptor {
     public func withBorrowedDescriptor<T>(_ body: (Int32) throws -> T) throws -> T {
         guard descriptor >= 0 else { throw RetainedCommandInputError.closed }
         return try body(descriptor)
+    }
+
+    /// Observes this retained object. The authority supplies and retains the stream binding; this method reads no source bytes.
+    public func capture(streamBinding: Data) throws -> CapturedCommandInput {
+        guard streamBinding.count == 16 else { throw RetainedCommandInputError.invalidBinding }
+        return try withBorrowedDescriptor { fd in
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
+            guard flags & O_ACCMODE != O_WRONLY, flags & O_EVTONLY == 0 else { throw RetainedCommandInputError.notReadable }
+            var information = stat()
+            guard fstat(fd, &information) == 0 else { throw RetainedCommandInputError.system(errno) }
+            let type = information.st_mode & S_IFMT
+            if type == S_IFCHR {
+                var null = stat()
+                if fstatat(AT_FDCWD, "/dev/null", &null, AT_SYMLINK_NOFOLLOW) == 0,
+                   null.st_mode & S_IFMT == S_IFCHR, null.st_rdev == information.st_rdev {
+                    return CapturedCommandInput(kind: .null, streamBinding: nil, observedPath: nil, identity: nil)
+                }
+            }
+            let kind: CommandInputKind
+            switch type {
+            case S_IFREG: kind = .file
+            case S_IFDIR: kind = .directory
+            case S_IFIFO: kind = .pipe
+            case S_IFSOCK: kind = .socket
+            case S_IFCHR: kind = isatty(fd) == 1 ? .tty : .device
+            case S_IFBLK: kind = .device
+            default: kind = .other
+            }
+            var path = [CChar](repeating: 0, count: Int(PATH_MAX))
+            let result = path.withUnsafeMutableBufferPointer { fcntl(fd, F_GETPATH, $0.baseAddress!) }
+            let observedPath: Data?
+            if result == 0, path.first == 0x2f, let end = path.firstIndex(of: 0) {
+                observedPath = Data(path[..<end].map { UInt8(bitPattern: $0) })
+            } else { observedPath = nil }
+            return CapturedCommandInput(kind: kind, streamBinding: streamBinding, observedPath: observedPath,
+                identity: CapturedFileIdentity(device: UInt64(UInt32(bitPattern: information.st_dev)), inode: information.st_ino))
+        }
     }
 
     public func close() {

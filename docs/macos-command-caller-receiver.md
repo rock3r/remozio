@@ -124,8 +124,53 @@ The descriptor shares its open-file offset and status flags with other holders. 
 This library installs no endpoint and exposes no product sender that transfers input to an unverified service.
 The future client must authenticate the Root endpoint and bind the negotiated channel before transferring its input.
 An admission owner must bind the submission ID, nonce, stream binding, request lifetime, and current protected policy.
-It must classify the actual source and enforce resource budgets. This carrier does not add protocol negotiation, replies, or command I/O.
+It must bind the source observation to that request and enforce resource budgets. This carrier does not add protocol negotiation, replies, or command I/O.
 Authenticated senders can still import resources before invalid descriptor types are rejected; that budget limitation remains.
+
+## Observing the retained input
+
+`input.capture(streamBinding:)` describes the imported object without reading source bytes.
+The authority supplies a 16-byte binding and retains its association with this descriptor and request.
+A binding copied from caller claims does not prove that association.
+
+The method checks read access with `F_GETFL`, then queries `fstat`, `isatty`, and `F_GETPATH`.
+Write-only and event-only descriptors fail with `notReadable`.
+An invalid binding fails before querying the object. A closed owner cannot produce another observation.
+
+| Kernel observation | Capture kind | Minimum schema |
+| --- | --- | --- |
+| Character device matches the current `/dev/null` device number | Null | 1 |
+| Regular file | File | 1 |
+| FIFO | Caller-controlled pipe | 1 |
+| Character device with a positive terminal query | Caller-controlled terminal | 1 |
+| Socket | Caller-controlled socket | 2 |
+| Directory | Directory | 2 |
+| Other character or block device | Caller-controlled device | 2 |
+| Another reported file type | Other caller-controlled source | 2 |
+
+Null input retains no descriptive path, identity, or stream binding in the capture.
+Other sources retain the supplied binding and the observed device and inode values.
+Those numbers are observations, not a globally unique stream key.
+The live descriptor association remains authoritative.
+
+A successful absolute `F_GETPATH` result is retained as raw bytes.
+An unavailable path remains null. Pipes and sockets do not need a path to remain supported.
+No path is reopened to obtain input. Replacing a named file does not replace the imported object.
+
+An imported pseudo-terminal slave can prove that it is a terminal through `isatty`.
+The local probe's `TIOCPTYGNAME` query returned `ENOTTY` on that slave.
+The adapter therefore uses the generic terminal label, without guessing from path spelling.
+The PTY tag remains available for a source whose construction proves that stronger description.
+
+The producer must select a supported capture schema before encoding an issued request.
+`CommandInputKind.minimumSchemaVersion` gives the required version for each source kind.
+Schema 1 cannot receive a socket, directory, device, or other-source label.
+The producer must not substitute another kind to bypass that requirement.
+
+Observation does not freeze content, open-file offsets, flags, or terminal settings shared with other holders.
+The producer and executor must keep the descriptor associated with the original request.
+A captured access mode is not a promise of later read success.
+This method does not approve input bytes, allocate an execution permit, or execute a command.
 
 ## Validation and limits
 
@@ -146,7 +191,7 @@ The [audit-token experiment](experiments/macos-command-caller.md) also has retai
 Process identity is not request consent or channel continuity.
 The future admission owner must bind the submission, request nonce, lifetime, and transport channel.
 It must enforce the current component role and security floor from protected release metadata.
-This library does not check caller ancestry or sudoers policy, install Root, capture stdin, or execute commands.
+This library does not check caller ancestry or sudoers policy, install Root, read stdin content, or execute commands.
 It does not prove PID reuse behavior or physical-device end-to-end behavior.
 
 The shim uses public installed Mach and Security declarations.
@@ -159,3 +204,8 @@ Its [message queue implementation](https://github.com/apple-oss-distributions/xn
 Input-carrier tests preserve regular-file identity and offset, queued and later pipe bytes, shared flags, and close-on-exec.
 They close the sender’s original descriptor and fileport before receipt, reject ordinary ports and transferred memory, and check version isolation and cleanup.
 These use disposable local resources and synthetic input. They do not exercise a phone, protected Root installation, or physical-device end-to-end behavior.
+
+Source-observation tests use real imported fileports for pipes, files, sockets, directories, `/dev/null`, `/dev/zero`, and a disposable terminal.
+They preserve queued bytes, file offsets, and shared flags, reject write-only input, and keep the original object after path replacement.
+They check binding lengths, schema requirements, and closed-owner behavior.
+They do not prove atomic observations, immutable content, or read success for every possible device.

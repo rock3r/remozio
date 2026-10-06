@@ -14,7 +14,9 @@ flowchart LR
     D --> A[Explicit decision]
 ```
 
-The OS capture, authenticated delivery, and phone rendering steps remain integration work. This change does not advertise a production command handler or enable execution.
+Native adapters now observe the authenticated caller, executable, directory, and retained input object.
+Command admission and execution remain integration work.
+These codecs do not install or enable a production command handler.
 
 ## Root fields
 
