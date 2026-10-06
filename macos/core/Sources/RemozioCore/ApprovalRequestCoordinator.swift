@@ -82,11 +82,15 @@ public final class ApprovalRequestCoordinator {
     private var stopped = false
     private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
+    private var deliveryBytes = 0
     private struct Entry {
         var state: ApprovalRequestState
         var retained: RetainedApprovalRequest?
         let category: AuditCategory
         var byteCount: Int
+        var delivery: PendingRequestDelivery?
+        var frame: Data?
+        var frameKey: Data?
     }
     private var entries: [Data: Entry] = [:]
 
@@ -300,6 +304,59 @@ public final class ApprovalRequestCoordinator {
             routing: finalRouting, now: now(), receiptTimeMs: receiptTimeMs) { accept($0, frame) }
     }
 
+    /// Root-owned retry storage for the request-frame provider. Serialize with all authority state.
+    /// A returned frame is a possible handoff, not phone receipt or consent. Never persist this cache.
+    /// Callbacks must be synchronous and must not reenter or mutate authority state.
+    public func retainedDeliveryFrame(binding: AuthorityPeerBinding, requestID: Data, authorityPublicKey: Data,
+                                      maximumBodyBytes: Int, now: () throws -> AuthorityMoment,
+                                      routing: () throws -> PresenceRouting, receiptTimeMs: UInt64?,
+                                      signer: (Data) throws -> Data) throws -> Data? {
+        guard (1...(16_777_216 - ApprovalMessage.overheadBytes)).contains(maximumBodyBytes) else {
+            throw ApprovalCoordinatorError.invalidConfiguration
+        }
+        try read { try $0.requireDirectApprovalBinding(binding) }
+        let time = try now()
+        let state = try deliveryState(requestID: requestID, now: time, receiptTimeMs: receiptTimeMs)
+        guard state.phase == .queued || state.phase == .presented else { return nil }
+        guard let entry = entries[requestID], let retained = entry.retained else { throw ApprovalCoordinatorError.notPending }
+        let delivery: PendingRequestDelivery
+        if let existing = entry.delivery { delivery = existing }
+        else {
+            delivery = try PendingRequestDelivery(request: retained)
+            entries[requestID]?.delivery = delivery
+        }
+        let currentRouting = try routing()
+        let update = try reconcileDelivery(requestID: requestID, delivery: delivery, routing: currentRouting, now: now(),
+            receiptTimeMs: receiptTimeMs) { _ in true }
+        guard let queued = update.active.first(where: {
+            $0.recipient.phoneID == binding.scope.phoneID && $0.recipient.enrollmentEpoch == binding.scope.enrollmentEpoch
+        }) else { return nil }
+        let cached = entries[requestID]?.frame
+        if cached != nil && entries[requestID]?.frameKey != authorityPublicKey { throw DecisionVerificationError.invalidTrustedState }
+        if update.dispatched.contains(where: { $0.id == queued.id }) {
+            guard let cached else { throw ApprovalCoordinatorError.unavailable }
+            guard cached.count <= maximumBodyBytes + ApprovalMessage.overheadBytes else { throw ApprovalCoordinatorError.capacityExceeded }
+            return cached
+        }
+        let cachedSignature = try cached.map {
+            try ApprovalMessage.decode($0, maximumBodyBytes: maximumBodyBytes).signature
+        }
+        var result: Data?
+        _ = try handoffSignedDelivery(requestID: requestID, delivery: delivery, deliveryID: queued.id,
+            authorityPublicKey: authorityPublicKey, maximumBodyBytes: maximumBodyBytes, now: now, routing: routing,
+            receiptTimeMs: receiptTimeMs, signer: { try cachedSignature ?? signer($0) }) { _, frame in
+                let previous = entries[requestID]?.frame?.count ?? 0
+                let maximum = maximumRetainedBytes + maximumRequests * ApprovalMessage.overheadBytes
+                guard frame.count <= maximum - deliveryBytes + previous else { return false }
+                entries[requestID]?.frame = frame
+                entries[requestID]?.frameKey = authorityPublicKey
+                deliveryBytes += frame.count - previous
+                result = frame
+                return true
+            }
+        return result
+    }
+
     private func deliveryState(requestID: Data, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> ApprovalRequestState {
         try checkClock(now)
         var current = try state(requestID: requestID)
@@ -374,6 +431,10 @@ public final class ApprovalRequestCoordinator {
             terminalAt: phase.isTerminal ? now : nil, decisionPhoneID: decisionPhoneID ?? entry.state.decisionPhoneID,
             requestID: id, phase: phase, revision: entry.state.revision + 1,
             firstObservedAt: entry.state.firstObservedAt, deadlineMilliseconds: entry.state.deadlineMilliseconds)
+        if phase != .queued && phase != .presented {
+            deliveryBytes -= entry.frame?.count ?? 0
+            entry.frame = nil; entry.frameKey = nil; entry.delivery = nil
+        }
         if !phase.isTerminal {
             guard let old = entry.retained else { throw ApprovalCoordinatorError.notPending }
             entry.retained = try .init(payload: old.payload, phase: phase, admittedAt: old.admittedAt, deadlineMilliseconds: old.deadlineMilliseconds)
@@ -418,7 +479,7 @@ public final class ApprovalRequestCoordinator {
     private func checkClock(_ now: AuthorityMoment) throws {
         try running()
         guard now.epoch == clockEpoch, lastTime == nil || now.milliseconds >= lastTime! else {
-            stopped = true; entries.removeAll(); retainedBytes = 0
+            stopped = true; entries.removeAll(); retainedBytes = 0; deliveryBytes = 0
             throw ApprovalCoordinatorError.invalidClock
         }
         lastTime = now.milliseconds

@@ -683,6 +683,95 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
     }
 
+    private func frameBinding(_ db: JournalDatabase) throws -> AuthorityPeerBinding {
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        return AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision)
+    }
+    func testRetainedFrameRetriesWithoutSigningOrConsumingAndSurvivesLocalPresence() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        var signatures = 0
+        let first = try XCTUnwrap(owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { signatures += 1; return try self.key.signature(for: $0).rawRepresentation }))
+        let second = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing(.present) }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Retry must use retained frame"); throw Failure.fixture })
+        XCTAssertEqual(first, second); XCTAssertEqual(signatures, 1)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
+        XCTAssertNil(try db.read { try $0.consumption(requestID: request.requestID) })
+        let carrier = try ApprovalMessage.decode(first, maximumBodyBytes: 4096)
+        XCTAssertEqual(carrier.body, try request.encode(limits: limits))
+    }
+    func testRetainedFrameSuppressesNewLocalDeliveryAndRechecksAfterSigner() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let local = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(120) }, routing: { try self.routing(.present) }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Local request signed"); throw Failure.fixture })
+        XCTAssertNil(local)
+        var signed = false
+        let changed = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing(signed ? .present : .away) }, receiptTimeMs: nil,
+            signer: { signed = true; return try self.key.signature(for: $0).rawRepresentation })
+        XCTAssertTrue(signed); XCTAssertNil(changed)
+        let retried = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(140) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation })
+        XCTAssertNotNil(retried)
+    }
+    func testRetainedFrameCannotSurviveExpiryOrTargetRetirement() throws {
+        for expires in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            XCTAssertNotNil(try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+                signer: { try self.key.signature(for: $0).rawRepresentation }))
+            if !expires { _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(130), receiptTimeMs: nil) }
+            let frame = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(expires ? 200 : 140) }, routing: { try self.routing() }, receiptTimeMs: nil,
+                signer: { _ in XCTFail("Terminal request signed"); throw Failure.fixture })
+            XCTAssertNil(frame)
+        }
+    }
+    func testRetainedFrameBudgetIsReclaimedAfterRetirement() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, bytes: 4096)
+        let binding = try frameBinding(db)
+        let capture = try DeterministicCBOR.encode(.map([0: .bytes(id(77, 2800))]), limits: limits)
+        for _ in 0..<3 {
+            let request = try owner.admit(draft(capture: capture), now: now(120), receiptTimeMs: nil)
+            XCTAssertNotNil(try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+                signer: { try self.key.signature(for: $0).rawRepresentation }))
+            _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(120), receiptTimeMs: nil)
+            try owner.forgetTerminal(requestID: request.requestID)
+        }
+    }
+    func testRetainedFrameRechecksBindingAndKeyBeforeRetry() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        _ = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation })
+        XCTAssertThrowsError(try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: decisionKey.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Changed key signed"); throw Failure.fixture }))
+        let stale = AuthorityPeerBinding(peer: try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096).peers.first }), revision: UUID())
+        XCTAssertThrowsError(try owner.retainedDeliveryFrame(binding: stale, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(140) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Stale binding signed"); throw Failure.fixture }))
+    }
     func testSignedHandoffBindsExactRetainedPayloadAndHonorsBackpressure() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         let (request, delivery, queued) = try queuedDelivery(owner)
