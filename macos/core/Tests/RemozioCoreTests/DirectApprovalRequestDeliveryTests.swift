@@ -12,13 +12,28 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     private static func scope(phone: UInt8 = 3) throws -> ChannelScope {
         try .init(macID: id(1), accountID: id(2), phoneID: id(phone), enrollmentEpoch: id(4))
     }
-    private static func frame(_ request: UInt8, features: Set<UInt64> = []) throws -> (Data, P256.Signing.PublicKey) {
+    private static func frame(_ request: UInt8, features: Set<UInt64> = [], bodyBytes: Int? = nil) throws -> (Data, P256.Signing.PublicKey) {
         let limits = try CBORLimits(maxBytes: 4096, maxDepth: 12, maxItems: 256)
-        let payload = try IssuedRequestPayload(contract: .init(requestKind: .command, wireVersion: 1, schemaVersion: 1),
-            macID: id(1), accountID: id(2), requestID: id(request), challenge: Data(repeating: 9, count: 32),
-            requiredFeatures: features, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 2000,
-            canonicalCapture: Data([0xa0]), permittedActions: [.init(choice: .execute, scope: .currentRequest)],
-            bodyLimits: limits, captureLimits: limits)
+        func payload(_ capture: Data) throws -> IssuedRequestPayload {
+            try IssuedRequestPayload(contract: .init(requestKind: .command, wireVersion: 1, schemaVersion: 1),
+                macID: id(1), accountID: id(2), requestID: id(request), challenge: Data(repeating: 9, count: 32),
+                requiredFeatures: features, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 2000,
+                canonicalCapture: capture, permittedActions: [.init(choice: .execute, scope: .currentRequest)],
+                bodyLimits: limits, captureLimits: limits)
+        }
+        var requestPayload = try payload(Data([0xa0]))
+        if let bodyBytes {
+            var found = false
+            for padding in 0..<bodyBytes {
+                let capture = try DeterministicCBOR.encode(.map([0: .bytes(Data(count: padding))]), limits: limits)
+                let candidate = try payload(capture)
+                if try candidate.encode(limits: limits).count == bodyBytes {
+                    requestPayload = candidate; found = true; break
+                }
+            }
+            guard found else { throw ApprovalChannelError.invalidInput }
+        }
+        let payload = requestPayload
         let body = try payload.encode(limits: limits), key = P256.Signing.PrivateKey()
         let input = try SigningInput.make(wireVersion: 1, messageType: .request, purpose: .issuedRequest,
             canonicalPayload: body, payloadLimits: limits, inputLimits: limits)
@@ -180,6 +195,18 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         XCTAssertTrue(try ApprovalSignature.verify(signature: message.signature, publicKey: key.x963Representation,
             wireVersion: 1, messageType: .request, purpose: .issuedRequest, canonicalPayload: message.body,
             payloadLimits: limits, inputLimits: limits))
+        await channel.closeAndWait(); await service.close()
+    }
+    func testReservedBodyBudgetFitsPeerPayloadLimit() async throws {
+        let maximum = 1024, bodyMaximum = maximum - ApprovalMessage.overheadBytes
+        let frame = try Self.frame(8, bodyBytes: bodyMaximum).0
+        let message = try ApprovalMessage.decode(frame, maximumBodyBytes: bodyMaximum)
+        XCTAssertEqual(message.body.count, bodyMaximum); XCTAssertLessThanOrEqual(frame.count, maximum)
+        let (service, _, _, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): frame], maximum: maximum)
+        let phone = try Phone(scope: peer.scope, requests: peer.requests, maximum: maximum), channel = try await connect(phone, peer)
+        try await factory.run(peer, channel)
+        let payloads = await phone.payloads
+        XCTAssertEqual(payloads, [frame])
         await channel.closeAndWait(); await service.close()
     }
     func testWrongScopeAndNoCommonContractCloseBeforeDiscovery() async throws {

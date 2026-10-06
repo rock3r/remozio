@@ -27,6 +27,8 @@ The installed root handler must source frames from authority-owned requests, ret
 
 The service supplies its own monotonic clock to the provider. Use that clock for request checks and resample it after signing.
 
+`maximumPayloadBytes` bounds the complete signed carrier inside a session envelope. Production request admission reserves `ApprovalMessage.overheadBytes` within that budget. Frame providers must use `configuration.maximumRequestBodyBytes` for `retainedDeliveryFrame` or `handoffSignedDelivery`, rather than passing the full channel budget as a body limit. This derived limit does not change version-one or version-two configuration bytes. Tiny budgets cannot admit a complete issued request. A regression admits an exact-boundary body and rejects a body that would use the reserved wrapper space; channel tests send the resulting carrier within the original payload budget.
+
 The service does not install a frame handler by default. Production queue ownership, the selected non-exportable signer, connection routing, and decision submission still need integration. Unit tests exercise the IPC adapter and root access guard.
 
 The [live XPC evidence](experiments/evidence/2026-10-05-request-frame-xpc.json) records 11 passing cases on macOS 27.0.1. The two-process probe imports the production protocol declaration. It verifies version negotiation and the nonempty, empty, and nil Data reply forms. Wrong client and server identifiers prevent frame dispatch. The temporary per-user LaunchAgent was removed.

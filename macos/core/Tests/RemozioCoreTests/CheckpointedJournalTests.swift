@@ -354,6 +354,43 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertNil(try fixture.store.read().pending)
     }
 
+    func testRequestAdmissionReservesCarrierSpaceWithinConfiguredPayloadBudget() throws {
+        let fixture = try Fixture(), owner = try requestStartupOwner(fixture), clock = try AuthorityClock()
+        let maximum = 1024, bodyMaximum = maximum - ApprovalMessage.overheadBytes
+        let limits = try CBORLimits(maxBytes: 16384, maxDepth: 32, maxItems: 262_144)
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let actions = [CapturedAction(choice: .execute, scope: .currentRequest)]
+        func captureForBody(_ size: Int) throws -> Data {
+            for padding in 0..<size {
+                let capture = try DeterministicCBOR.encode(.map([0: .bytes(Data(count: padding))]), limits: limits)
+                let payload = try IssuedRequestPayload(contract: contract, macID: Data(repeating: 1, count: 16),
+                    accountID: Data(repeating: 2, count: 16), requestID: Data(repeating: 3, count: 16),
+                    challenge: Data(repeating: 4, count: 32), requiredFeatures: [], createdUnixMilliseconds: 1000,
+                    expiresUnixMilliseconds: 11000, canonicalCapture: capture, permittedActions: actions,
+                    bodyLimits: limits, captureLimits: limits)
+                if try payload.encode(limits: limits).count == size { return capture }
+            }
+            throw Fault.injected
+        }
+        let tooLarge = try captureForBody(maximum), accepted = try captureForBody(bodyMaximum)
+        try owner.prepareRequests(clockEpoch: clock.epoch, maximumPayloadBytes: maximum)
+        let now = try clock.now()
+        func draft(_ capture: Data) throws -> ApprovalRequestDraft {
+            try ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: capture, actions: actions,
+                firstObservedAt: now, deadlineMilliseconds: now.milliseconds + 10000,
+                createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 11000)
+        }
+        let oversized = try draft(tooLarge), fitting = try draft(accepted)
+        XCTAssertThrowsError(try owner.withRequests { try $0.admit(oversized, now: now, receiptTimeMs: nil) })
+        let payload = try owner.withRequests { try $0.admit(fitting, now: now, receiptTimeMs: nil) }
+        let body = try payload.encode(limits: limits)
+        XCTAssertEqual(body.count, bodyMaximum)
+        let carrier = try ApprovalMessage(wireVersion: 1, type: .request, purpose: .issuedRequest,
+            body: body, signature: Data(count: 64)).encode(maximumBodyBytes: bodyMaximum)
+        XCTAssertLessThanOrEqual(carrier.count, maximum)
+        try owner.close()
+    }
+
     func testStartupFailureClosesBothStoresAndPreservesPreparedEpochForRecovery() throws {
         let fixture = try Fixture(), owner = try requestStartupOwner(fixture), clock = try AuthorityClock()
         try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
