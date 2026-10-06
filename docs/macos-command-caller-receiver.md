@@ -118,7 +118,8 @@ A borrowed descriptor must not escape its callback, be closed by the borrower, o
 Closing the owner is idempotent. A closed owner cannot lend its former descriptor number.
 
 The same authenticated Mach message associates the input object with its submission bytes and observed sender incarnation.
-Those bytes still need schema validation and admission. An input descriptor is not consent or execution authority.
+The [retained capture assembler](macos-command-capture-assembly.md) validates those submission bytes and builds the complete command capture.
+Admission remains separate. An input descriptor is not consent or execution authority.
 The descriptor shares its open-file offset and status flags with other holders. Source content remains caller-controlled.
 
 This library installs no endpoint and exposes no product sender that transfers input to an unverified service.
