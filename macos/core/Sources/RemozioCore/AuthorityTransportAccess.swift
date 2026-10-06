@@ -58,6 +58,14 @@ final class AuthorityTransportAccess: Sendable {
           catch EnrollmentJournalError.unavailableEnrollment { return false }
     }
 
+    func requestFrame(binding: AuthorityPeerBinding, requestID: Data,
+                      handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data) throws -> Data?) throws -> Data? {
+        try journal.withValidatedRequests(validate: { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }, body: { try handler($0, binding, requestID) })
+    }
+
     private func requireCurrent(_ transaction: JournalTransaction) throws {
         guard let snapshot = try transaction.codePolicy(), snapshot.roleRevisions[.transport] == roleRevision,
               snapshot.policy.entries.first(where: { $0.role == .transport }) == entry else {

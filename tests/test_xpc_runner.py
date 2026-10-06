@@ -18,6 +18,16 @@ class ExperimentTests(unittest.TestCase):
         self.assertFalse(runner.case_matches("guarded-wrong-server", result, 3, True))
         self.assertTrue(runner.case_matches("guarded-wrong-server", result, 3, False))
 
+    def test_frame_cases_require_dispatch_only_for_matching_peers(self):
+        accepted = subprocess.CompletedProcess([], 0, "accepted", "")
+        rejected = subprocess.CompletedProcess([], 3, "rejected:NSCocoaErrorDomain:4102", "")
+        for name in ("frame-bytes", "frame-empty", "frame-nil"):
+            self.assertTrue(runner.case_matches(name, accepted, 0, True))
+            self.assertFalse(runner.case_matches(name, accepted, 0, False))
+        for name in ("frame-wrong-client", "frame-wrong-server"):
+            self.assertTrue(runner.case_matches(name, rejected, 3, False))
+            self.assertFalse(runner.case_matches(name, rejected, 3, True))
+
     def test_crash_and_timeout_are_not_rejections(self):
         for code in (-5, 4):
             result = subprocess.CompletedProcess([], code, "rejected:error", "")

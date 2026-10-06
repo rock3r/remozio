@@ -47,15 +47,19 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try .init(database: db, writer: writer, clockEpoch: clock, maximumRequests: maximum, maximumRetainedBytes: bytes,
             requestLimits: limits, captureLimits: limits, decisionLimits: limits, signingLimits: limits, auditLimits: limits)
     }
-    private func journalOwner(_ fixture: Fixture) throws -> AuthorityJournal {
+    private func journalOwner(_ fixture: Fixture, enrollment: StoredApprovalEnrollment? = nil) throws -> AuthorityJournal {
         let limits = try limits, capabilities = try capabilities, contract = try contract
         let descriptor = try descriptor(3), clock = clock, anchor = fixture.root.path
         let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
             macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
             maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
-        _ = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+        let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
         let writer = try db.write { try $0.createEpoch(descriptor) }
+        if let enrollment {
+            _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+                eventID: Data(repeating: 30, count: 16), receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
+        }
         let requests = try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: clock,
             maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
             decisionLimits: limits, signingLimits: limits, auditLimits: limits)
@@ -783,6 +787,47 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
             signer: { _ in XCTFail("Terminal request reached signer"); return Data() }) { _, _ in XCTFail(); return true }
         XCTAssertNil(result.delivery); XCTAssertEqual(result.update.withdrawn, [queued])
+    }
+
+    func testRequestFrameAccessRechecksPolicyAndEnrollmentInsideRequestOwnership() throws {
+        let fixture = try Fixture()
+        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities,
+                keys: [EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
+                       EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
+        let journal = try journalOwner(fixture, enrollment: enrollment)
+        defer { try? journal.close() }
+        let entry = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: true)
+        let installed = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
+        let draft = try draft(), time = now()
+        let payload = try journal.withRequests { try $0.admit(draft, now: time, receiptTimeMs: nil) }
+        let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+            approvedCodeDirectoryHashes: [id(3, 20)], expectedUserID: 501)
+        let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peer, macID: id(1), accountID: id(2),
+            maximumPayloadBytes: 4096, minimumEnvelopeVersion: 1, auditVersions: [])
+        let trust = try access.snapshot()
+        let binding = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision)
+        let result = try access.requestFrame(binding: binding, requestID: payload.requestID) { requests, received, requestID in
+            XCTAssertEqual(received.scope.phoneID, binding.scope.phoneID)
+            XCTAssertEqual(try requests.state(requestID: requestID).phase, .queued)
+            XCTAssertThrowsError(try journal.write { _ in XCTFail("Reentered root owner") }) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+            return Data([7])
+        }
+        XCTAssertEqual(result, Data([7]))
+        let stale = try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID())
+        XCTAssertThrowsError(try access.requestFrame(binding: stale, requestID: payload.requestID) { _, _, _ in
+            XCTFail("Stale enrollment reached handler"); return nil
+        }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+            installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
+        _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: installed.revision) }
+        XCTAssertThrowsError(try access.requestFrame(binding: binding, requestID: payload.requestID) { _, _, _ in
+            XCTFail("Obsolete transport reached handler"); return nil
+        }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
     }
 
     private final class Fixture {

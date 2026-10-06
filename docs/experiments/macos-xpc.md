@@ -36,6 +36,14 @@ The listener applies its client requirement before accepting messages. The clien
 
 The first harness run trapped in its error callback because Swift inferred main-actor isolation. Explicit Sendable callbacks fixed the harness. The runner also waits for launchd removal because bootout completion can precede disappearance from the service listing. Neither issue is counted as an OS security result.
 
+## Request-frame extension
+
+[The October 5 evidence](evidence/2026-10-05-request-frame-xpc.json) adds five cases to the six-case baseline. All 11 passed on macOS 27.0.1, targeting macOS 26. The temporary service was removed.
+
+The probe imports `TransportAuthorityXPCProtocol` from the production core. After hello and delivery-version negotiation, it sends synthetic Data through the request-frame selector. Nonempty, empty, and nil replies remain distinct. Wrong client and server identifiers prevent frame dispatch.
+
+This checks the actual Objective-C protocol declaration and NSXPC value bridging across two processes. The synthetic service is not the production root endpoint. It grants no request authority and does not validate protected service routing or release signing.
+
 ## Still unproven
 
 - Runtime behavior on macOS 26.

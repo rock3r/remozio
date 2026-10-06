@@ -1,6 +1,11 @@
 import Foundation
 import RemozioProtocol
 
+/// Trusted root provider. Use the supplied clock for request checks, including a fresh sample after signing.
+public typealias AuthorityRequestFrameProvider = @Sendable (
+    ApprovalRequestCoordinator, AuthorityPeerBinding, Data, @Sendable () throws -> AuthorityMoment
+) throws -> Data?
+
 /// Owns one authority listener and its journal for a single service lifetime.
 /// Protected installation and configuration loading must precede construction.
 public final class AuthorityService: @unchecked Sendable {
@@ -36,16 +41,18 @@ public final class AuthorityService: @unchecked Sendable {
     /// Shares the prepared request owner with the service. Service closure retires that owner too.
     public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
                             maintenanceIntervalMilliseconds: Int = 1000,
-                            maintain: (@Sendable () throws -> Void)? = nil) throws {
+                            maintain: (@Sendable () throws -> Void)? = nil,
+                            requestFrame: AuthorityRequestFrameProvider? = nil) throws {
         try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
-            maintain: maintain, validateSelf: AuthoritySelfValidation.validate)
+            maintain: maintain, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame)
     }
 
     /// Internal lifecycle fixture. Public constructors always validate the running authority against retained policy.
     init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
          maintenanceIntervalMilliseconds: Int = 1000, maintain: (@Sendable () throws -> Void)? = nil,
          validateSelf: @Sendable (AuthorityJournal) throws -> Void,
-         requestClock: (@Sendable () throws -> AuthorityMoment)? = nil) throws {
+         requestClock: (@Sendable () throws -> AuthorityMoment)? = nil,
+         requestFrame: AuthorityRequestFrameProvider? = nil) throws {
         self.journal = journal
         do {
             if let requestClock { self.requestClock = requestClock }
@@ -56,6 +63,11 @@ public final class AuthorityService: @unchecked Sendable {
         } catch { try? journal.close(); throw error }
         do {
             try validateSelf(journal)
+            let frameClock = self.requestClock
+            let frameHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data) throws -> Data?)?
+            if let requestFrame {
+                frameHandler = { owner, binding, requestID in try requestFrame(owner, binding, requestID, frameClock) }
+            } else { frameHandler = nil }
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,
                 peerPolicy: configuration.transportPolicy, macID: configuration.macID,
                 accountID: configuration.accountID, journal: journal,
@@ -64,7 +76,7 @@ public final class AuthorityService: @unchecked Sendable {
                 auditVersions: configuration.auditVersions,
                 maximumConnections: configuration.maximumConnections,
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
-                maximumOperations: configuration.maximumOperations)
+                maximumOperations: configuration.maximumOperations, requestFrame: frameHandler)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)
             if let maintain {
@@ -83,10 +95,11 @@ public final class AuthorityService: @unchecked Sendable {
                             maintenanceIntervalMilliseconds: Int = 1000,
                             expiryClock: @escaping @Sendable () throws -> AuthorityMoment,
                             receiptTime: @escaping @Sendable () -> UInt64? = { nil },
-                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+                            requestFrame: AuthorityRequestFrameProvider? = nil) throws {
         try self.init(configuration: configuration, journal: journal,
             maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds, expiryClock: expiryClock,
-            receiptTime: receiptTime, reconcileExpired: reconcileExpired, validateSelf: AuthoritySelfValidation.validate)
+            receiptTime: receiptTime, reconcileExpired: reconcileExpired, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame)
     }
 
     /// Fixture seam for the same expiry path used by public construction.
@@ -95,14 +108,15 @@ public final class AuthorityService: @unchecked Sendable {
                      expiryClock: @escaping @Sendable () throws -> AuthorityMoment,
                      receiptTime: @escaping @Sendable () -> UInt64? = { nil },
                      reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                     validateSelf: @Sendable (AuthorityJournal) throws -> Void) throws {
+                     validateSelf: @Sendable (AuthorityJournal) throws -> Void,
+                     requestFrame: AuthorityRequestFrameProvider? = nil) throws {
         try self.init(configuration: configuration, journal: journal,
             maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds, maintain: {
                 try journal.withRequests { requests in
                     let states = try requests.expirePending(now: expiryClock(), receiptTimeMs: receiptTime())
                     try reconcileExpired(states)
                 }
-            }, validateSelf: validateSelf, requestClock: expiryClock)
+            }, validateSelf: validateSelf, requestClock: expiryClock, requestFrame: requestFrame)
     }
 
     deinit { maintenance?.close(); listener.close(); try? journal.close() }
