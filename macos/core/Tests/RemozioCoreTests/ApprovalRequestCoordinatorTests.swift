@@ -1,6 +1,8 @@
 import CryptoKit
 import Darwin
 import Foundation
+import LocalAuthentication
+import Security
 import RemozioProtocol
 import SQLite3
 import XCTest
@@ -1259,5 +1261,183 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             defer { sqlite3_close(db) }
             guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw Failure.fixture }
         }
+    }
+
+    private final class ProviderEnvironment: @unchecked Sendable {
+        private let lock = NSLock()
+        let epoch: UUID
+        let authorityKey = P256.Signing.PrivateKey()
+        private var time: UInt64 = 120
+        private var mode: RoutingMode = .away
+        private var count = 0
+        var afterSign: (@Sendable () -> Void)?
+        init(epoch: UUID) { self.epoch = epoch }
+        var signatures: Int { lock.withLock { count } }
+        func set(time: UInt64? = nil, mode: RoutingMode? = nil) {
+            lock.withLock { if let time { self.time = time }; if let mode { self.mode = mode } }
+        }
+        func now() -> AuthorityMoment { lock.withLock { AuthorityMoment(epoch: epoch, milliseconds: time) } }
+        func route() throws -> PresenceRouting {
+            let mode = lock.withLock { mode }
+            var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
+            return router.evaluate(mode: mode, snapshot: .init(), now: .init(epoch: epoch, milliseconds: now().milliseconds))
+        }
+        func sign(_ input: Data) throws -> Data {
+            lock.withLock { count += 1 }
+            let bytes = try authorityKey.signature(for: input).rawRepresentation
+            afterSign?()
+            return bytes
+        }
+    }
+    private func providerConfiguration(_ fixture: Fixture, maximum: Int = 4096, account: UInt8 = 2) throws -> AuthorityServiceConfiguration {
+        try AuthorityServiceConfiguration(macID: id(1), accountID: id(account), journalDirectory: fixture.path.replacingOccurrences(of: "/journal.sqlite", with: ""),
+            serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
+            transportHashes: [id(3, 20)], transportUID: 501, maximumPayloadBytes: maximum)
+    }
+    private func providers(_ configuration: AuthorityServiceConfiguration, _ environment: ProviderEnvironment) throws -> AuthorityRequestProviders {
+        try AuthorityRequestProviders(configuration: configuration, publicKey: environment.authorityKey.publicKey.x963Representation,
+            signing: { try environment.sign($0) }, routing: { try environment.route() })
+    }
+    private func verifyProviderFrame(_ bytes: Data, _ environment: ProviderEnvironment, type: ApprovalMessageType) throws -> ApprovalMessage {
+        let message = try ApprovalMessage.decode(bytes, maximumBodyBytes: 3968)
+        XCTAssertEqual(message.type, type)
+        XCTAssertTrue(try ApprovalSignature.verify(signature: message.signature, publicKey: environment.authorityKey.publicKey.x963Representation,
+            wireVersion: 1, messageType: type, purpose: message.purpose, canonicalPayload: message.body,
+            payloadLimits: limits, inputLimits: limits))
+        return message
+    }
+    func testComposedProvidersUseOneAuthorityForDiscoveryRequestsAndDecisions() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let environment = ProviderEnvironment(epoch: clock), providers = try providers(providerConfiguration(fixture), environment)
+        let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        XCTAssertEqual(try providers.pendingRequestIDs(owner, binding, clock), [request.requestID])
+        let frame = try XCTUnwrap(providers.requestFrame(owner, binding, request.requestID, clock))
+        _ = try verifyProviderFrame(frame, environment, type: .request)
+        let status = try XCTUnwrap(providers.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        _ = try verifyProviderFrame(status, environment, type: .status)
+        let (body, signature) = try decision(request)
+        let carrier = try ApprovalMessage(wireVersion: 1, type: .decision, purpose: .biometricAuthorization,
+            body: body, signature: signature).encode(maximumBodyBytes: 3968)
+        let accepted = try XCTUnwrap(providers.exchangeRequest(owner, binding, request.requestID, carrier, clock))
+        let message = try verifyProviderFrame(accepted, environment, type: .status)
+        XCTAssertEqual(try RequestStatusPayload.decode(message.body, limits: limits).phase, .authorized)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).decisionPhoneID, id(5))
+        XCTAssertNil(try providers.requestFrame(owner, binding, request.requestID, clock))
+        XCTAssertTrue(try providers.pendingRequestIDs(owner, binding, clock).isEmpty)
+        XCTAssertNotNil(try db.read { try $0.consumption(requestID: request.requestID) })
+    }
+    func testPublicHardwareBundleSignsRealRootRequestAndStatus() throws {
+        guard SecureEnclave.isAvailable else { throw XCTSkip("Requires Secure Enclave hardware; production custody remains unproved") }
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let context = LAContext(); context.interactionNotAllowed = true
+        defer { context.invalidate() }
+        var failure: Unmanaged<CFError>?
+        let access = try XCTUnwrap(SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            .privateKeyUsage, &failure))
+        let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access, authenticationContext: context)
+        let config = try providerConfiguration(fixture)
+        let record = try AuthoritySigningKeyRecord(macID: id(1), accountID: id(2), key: key)
+        let signer = try EnclaveAuthorityRequestSigner.restore(record.encode(), configuration: config, expectedPublicKey: key.publicKey.x963Representation)
+        let environment = ProviderEnvironment(epoch: clock)
+        let bundle = try AuthorityRequestProviders(configuration: config, signer: signer, routing: { try environment.route() })
+        XCTAssertThrowsError(try AuthorityRequestProviders(configuration: providerConfiguration(fixture, account: 8), signer: signer,
+            routing: { try environment.route() })) {
+            XCTAssertEqual($0 as? AuthorityRequestSignerError, .wrongIdentity)
+        }
+        let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let frame = try XCTUnwrap(bundle.requestFrame(owner, binding, request.requestID, clock))
+        let status = try XCTUnwrap(bundle.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        for (bytes, type): (Data, ApprovalMessageType) in [(frame, .request), (status, .status)] {
+            let message = try ApprovalMessage.decode(bytes, maximumBodyBytes: 3968)
+            XCTAssertEqual(message.type, type)
+            XCTAssertTrue(try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey.x963Representation,
+                wireVersion: 1, messageType: type, purpose: message.purpose, canonicalPayload: message.body,
+                payloadLimits: limits, inputLimits: limits))
+        }
+    }
+
+    func testProviderPresenceKeepsReviewedRequestAndReadOnlyStateAvailable() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let first = try owner.admit(draft(), now: now(), receiptTimeMs: nil), second = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let binding = try frameBinding(db), environment = ProviderEnvironment(epoch: clock)
+        let providers = try providers(providerConfiguration(fixture), environment), clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        let frame = try XCTUnwrap(providers.requestFrame(owner, binding, first.requestID, clock))
+        environment.set(mode: .present)
+        XCTAssertEqual(try providers.pendingRequestIDs(owner, binding, clock), [first.requestID])
+        XCTAssertEqual(try providers.requestFrame(owner, binding, first.requestID, clock), frame)
+        XCTAssertNil(try providers.requestFrame(owner, binding, second.requestID, clock))
+        XCTAssertNotNil(try providers.exchangeRequest(owner, binding, first.requestID, nil, clock))
+        XCTAssertEqual(environment.signatures, 2)
+    }
+    func testProvidersResampleClockAndPresenceAfterNativeSigningBoundary() throws {
+        for expire in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            defer { try? db.close() }
+            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            let environment = ProviderEnvironment(epoch: clock)
+            environment.afterSign = { [weak environment] in environment?.set(time: expire ? 200 : 130, mode: expire ? .away : .present) }
+            let providers = try providers(providerConfiguration(fixture), environment), clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+            XCTAssertNil(try providers.requestFrame(owner, binding, request.requestID, clock))
+            XCTAssertEqual(try owner.state(requestID: request.requestID).phase, expire ? .expired : .queued)
+            XCTAssertNil(try db.read { try $0.consumption(requestID: request.requestID) })
+        }
+    }
+    func testComposedExpiryUsesSameEpochAndReturnsSignedTerminalState() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let environment = ProviderEnvironment(epoch: clock), providers = try providers(providerConfiguration(fixture), environment)
+        let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        environment.set(time: 200)
+        XCTAssertEqual(try providers.expirePending(owner, clock: clock).map(\.requestID), [request.requestID])
+        XCTAssertTrue(try providers.expirePending(owner, clock: clock).isEmpty)
+        let status = try XCTUnwrap(providers.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        let message = try verifyProviderFrame(status, environment, type: .status)
+        let payload = try RequestStatusPayload.decode(message.body, limits: limits)
+        XCTAssertEqual(payload.phase, .expired); XCTAssertEqual(payload.observedAgeMs, 100)
+        XCTAssertThrowsError(try providers.expirePending(owner, clock: { AuthorityMoment(epoch: UUID(), milliseconds: 201) }))
+    }
+    func testProviderScopeRejectsBeforeSignerAndPresenceCallbacks() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let environment = ProviderEnvironment(epoch: clock)
+        let providers = try AuthorityRequestProviders(configuration: providerConfiguration(fixture, account: 8),
+            publicKey: environment.authorityKey.publicKey.x963Representation, signing: { _ in XCTFail("Wrong-scope signer"); return Data() },
+            routing: { XCTFail("Wrong-scope presence"); return try environment.route() })
+        let clock: @Sendable () throws -> AuthorityMoment = { XCTFail("Wrong-scope clock"); return environment.now() }
+        XCTAssertThrowsError(try providers.pendingRequestIDs(owner, binding, clock))
+        XCTAssertThrowsError(try providers.requestFrame(owner, binding, request.requestID, clock))
+        XCTAssertThrowsError(try providers.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        XCTAssertEqual(environment.signatures, 0)
+    }
+    func testProviderBudgetRejectsRequestThatUsesReservedCarrierSpace() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let capture = try DeterministicCBOR.encode(.map([0: .bytes(Data(count: 800))]), limits: limits)
+        let retained = try owner.admit(draft(capture: capture), now: now(), receiptTimeMs: nil)
+        let size = try retained.encode(limits: limits).count
+        XCTAssertGreaterThan(size, 896); XCTAssertLessThanOrEqual(size, 1024)
+        let binding = try frameBinding(db), environment = ProviderEnvironment(epoch: clock)
+        let providers = try providers(providerConfiguration(fixture, maximum: 1024), environment)
+        XCTAssertThrowsError(try providers.requestFrame(owner, binding, retained.requestID, { environment.now() }))
+        XCTAssertEqual(environment.signatures, 0)
+        XCTAssertEqual(try owner.state(requestID: retained.requestID).phase, .queued)
+    }
+    func testProvidersRejectInvalidPublicKeysAndTinyCarrierBudget() throws {
+        let fixture = try Fixture(), environment = ProviderEnvironment(epoch: clock)
+        for publicKey in [Data(), Data(count: 65)] {
+            XCTAssertThrowsError(try AuthorityRequestProviders(configuration: providerConfiguration(fixture), publicKey: publicKey,
+                signing: { _ in XCTFail("Invalid key reached signer"); return Data() }, routing: { try environment.route() }))
+        }
+        XCTAssertThrowsError(try providers(providerConfiguration(fixture, maximum: 128), environment))
+        let bundle = try providers(providerConfiguration(fixture), environment)
+        XCTAssertNoThrow(try bundle.requireConfiguration(providerConfiguration(fixture)))
+        XCTAssertThrowsError(try bundle.requireConfiguration(providerConfiguration(fixture, maximum: 8192)))
     }
 }
