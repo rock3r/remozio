@@ -11,10 +11,12 @@ public enum MachCommandCallerError: Error, Equatable {
 }
 
 /// Receives untrusted submission bytes and authenticates their actual sender. This grants no command authority.
-/// The owner supplies a borrowed receive right and serializes access. It also owns the port's lifetime.
+/// This receiver is the port's sole consumer. The owner supplies the borrowed right, serializes access, and owns its lifetime.
 public final class MachCommandCallerReceiver {
     public static let messageID: mach_msg_id_t = 0x524d0401
     public static let carrierVersion: UInt32 = 1
+    public static let inputMessageID: mach_msg_id_t = 0x524d0402
+    public static let inputCarrierVersion: UInt32 = 2
     private let port: mach_port_t
     private let maxPayloadBytes: Int
     private let requirement: SecRequirement
@@ -37,6 +39,24 @@ public final class MachCommandCallerReceiver {
 
     /// A finite timeout keeps receive loops cancellable. Oversized and malformed packets fail without truncation.
     public func receive(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandSubmission {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, hasInput: false)
+        return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
+    }
+
+    /// Imports one actual input fileport from the verified sender without reading its input.
+    public func receiveInput(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandInputSubmission {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, hasInput: true)
+        guard let input = packet.input else { throw MachCommandCallerError.malformed }
+        return ReceivedMachCommandInputSubmission(payload: packet.payload, caller: packet.caller, input: input)
+    }
+
+    private struct Packet {
+        let payload: Data
+        let caller: RetainedCommandCaller
+        let input: RetainedCommandInputDescriptor?
+    }
+
+    private func receivePacket(timeoutMilliseconds: UInt32, hasInput: Bool) throws -> Packet {
         guard timeoutMilliseconds > 0 else { throw MachCommandCallerError.configuration }
         let started = DispatchTime.now().uptimeNanoseconds
         var preview = remozio_mach_preview_t()
@@ -44,9 +64,13 @@ public final class MachCommandCallerReceiver {
         if previewResult == MACH_RCV_TIMED_OUT { throw MachCommandCallerError.timeout }
         guard previewResult == KERN_SUCCESS else { throw MachCommandCallerError.mach(previewResult) }
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
-        let prefixBytes = headerBytes + 8
+        let descriptorBytes = hasInput ? MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size : 0
+        let metadataOffset = headerBytes + descriptorBytes
+        let prefixBytes = metadataOffset + 8
+        let identifier = hasInput ? Self.inputMessageID : Self.messageID
+        let carrierVersion = hasInput ? Self.inputCarrierVersion : Self.carrierVersion
         let maximumMessage = (prefixBytes + maxPayloadBytes + 3) & ~3
-        guard preview.identifier == Self.messageID, preview.size >= prefixBytes, preview.size <= maximumMessage else {
+        guard preview.identifier == identifier, preview.size >= prefixBytes, preview.size <= maximumMessage else {
             try discardQueueHead()
             throw MachCommandCallerError.malformed
         }
@@ -78,9 +102,9 @@ public final class MachCommandCallerReceiver {
         guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         defer { mach_msg_destroy(header) }
         let value = header.pointee
-        guard value.msgh_bits & MACH_MSGH_BITS_COMPLEX == 0, value.msgh_remote_port == MACH_PORT_NULL,
+        guard (value.msgh_bits & MACH_MSGH_BITS_COMPLEX != 0) == hasInput, value.msgh_remote_port == MACH_PORT_NULL,
               value.msgh_voucher_port == MACH_PORT_NULL, value.msgh_local_port == port,
-              value.msgh_id == Self.messageID, value.msgh_size >= prefixBytes,
+              value.msgh_id == identifier, value.msgh_size >= prefixBytes,
               value.msgh_size <= maximumMessage else { throw MachCommandCallerError.malformed }
         let size = Int(value.msgh_size)
         let trailerOffset = (size + 3) & ~3
@@ -94,9 +118,22 @@ public final class MachCommandCallerReceiver {
               Self.sameToken(trailer.msgh_audit, preview.token) else {
             throw MachCommandCallerError.malformed
         }
-        let version = UInt32(bigEndian: storage.loadUnaligned(fromByteOffset: headerBytes, as: UInt32.self))
-        guard version == Self.carrierVersion else { throw MachCommandCallerError.version }
-        let count = Int(UInt32(bigEndian: storage.loadUnaligned(fromByteOffset: headerBytes + 4, as: UInt32.self)))
+        var inputPort: mach_port_t?
+        if hasInput {
+            let body = storage.loadUnaligned(fromByteOffset: headerBytes, as: mach_msg_body_t.self)
+            guard body.msgh_descriptor_count == 1 else { throw MachCommandCallerError.malformed }
+            let descriptor = storage.loadUnaligned(fromByteOffset: headerBytes + MemoryLayout<mach_msg_body_t>.size,
+                as: mach_msg_port_descriptor_t.self)
+            guard descriptor.type == UInt32(MACH_MSG_PORT_DESCRIPTOR),
+                  descriptor.disposition == UInt32(MACH_MSG_TYPE_PORT_SEND),
+                  descriptor.name != MACH_PORT_NULL, descriptor.name != UInt32.max else {
+                throw MachCommandCallerError.malformed
+            }
+            inputPort = descriptor.name
+        }
+        let version = UInt32(bigEndian: storage.loadUnaligned(fromByteOffset: metadataOffset, as: UInt32.self))
+        guard version == carrierVersion else { throw MachCommandCallerError.version }
+        let count = Int(UInt32(bigEndian: storage.loadUnaligned(fromByteOffset: metadataOffset + 4, as: UInt32.self)))
         guard count > 0, count <= maxPayloadBytes, (prefixBytes + count + 3) & ~3 == size else {
             throw MachCommandCallerError.malformed
         }
@@ -104,8 +141,9 @@ public final class MachCommandCallerReceiver {
             throw MachCommandCallerError.malformed
         }
         try caller.recheck(requirement: requirement, userID: userID, auditSessionID: auditSessionID)
+        let input = try inputPort.map { try RetainedCommandInputDescriptor(fileport: $0) }
         completed = true
-        return ReceivedMachCommandSubmission(payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller)
+        return Packet(payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller, input: input)
     }
 
     private func discardQueueHead() throws {
@@ -133,6 +171,51 @@ public struct ReceivedMachCommandSubmission {
     public let payload: Data
     public let caller: RetainedCommandCaller
     fileprivate init(payload: Data, caller: RetainedCommandCaller) { self.payload = payload; self.caller = caller }
+}
+
+/// The input remains caller-controlled. Holding its descriptor grants no execution authority.
+public struct ReceivedMachCommandInputSubmission {
+    public let payload: Data
+    public let caller: RetainedCommandCaller
+    public let input: RetainedCommandInputDescriptor
+    fileprivate init(payload: Data, caller: RetainedCommandCaller, input: RetainedCommandInputDescriptor) {
+        self.payload = payload; self.caller = caller; self.input = input
+    }
+}
+
+public enum RetainedCommandInputError: Error, Equatable {
+    case closed
+    case system(Int32)
+}
+
+/// Owns an imported descriptor without reading input or changing shared open-file flags.
+/// The owner serializes access and closes it when the request retires.
+public final class RetainedCommandInputDescriptor {
+    private var descriptor: Int32
+
+    fileprivate init(fileport: mach_port_t) throws {
+        let imported = fileport_makefd(fileport)
+        guard imported >= 0 else { throw RetainedCommandInputError.system(errno) }
+        let flags = fcntl(imported, F_GETFD)
+        guard flags >= 0, fcntl(imported, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+            let error = errno
+            _ = Darwin.close(imported)
+            throw RetainedCommandInputError.system(error)
+        }
+        descriptor = imported
+    }
+
+    deinit { close() }
+
+    /// Borrow only for this call. Do not close, retain, or pass this descriptor to another thread.
+    public func withBorrowedDescriptor<T>(_ body: (Int32) throws -> T) throws -> T {
+        guard descriptor >= 0 else { throw RetainedCommandInputError.closed }
+        return try body(descriptor)
+    }
+
+    public func close() {
+        if descriptor >= 0 { _ = Darwin.close(descriptor); descriptor = -1 }
+    }
 }
 
 /// Retains an OS process incarnation and dynamic code reference. It is not user consent or an execution permit.

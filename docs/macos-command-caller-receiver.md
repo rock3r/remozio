@@ -67,7 +67,7 @@ The C shim also destroys partially received resources on a body error.
 Receive interruptions return an error instead of silently restarting the full timeout.
 
 The carrier version does not replace application protocol negotiation or schema validation.
-Descriptor transport, reply channels, and streaming I/O require their own designed extension.
+Version 2 adds one input fileport through an explicit method. Reply channels and streaming execution I/O remain separate integration work.
 The receiver authenticates the sender before allocating its message arena or importing message resources.
 It waits with a 32-byte buffer, `MACH_RCV_LARGE`, and a requested audit trailer.
 Even a bare header needs more space with that trailer, so the message remains queued.
@@ -87,6 +87,45 @@ Receive waits share a monotonic timeout budget. System identity checks are not p
 An authenticated sender can still transfer resources before carrier version 1 rejects a complex packet.
 Kernel queue pressure and resources held during send are also outside this receiver's budget.
 Descriptor admission, trusted-sender resource limits, and complete denial-of-service protection remain separate work.
+
+## Input carrier version 2
+
+The owner explicitly calls `receiveInput` on a channel that supports this carrier.
+The existing `receive` method continues to accept only version 1. Neither method silently downgrades the other carrier.
+
+| Field | Encoding |
+| --- | --- |
+| Mach message ID | `0x524d0402` |
+| Header | Native public `mach_msg_header_t`, complex flag set |
+| Body | Native `mach_msg_body_t`, exactly one descriptor |
+| Input | Native `mach_msg_port_descriptor_t`, a received send right to a fileport |
+| Carrier version | Big-endian UInt32, value 2 |
+| Payload byte count | Big-endian UInt32, nonzero |
+| Payload | Opaque submission bytes, within the configured maximum |
+| Padding | Zero bytes to the next four-byte boundary |
+| Audit trailer | Kernel-provided format 0 audit trailer |
+
+The receiver applies the same sender preview, protected policy, timeout budget, and final identity checks.
+It validates the descriptor count and type before interpreting carrier metadata.
+Reply ports, vouchers, extra descriptors, transferred memory, unknown versions, and malformed payloads are rejected.
+Message destruction releases received rights on every success or rejection path.
+An ordinary Mach send right fails fileport conversion; it cannot supply input.
+
+`RetainedCommandInputDescriptor` owns the imported descriptor independently of the received fileport right.
+It sets the descriptor-local close-on-exec flag. It does not alter shared open-file status flags or read source bytes.
+The request owner serializes borrowing and closes both the input descriptor and caller record when the request retires.
+A borrowed descriptor must not escape its callback, be closed by the borrower, or be passed to another thread.
+Closing the owner is idempotent. A closed owner cannot lend its former descriptor number.
+
+The same authenticated Mach message associates the input object with its submission bytes and observed sender incarnation.
+Those bytes still need schema validation and admission. An input descriptor is not consent or execution authority.
+The descriptor shares its open-file offset and status flags with other holders. Source content remains caller-controlled.
+
+This library installs no endpoint and exposes no product sender that transfers input to an unverified service.
+The future client must authenticate the Root endpoint and bind the negotiated channel before transferring its input.
+An admission owner must bind the submission ID, nonce, stream binding, request lifetime, and current protected policy.
+It must classify the actual source and enforce resource budgets. This carrier does not add protocol negotiation, replies, or command I/O.
+Authenticated senders can still import resources before invalid descriptor types are rejected; that budget limitation remains.
 
 ## Validation and limits
 
@@ -116,3 +155,7 @@ Apple's [Mach library implementation](https://github.com/apple-oss-distributions
 
 Apple’s [queue preview implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/mach_port.c) returns audit data without receiving the body.
 Its [message queue implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/ipc_mqueue.c) distinguishes queued kernel sizes from receive sizes.
+
+Input-carrier tests preserve regular-file identity and offset, queued and later pipe bytes, shared flags, and close-on-exec.
+They close the sender’s original descriptor and fileport before receipt, reject ordinary ports and transferred memory, and check version isolation and cleanup.
+These use disposable local resources and synthetic input. They do not exercise a phone, protected Root installation, or physical-device end-to-end behavior.

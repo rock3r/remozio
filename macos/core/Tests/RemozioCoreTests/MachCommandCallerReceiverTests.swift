@@ -73,6 +73,66 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         }
 
+        func sendInput(_ payload: Data, fileport: mach_port_t, version: UInt32 = 2, descriptorCount: Int = 1) throws {
+            let headerBytes = MemoryLayout<mach_msg_header_t>.size
+            let bodyBytes = MemoryLayout<mach_msg_body_t>.size
+            let descriptorBytes = MemoryLayout<mach_msg_port_descriptor_t>.size
+            let metadata = headerBytes + bodyBytes + descriptorCount * descriptorBytes
+            let size = (metadata + 8 + payload.count + 3) & ~3
+            let storage = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 8)
+            defer { storage.deallocate() }
+            storage.initializeMemory(as: UInt8.self, repeating: 0, count: size)
+            let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
+            header.pointee.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND) | MACH_MSGH_BITS_COMPLEX
+            header.pointee.msgh_size = UInt32(size)
+            header.pointee.msgh_remote_port = port
+            header.pointee.msgh_id = MachCommandCallerReceiver.inputMessageID
+            storage.storeBytes(of: mach_msg_body_t(msgh_descriptor_count: UInt32(descriptorCount)),
+                toByteOffset: headerBytes, as: mach_msg_body_t.self)
+            for index in 0..<descriptorCount {
+                var descriptor = mach_msg_port_descriptor_t()
+                descriptor.name = fileport
+                descriptor.disposition = UInt32(MACH_MSG_TYPE_COPY_SEND)
+                descriptor.type = UInt32(MACH_MSG_PORT_DESCRIPTOR)
+                storage.storeBytes(of: descriptor, toByteOffset: headerBytes + bodyBytes + index * descriptorBytes,
+                    as: mach_msg_port_descriptor_t.self)
+            }
+            storage.storeBytes(of: version.bigEndian, toByteOffset: metadata, as: UInt32.self)
+            storage.storeBytes(of: UInt32(payload.count).bigEndian, toByteOffset: metadata + 4, as: UInt32.self)
+            payload.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress { storage.advanced(by: metadata + 8).copyMemory(from: base, byteCount: bytes.count) }
+            }
+            let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, UInt32(size), 0, 0, 1000, 0)
+            guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        }
+
+        func sendOutOfLineInput() throws {
+            let headerBytes = MemoryLayout<mach_msg_header_t>.size, bodyBytes = MemoryLayout<mach_msg_body_t>.size
+            let metadata = headerBytes + bodyBytes + MemoryLayout<mach_msg_ool_descriptor_t>.size
+            let size = metadata + 12
+            let storage = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 8)
+            let bytes = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 8)
+            defer { storage.deallocate(); bytes.deallocate() }
+            bytes.initializeMemory(as: UInt8.self, repeating: 0x5a, count: 65536)
+            storage.initializeMemory(as: UInt8.self, repeating: 0, count: size)
+            let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
+            header.pointee.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND) | MACH_MSGH_BITS_COMPLEX
+            header.pointee.msgh_size = UInt32(size)
+            header.pointee.msgh_remote_port = port
+            header.pointee.msgh_id = MachCommandCallerReceiver.inputMessageID
+            storage.storeBytes(of: mach_msg_body_t(msgh_descriptor_count: 1), toByteOffset: headerBytes, as: mach_msg_body_t.self)
+            var descriptor = mach_msg_ool_descriptor_t()
+            descriptor.address = bytes
+            descriptor.size = 65536
+            descriptor.copy = UInt32(MACH_MSG_VIRTUAL_COPY)
+            descriptor.type = UInt32(MACH_MSG_OOL_DESCRIPTOR)
+            storage.storeBytes(of: descriptor, toByteOffset: headerBytes + bodyBytes, as: mach_msg_ool_descriptor_t.self)
+            storage.storeBytes(of: UInt32(2).bigEndian, toByteOffset: metadata, as: UInt32.self)
+            storage.storeBytes(of: UInt32(1).bigEndian, toByteOffset: metadata + 4, as: UInt32.self)
+            let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, UInt32(size), 0, 0, 1000, 0)
+            guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        }
+
         func sendBareHeader() throws {
             var header = mach_msg_header_t()
             header.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND)
@@ -183,6 +243,148 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
         try endpoint.send(Data([6]))
         XCTAssertEqual(try receiver(endpoint).receive(timeoutMilliseconds: 1000).payload, Data([6]))
+    }
+
+    func testInputCarrierRetainsActualPipeAfterSenderClosesItsHandles() throws {
+        let endpoint = try Endpoint(), receiver = try receiver(endpoint)
+        var descriptors: [Int32] = [-1, -1]
+        guard pipe(&descriptors) == 0 else { throw MachCommandCallerError.unavailable }
+        defer { for fd in descriptors where fd >= 0 { _ = Darwin.close(fd) } }
+        let initialFlags = fcntl(descriptors[0], F_GETFL)
+        XCTAssertEqual(fcntl(descriptors[0], F_SETFL, initialFlags | O_NONBLOCK), 0)
+        let queued = Data("queued".utf8)
+        XCTAssertEqual(queued.withUnsafeBytes { Darwin.write(descriptors[1], $0.baseAddress, $0.count) }, queued.count)
+        var fileport: mach_port_t = UInt32(MACH_PORT_NULL)
+        XCTAssertEqual(fileport_makeport(descriptors[0], &fileport), 0)
+        defer { if fileport != MACH_PORT_NULL { _ = mach_port_deallocate(mach_task_self_, fileport) } }
+        let payload = Data([0xff, 0, 3])
+        try endpoint.sendInput(payload, fileport: fileport)
+        XCTAssertEqual(mach_port_deallocate(mach_task_self_, fileport), KERN_SUCCESS)
+        fileport = UInt32(MACH_PORT_NULL)
+        XCTAssertEqual(Darwin.close(descriptors[0]), 0)
+        descriptors[0] = -1
+        let submission = try receiver.receiveInput(timeoutMilliseconds: 1000)
+        XCTAssertEqual(submission.payload, payload)
+        XCTAssertEqual(submission.caller.requester.pid, UInt32(getpid()))
+        let later = Data("later".utf8)
+        XCTAssertEqual(later.withUnsafeBytes { Darwin.write(descriptors[1], $0.baseAddress, $0.count) }, later.count)
+        var imported: Int32 = -1
+        try submission.input.withBorrowedDescriptor { fd in
+            imported = fd
+            XCTAssertNotEqual(fcntl(fd, F_GETFD) & FD_CLOEXEC, 0)
+            XCTAssertEqual(fcntl(fd, F_GETFL), initialFlags | O_NONBLOCK)
+            var bytes = [UInt8](repeating: 0, count: queued.count + later.count)
+            XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count)
+            XCTAssertEqual(Data(bytes), queued + later)
+        }
+        submission.input.close(); submission.input.close()
+        XCTAssertEqual(fcntl(imported, F_GETFD), -1)
+        XCTAssertEqual(errno, EBADF)
+        XCTAssertThrowsError(try submission.input.withBorrowedDescriptor { _ in XCTFail("A retired descriptor was borrowed") }) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .closed)
+        }
+    }
+
+    func testOrdinaryMachRightCannotBecomeInputAndNextPacketWorks() throws {
+        let endpoint = try Endpoint(), carried = try Endpoint(), receiver = try receiver(endpoint)
+        let baseline = try sendReferences(carried.port)
+        try endpoint.sendInput(Data([1]), fileport: carried.port)
+        XCTAssertThrowsError(try receiver.receiveInput(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .system(EINVAL))
+        }
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        try endpoint.send(Data([2]))
+        XCTAssertEqual(try receiver.receive(timeoutMilliseconds: 1000).payload, Data([2]))
+    }
+
+    func testInputCarrierRejectsCountsVersionsAndWrongPeerWithoutPoisoningQueue() throws {
+        let endpoint = try Endpoint(), receiver = try receiver(endpoint)
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { _ = Darwin.close(fd) }
+        var fileport: mach_port_t = UInt32(MACH_PORT_NULL)
+        XCTAssertEqual(fileport_makeport(fd, &fileport), 0)
+        defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        let baseline = try sendReferences(fileport)
+        for count in [0, 2] {
+            try endpoint.sendInput(Data([1]), fileport: fileport, descriptorCount: count)
+            XCTAssertThrowsError(try receiver.receiveInput(timeoutMilliseconds: 1000))
+            XCTAssertEqual(try sendReferences(fileport), baseline)
+        }
+        try endpoint.sendInput(Data([1]), fileport: fileport, version: 3)
+        XCTAssertThrowsError(try receiver.receiveInput(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .version)
+        }
+        try endpoint.sendInput(Data([1]), fileport: fileport)
+        XCTAssertThrowsError(try self.receiver(endpoint, user: geteuid() ^ 1).receiveInput(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer)
+        }
+        XCTAssertEqual(try sendReferences(fileport), baseline)
+        try endpoint.sendInput(Data([2]), fileport: fileport)
+        let submission = try receiver.receiveInput(timeoutMilliseconds: 1000)
+        XCTAssertEqual(submission.payload, Data([2]))
+        XCTAssertEqual(try sendReferences(fileport), baseline)
+        try submission.input.withBorrowedDescriptor { fd in
+            var byte: UInt8 = 0
+            XCTAssertEqual(Darwin.read(fd, &byte, 1), 0)
+        }
+    }
+
+    func testCarrierVersionsCannotSilentlyDowngradeEachOther() throws {
+        let endpoint = try Endpoint(), receiver = try receiver(endpoint)
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { _ = Darwin.close(fd) }
+        var fileport: mach_port_t = UInt32(MACH_PORT_NULL)
+        XCTAssertEqual(fileport_makeport(fd, &fileport), 0)
+        defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        try endpoint.sendInput(Data([1]), fileport: fileport)
+        XCTAssertThrowsError(try receiver.receive(timeoutMilliseconds: 1000))
+        try endpoint.send(Data([1]))
+        XCTAssertThrowsError(try receiver.receiveInput(timeoutMilliseconds: 1000))
+        try endpoint.sendInput(Data([2]), fileport: fileport)
+        XCTAssertEqual(try receiver.receiveInput(timeoutMilliseconds: 1000).payload, Data([2]))
+    }
+
+    func testInputCarrierPreservesRegularFileIdentityAndOffset() throws {
+        let endpoint = try Endpoint(), receiver = try receiver(endpoint)
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let fd = Darwin.open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { _ = Darwin.close(fd); _ = Darwin.unlink(path) }
+        let contents = Data("012345".utf8)
+        XCTAssertEqual(contents.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }, contents.count)
+        XCTAssertEqual(lseek(fd, 2, SEEK_SET), 2)
+        var original = stat()
+        XCTAssertEqual(fstat(fd, &original), 0)
+        var fileport: mach_port_t = UInt32(MACH_PORT_NULL)
+        XCTAssertEqual(fileport_makeport(fd, &fileport), 0)
+        defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        try endpoint.sendInput(Data([7]), fileport: fileport)
+        let submission = try receiver.receiveInput(timeoutMilliseconds: 1000)
+        try submission.input.withBorrowedDescriptor { imported in
+            var observed = stat()
+            XCTAssertEqual(fstat(imported, &observed), 0)
+            XCTAssertEqual(observed.st_dev, original.st_dev)
+            XCTAssertEqual(observed.st_ino, original.st_ino)
+            XCTAssertEqual(observed.st_mode, original.st_mode)
+            XCTAssertEqual(lseek(imported, 0, SEEK_CUR), 2)
+            XCTAssertEqual(lseek(fd, 0, SEEK_CUR), 2)
+            var bytes = [UInt8](repeating: 0, count: 4)
+            XCTAssertEqual(Darwin.read(imported, &bytes, 4), 4)
+            XCTAssertEqual(Data(bytes), Data("2345".utf8))
+            XCTAssertEqual(lseek(fd, 0, SEEK_CUR), 6)
+        }
+    }
+
+    func testInputCarrierRejectsOutOfLineDescriptorBeforeParsingPayload() throws {
+        let endpoint = try Endpoint(), receiver = try receiver(endpoint)
+        try endpoint.sendOutOfLineInput()
+        XCTAssertThrowsError(try receiver.receiveInput(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .malformed)
+        }
+        try endpoint.send(Data([8]))
+        XCTAssertEqual(try receiver.receive(timeoutMilliseconds: 1000).payload, Data([8]))
     }
 
     private final class Peer {

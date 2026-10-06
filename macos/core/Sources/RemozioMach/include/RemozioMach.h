@@ -3,6 +3,7 @@
 #include <mach/mach.h>
 #include <Security/Security.h>
 #include <stdbool.h>
+#include <sys/fileport.h>
 typedef struct {
     mach_port_seqno_t sequence;
     mach_msg_size_t size;
