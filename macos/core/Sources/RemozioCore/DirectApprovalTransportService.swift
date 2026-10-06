@@ -49,6 +49,19 @@ public actor DirectApprovalTransportService {
         } catch { await close(); throw error }
     }
 
+    /// Retrieves a frame for this live phone session. It neither acknowledges delivery nor grants an action.
+    public func requestFrame(for session: DirectApprovalSession, requestID: Data) async throws -> Data? {
+        guard started, !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        let frame = try await feed.requestFrame(session.peer, revision: session.revision, requestID: requestID)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+        return frame
+    }
+
     public func close() async {
         closed = true
         await host.close()

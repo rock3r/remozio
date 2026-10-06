@@ -103,6 +103,24 @@ public actor AuthorityTrustFeed {
         } catch { await close(); throw error }
         guard allowed else { throw DirectHostError.staleSession }
     }
+    /// Fetch through the same ordered authority connection as trust refreshes and peer validation.
+    /// The root rechecks the binding atomically with request access. Absence is not a terminal status.
+    public func requestFrame(_ peer: DirectApprovalPeer, revision: UUID, requestID: Data) async throws -> Data? {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID, requestID.count == 16 else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        try await acquire()
+        defer { release() }
+        do {
+            let frame = try await activeChannel().requestFrame(binding: AuthorityPeerBinding(peer: peer, revision: revision),
+                requestID: requestID)
+            try requireActive()
+            return frame
+        } catch AuthorityXPCError.unsupportedRequestDelivery {
+            try requireActive()
+            throw AuthorityXPCError.unsupportedRequestDelivery
+        } catch { await close(); throw error }
+    }
     public func close() async {
         if !closed {
             closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil

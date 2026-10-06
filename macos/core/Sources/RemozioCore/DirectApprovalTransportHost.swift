@@ -10,7 +10,7 @@ public enum DirectHostState: Sendable, Equatable {
 public struct DirectApprovalSession: Sendable {
     public let peer: DirectApprovalPeer
     fileprivate let generation: UUID
-    fileprivate let revision: UUID
+    let revision: UUID
 }
 
 protocol OwnedDirectListener: Sendable {

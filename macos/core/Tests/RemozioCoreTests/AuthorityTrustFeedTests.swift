@@ -14,6 +14,23 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         private var validationReply: (@Sendable (AuthorityXPCReply) -> Void)?
         private var invalidated: (@Sendable () -> Void)?
         private var validations = 0
+        private var frames = 0
+        private var frameReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var version: UInt64 = 1
+        let frameSent = XCTestExpectation(description: "held frame")
+        var frameCount: Int { lock.withLock { frames } }
+        func setVersion(_ value: UInt64) { lock.withLock { version = value } }
+        func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            reply(.deliveryVersion(lock.withLock { version }))
+        }
+        func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { frames += 1; frameReply = reply }
+            frameSent.fulfill()
+        }
+        func finishFrame() {
+            let reply = lock.withLock { let value = frameReply; frameReply = nil; return value }
+            reply?(.requestFrame(Data()))
+        }
         let snapshotSent = XCTestExpectation(description: "held snapshot")
         let validationSent = XCTestExpectation(description: "held validation")
         init(_ trust: DirectApprovalTrust) throws { bytes = try AuthorityTrustCodec.encodeSnapshot(trust) }
@@ -56,8 +73,10 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
     private final class Listeners: @unchecked Sendable {
         private let lock = NSLock()
         private var storage: [Listener] = []
+        private var currentGeneration: UUID?
+        var generation: UUID? { lock.withLock { currentGeneration } }
         var values: [Listener] { lock.withLock { storage } }
-        func make() -> Listener { lock.withLock { let value = Listener(); storage.append(value); return value } }
+        func make(_ generation: UUID) -> Listener { lock.withLock { currentGeneration = generation; let value = Listener(); storage.append(value); return value } }
     }
     private let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16)
     private func trust(empty: Bool = false) throws -> DirectApprovalTrust {
@@ -71,7 +90,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             factory: { AuthorityXPCChannel(driver: driver, onClose: $0) })
     }
     private func host(_ listeners: Listeners) -> DirectApprovalTransportHost {
-        DirectApprovalTransportHost(macID: mac, accountID: account, factory: { _, _, _, _ in listeners.make() }, validatePeer: { _, _ in })
+        DirectApprovalTransportHost(macID: mac, accountID: account, factory: { generation, _, _, _ in listeners.make(generation) }, validatePeer: { _, _ in })
     }
     func testServiceStartsAfterTrustAndRetiresOnClose() async throws {
         let listeners = Listeners(), host = host(listeners), feed = feed(try Driver(trust()))
@@ -168,6 +187,75 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         XCTAssertEqual(driver.validationCount, 2)
         await feed.close(); await host.close()
+    }
+    func testServiceRejectsFrameWhenSessionIsReplacedDuringFetch() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        try await service.start()
+        let session = try await host.admit(trust.peers[0], generation: XCTUnwrap(listeners.generation))
+        let pending = Task { try await service.requestFrame(for: session, requestID: Data(repeating: 8, count: 16)) }
+        await fulfillment(of: [driver.frameSent], timeout: 2)
+        try await host.replaceTrust(self.trust(empty: true))
+        driver.finishFrame()
+        do { _ = try await pending.value; XCTFail("Retired phone session received frame") } catch DirectHostError.staleSession { }
+        await service.close()
+    }
+    func testServiceReturnsAbsenceOnlyForCurrentSession() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        try await service.start()
+        let session = try await host.admit(trust.peers[0], generation: XCTUnwrap(listeners.generation))
+        let pending = Task { try await service.requestFrame(for: session, requestID: Data(repeating: 8, count: 16)) }
+        await fulfillment(of: [driver.frameSent], timeout: 2)
+        driver.finishFrame()
+        let frame = try await pending.value; XCTAssertNil(frame)
+        await service.close()
+        do { _ = try await service.requestFrame(for: session, requestID: Data(repeating: 8, count: 16)); XCTFail("Closed service fetched") }
+        catch DirectHostError.stopped { }
+        XCTAssertEqual(driver.frameCount, 1)
+    }
+    func testFrameRetrievalSerializesWithValidationAndCancellation() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+        try await feed.start(host: host)
+        let first = Task { try await feed.requestFrame(trust.peers[0], revision: trust.revision,
+            requestID: Data(repeating: 8, count: 16)) }
+        await fulfillment(of: [driver.frameSent], timeout: 2)
+        let cancelled = Task { try await feed.requestFrame(trust.peers[0], revision: trust.revision,
+            requestID: Data(repeating: 9, count: 16)) }
+        try await waitForQueue(feed, count: 1)
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancelled fetch completed") } catch { }
+        let validation = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
+        try await waitForQueue(feed, count: 1)
+        XCTAssertEqual(driver.validationCount, 0)
+        driver.finishFrame()
+        let frame = try await first.value; XCTAssertNil(frame)
+        try await validation.value
+        XCTAssertEqual(driver.frameCount, 1); XCTAssertEqual(driver.validationCount, 1)
+        await feed.close(); await host.close()
+    }
+    func testUnsupportedFramesPreserveCommonTrustOperations() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+        driver.setVersion(0); try await feed.start(host: host)
+        do {
+            _ = try await feed.requestFrame(trust.peers[0], revision: trust.revision, requestID: Data(repeating: 8, count: 16))
+            XCTFail("Unsupported delivery accepted")
+        } catch AuthorityXPCError.unsupportedRequestDelivery { }
+        XCTAssertEqual(driver.frameCount, 0)
+        try await feed.refresh(); try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testDisconnectRejectsLateFrameReply() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let pending = Task { try await feed.requestFrame(trust.peers[0], revision: trust.revision,
+            requestID: Data(repeating: 8, count: 16)) }
+        await fulfillment(of: [driver.frameSent], timeout: 2)
+        driver.interrupt(); driver.finishFrame()
+        do { _ = try await pending.value; XCTFail("Disconnected fetch completed") } catch { }
+        await feed.close()
+        XCTAssertTrue(try XCTUnwrap(listeners.values.last).isClosed)
+        await host.close()
     }
     private func waitForQueue(_ feed: AuthorityTrustFeed, count: Int) async throws {
         let deadline = ContinuousClock.now + .seconds(2)

@@ -32,3 +32,11 @@ The service does not install a frame handler by default. Production queue owners
 The [live XPC evidence](experiments/evidence/2026-10-05-request-frame-xpc.json) records 11 passing cases on macOS 27.0.1. The two-process probe imports the production protocol declaration. It verifies version negotiation and the nonempty, empty, and nil Data reply forms. Wrong client and server identifiers prevent frame dispatch. The temporary per-user LaunchAgent was removed.
 
 This probe uses synthetic bytes and ad-hoc identifiers. It does not exercise the production root endpoint, protected service routing, Developer ID policy, or device E2E. Those release integration checks remain pending; the probe does not establish them.
+
+## Transport integration
+
+`DirectApprovalTransportService.requestFrame` takes a live phone session and request ID. It checks that session before retrieval and after the reply. Session replacement, closure, or cancellation prevents return to the caller.
+
+The trust feed serializes retrieval with validation and refresh on its existing authority connection. Its bounded wait queue and refresh priority also apply to fetches. Cancelling queued work does not cancel another active operation. A disconnected authority rejects late replies and retires its listener. Explicitly unsupported request delivery leaves common trust operations available.
+
+This API returns a frame to the transport handler. It does not write to the phone, acknowledge delivery, install a root signer, or submit a decision. The network handler must retain its channel checks before sending.
