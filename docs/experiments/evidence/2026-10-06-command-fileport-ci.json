@@ -1,0 +1,35 @@
+{
+  "experiment": "command-fileport-v1",
+  "measuredAtUTC": "2026-10-06T20:49:11.459248+00:00",
+  "host": {
+    "os": "26.6.2",
+    "build": "25G83",
+    "architecture": "arm64",
+    "sdk": "26.5",
+    "deploymentTarget": "26.0"
+  },
+  "sources": {
+    "probe.c": "897cf25cc1a1ebf184c7f31b72aacf22840612da8abb5ffe645994de035d7d9d"
+  },
+  "observations": {
+    "file_identity_offset_and_lifetime": true,
+    "directory_identity_and_lifetime": true,
+    "pipe_queued_and_later_input": true,
+    "socket_queued_and_later_input": true,
+    "pty_input_and_resize": true,
+    "null_input": true,
+    "write_only_input_rejected": true,
+    "ordinary_port_rejected": true,
+    "silent_peer_reaped": true,
+    "passed": true
+  },
+  "limits": [
+    "Unprivileged anonymous Mach endpoint; no service installation",
+    "Kernel sender attributes compared to spawned fixture; no release code policy",
+    "Synthetic data and disposable PTY; no command execution or real terminal",
+    "No hostile-sender resource budget or production admission/I/O transport",
+    "Socket transfer measured; application capture-schema classification remains integration work"
+  ],
+  "sourceJobURL": "https://github.com/rock3r/remozio/actions/runs/37528436302/job/112491303888",
+  "sourceCommit": "ad65f2607a8ce1302064a3acd8b43b106bf75c08"
+}

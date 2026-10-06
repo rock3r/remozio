@@ -92,3 +92,6 @@ The report contains host metadata, source hashes, and booleans. It contains no i
 
 The installed public `sys/fileport.h` declares both APIs.
 Apple's [descriptor implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_descrip.c) retains the underlying open file and applies close-on-exec to imported descriptors.
+
+The [macOS 26 CI report](evidence/2026-10-06-command-fileport-ci.json) retains the same nine passing cases on macOS 26.6.2, arm64, with SDK 26.5.
+The [CI job](https://github.com/rock3r/remozio/actions/runs/37528436302/job/112491303888) ran the reviewed fileport source from PR #216.
