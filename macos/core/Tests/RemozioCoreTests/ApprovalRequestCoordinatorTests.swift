@@ -741,6 +741,49 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             XCTAssertNil(frame)
         }
     }
+    func testRetainedFrameSharesBytesButKeepsDeliveryAndRevocationPerPhone() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let revision = try db.read { try $0.approvalTrustSnapshot().revision }
+        let other = try StoredApprovalEnrollment(epoch: id(19), notificationTag: id(20, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(15), active: true, capabilities: capabilities, keys: [
+                EnrolledApprovalKey(id: id(16), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                EnrolledApprovalKey(id: id(17), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            ]))
+        _ = try db.write { try $0.addApprovalEnrollment(other, expectedTrustRevision: revision,
+            eventID: id(32), receiptTimeMs: nil, writer: writer, expectedAuditHead: 1) }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        let first = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(5) }), revision: trust.revision)
+        let second = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(15) }), revision: trust.revision)
+        let frame = try XCTUnwrap(owner.retainedDeliveryFrame(binding: first, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation }))
+        let local = try owner.retainedDeliveryFrame(binding: second, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(130) }, routing: { try self.routing(.present) }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Shared frame signed again"); throw Failure.fixture })
+        XCTAssertNil(local)
+        let delivered = try owner.retainedDeliveryFrame(binding: second, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(140) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Shared frame signed again"); throw Failure.fixture })
+        XCTAssertEqual(frame, delivered)
+        _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: id(5), epoch: id(9), expectedTrustRevision: trust.revision,
+            eventID: id(33), receiptTimeMs: nil, writer: writer, expectedAuditHead: 3) }
+        let current = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        let remaining = AuthorityPeerBinding(peer: try XCTUnwrap(current.peers.first { $0.scope.phoneID == id(15) }), revision: current.revision)
+        let retried = try owner.retainedDeliveryFrame(binding: remaining, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(150) }, routing: { try self.routing(.present) }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Surviving phone signed again"); throw Failure.fixture })
+        XCTAssertEqual(frame, retried)
+        XCTAssertThrowsError(try owner.retainedDeliveryFrame(binding: first, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(150) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Revoked phone signed"); throw Failure.fixture }))
+    }
     func testRetainedFrameBudgetIsReclaimedAfterRetirement() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, bytes: 4096)
         let binding = try frameBinding(db)
