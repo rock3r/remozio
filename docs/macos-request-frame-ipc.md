@@ -40,3 +40,13 @@ This probe uses synthetic bytes and ad-hoc identifiers. It does not exercise the
 The trust feed serializes retrieval with validation and refresh on its existing authority connection. Its bounded wait queue and refresh priority also apply to fetches. Cancelling queued work does not cancel another active operation. A disconnected authority rejects late replies and retires its listener. Explicitly unsupported request delivery leaves common trust operations available.
 
 This API returns a frame to the transport handler. It does not write to the phone, acknowledge delivery, install a root signer, or submit a decision. The network handler must retain its channel checks before sending.
+
+## Root retry retention
+
+`ApprovalRequestCoordinator.retainedDeliveryFrame` owns one in-memory frame per pending request and tracks eligible recipients through `PendingRequestDelivery`. Install it through the service's trusted frame provider, using the supplied service clock and the selected authority signer. Callbacks must not mutate or reenter the authority.
+
+A first fetch checks current enrollment, contract support, presence, deadline, and request state. Signing uses the retained request bytes. It checks deadline and presence again after signing. A lost IPC reply does not dequeue or consume the request. A retry returns the retained frame after fresh authority checks. A changed signing key fails instead of releasing a frame under the previous key.
+
+Present suppresses first delivery to a recipient. A recipient already handed a frame can retry while the request remains valid, as required for phone review across presence changes. This handoff is not proof of phone receipt. The provider does not mark the request presented or approved.
+
+The cache releases frames when requests leave queued/presented state, including authorization, cancellation, and expiry. It dies with the coordinator. Frame storage is bounded separately by the retained-payload budget plus one carrier overhead per request; recipients share a frame. Existing request and recipient limits also apply. This does not persist sensitive payloads or implement FCM scheduling, pending-set discovery, or decision submission.
