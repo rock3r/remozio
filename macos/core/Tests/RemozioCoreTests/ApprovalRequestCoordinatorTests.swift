@@ -1385,6 +1385,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             XCTAssertNil(try providers.requestFrame(owner, binding, request.requestID, clock))
             XCTAssertEqual(try owner.state(requestID: request.requestID).phase, expire ? .expired : .queued)
             XCTAssertNil(try db.read { try $0.consumption(requestID: request.requestID) })
+            XCTAssertEqual(try providers.expirePending(owner, clock: clock).map(\.requestID), expire ? [request.requestID] : [])
         }
     }
     func testComposedExpiryUsesSameEpochAndReturnsSignedTerminalState() throws {
@@ -1400,7 +1401,169 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let message = try verifyProviderFrame(status, environment, type: .status)
         let payload = try RequestStatusPayload.decode(message.body, limits: limits)
         XCTAssertEqual(payload.phase, .expired); XCTAssertEqual(payload.observedAgeMs, 100)
+        XCTAssertNil(try providers.requestFrame(owner, binding, request.requestID, clock))
+        XCTAssertTrue(try providers.expirePending(owner, clock: clock).isEmpty)
+        XCTAssertEqual(try events(db, writer).filter { $0.kind == .expired }.count, 1)
         XCTAssertThrowsError(try providers.expirePending(owner, clock: { AuthorityMoment(epoch: UUID(), milliseconds: 201) }))
+    }
+    func testFrameExpiryReachesComposedCleanupOnce() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let environment = ProviderEnvironment(epoch: clock), bundle = try providers(providerConfiguration(fixture), environment)
+        let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        XCTAssertNotNil(try bundle.requestFrame(owner, binding, request.requestID, clock))
+        environment.set(time: 200)
+        XCTAssertNil(try bundle.requestFrame(owner, binding, request.requestID, clock))
+        let committed = try owner.state(requestID: request.requestID), auditCount = try events(db, writer).count
+        XCTAssertEqual(try bundle.expirePending(owner, clock: clock), [committed])
+        XCTAssertEqual(committed.phase, .expired); XCTAssertEqual(committed.terminalAt, now(200))
+        XCTAssertEqual(committed.requestDigest, try request.requestDigest(bodyLimits: limits, signingLimits: limits))
+        XCTAssertTrue(try bundle.expirePending(owner, clock: clock).isEmpty)
+        XCTAssertNil(try bundle.requestFrame(owner, binding, request.requestID, clock))
+        XCTAssertEqual(try events(db, writer).count, auditCount)
+        XCTAssertNil(try db.read { try $0.consumption(requestID: request.requestID) })
+    }
+    func testStatusExpirySurvivesSigningFailureAndReachesCleanup() throws {
+        for signingFails in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            defer { try? db.close() }
+            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            let environment = ProviderEnvironment(epoch: clock)
+            let bundle = try AuthorityRequestProviders(configuration: providerConfiguration(fixture),
+                publicKey: environment.authorityKey.publicKey.x963Representation,
+                signing: { input in
+                    if signingFails { throw Failure.fixture }
+                    return try environment.sign(input)
+                }, routing: { try environment.route() })
+            let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+            environment.set(time: 200)
+            if signingFails {
+                XCTAssertThrowsError(try bundle.exchangeRequest(owner, binding, request.requestID, nil, clock)) {
+                    guard case Failure.fixture = $0 else { return XCTFail("Unexpected signing failure") }
+                }
+            } else {
+                let frame = try XCTUnwrap(bundle.exchangeRequest(owner, binding, request.requestID, nil, clock))
+                let message = try verifyProviderFrame(frame, environment, type: .status)
+                let status = try RequestStatusPayload.decode(message.body, limits: limits)
+                XCTAssertEqual(status.phase, .expired); XCTAssertEqual(status.observedAgeMs, 100)
+            }
+            let committed = try owner.state(requestID: request.requestID)
+            XCTAssertEqual(try bundle.expirePending(owner, clock: clock), [committed])
+            XCTAssertEqual(committed.phase, .expired)
+            XCTAssertTrue(try bundle.expirePending(owner, clock: clock).isEmpty)
+            XCTAssertNil(try db.read { try $0.consumption(requestID: request.requestID) })
+        }
+    }
+    func testRejectedDecisionAfterExpiryStillReachesCleanup() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let environment = ProviderEnvironment(epoch: clock), bundle = try providers(providerConfiguration(fixture), environment)
+        let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        let (body, originalSignature) = try decision(request)
+        var signature = originalSignature; signature[0] ^= 1
+        let decision = try ApprovalMessage(wireVersion: 1, type: .decision, purpose: .biometricAuthorization,
+            body: body, signature: signature).encode(maximumBodyBytes: 3968)
+        environment.set(time: 200)
+        XCTAssertThrowsError(try bundle.exchangeRequest(owner, binding, request.requestID, decision, clock)) {
+            XCTAssertEqual($0 as? DecisionVerificationError, .invalidSignature)
+        }
+        XCTAssertEqual(try bundle.expirePending(owner, clock: clock).map(\.requestID), [request.requestID])
+        XCTAssertTrue(try bundle.expirePending(owner, clock: clock).isEmpty)
+        XCTAssertEqual(environment.signatures, 0)
+        XCTAssertNil(try db.read { try $0.consumption(requestID: request.requestID) })
+    }
+    func testForgottenExpiryPreservesCleanupAndConsumesCapacityUntilDrained() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, maximum: 1)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        XCTAssertThrowsError(try owner.pendingRequest(requestID: request.requestID, now: now(200), receiptTimeMs: nil)) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .expired)
+        }
+        let committed = try owner.state(requestID: request.requestID)
+        try owner.forgetTerminal(requestID: request.requestID)
+        XCTAssertThrowsError(try owner.state(requestID: request.requestID)) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .unknownRequest)
+        }
+        XCTAssertThrowsError(try owner.admit(draft(deadline: 300), now: now(200), receiptTimeMs: nil)) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .capacityExceeded)
+        }
+        XCTAssertEqual(try owner.expirePending(now: now(200), receiptTimeMs: nil), [committed])
+        let replacement = try owner.admit(draft(deadline: 300), now: now(200), receiptTimeMs: nil)
+        XCTAssertNotEqual(replacement.requestID, request.requestID)
+        XCTAssertTrue(try owner.expirePending(now: now(200), receiptTimeMs: nil).isEmpty)
+    }
+    func testAuditFailureDoesNotDiscardEarlierHandlerExpiry() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let requests = try (0..<3).map { _ in try owner.admit(draft(), now: now(), receiptTimeMs: nil) }
+        XCTAssertThrowsError(try owner.pendingRequest(requestID: requests[0].requestID, now: now(200), receiptTimeMs: nil))
+        let committed = try owner.state(requestID: requests[0].requestID), count = try events(db, writer).count
+        try fixture.sql("CREATE TRIGGER fail_sweep BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try owner.expirePending(now: now(200), receiptTimeMs: nil))
+        XCTAssertEqual(try owner.state(requestID: requests[0].requestID), committed)
+        for request in requests.dropFirst() { XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued) }
+        XCTAssertEqual(try events(db, writer).count, count)
+        try fixture.sql("DROP TRIGGER fail_sweep")
+        XCTAssertEqual(Set(try owner.expirePending(now: now(200), receiptTimeMs: nil).map(\.requestID)), Set(requests.map(\.requestID)))
+        XCTAssertEqual(try events(db, writer).filter { $0.kind == .expired }.count, 3)
+        XCTAssertTrue(try owner.expirePending(now: now(200), receiptTimeMs: nil).isEmpty)
+    }
+    func testExplicitTargetExpiryIsReportedWithoutNewAuditOnDrain() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let committed = try owner.retirePending(requestID: request.requestID, reason: .targetTimedOut, now: now(120), receiptTimeMs: nil)
+        let count = try events(db, writer).count
+        XCTAssertEqual(try owner.expirePending(now: now(130), receiptTimeMs: nil), [committed])
+        XCTAssertEqual(committed.reason, .targetTimedOut); XCTAssertEqual(committed.terminalAt, now(120))
+        XCTAssertTrue(try owner.expirePending(now: now(140), receiptTimeMs: nil).isEmpty)
+        XCTAssertEqual(try events(db, writer).count, count)
+    }
+    private final class ExpiryObservations: @unchecked Sendable {
+        private let lock = NSLock()
+        private var states: [ApprovalRequestState] = []
+        private var failed = false
+        func append(_ batch: [ApprovalRequestState]) { lock.withLock { states += batch } }
+        func fail() { lock.withLock { failed = true } }
+        var result: ([ApprovalRequestState], Bool) { lock.withLock { (self.states, self.failed) } }
+    }
+    func testConcurrentRequestExpiryAndSweepReportOneTransition() throws {
+        for _ in 0..<4 {
+            let fixture = try Fixture(), journal = try journalOwner(fixture)
+            defer { try? journal.close() }
+            let draft = try draft(), admissionTime = now(), expiryTime = now(200)
+            let requestID = try journal.withRequests { try $0.admit(draft, now: admissionTime, receiptTimeMs: nil).requestID }
+            let observations = ExpiryObservations(), group = DispatchGroup()
+            group.enter()
+            DispatchQueue.global().async {
+                defer { group.leave() }
+                do {
+                    try journal.withRequests { _ = try $0.pendingRequest(requestID: requestID, now: expiryTime, receiptTimeMs: nil) }
+                    observations.fail()
+                } catch let error as ApprovalCoordinatorError {
+                    if error != .expired && error != .notPending { observations.fail() }
+                } catch { observations.fail() }
+            }
+            group.enter()
+            DispatchQueue.global().async {
+                defer { group.leave() }
+                do { try journal.withRequests { observations.append(try $0.expirePending(now: expiryTime, receiptTimeMs: nil)) } }
+                catch { observations.fail() }
+            }
+            XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+            let (states, failed) = observations.result
+            XCTAssertFalse(failed); XCTAssertEqual(states.map(\.requestID), [requestID])
+            XCTAssertEqual(states.first?.phase, .expired)
+            XCTAssertTrue(try journal.withRequests { try $0.expirePending(now: expiryTime, receiptTimeMs: nil).isEmpty })
+            let epoch = id(3), eventLimits = try limits
+            let expiredEvents = try journal.read { tx in
+                let records = try tx.page(epoch: epoch, after: 0, maximumRecords: 50, maximumBytes: 32768).canonicalRecords
+                return try records.map { try AuditEventMetadata.decode($0, limits: eventLimits) }.filter { $0.kind == .expired }.count
+            }
+            XCTAssertEqual(expiredEvents, 1)
+        }
     }
     func testProviderScopeRejectsBeforeSignerAndPresenceCallbacks() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
