@@ -39,12 +39,21 @@ final class PendingRequestDeliveryTests: XCTestCase {
         try session.reconcile(current: request(phase: phase), routing: route(mode), trust: trust(phones), now: now(time), enqueue: enqueue)
     }
 
+    private func discover(_ session: PendingRequestDelivery, current: RetainedApprovalRequest,
+                          mode: RoutingMode = .away, phones: [StoredApprovalEnrollment], time: UInt64 = 110) throws -> Set<DeliveryRecipient> {
+        let snapshot = try trust(phones), routing = try route(mode)
+        return Set(phones.filter {
+            session.canDiscover(current: current, routing: routing, authority: snapshot.approval,
+                recipient: DeliveryRecipient($0), enrollment: $0.approval, now: now(time))
+        }.map(DeliveryRecipient.init))
+    }
+
     func testDiscoveryLeavesNotificationEnqueueAvailable() throws {
         let request = try request(), session = try PendingRequestDelivery(request: request), phones = try [phone(5), phone(6)]
-        let discovered = try session.discover(current: request, routing: route(.away), trust: trust(phones), now: now())
+        let discovered = try discover(session, current: request, phones: phones)
         XCTAssertEqual(discovered.count, 2)
-        XCTAssertEqual(try session.discover(current: request, routing: route(.away), trust: trust(phones), now: now()), discovered)
-        XCTAssertTrue(try session.discover(current: request, routing: route(.present), trust: trust(phones), now: now()).isEmpty)
+        XCTAssertEqual(try discover(session, current: request, phones: phones), discovered)
+        XCTAssertTrue(try discover(session, current: request, mode: .present, phones: phones).isEmpty)
         var accepted: [PhoneRequestDelivery] = []
         let queued = try reconcile(session, phones: phones) { accepted.append($0); return true }
         XCTAssertEqual(Set(accepted.map(\.recipient)), discovered)
@@ -57,12 +66,38 @@ final class PendingRequestDeliveryTests: XCTestCase {
         let queued = try reconcile(session, phones: phones)
         let remaining = [phones[1]]
         for _ in 0..<2 {
-            let discovered = try session.discover(current: request, routing: route(.away), trust: trust(remaining), now: now())
+            let discovered = try discover(session, current: request, phones: remaining)
             XCTAssertEqual(discovered, Set([DeliveryRecipient(phones[1])]))
         }
         let update = try reconcile(session, phones: remaining)
         XCTAssertEqual(update.withdrawn, queued.active.filter { $0.recipient.phoneID == id(5) })
         XCTAssertTrue(try reconcile(session, phones: remaining).withdrawn.isEmpty)
+    }
+
+    func testDiscoveryRespectsRecipientCapacityAndRetirementWithoutAllocatingEntries() throws {
+        let request = try request(), session = try PendingRequestDelivery(request: request, maximumRecipients: 1)
+        let a = try phone(5), b = try phone(6), replacement = try phone(5, epoch: 10)
+        for _ in 0..<3 {
+            XCTAssertEqual(try discover(session, current: request, phones: [a, b]), Set([DeliveryRecipient(a), DeliveryRecipient(b)]))
+        }
+        let queued = try reconcile(session, phones: [b])
+        XCTAssertEqual(queued.active.map(\.recipient.phoneID), [id(6)])
+        XCTAssertTrue(try discover(session, current: request, phones: [a]).isEmpty)
+        _ = try reconcile(session, phones: [])
+        XCTAssertTrue(try discover(session, current: request, phones: [b, replacement]).isEmpty)
+    }
+
+    func testDiscoveryChecksOnlySelectedEnrollmentAndCurrentRequest() throws {
+        let request = try request(), session = try PendingRequestDelivery(request: request), a = try phone(5)
+        XCTAssertTrue(try discover(session, current: request, phones: [phone(5, features: [])]).isEmpty)
+        XCTAssertTrue(try discover(session, current: request, phones: [phone(5, active: false)]).isEmpty)
+        XCTAssertTrue(try discover(session, current: request, phones: [a], time: 200).isEmpty)
+        XCTAssertTrue(try discover(session, current: self.request(phase: .cancelled), phones: [a]).isEmpty)
+        XCTAssertTrue(try discover(session, current: self.request(requestID: 4), phones: [a]).isEmpty)
+        let queued = try reconcile(session, phones: [a]).active
+        _ = try session.beginDelivery(id: XCTUnwrap(queued.first).id, current: request, routing: route(.away), trust: trust([a]), now: now())
+        XCTAssertEqual(try discover(session, current: request, mode: .present, phones: [a]), Set([DeliveryRecipient(a)]))
+        XCTAssertTrue(try discover(session, current: request, mode: .present, phones: [phone(5, epoch: 10)]).isEmpty)
     }
 
     func testLocalThenAwayPreservesIdentityAgeAndDeadlineForEveryPhone() throws {

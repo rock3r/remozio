@@ -313,15 +313,19 @@ public final class ApprovalRequestCoordinator {
             try transaction.requireDirectApprovalBinding(binding)
             return try transaction.requestDeliveryTrust()
         }
+        guard let stored = trust.enrollments.first(where: {
+            $0.approval.phoneID == binding.scope.phoneID && $0.epoch == binding.scope.enrollmentEpoch
+        }), stored.approval.active,
+              let enrollment = trust.approval.enrollments.first(where: { $0.phoneID == binding.scope.phoneID }),
+              enrollment.active else { return [] }
+        let recipient = DeliveryRecipient(stored)
         var result: [Data] = []
         for id in entries.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
             guard let retained = entries[id]?.retained,
                   retained.phase == .queued || retained.phase == .presented else { continue }
             let delivery = try deliveryController(requestID: id, retained: retained)
-            let recipients = delivery.discover(current: retained, routing: routing, trust: trust, now: now)
-            if recipients.contains(where: {
-                $0.phoneID == binding.scope.phoneID && $0.enrollmentEpoch == binding.scope.enrollmentEpoch
-            }) { result.append(id) }
+            if delivery.canDiscover(current: retained, routing: routing, authority: trust.approval,
+                recipient: recipient, enrollment: enrollment, now: now) { result.append(id) }
         }
         return result
     }
