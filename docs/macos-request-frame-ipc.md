@@ -78,3 +78,33 @@ The [discovery live evidence](experiments/evidence/2026-10-06-discovery-xpc.json
 Discovery uses the trust feed's existing authority connection, bounded wait queue, and refresh priority. Cancelling queued discovery leaves the active operation running. An explicitly unsupported discovery extension preserves common trust operations and frame retrieval. Authority disconnection rejects late replies and retires the listener.
 
 This API returns discovery hints to a transport handler. It does not send them to the phone, mark requests handled, or schedule notifications. The network handler must retain its channel checks before sending and fetch each frame through the existing request checks.
+
+## Outbound channel delivery
+
+The transport service now has a default fetch handler. It discovers one bounded snapshot and sends available signed frames through `NegotiatedNetworkChannel`. It preserves each carrier byte and signature. Discovery IDs stay on the Mac. Missing frames and unsupported contracts or required features produce no unsigned status or approval.
+
+```mermaid
+sequenceDiagram
+    participant P as Enrolled phone channel
+    participant T as Transport service
+    participant A as Root authority
+    P->>T: Confirm enrollment-bound negotiation
+    T->>A: Validate and discover pending IDs
+    A-->>T: Bound discovery hints
+    loop Each ID, one frame at a time
+        T->>A: Validate and fetch retained signed frame
+        A-->>T: Exact frame or no frame
+        T->>T: Check channel scope, contract, features and size
+        T->>A: Revalidate current session
+        T-->>P: Original signed frame in session envelope
+    end
+    T->>P: Close completed fetch connection
+```
+
+The phone must verify the authority signature and capture semantics. A transport write does not establish phone receipt, presentation, consent, or execution. The existing Android receiver keeps retained request owners on EOF and authenticates duplicates before reusing them.
+
+The default handler returns after the snapshot. The listener closes its fetch connection. An explicit custom handler remains in control and can call `deliverPendingRequests` without closing a successful channel. No live polling or decision handling is added here.
+
+The write deadline defaults to 30 seconds and has a constructor setting. No new write starts after that deadline; a blocked write closes the channel. Authority operations retain their separate bounded IPC deadlines and ordered queue. Cancellation, stale-session checks, invalid frames, and failed writes close the channel. A failed write stops the scan before fetching another frame.
+
+Tests use synthetic authority IPC and a negotiated in-memory phone stream. They verify exact signed bytes and sequences, absent requests, runtime features, wrong scopes, changed sessions, service closure, payload bounds, write failure, timeout, cancellation, and custom-handler ownership. These tests do not exercise native TLS sockets, Android hardware, protected installation, production key custody, push, or relay delivery. Production root providers and bidirectional decision/status assembly remain required.

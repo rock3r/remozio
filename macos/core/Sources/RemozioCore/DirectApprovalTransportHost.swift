@@ -28,7 +28,8 @@ public actor DirectApprovalTransportHost {
     private let accountID: Data
     private let factory: Factory
     private let validatePeer: @Sendable (DirectApprovalPeer, UUID) async throws -> Void
-    private let handler: @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void
+    private var handler: @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void
+    private var handlerSealed = false
     private var authority: AuthorityTrustLease?
     private var trust: DirectApprovalTrust?
     private var listener: (generation: UUID, value: any OwnedDirectListener)?
@@ -59,7 +60,13 @@ public actor DirectApprovalTransportHost {
         self.factory = factory; self.validatePeer = validatePeer; self.handler = handler
     }
 
+    func configureHandler(_ value: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void) throws {
+        guard !handlerSealed, !closed else { throw DirectHostError.stopped }
+        handler = value
+    }
+
     public func start() throws {
+        handlerSealed = true
         guard !closed else { throw DirectHostError.stopped }
         enabled = true
         if listener == nil { try open() }
