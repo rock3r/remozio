@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import RemozioProtocol
 
-public enum RetainedCommandCaptureError: Error, Equatable { case binding, invalidContext, closed }
+public enum RetainedCommandCaptureError: Error, Equatable { case binding, invalidContext, closed, alreadyOwned }
 
 /// Owns the original caller, input, and filesystem observations for one command request. This grants no execution authority.
 /// Construction takes ownership on success and failure. The request owner must serialize access and must not reuse the received submission.
@@ -12,6 +12,7 @@ public final class RetainedCommandCapture {
     private let input: RetainedCommandInputDescriptor
     private let filesystem: CommandFilesystemCapture
     private var closed = false
+    private var requestOwned = false
 
     /// Supply target credentials and the minimal environment from protected policy and OS resolution.
     /// The expected caller binding comes from the authenticated channel; the authority creates the stream binding.
@@ -63,6 +64,13 @@ public final class RetainedCommandCapture {
     }
 
     deinit { close() }
+
+    /// A repeated transfer must not close resources already held by an admitted request.
+    func claimForRequestOwner() throws {
+        guard !closed else { throw RetainedCommandCaptureError.closed }
+        guard !requestOwned else { throw RetainedCommandCaptureError.alreadyOwned }
+        requestOwned = true
+    }
 
     /// Invoke after durable permit consumption and current elevation-policy validation, immediately before dispatch.
     public func recheck(currentPolicy: XPCPeerPolicy, checkCancellation: () throws -> Void = {}) throws {

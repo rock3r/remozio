@@ -174,6 +174,7 @@ public final class AuthorityJournal: @unchecked Sendable {
             try requireNoRequestOperation()
             try database.close()
             storage?.continuity.close()
+            requests?.close()
             requests = nil
         }
     }

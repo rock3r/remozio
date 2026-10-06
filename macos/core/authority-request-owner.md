@@ -18,3 +18,46 @@ Storage validation precedes the callback. Successful closure drops live request 
 `AuthorityService` accepts this prepared journal owner. Its listener uses the same owner for trust queries, and service closure retires request access and releases storage.
 
 This establishes an ownership boundary, not an admission or execution gate. Target validation, capacity reservations, recovery, authenticated RPC dispatch, and daemon composition remain required. Tests use a disposable protected journal and synthetic request data. No real action or device is used.
+
+## Native command ownership
+
+`admitCommand` transfers a `RetainedCommandCapture` into the same entry as its immutable issued request.
+The draft must contain the exact captured bytes, the same command schema, and execute/decline for the current request.
+The host supplies the current protected caller policy. The owner rechecks the original caller and files before admission.
+It samples the authority clock after that work, so an elapsed deadline cannot use the earlier observation time.
+A failed first admission closes the transferred caller, input, and filesystem resources.
+An already transferred owner cannot be admitted again; that rejection leaves its existing request intact.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Recheck: Transfer original capture
+    Recheck --> Released: Validation or admission failure
+    Recheck --> Pending: Commit request-created audit event
+    Pending --> Authorized: Consume signed biometric decision
+    Authorized --> Executing: Record controller-observed dispatch
+    Pending --> Released: Decline, cancel, expire, or lose target
+    Authorized --> Released: Verified no dispatch or unknown outcome
+    Executing --> Released: Verified result or unknown outcome
+    Pending --> Released: Owner shutdown
+    Authorized --> Released: Owner shutdown
+    Executing --> Released: Owner shutdown
+```
+
+Queued, presented, authorized, and executing entries retain the original OS objects.
+A terminal transition closes them only after its audit transaction commits.
+An audit rollback leaves the previous pending state and objects intact.
+Owner shutdown and an invalid authority clock release all live objects without inventing a durable outcome.
+`AuthorityJournal.close` explicitly retires the coordinator after successful storage closure.
+The coordinator destructor also retires its resources.
+
+The existing raw `admit` API remains for trusted adapters and fixtures. It does not construct or retain command OS provenance.
+Production command adapters must use `admitCommand`; parsing a caller-provided capture is not an equivalent path.
+A typed capture transfer is not replay protection, current elevation-policy validation, or an execution permit.
+The host must complete those gates, authenticated channel negotiation, protected deployment, and descriptor budgets before exposing an endpoint.
+This change enables no Root installation or command execution and selects no pending sudoers policy.
+
+Real Mach/fileport tests bind exact capture bytes through request creation and biometric decision consumption.
+They verify terminal cleanup, pending expiry, cancellation, changed policy, duplicate ownership, and capacity rejection.
+Injected audit failures preserve existing resources on rollback and release rejected admission resources.
+A fresh clock check rejects a deadline reached during the recheck.
+The tests use synthetic keys and disposable storage. They do not execute a command or exercise a phone.
