@@ -24,6 +24,7 @@ public final class AuthorityService: @unchecked Sendable {
     private let listener: AuthorityXPCListener
     private var maintenance: AuthorityMaintenanceLoop?
     private let requestClock: @Sendable () throws -> AuthorityMoment
+    private let onMaintenanceFailure: @Sendable () -> Void
     private var started = false
     private var closed = false
 
@@ -36,13 +37,14 @@ public final class AuthorityService: @unchecked Sendable {
     /// Callbacks are required, synchronous, and must not reenter the service or journal. No listener starts here.
     public convenience init(requestStartup: AuthorityRequestStartupConfiguration,
                             routing: @escaping @Sendable () throws -> PresenceRouting,
-                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+                            onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
         try self.init(requestStartup: requestStartup,
             openJournal: { try Self.openJournal(configuration: requestStartup.service) },
             loadSigner: { journal in
                 try EnclaveAuthorityRequestSigner.load(path: requestStartup.keyRecordPath,
                     configuration: requestStartup.service, expectedPublicKey: requestStartup.authorityPublicKey, journal: journal)
-            }, routing: routing, reconcileExpired: reconcileExpired)
+            }, routing: routing, reconcileExpired: reconcileExpired, onMaintenanceFailure: onMaintenanceFailure)
     }
 
     /// Fixture storage/key-loading seam. It preserves hardware-only signing and production service self-validation.
@@ -50,13 +52,15 @@ public final class AuthorityService: @unchecked Sendable {
                      openJournal: () throws -> AuthorityJournal,
                      loadSigner: (AuthorityJournal) throws -> EnclaveAuthorityRequestSigner,
                      routing: @escaping @Sendable () throws -> PresenceRouting,
-                     reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+                     reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+                     onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
         let journal = try openJournal()
         do {
             let signer = try loadSigner(journal)
             let providers = try AuthorityRequestProviders(configuration: requestStartup.service, signer: signer, routing: routing)
             try self.init(configuration: requestStartup.service, journal: journal, requestProviders: providers,
-                maintenanceIntervalMilliseconds: requestStartup.maintenanceIntervalMilliseconds, reconcileExpired: reconcileExpired)
+                maintenanceIntervalMilliseconds: requestStartup.maintenanceIntervalMilliseconds, reconcileExpired: reconcileExpired,
+                onMaintenanceFailure: onMaintenanceFailure)
         } catch {
             try? journal.close()
             throw error
@@ -98,9 +102,11 @@ public final class AuthorityService: @unchecked Sendable {
     /// Protected signer loading and provisioning must precede construction. Closure retires the shared request owner.
     public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
                             requestProviders: AuthorityRequestProviders, maintenanceIntervalMilliseconds: Int = 1000,
-                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+                            onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
         try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
-            validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders, reconcileExpired: reconcileExpired)
+            validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders, reconcileExpired: reconcileExpired,
+            onMaintenanceFailure: onMaintenanceFailure)
     }
 
     /// Internal lifecycle fixture. Public constructors always validate the running authority against retained policy.
@@ -112,8 +118,10 @@ public final class AuthorityService: @unchecked Sendable {
          pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
          exchangeRequest: AuthorityRequestExchangeProvider? = nil,
          requestProviders: AuthorityRequestProviders? = nil,
-         reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil) throws {
+         reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
+         onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
         self.journal = journal
+        self.onMaintenanceFailure = onMaintenanceFailure
         do {
             if let requestClock { self.requestClock = requestClock }
             else {
@@ -161,10 +169,10 @@ public final class AuthorityService: @unchecked Sendable {
                         let states = try requestProviders.expirePending(owner, clock: clock)
                         try reconcileExpired(states)
                     }
-                }, failed: { [weak self] in try? self?.close() })
+                }, failed: { [weak self] in self?.maintenanceDidFail() })
             } else if let maintain {
                 maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: maintenanceIntervalMilliseconds,
-                    work: maintain, failed: { [weak self] in try? self?.close() })
+                    work: maintain, failed: { [weak self] in self?.maintenanceDidFail() })
             }
         } catch {
             try? journal.close()
@@ -224,6 +232,17 @@ public final class AuthorityService: @unchecked Sendable {
                 throw error
             }
         }
+    }
+
+    /// Maintenance calls this after releasing its work lock. Report retirement once after attempting service closure.
+    /// The observer must return promptly and must not reenter this service or journal.
+    func maintenanceDidFail() {
+        let notify = lock.withLock {
+            guard !closed else { return false }
+            try? close()
+            return true
+        }
+        if notify { onMaintenanceFailure() }
     }
 
     /// Stops admissions before waiting for any journal transaction and releasing storage.

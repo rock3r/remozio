@@ -157,6 +157,26 @@ final class AuthorityServiceTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    func testMaintenanceRetirementReportsOnceAfterReleasingWriterLease() throws {
+        let fixture = try Fixture(), anchor = fixture.root.path, owner = getuid()
+        let retired = expectation(description: "service retired")
+        retired.assertForOverFulfill = true
+        let journal = AuthorityJournal(database: try database(fixture))
+        let service = try AuthorityService(configuration: configuration(fixture), journal: journal,
+            validateSelf: { _ in }, onMaintenanceFailure: {
+                do {
+                    let lease = try ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: owner)
+                    lease.close()
+                } catch { XCTFail("Retirement preceded writer release") }
+                retired.fulfill()
+            })
+        service.maintenanceDidFail(); service.maintenanceDidFail()
+        wait(for: [retired], timeout: 1)
+        XCTAssertThrowsError(try journal.read { try $0.approvalTrustSnapshot() }) { XCTAssertEqual($0 as? JournalDatabaseError, .closed) }
+        XCTAssertThrowsError(try service.start())
+        try service.close()
+    }
+
     private func startup(_ fixture: Fixture, publicKey: Data? = nil) throws -> AuthorityRequestStartupConfiguration {
         let base = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             journalDirectory: fixture.directory, serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ",

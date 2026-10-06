@@ -18,6 +18,9 @@ flowchart TD
     K -->|Failure| X
     E -->|Failure| X
     L -->|Failure| X
+    L --> M[Expiry or target cleanup fails]
+    M --> X
+    M --> S[Runner reports Retired; supervisor receives failure]
 ```
 
 ## Local configuration
@@ -36,11 +39,11 @@ The container is at most 64 KiB. Unknown, missing, duplicate, noncanonical or mi
 
 Provisioning writes this machine's configuration and key record. The container is not a portable setup export. Runtime does not generate a key, discover a replacement pin, initialize an empty journal, migrate storage, or repair inconsistent trust. The original trust-only configuration and initializer remain available; request startup never downgrades to them after a failure.
 
-Every temporary-storage retry reloads the protected inputs, reopens both stores, and restores the configured signer. Opened stores close if signer restoration or service construction fails. A successful runner owns one started service and its shutdown. Inputs stay fixed within that service lifetime; coordinated activation must replace them outside active request work.
+Every temporary-storage retry reloads the protected inputs, reopens both stores, and restores the configured signer. Opened stores close if signer restoration or service construction fails. A successful runner owns one started service and its shutdown. A maintenance failure closes the service and reports Retired. It does not reopen the service or retry uncertain target cleanup. The supervisor receives this terminal diagnostic. Early retirement cannot report Running; notifications from an abandoned startup attempt cannot retire a replacement. Inputs stay fixed within that service lifetime; coordinated activation must replace them outside active request work.
 
 ## Evidence and remaining integration
 
-Component tests cover configuration boundaries and strict parsing, normal-user rejection, retry with changed protected inputs, key-load failure, pin mismatch, and writer-lease release. Existing service tests cover failed start and orderly shutdown. No root service is installed or activated by these tests.
+Component tests cover configuration boundaries and strict parsing, normal-user rejection, retry with changed protected inputs, key-load failure, pin mismatch, writer-lease release, early and asynchronous retirement, stale failure notifications, and shutdown races. Existing service tests cover failed start and orderly shutdown. No root service is installed or activated by these tests.
 
 The bundled `AuthorityMain` still selects the original trust-only initializer. Selecting this request startup path requires its runtime owner to supply real presence and target cleanup, rather than hard-code Away or discard expired targets. Protected provisioning, activation, request admission, target execution, local command approval, and transport executable wiring remain required.
 

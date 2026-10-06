@@ -143,7 +143,7 @@ final class AuthorityServiceRunnerTests: XCTestCase {
     func testRequestRetryReloadsInputsAndTransfersOneCompleteService() throws {
         let first = try requestInputs(1), second = try requestInputs(2), probe = Probe()
         let running = expectation(description: "request service running")
-        let runner = try AuthorityServiceRunner(requestConfiguration: { probe.open() == 1 ? first : second }, openRequestService: { inputs in
+        let runner = try AuthorityServiceRunner(requestConfiguration: { probe.open() == 1 ? first : second }, openRequestService: { inputs, _ in
             probe.recordInput(inputs.canonicalBytes)
             if inputs.canonicalBytes == first.canonicalBytes { throw JournalLeaseError.busy }
             return { probe.close() }
@@ -162,7 +162,7 @@ final class AuthorityServiceRunnerTests: XCTestCase {
         let probe = Probe(), failed = expectation(description: "invalid request inputs")
         let runner = try AuthorityServiceRunner(requestConfiguration: {
             _ = probe.open(); throw AuthorityServiceConfigurationError.invalidConfiguration
-        }, openRequestService: { _ in XCTFail("Invalid inputs opened a service"); return {} },
+        }, openRequestService: { _, _ in XCTFail("Invalid inputs opened a service"); return {} },
             initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
                 probe.record($0); if case .failed = $0 { failed.fulfill() }
             })
@@ -188,7 +188,7 @@ final class AuthorityServiceRunnerTests: XCTestCase {
 
     func testRequestKeyFailureNeverReportsTrustOnlySuccessOrRotatesInputs() throws {
         let inputs = try requestInputs(1), probe = Probe(), failed = expectation(description: "request key unavailable")
-        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs }, openRequestService: { inputs in
+        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs }, openRequestService: { inputs, _ in
             probe.recordInput(inputs.canonicalBytes); throw AuthorityRequestSignerError.unavailable
         }, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
             probe.record($0); if case .failed = $0 { failed.fulfill() }
@@ -200,13 +200,88 @@ final class AuthorityServiceRunnerTests: XCTestCase {
         try runner.close()
     }
 
+    func testEarlyRequestRetirementNeverReportsRunning() throws {
+        let inputs = try requestInputs(1), probe = Probe(), retired = expectation(description: "early retirement")
+        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs },
+            openRequestService: { _, retirement in retirement(); return { probe.close() } },
+            initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+                probe.record($0); if $0 == .retired { retired.fulfill() }
+            })
+        try runner.start(); wait(for: [retired], timeout: 2)
+        XCTAssertEqual(runner.status, .retired)
+        XCTAssertEqual(probe.statuses, [.starting, .retired])
+        XCTAssertThrowsError(try runner.start())
+        try runner.close()
+        XCTAssertEqual(probe.counts.closes, 1)
+    }
+    func testAsynchronousRequestRetirementReportsOnceWithoutReopeningService() throws {
+        let inputs = try requestInputs(1), probe = Probe()
+        let running = expectation(description: "running before retirement"), retired = expectation(description: "retired")
+        retired.assertForOverFulfill = true
+        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs }, openRequestService: { _, retirement in
+            probe.retainRetirement(retirement); return { probe.close() }
+        }, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+            probe.record($0)
+            if $0 == .running { running.fulfill() }
+            if $0 == .retired { retired.fulfill() }
+        })
+        try runner.start(); wait(for: [running], timeout: 2)
+        probe.fireRetirement(0); probe.fireRetirement(0)
+        wait(for: [retired], timeout: 2)
+        XCTAssertEqual(runner.status, .retired)
+        XCTAssertEqual(probe.statuses, [.starting, .running, .retired])
+        XCTAssertEqual(probe.counts.opens, 1)
+        try runner.close(); try runner.close()
+        XCTAssertEqual(probe.counts.closes, 1)
+    }
+    func testRetirementFromFailedAttemptCannotRetireReplacement() throws {
+        let inputs = try requestInputs(1), probe = Probe()
+        let running = expectation(description: "replacement running"), retired = expectation(description: "no stale retirement")
+        retired.isInverted = true
+        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs }, openRequestService: { _, retirement in
+            probe.retainRetirement(retirement)
+            if probe.counts.opens == 1 { throw JournalLeaseError.busy }
+            return { probe.close() }
+        }, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+            probe.record($0); if $0 == .running { running.fulfill() }; if $0 == .retired { retired.fulfill() }
+        })
+        try runner.start(); wait(for: [running], timeout: 3)
+        probe.fireRetirement(0)
+        wait(for: [retired], timeout: 0.2)
+        XCTAssertEqual(runner.status, .running)
+        XCTAssertEqual(probe.counts.opens, 2)
+        try runner.close()
+        XCTAssertEqual(probe.counts.closes, 1)
+    }
+    func testRequestRetirementAfterCloseCannotChangeClosedStatus() throws {
+        let inputs = try requestInputs(1), probe = Probe()
+        let running = expectation(description: "request service running"), retired = expectation(description: "no retirement after close")
+        retired.isInverted = true
+        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs }, openRequestService: { _, retirement in
+            probe.retainRetirement(retirement); return { probe.close() }
+        }, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+            if $0 == .running { running.fulfill() }; if $0 == .retired { retired.fulfill() }
+        })
+        try runner.start(); wait(for: [running], timeout: 2)
+        try runner.close(); probe.fireRetirement(0)
+        wait(for: [retired], timeout: 0.2)
+        XCTAssertEqual(runner.status, .closed)
+        XCTAssertEqual(probe.counts.closes, 1)
+    }
+
     private final class Probe: @unchecked Sendable {
         private let lock = NSLock()
         private var opens = 0, closes = 0
         private var events: [AuthorityServiceRunner.Status] = []
         private var loadedInputs: [Data] = []
+        private var retirements: [AuthorityServiceRunner.Retirement] = []
         func open() -> Int { lock.withLock { opens += 1; return opens } }
         @discardableResult func close() -> Int { lock.withLock { closes += 1; return closes } }
+        func retainRetirement(_ callback: @escaping AuthorityServiceRunner.Retirement) { lock.withLock { retirements.append(callback) } }
+        func fireRetirement(_ index: Int) {
+            let callback: AuthorityServiceRunner.Retirement = lock.withLock { retirements[index] }
+            callback()
+        }
         func recordInput(_ bytes: Data) { lock.withLock { loadedInputs.append(bytes) } }
         var inputs: [Data] { lock.withLock { loadedInputs } }
         func record(_ status: AuthorityServiceRunner.Status) { lock.withLock { events.append(status) } }

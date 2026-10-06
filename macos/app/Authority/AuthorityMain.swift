@@ -35,6 +35,8 @@ struct AuthorityMain {
         case .idle, .starting, .closed: break
         case .running:
             log("Authority trust service started.")
+        case .retired:
+            fail("Authority service stopped after a maintenance failure.", code: EX_SOFTWARE)
         case .waiting(let milliseconds):
             log("Authority starting: storage is temporarily unavailable. Retrying in \(milliseconds) milliseconds.")
         case .failed(.historyRecoveryRequired):
