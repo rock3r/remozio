@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RemozioMach
+import RemozioProtocol
 import Security
 import XCTest
 @testable import RemozioCore
@@ -266,6 +267,11 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let submission = try receiver.receiveInput(timeoutMilliseconds: 1000)
         XCTAssertEqual(submission.payload, payload)
         XCTAssertEqual(submission.caller.requester.pid, UInt32(getpid()))
+        let capture = try submission.input.capture(streamBinding: Data(repeating: 0xa1, count: 16))
+        XCTAssertEqual(capture.kind, .pipe)
+        XCTAssertEqual(capture.kind.minimumSchemaVersion, 1)
+        XCTAssertEqual(capture.streamBinding, Data(repeating: 0xa1, count: 16))
+        XCTAssertNil(capture.observedPath)
         let later = Data("later".utf8)
         XCTAssertEqual(later.withUnsafeBytes { Darwin.write(descriptors[1], $0.baseAddress, $0.count) }, later.count)
         var imported: Int32 = -1
@@ -362,6 +368,11 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
         try endpoint.sendInput(Data([7]), fileport: fileport)
         let submission = try receiver.receiveInput(timeoutMilliseconds: 1000)
+        let capture = try submission.input.capture(streamBinding: Data(repeating: 0xa2, count: 16))
+        XCTAssertEqual(capture.kind, .file)
+        XCTAssertEqual(capture.kind.minimumSchemaVersion, 1)
+        XCTAssertEqual(capture.identity, CapturedFileIdentity(device: UInt64(UInt32(bitPattern: original.st_dev)), inode: original.st_ino))
+        XCTAssertNotNil(capture.observedPath)
         try submission.input.withBorrowedDescriptor { imported in
             var observed = stat()
             XCTAssertEqual(fstat(imported, &observed), 0)
@@ -385,6 +396,154 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
         try endpoint.send(Data([8]))
         XCTAssertEqual(try receiver.receive(timeoutMilliseconds: 1000).payload, Data([8]))
+    }
+
+    private func inputSubmission(_ fd: Int32) throws -> ReceivedMachCommandInputSubmission {
+        let endpoint = try Endpoint()
+        var fileport: mach_port_t = UInt32(MACH_PORT_NULL)
+        guard fileport_makeport(fd, &fileport) == 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        try endpoint.sendInput(Data([1]), fileport: fileport)
+        return try receiver(endpoint).receiveInput(timeoutMilliseconds: 1000)
+    }
+
+    func testSocketCapturePreservesQueuedInputAndSharedFlags() throws {
+        var pair: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { for fd in pair { _ = Darwin.close(fd) } }
+        let flags = fcntl(pair[0], F_GETFL)
+        XCTAssertEqual(fcntl(pair[0], F_SETFL, flags | O_NONBLOCK), 0)
+        let queued = Data("socket".utf8)
+        XCTAssertEqual(queued.withUnsafeBytes { Darwin.write(pair[1], $0.baseAddress, $0.count) }, queued.count)
+        let submission = try inputSubmission(pair[0])
+        defer { submission.input.close(); submission.caller.close() }
+        let capture = try submission.input.capture(streamBinding: Data(repeating: 0xa3, count: 16))
+        XCTAssertEqual(capture.kind, .socket)
+        XCTAssertEqual(capture.kind.minimumSchemaVersion, 2)
+        XCTAssertNil(capture.observedPath)
+        XCTAssertNotNil(capture.identity)
+        XCTAssertEqual(fcntl(pair[0], F_GETFL), flags | O_NONBLOCK)
+        try submission.input.withBorrowedDescriptor { fd in
+            var bytes = [UInt8](repeating: 0, count: queued.count)
+            XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count)
+            XCTAssertEqual(Data(bytes), queued)
+        }
+    }
+
+    func testDirectoryAndDeviceCaptureKeepDistinctKinds() throws {
+        let resources: [(String, Int32, CommandInputKind)] = [
+            (FileManager.default.temporaryDirectory.path, O_RDONLY | O_DIRECTORY, .directory),
+            ("/dev/zero", O_RDONLY, .device), ("/dev/null", O_RDONLY, .null),
+        ]
+        for (path, flags, kind) in resources {
+            let fd = Darwin.open(path, flags | O_CLOEXEC)
+            guard fd >= 0 else { throw RetainedCommandInputError.system(errno) }
+            defer { _ = Darwin.close(fd) }
+            let submission = try inputSubmission(fd)
+            defer { submission.input.close(); submission.caller.close() }
+            let capture = try submission.input.capture(streamBinding: Data(repeating: 0xa4, count: 16))
+            XCTAssertEqual(capture.kind, kind)
+            if kind == .null {
+                XCTAssertNil(capture.streamBinding); XCTAssertNil(capture.observedPath); XCTAssertNil(capture.identity)
+            } else {
+                var original = stat()
+                XCTAssertEqual(fstat(fd, &original), 0)
+                XCTAssertEqual(capture.identity, CapturedFileIdentity(device: UInt64(UInt32(bitPattern: original.st_dev)), inode: original.st_ino))
+                XCTAssertNotNil(capture.observedPath)
+                XCTAssertEqual(capture.kind.minimumSchemaVersion, 2)
+            }
+            XCTAssertEqual(fcntl(fd, F_GETFL) & O_ACCMODE, O_RDONLY)
+        }
+    }
+
+    func testTerminalCaptureUsesKernelTerminalObservationWithoutReadingInput() throws {
+        var master: Int32 = -1, slave: Int32 = -1
+        guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = Darwin.close(master); _ = Darwin.close(slave) }
+        let flags = fcntl(slave, F_GETFL)
+        let bytes = Data("terminal\n".utf8)
+        XCTAssertEqual(bytes.withUnsafeBytes { Darwin.write(master, $0.baseAddress, $0.count) }, bytes.count)
+        let submission = try inputSubmission(slave)
+        defer { submission.input.close(); submission.caller.close() }
+        let capture = try submission.input.capture(streamBinding: Data(repeating: 0xa5, count: 16))
+        XCTAssertEqual(capture.kind, .tty)
+        XCTAssertEqual(capture.kind.minimumSchemaVersion, 1)
+        XCTAssertNotNil(capture.observedPath)
+        XCTAssertEqual(fcntl(slave, F_GETFL), flags)
+        try submission.input.withBorrowedDescriptor { fd in
+            // A bounded readiness wait keeps a failed observation from blocking the test on an empty terminal.
+            var ready = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            XCTAssertEqual(poll(&ready, 1, 1000), 1)
+            guard ready.revents & Int16(POLLIN) != 0 else { return }
+            var actual = [UInt8](repeating: 0, count: bytes.count)
+            XCTAssertEqual(Darwin.read(fd, &actual, actual.count), actual.count)
+            XCTAssertEqual(Data(actual), bytes)
+        }
+    }
+
+    func testCaptureRejectsWriteOnlyInputAndInvalidBindingsAndRetiredOwner() throws {
+        let fd = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = Darwin.close(fd) }
+        let submission = try inputSubmission(fd)
+        defer { submission.input.close(); submission.caller.close() }
+        for count in [0, 15, 17] {
+            XCTAssertThrowsError(try submission.input.capture(streamBinding: Data(repeating: 1, count: count))) {
+                XCTAssertEqual($0 as? RetainedCommandInputError, .invalidBinding)
+            }
+        }
+        XCTAssertThrowsError(try submission.input.capture(streamBinding: Data(repeating: 1, count: 16))) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .notReadable)
+        }
+        XCTAssertEqual(fcntl(fd, F_GETFL) & O_ACCMODE, O_WRONLY)
+        submission.input.close()
+        XCTAssertThrowsError(try submission.input.capture(streamBinding: Data(repeating: 1, count: 16))) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .closed)
+        }
+    }
+
+    func testEventOnlyInputIsNotAdvertisedAsReadable() throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let created = Darwin.open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+        guard created >= 0 else { throw RetainedCommandInputError.system(errno) }
+        XCTAssertEqual(Darwin.close(created), 0)
+        defer { _ = Darwin.unlink(path) }
+        let fd = Darwin.open(path, O_EVTONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = Darwin.close(fd) }
+        let submission = try inputSubmission(fd)
+        defer { submission.input.close(); submission.caller.close() }
+        XCTAssertThrowsError(try submission.input.capture(streamBinding: Data(repeating: 1, count: 16))) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .notReadable)
+        }
+        XCTAssertNotEqual(fcntl(fd, F_GETFL) & O_EVTONLY, 0)
+    }
+
+    func testPathReplacementCannotReplaceTheCapturedInputObject() throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let original = Darwin.open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
+        guard original >= 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = Darwin.close(original); _ = Darwin.unlink(path) }
+        let bytes = Data("original".utf8)
+        XCTAssertEqual(bytes.withUnsafeBytes { Darwin.write(original, $0.baseAddress, $0.count) }, bytes.count)
+        XCTAssertEqual(lseek(original, 0, SEEK_SET), 0)
+        let submission = try inputSubmission(original)
+        defer { submission.input.close(); submission.caller.close() }
+        let first = try submission.input.capture(streamBinding: Data(repeating: 0xa6, count: 16))
+        XCTAssertEqual(Darwin.unlink(path), 0)
+        let replacement = Darwin.open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
+        guard replacement >= 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = Darwin.close(replacement) }
+        var fresh = stat()
+        XCTAssertEqual(fstat(replacement, &fresh), 0)
+        XCTAssertNotEqual(first.identity?.inode, fresh.st_ino)
+        let observed = try submission.input.capture(streamBinding: Data(repeating: 0xa6, count: 16))
+        XCTAssertEqual(observed.identity, first.identity)
+        try submission.input.withBorrowedDescriptor { fd in
+            var actual = [UInt8](repeating: 0, count: bytes.count)
+            XCTAssertEqual(Darwin.read(fd, &actual, actual.count), actual.count)
+            XCTAssertEqual(Data(actual), bytes)
+        }
     }
 
     private final class Peer {

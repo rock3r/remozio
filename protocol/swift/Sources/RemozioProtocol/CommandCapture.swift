@@ -33,12 +33,18 @@ public struct CapturedEnvironmentEntry: Equatable, Sendable {
     public let value: Data
     public let source: EnvironmentSource
 }
-public enum CommandInputKind: UInt64, Sendable { case null, pipe, file, tty, pty, socket, directory, device, other }
+public enum CommandInputKind: UInt64, Sendable {
+    case null, pipe, file, tty, pty, socket, directory, device, other
+    public var minimumSchemaVersion: UInt64 { rawValue <= 4 ? 1 : 2 }
+}
 public struct CapturedCommandInput: Equatable, Sendable {
     public let kind: CommandInputKind
     public let streamBinding: Data?
     public let observedPath: Data?
     public let identity: CapturedFileIdentity?
+    public init(kind: CommandInputKind, streamBinding: Data?, observedPath: Data?, identity: CapturedFileIdentity?) {
+        self.kind = kind; self.streamBinding = streamBinding; self.observedPath = observedPath; self.identity = identity
+    }
 }
 public enum CommandIOMode: UInt64, Sendable { case pipes, pty }
 public enum StartedCommandDisconnect: UInt64, Sendable { case terminate, continueRunning }
@@ -133,7 +139,7 @@ public struct CommandCapture: Equatable, Sendable {
         self.environment = environment
         let input = try CaptureFields(root[6], count: 4)
         let kind: CommandInputKind = try input.tag(0)
-        guard schemaVersion == 2 || kind.rawValue <= 4 else { throw CommandCaptureError.enumeration }
+        guard schemaVersion >= kind.minimumSchemaVersion else { throw CommandCaptureError.enumeration }
         let binding = try input.optionalBytes(1, count: 16)
         let path = try input.optionalPath(2)
         let identity = try input.optionalIdentity(3)
