@@ -307,16 +307,11 @@ public final class ApprovalRequestCoordinator {
     /// Bounded discovery hints for one current enrollment, never approval or delivery acknowledgments.
     /// The host serializes this call with authority changes. Fetch each frame through retainedDeliveryFrame.
     public func pendingDeliveryRequestIDs(binding: AuthorityPeerBinding, routing: PresenceRouting,
-                                          now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> [Data] {
+                                          now: AuthorityMoment) throws -> [Data] {
         try checkClock(now)
         let trust = try read { transaction in
             try transaction.requireDirectApprovalBinding(binding)
             return try transaction.requestDeliveryTrust()
-        }
-        if entries.values.contains(where: {
-            ($0.state.phase == .queued || $0.state.phase == .presented) && now.milliseconds >= $0.state.deadlineMilliseconds
-        }) {
-            _ = try expirePending(now: now, receiptTimeMs: receiptTimeMs)
         }
         var result: [Data] = []
         for id in entries.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
