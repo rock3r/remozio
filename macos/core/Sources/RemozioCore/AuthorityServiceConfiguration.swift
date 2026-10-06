@@ -13,6 +13,11 @@ public struct AuthorityServiceConfiguration: Sendable {
     public let serviceName: String
     public let transportPolicy: XPCPeerPolicy
     public let maximumPayloadBytes: Int
+    /// Reserves the signed carrier inside the configured channel payload budget.
+    public var maximumRequestBodyBytes: Int { Self.requestBodyLimit(maximumPayloadBytes) }
+    static func requestBodyLimit(_ maximumPayloadBytes: Int) -> Int {
+        max(1, maximumPayloadBytes - ApprovalMessage.overheadBytes)
+    }
     public let minimumEnvelopeVersion: UInt64
     public let auditVersions: Set<UInt64>
     public let maximumConnections: Int

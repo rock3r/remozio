@@ -39,7 +39,7 @@ final class ProtectedServiceConfigurationTests: XCTestCase {
         XCTAssertEqual(decoded.journalDirectory, value.journalDirectory); XCTAssertEqual(decoded.serviceName, value.serviceName)
         XCTAssertEqual(decoded.transportPolicy.requirement, value.transportPolicy.requirement)
         XCTAssertEqual(decoded.transportPolicy.expectedUserID, 501)
-        XCTAssertEqual(decoded.maximumPayloadBytes, 4096); XCTAssertEqual(decoded.minimumEnvelopeVersion, 2)
+        XCTAssertEqual(decoded.maximumPayloadBytes, 4096); XCTAssertEqual(decoded.maximumRequestBodyBytes, 3968); XCTAssertEqual(decoded.minimumEnvelopeVersion, 2)
         XCTAssertEqual(decoded.auditVersions, [1, 2]); XCTAssertEqual(decoded.maximumConnections, 4)
         XCTAssertEqual(decoded.handshakeTimeoutMilliseconds, 1234); XCTAssertEqual(decoded.maximumOperations, 3)
     }

@@ -57,7 +57,9 @@ public final class AuthorityJournal: @unchecked Sendable {
             guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
             requestStartupAttempted = true
             do {
-                let limits = try CBORLimits(maxBytes: maximumPayloadBytes, maxDepth: 32, maxItems: 262_144)
+                guard (1...16_777_216).contains(maximumPayloadBytes) else { throw ApprovalCoordinatorError.invalidConfiguration }
+                let bodyBytes = AuthorityServiceConfiguration.requestBodyLimit(maximumPayloadBytes)
+                let limits = try CBORLimits(maxBytes: bodyBytes, maxDepth: 32, maxItems: 262_144)
                 let auditLimits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
                 let retainedBytes = 67_108_864
                 guard maximumPayloadBytes <= retainedBytes else { throw ApprovalCoordinatorError.invalidConfiguration }

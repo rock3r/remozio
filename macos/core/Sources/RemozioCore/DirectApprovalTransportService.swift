@@ -1,10 +1,13 @@
 import Foundation
 import Security
+import RemozioProtocol
 
 /// Owns one transport incarnation. Authority reconnection requires a new service instance.
 public actor DirectApprovalTransportService {
     private let feed: AuthorityTrustFeed
     private let host: DirectApprovalTransportHost
+    private let useDefaultDelivery: Bool
+    private let requestDeliveryTimeoutMilliseconds: UInt64
     private var started = false
     private var closed = false
 
@@ -13,19 +16,24 @@ public actor DirectApprovalTransportService {
                 binding: DirectApprovalListener.Binding = .localNetwork,
                 maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000,
                 authorityTimeoutMilliseconds: UInt64 = 5000, refreshMilliseconds: UInt64 = 5000,
-                maximumWaiting: Int = 8,
-                handler: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void) throws {
+                maximumWaiting: Int = 8, requestDeliveryTimeoutMilliseconds: UInt64 = 30_000,
+                handler: (@Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void)? = nil) throws {
+        guard (1...60_000).contains(requestDeliveryTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
+        self.requestDeliveryTimeoutMilliseconds = requestDeliveryTimeoutMilliseconds
         let feed = try AuthorityTrustFeed(serviceName: authorityServiceName, peerPolicy: authorityPolicy,
             macID: macID, accountID: accountID, timeoutMilliseconds: authorityTimeoutMilliseconds,
             refreshMilliseconds: refreshMilliseconds, maximumWaiting: maximumWaiting)
         self.feed = feed
+        useDefaultDelivery = handler == nil
         host = try DirectApprovalTransportHost(macID: macID, accountID: accountID, identity: identity,
             binding: binding, maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
-            validatePeer: { try await feed.validatePeer($0, revision: $1) }, handler: handler)
+            validatePeer: { try await feed.validatePeer($0, revision: $1) },
+            handler: handler ?? { _, _ in throw DirectHostError.stopped })
     }
 
-    init(feed: AuthorityTrustFeed, host: DirectApprovalTransportHost) {
-        self.feed = feed; self.host = host
+    init(feed: AuthorityTrustFeed, host: DirectApprovalTransportHost, useDefaultDelivery: Bool = false) {
+        self.feed = feed; self.host = host; self.useDefaultDelivery = useDefaultDelivery
+        requestDeliveryTimeoutMilliseconds = 30_000
     }
 
     deinit {
@@ -40,6 +48,13 @@ public actor DirectApprovalTransportService {
         started = true
         do {
             try Task.checkCancellation()
+            if useDefaultDelivery {
+                let timeout = requestDeliveryTimeoutMilliseconds
+                try await host.configureHandler { [weak self] session, channel in
+                    guard let self else { throw DirectHostError.stopped }
+                    try await self.deliverPendingRequests(for: session, over: channel, timeoutMilliseconds: timeout)
+                }
+            }
             try await feed.start(host: host)
             guard !closed else { throw DirectHostError.stopped }
             try Task.checkCancellation()
@@ -73,6 +88,90 @@ public actor DirectApprovalTransportService {
         try Task.checkCancellation()
         guard !closed else { throw DirectHostError.stopped }
         return ids
+    }
+
+    /// Sends one bounded discovery snapshot over the admitted channel. Writes are not phone receipts or approvals.
+    /// The default listener closes this fetch connection afterward. Custom handlers may continue with other operations.
+    /// Failure closes the channel. Missing or incompatible frames do not imply a terminal request outcome.
+    public func deliverPendingRequests(for session: DirectApprovalSession, over channel: NegotiatedNetworkChannel,
+                                       timeoutMilliseconds: UInt64 = 30_000) async throws {
+        try await withTaskCancellationHandler {
+            do {
+                guard started, !closed else { throw DirectHostError.stopped }
+                guard (1...60_000).contains(timeoutMilliseconds) else { throw ApprovalChannelError.invalidInput }
+                let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(timeoutMilliseconds)))
+                let metadata = try await channel.negotiated()
+                guard metadata.peer.role == .phone, metadata.peer.scope == session.peer.scope,
+                      metadata.envelopeVersion == 1,
+                      session.peer.requests.contains(where: { local in
+                          metadata.peer.requests.contains { $0.kind == local.kind && $0.wireVersion == local.wireVersion &&
+                              $0.schemaVersion == local.schemaVersion }
+                      }) else { throw ApprovalChannelError.invalidInput }
+                let ids = try await pendingRequestIDs(for: session)
+                for id in ids {
+                    try Task.checkCancellation()
+                    guard ContinuousClock.now < deadline else { throw ApprovalChannelError.timedOut }
+                    guard let frame = try await requestFrame(for: session, requestID: id) else { continue }
+                    guard try Self.supports(frame, maximumBytes: session.peer.maximumPayloadBytes,
+                        local: session.peer.requests, remote: metadata.peer.requests) else { continue }
+                    try await host.validate(session)
+                    try Task.checkCancellation()
+                    guard !closed else { throw DirectHostError.stopped }
+                    try await Self.send(frame, over: channel, deadline: deadline)
+                }
+                try Task.checkCancellation()
+                guard !closed else { throw DirectHostError.stopped }
+                guard ContinuousClock.now < deadline else { throw ApprovalChannelError.timedOut }
+            } catch {
+                await channel.closeAndWait()
+                throw error
+            }
+        } onCancel: { channel.close() }
+    }
+
+    private static func supports(_ frame: Data, maximumBytes: Int,
+                                 local: [ChannelRequestCapability], remote: [ChannelRequestCapability]) throws -> Bool {
+        guard frame.count <= maximumBytes, maximumBytes > ApprovalMessage.overheadBytes else {
+            throw ApprovalChannelError.invalidInput
+        }
+        let message = try ApprovalMessage.decode(frame, maximumBodyBytes: maximumBytes - ApprovalMessage.overheadBytes)
+        let limits = try CBORLimits(maxBytes: maximumBytes, maxDepth: 32, maxItems: 262_144)
+        guard message.type == .request, message.purpose == .issuedRequest,
+              case .map(let body) = try DeterministicCBOR.decode(message.body, limits: limits),
+              case .unsigned(let kind) = body[5], case .unsigned(let schema) = body[6],
+              case .array(let values) = body[7], values.count <= 64 else { throw ApprovalChannelError.invalidInput }
+        var features = Set<UInt64>(), previous: UInt64?
+        for value in values {
+            guard case .unsigned(let feature) = value, previous == nil || feature > previous! else {
+                throw ApprovalChannelError.invalidInput
+            }
+            features.insert(feature); previous = feature
+        }
+        func accepts(_ capabilities: [ChannelRequestCapability]) -> Bool {
+            capabilities.contains { $0.kind == kind && $0.wireVersion == message.wireVersion &&
+                $0.schemaVersion == schema && features.isSubset(of: $0.features) }
+        }
+        return accepts(local) && accepts(remote)
+    }
+
+    private static func send(_ frame: Data, over channel: NegotiatedNetworkChannel,
+                             deadline: ContinuousClock.Instant) async throws {
+        guard ContinuousClock.now < deadline else { throw ApprovalChannelError.timedOut }
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await channel.send(frame) }
+                group.addTask {
+                    try await ContinuousClock().sleep(until: deadline)
+                    channel.close()
+                    throw ApprovalChannelError.timedOut
+                }
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
+        } catch {
+            if !Task.isCancelled, ContinuousClock.now >= deadline { throw ApprovalChannelError.timedOut }
+            throw error
+        }
     }
 
     public func close() async {
