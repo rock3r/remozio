@@ -678,8 +678,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint)
         let submission = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
         defer { submission.caller.close() }
-        var selfToken = audit_token_t()
-        XCTAssertEqual(remozio_pid_audit_token(getpid(), &selfToken), KERN_SUCCESS)
+        var selfToken = audit_token_t(), missing = false
+        XCTAssertEqual(remozio_pid_audit_token(getpid(), &selfToken, &missing), KERN_SUCCESS)
         let capture = try submission.caller.captureAncestry(expression: peer.expression, userID: geteuid(),
             auditSessionID: nil, maximumEntries: 1)
         XCTAssertEqual(capture.entries.count, 1)

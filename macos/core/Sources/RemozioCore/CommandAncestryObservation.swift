@@ -53,12 +53,17 @@ enum CommandAncestryObservation {
         return withUnsafeBytes(of: &a) { first in withUnsafeBytes(of: &b) { first.elementsEqual($0) } }
     }
 
-    static func sample(_ pid: pid_t) throws -> Process {
-        var token = audit_token_t()
-        let result = remozio_pid_audit_token(pid, &token)
+    private static func auditToken(_ pid: pid_t) throws -> audit_token_t {
+        var token = audit_token_t(), missing = false
+        let result = remozio_pid_audit_token(pid, &token, &missing)
         guard result == KERN_SUCCESS else {
-            throw Unavailable(reason: result == KERN_PROTECTION_FAILURE ? .permission : .unsupported)
+            throw Unavailable(reason: missing ? .exited : (result == KERN_PROTECTION_FAILURE ? .permission : .unsupported))
         }
+        return token
+    }
+
+    static func sample(_ pid: pid_t) throws -> Process {
+        var token = try auditToken(pid)
         var bsd = proc_bsdshortinfo()
         errno = 0
         let size = proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &bsd, Int32(MemoryLayout<proc_bsdshortinfo>.size))
@@ -75,11 +80,7 @@ enum CommandAncestryObservation {
         if length > 0, bytes.first == 0x2f, let end = bytes.firstIndex(of: 0) {
             path = Data(bytes[..<end].map { UInt8(bitPattern: $0) })
         } else { path = nil }
-        var checked = audit_token_t()
-        let checkedResult = remozio_pid_audit_token(pid, &checked)
-        guard checkedResult == KERN_SUCCESS else {
-            throw Unavailable(reason: checkedResult == KERN_PROTECTION_FAILURE ? .permission : .unsupported)
-        }
+        let checked = try auditToken(pid)
         guard sameToken(token, checked) else {
             throw Unavailable(reason: audit_token_to_pidversion(token) != audit_token_to_pidversion(checked) ? .exited : .unsupported)
         }

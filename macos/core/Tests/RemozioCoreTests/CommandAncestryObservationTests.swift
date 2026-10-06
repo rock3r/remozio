@@ -21,6 +21,34 @@ final class CommandAncestryObservationTests: XCTestCase {
         default: fatalError("Unexpected synthetic process")
         }
     }
+    func testReapedProcessIsReportedAsExited() throws {
+        let child = Foundation.Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        child.environment = ["PATH": "/usr/bin:/bin"]
+        try child.run()
+        let pid = child.processIdentifier
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationStatus, 0)
+        var token = audit_token_t(), missing = false
+        XCTAssertNotEqual(remozio_pid_audit_token(pid, &token, &missing), KERN_SUCCESS)
+        XCTAssertTrue(missing)
+        XCTAssertThrowsError(try CommandAncestryObservation.sample(pid)) {
+            XCTAssertEqual(($0 as? CommandAncestryObservation.Unavailable)?.reason, .exited)
+        }
+    }
+
+    func testAuditLookupDoesNotReportLiveOrInvalidProcessAsMissing() throws {
+        var token = audit_token_t(), missing = true
+        XCTAssertEqual(remozio_pid_audit_token(getpid(), &token, &missing), KERN_SUCCESS)
+        XCTAssertFalse(missing)
+        XCTAssertEqual(audit_token_to_pid(token), getpid())
+        let original = token
+        missing = true
+        XCTAssertEqual(remozio_pid_audit_token(0, &token, &missing), KERN_INVALID_ARGUMENT)
+        XCTAssertFalse(missing)
+        XCTAssertTrue(CommandAncestryObservation.sameToken(original, token))
+    }
+
     func testCompleteChainPreservesKernelCounterBitsAndUnavailablePaths() throws {
         let value = try CommandAncestryObservation.capture(source: source.token, maximumEntries: 2, read: chain)
         XCTAssertEqual(value.completeness, .complete)

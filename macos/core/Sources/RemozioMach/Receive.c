@@ -1,5 +1,7 @@
 #include "RemozioMach.h"
 #include <bsm/libbsm.h>
+#include <errno.h>
+#include <libproc.h>
 #include <mach/task_info.h>
 
 kern_return_t remozio_preview_audit(mach_port_t endpoint, mach_msg_timeout_t timeout,
@@ -61,16 +63,24 @@ bool remozio_code_is_adhoc(uint32_t flags) {
     return (flags & kSecCodeSignatureAdhoc) != 0;
 }
 
-kern_return_t remozio_pid_audit_token(pid_t pid, audit_token_t *token) {
+static bool remozio_process_missing(pid_t pid) {
+    struct proc_bsdshortinfo info = {0};
+    errno = 0;
+    int size = proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, sizeof(info));
+    return size <= 0 && errno == ESRCH;
+}
+
+kern_return_t remozio_pid_audit_token(pid_t pid, audit_token_t *token, bool *missing) {
+    *missing = false;
     if (pid <= 0) return KERN_INVALID_ARGUMENT;
     mach_port_t name = MACH_PORT_NULL;
     kern_return_t result = task_name_for_pid(mach_task_self(), pid, &name);
-    if (result != KERN_SUCCESS) return result;
+    if (result != KERN_SUCCESS) { *missing = remozio_process_missing(pid); return result; }
     audit_token_t observed = {0};
     mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
     result = task_info(name, TASK_AUDIT_TOKEN, (task_info_t)&observed, &count);
     mach_port_deallocate(mach_task_self(), name);
-    if (result != KERN_SUCCESS) return result;
+    if (result != KERN_SUCCESS) { *missing = remozio_process_missing(pid); return result; }
     if (count != TASK_AUDIT_TOKEN_COUNT || audit_token_to_pid(observed) != pid) return KERN_INVALID_ARGUMENT;
     *token = observed;
     return KERN_SUCCESS;

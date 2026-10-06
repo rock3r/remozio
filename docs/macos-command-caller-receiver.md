@@ -192,6 +192,9 @@ flowchart LR
 
 The C shim obtains a task name right and reads `TASK_AUDIT_TOKEN` through the public Mach API.
 It releases that right after each query. The kernel token supplies the PID version and effective UID.
+If either token query fails, the shim separately checks whether the process lookup reports `ESRCH`.
+Only that confirmed missing-process observation maps the generic Mach failure to exited.
+Other unclassified failures remain unsupported; a generic failure alone does not prove exit or permission denial.
 The adapter samples parent links with `PROC_PIDT_SHORTBSDINFO` between two matching full audit-token observations.
 It reads available executable paths through `proc_pidpath_audittoken`, preserving their raw bytes.
 An unavailable path remains null. The adapter does not invent a PID version from a reserved BSD field.
@@ -261,3 +264,7 @@ Ancestry tests verify the actual parent of a disposable signed Mach sender, kern
 They reject old incarnations after exec and exit, invalid limits, wrong account policies, and retired caller records.
 Deterministic race tests cover changed parent links, changed caller and ancestor incarnations, cycles, missing paths, permission limits, and cancellation.
 They do not prove an atomic process tree, PID reuse, protected Root installation, or physical-device end-to-end behavior.
+The missing-process regression test reaps a disposable child before sampling it and expects an exited limitation.
+A live process and an invalid PID cannot inherit that classification. Failed token queries leave their token output unchanged.
+Apple's [task-name lookup](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_proc.c) returns the same generic failure for missing and denied processes.
+Its [process-info lookup](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c) provides the separate missing-process result.
