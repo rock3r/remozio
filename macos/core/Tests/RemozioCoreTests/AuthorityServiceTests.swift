@@ -157,6 +157,55 @@ final class AuthorityServiceTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    private func startup(_ fixture: Fixture, publicKey: Data? = nil) throws -> AuthorityRequestStartupConfiguration {
+        let base = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            journalDirectory: fixture.directory, serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ",
+            transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
+            continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
+        return try AuthorityRequestStartupConfiguration(service: base, keyRecordPath: fixture.root.appendingPathComponent("authority.cbor").path,
+            authorityPublicKey: publicKey ?? P256.Signing.PrivateKey().publicKey.x963Representation)
+    }
+    func testRequestStartupKeyFailureClosesOpenedStorageWithoutCallingRuntimeCallbacks() throws {
+        let fixture = try Fixture(), inputs = try startup(fixture)
+        let journal = AuthorityJournal(database: try database(fixture))
+        var loaded = false
+        XCTAssertThrowsError(try AuthorityService(requestStartup: inputs, openJournal: { journal }, loadSigner: { owner in
+            XCTAssertTrue(owner === journal)
+            XCTAssertThrowsError(try fixture.lease()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
+            loaded = true
+            throw AuthorityRequestSignerError.unavailable
+        }, routing: { XCTFail("Failed startup queried presence"); throw AuthorityRequestSignerError.unavailable },
+            reconcileExpired: { _ in XCTFail("Failed startup performed cleanup") })) {
+            XCTAssertEqual($0 as? AuthorityRequestSignerError, .unavailable)
+        }
+        XCTAssertTrue(loaded)
+        XCTAssertThrowsError(try journal.read { try $0.approvalTrustSnapshot() }) { XCTAssertEqual($0 as? JournalDatabaseError, .closed) }
+        try assertReleased(fixture)
+    }
+    func testRequestStartupPinMismatchClosesStorageWithoutRestoringAnotherKey() throws {
+        let fixture = try Fixture(), inputs = try startup(fixture), other = P256.Signing.PrivateKey().publicKey.x963Representation
+        let mismatched = try AuthoritySigningKeyRecord(macID: inputs.service.macID, accountID: inputs.service.accountID,
+            publicKey: other, representation: Data([1])).encode()
+        let journal = AuthorityJournal(database: try database(fixture))
+        XCTAssertThrowsError(try AuthorityService(requestStartup: inputs, openJournal: { journal }, loadSigner: { _ in
+            try EnclaveAuthorityRequestSigner.restore(mismatched, configuration: inputs.service, expectedPublicKey: inputs.authorityPublicKey)
+        }, routing: { XCTFail("Mismatched key queried presence"); throw AuthorityRequestSignerError.wrongIdentity },
+            reconcileExpired: { _ in XCTFail("Mismatched key performed cleanup") })) {
+            XCTAssertEqual($0 as? AuthorityRequestSignerError, .wrongIdentity)
+        }
+        try assertReleased(fixture)
+    }
+    func testPublicRequestStartupRequiresRootWithoutInitializingStorage() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Requires normal user") }
+        let fixture = try Fixture(), inputs = try startup(fixture)
+        XCTAssertThrowsError(try AuthorityService(requestStartup: inputs,
+            routing: { XCTFail("Non-root startup queried presence"); throw AuthorityRequestSignerError.unavailable },
+            reconcileExpired: { _ in XCTFail("Non-root startup performed cleanup") })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.directory + "/journal.sqlite")).count, 0)
+    }
+
     private final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }

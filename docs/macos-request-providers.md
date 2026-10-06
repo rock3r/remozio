@@ -46,3 +46,5 @@ Hardware tests create disposable keys and restore them through the new signer wi
 This assembly API does not select a production accessibility policy or prove pre-login, lock/logout, another-Mac restoration, or update continuity. The [key-custody experiment](experiments/macos-key-custody.md) records those remaining live gates. Root-private storage and library self-validation do not independently prove every code-isolation requirement.
 
 The configuration-only `AuthorityServiceRunner` remains a trust-only startup path. Onboarding must provision the selected hardware key and protected record, retain its public-key pin, connect current presence, and choose this request-enabled constructor. The existing configuration schemas and legacy constructors are unchanged. Production launch wiring, protected installation, request admission, target execution, push, and device E2E remain required.
+
+The [protected request-startup path](macos-request-startup.md) now composes paired recovery, pinned signer restoration, providers, and service ownership. The runtime must supply presence and target cleanup before the bundled executable can select it.

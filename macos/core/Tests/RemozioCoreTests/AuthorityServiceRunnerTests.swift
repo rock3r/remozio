@@ -1,3 +1,5 @@
+import CryptoKit
+import Darwin
 import Foundation
 import SQLite3
 import XCTest
@@ -130,12 +132,83 @@ final class AuthorityServiceRunnerTests: XCTestCase {
         XCTAssertEqual(probe.counts.closes, 2)
     }
 
+    private func requestInputs(_ index: UInt8) throws -> AuthorityRequestStartupConfiguration {
+        let service = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.remozio.authority",
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: index, count: 20)], transportUID: 502,
+            continuityDirectory: "/Library/Application Support/Remozio/continuity")
+        return try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/keys/authority-\(index).cbor",
+            authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+    }
+    func testRequestRetryReloadsInputsAndTransfersOneCompleteService() throws {
+        let first = try requestInputs(1), second = try requestInputs(2), probe = Probe()
+        let running = expectation(description: "request service running")
+        let runner = try AuthorityServiceRunner(requestConfiguration: { probe.open() == 1 ? first : second }, openRequestService: { inputs in
+            probe.recordInput(inputs.canonicalBytes)
+            if inputs.canonicalBytes == first.canonicalBytes { throw JournalLeaseError.busy }
+            return { probe.close() }
+        }, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+            probe.record($0); if $0 == .running { running.fulfill() }
+        })
+        try runner.start()
+        wait(for: [running], timeout: 3)
+        XCTAssertEqual(probe.inputs, [first.canonicalBytes, second.canonicalBytes])
+        XCTAssertEqual(probe.counts.opens, 2)
+        XCTAssertEqual(probe.statuses, [.starting, .waiting(retryMilliseconds: 100), .starting, .running])
+        try runner.close(); try runner.close()
+        XCTAssertEqual(probe.counts.closes, 1)
+    }
+    func testInvalidRequestInputsNeverOpenAService() throws {
+        let probe = Probe(), failed = expectation(description: "invalid request inputs")
+        let runner = try AuthorityServiceRunner(requestConfiguration: {
+            _ = probe.open(); throw AuthorityServiceConfigurationError.invalidConfiguration
+        }, openRequestService: { _ in XCTFail("Invalid inputs opened a service"); return {} },
+            initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+                probe.record($0); if case .failed = $0 { failed.fulfill() }
+            })
+        try runner.start(); wait(for: [failed], timeout: 2)
+        XCTAssertEqual(runner.status, .failed(.configurationFailure))
+        XCTAssertEqual(probe.counts.opens, 1)
+        XCTAssertFalse(probe.statuses.contains(.running))
+        try runner.close()
+    }
+    func testProtectedRequestRunnerRejectsNormalUserWithoutInvokingRuntimeCallbacks() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Requires normal user") }
+        let failed = expectation(description: "protected inputs rejected")
+        let runner = try AuthorityServiceRunner(requestConfigurationPath: "/Library/Application Support/Remozio/request-startup.cbor",
+            routing: { XCTFail("Non-root runner queried presence"); throw AuthorityRequestSignerError.unavailable },
+            reconcileExpired: { _ in XCTFail("Non-root runner performed cleanup") },
+            initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+                if case .failed = $0 { failed.fulfill() }
+            })
+        try runner.start(); wait(for: [failed], timeout: 2)
+        XCTAssertEqual(runner.status, .failed(.configurationFailure))
+        try runner.close()
+    }
+
+    func testRequestKeyFailureNeverReportsTrustOnlySuccessOrRotatesInputs() throws {
+        let inputs = try requestInputs(1), probe = Probe(), failed = expectation(description: "request key unavailable")
+        let runner = try AuthorityServiceRunner(requestConfiguration: { _ = probe.open(); return inputs }, openRequestService: { inputs in
+            probe.recordInput(inputs.canonicalBytes); throw AuthorityRequestSignerError.unavailable
+        }, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, report: {
+            probe.record($0); if case .failed = $0 { failed.fulfill() }
+        })
+        try runner.start(); wait(for: [failed], timeout: 2)
+        XCTAssertEqual(runner.status, .failed(.configurationFailure))
+        XCTAssertEqual(probe.inputs, [inputs.canonicalBytes]); XCTAssertEqual(probe.counts.opens, 1)
+        XCTAssertEqual(probe.statuses, [.starting, .failed(.configurationFailure)])
+        try runner.close()
+    }
+
     private final class Probe: @unchecked Sendable {
         private let lock = NSLock()
         private var opens = 0, closes = 0
         private var events: [AuthorityServiceRunner.Status] = []
+        private var loadedInputs: [Data] = []
         func open() -> Int { lock.withLock { opens += 1; return opens } }
         @discardableResult func close() -> Int { lock.withLock { closes += 1; return closes } }
+        func recordInput(_ bytes: Data) { lock.withLock { loadedInputs.append(bytes) } }
+        var inputs: [Data] { lock.withLock { loadedInputs } }
         func record(_ status: AuthorityServiceRunner.Status) { lock.withLock { events.append(status) } }
         var counts: (opens: Int, closes: Int) { lock.withLock { (opens, closes) } }
         var statuses: [AuthorityServiceRunner.Status] { lock.withLock { events } }

@@ -29,6 +29,41 @@ public final class AuthorityService: @unchecked Sendable {
 
     /// Opens the provisioned launch stores. Version 2 retains independent continuity ownership until shutdown.
     public convenience init(configuration: AuthorityServiceConfiguration) throws {
+        try self.init(configuration: configuration, journal: Self.openJournal(configuration: configuration))
+    }
+
+    /// Opens existing paired stores, restores the pinned enclave signer, and prepares the complete request service.
+    /// Callbacks are required, synchronous, and must not reenter the service or journal. No listener starts here.
+    public convenience init(requestStartup: AuthorityRequestStartupConfiguration,
+                            routing: @escaping @Sendable () throws -> PresenceRouting,
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+        try self.init(requestStartup: requestStartup,
+            openJournal: { try Self.openJournal(configuration: requestStartup.service) },
+            loadSigner: { journal in
+                try EnclaveAuthorityRequestSigner.load(path: requestStartup.keyRecordPath,
+                    configuration: requestStartup.service, expectedPublicKey: requestStartup.authorityPublicKey, journal: journal)
+            }, routing: routing, reconcileExpired: reconcileExpired)
+    }
+
+    /// Fixture storage/key-loading seam. It preserves hardware-only signing and production service self-validation.
+    convenience init(requestStartup: AuthorityRequestStartupConfiguration,
+                     openJournal: () throws -> AuthorityJournal,
+                     loadSigner: (AuthorityJournal) throws -> EnclaveAuthorityRequestSigner,
+                     routing: @escaping @Sendable () throws -> PresenceRouting,
+                     reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+        let journal = try openJournal()
+        do {
+            let signer = try loadSigner(journal)
+            let providers = try AuthorityRequestProviders(configuration: requestStartup.service, signer: signer, routing: routing)
+            try self.init(configuration: requestStartup.service, journal: journal, requestProviders: providers,
+                maintenanceIntervalMilliseconds: requestStartup.maintenanceIntervalMilliseconds, reconcileExpired: reconcileExpired)
+        } catch {
+            try? journal.close()
+            throw error
+        }
+    }
+
+    private static func openJournal(configuration: AuthorityServiceConfiguration) throws -> AuthorityJournal {
         let journal: AuthorityJournal
         if configuration.continuityDirectory != nil {
             journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration),
@@ -40,7 +75,7 @@ public final class AuthorityService: @unchecked Sendable {
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
                 maximumConsumptions: 1_000_000, busyMilliseconds: 5000))
         }
-        try self.init(configuration: configuration, journal: journal)
+        return journal
     }
 
     /// Transfers the database to this service. Construction failure releases its writer lease.

@@ -33,6 +33,30 @@ public final class AuthorityServiceRunner: @unchecked Sendable {
             }, report: report)
     }
 
+    /// Every retry reloads protected request inputs and restores the pinned hardware signer. There is no trust-only fallback.
+    /// Presence and target cleanup belong to the runtime owner. Their callbacks must not reenter the service or journal.
+    public convenience init(requestConfigurationPath: String,
+                            routing: @escaping @Sendable () throws -> PresenceRouting,
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+                            initialRetryMilliseconds: Int = 1000, maximumRetryMilliseconds: Int = 30_000,
+                            report: @escaping @Sendable (Status) -> Void) throws {
+        try self.init(requestConfiguration: { try AuthorityRequestStartupConfiguration.load(path: requestConfigurationPath) },
+            openRequestService: { configuration in
+                let service = try AuthorityService(requestStartup: configuration, routing: routing, reconcileExpired: reconcileExpired)
+                try service.start()
+                return { try service.close() }
+            }, initialRetryMilliseconds: initialRetryMilliseconds, maximumRetryMilliseconds: maximumRetryMilliseconds, report: report)
+    }
+
+    /// Fixture loading seam for the same reload-before-open retry composition.
+    convenience init(requestConfiguration: @escaping @Sendable () throws -> AuthorityRequestStartupConfiguration,
+                     openRequestService: @escaping @Sendable (AuthorityRequestStartupConfiguration) throws -> Shutdown,
+                     initialRetryMilliseconds: Int = 1000, maximumRetryMilliseconds: Int = 30_000,
+                     report: @escaping @Sendable (Status) -> Void) throws {
+        try self.init(initialRetryMilliseconds: initialRetryMilliseconds, maximumRetryMilliseconds: maximumRetryMilliseconds,
+            open: { try openRequestService(requestConfiguration()) }, report: report)
+    }
+
     /// The factory either throws after releasing its resources, or transfers one running service's shutdown operation.
     init(initialRetryMilliseconds: Int, maximumRetryMilliseconds: Int,
          open: @escaping @Sendable () throws -> Shutdown,
