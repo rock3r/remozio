@@ -47,9 +47,22 @@ final class PendingRequestDeliveryTests: XCTestCase {
         XCTAssertTrue(try session.discover(current: request, routing: route(.present), trust: trust(phones), now: now()).isEmpty)
         var accepted: [PhoneRequestDelivery] = []
         let queued = try reconcile(session, phones: phones) { accepted.append($0); return true }
-        XCTAssertEqual(Set(accepted.map(\.id)), Set(discovered.map(\.id)))
-        XCTAssertEqual(queued.newlyEnqueued, discovered)
+        XCTAssertEqual(Set(accepted.map(\.recipient)), discovered)
+        XCTAssertEqual(Set(queued.newlyEnqueued.map(\.recipient)), discovered)
         _ = try reconcile(session, phones: phones) { _ in XCTFail("Queue already owns retries"); return true }
+    }
+
+    func testDiscoveryDoesNotConsumeQueueWithdrawals() throws {
+        let request = try request(), session = try PendingRequestDelivery(request: request), phones = try [phone(5), phone(6)]
+        let queued = try reconcile(session, phones: phones)
+        let remaining = [phones[1]]
+        for _ in 0..<2 {
+            let discovered = try session.discover(current: request, routing: route(.away), trust: trust(remaining), now: now())
+            XCTAssertEqual(discovered, Set([DeliveryRecipient(phones[1])]))
+        }
+        let update = try reconcile(session, phones: remaining)
+        XCTAssertEqual(update.withdrawn, queued.active.filter { $0.recipient.phoneID == id(5) })
+        XCTAssertTrue(try reconcile(session, phones: remaining).withdrawn.isEmpty)
     }
 
     func testLocalThenAwayPreservesIdentityAgeAndDeadlineForEveryPhone() throws {

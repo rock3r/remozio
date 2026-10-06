@@ -123,14 +123,20 @@ public final class PendingRequestDelivery {
             withdrawn: sorted(withdrawn), closure: closure, capacityLimitedRecipients: capacityLimited)
     }
 
-    /// Refresh eligibility without accepting notification queue ownership.
+    private init(copying other: PendingRequestDelivery) {
+        original = other.original; maximumRecipients = other.maximumRecipients
+        lastTime = other.lastTime; closure = other.closure; entries = other.entries
+    }
+
+    /// Inspect eligibility without changing notification queue state or consuming withdrawals.
     /// Previously dispatched recipients remain discoverable while presence routes new requests locally.
     func discover(current: RetainedApprovalRequest, routing: PresenceRouting, trust: RequestDeliveryTrust,
-                  now: AuthorityMoment) -> [PhoneRequestDelivery] {
-        _ = reconcile(current: current, routing: routing, trust: trust, now: now) { _ in false }
-        return sorted(entries.values.filter {
+                  now: AuthorityMoment) -> Set<DeliveryRecipient> {
+        let snapshot = PendingRequestDelivery(copying: self)
+        _ = snapshot.reconcile(current: current, routing: routing, trust: trust, now: now) { _ in false }
+        return Set(snapshot.entries.values.filter {
             !$0.retired && (routing.destination == .phones || $0.dispatched)
-        }.map(\.delivery))
+        }.map(\.delivery.recipient))
     }
 
     /// Recheck immediately before the first transport write, with no intervening await or authority-state change.

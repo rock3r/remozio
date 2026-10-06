@@ -325,7 +325,7 @@ public final class ApprovalRequestCoordinator {
             let delivery = try deliveryController(requestID: id, retained: retained)
             let recipients = delivery.discover(current: retained, routing: routing, trust: trust, now: now)
             if recipients.contains(where: {
-                $0.recipient.phoneID == binding.scope.phoneID && $0.recipient.enrollmentEpoch == binding.scope.enrollmentEpoch
+                $0.phoneID == binding.scope.phoneID && $0.enrollmentEpoch == binding.scope.enrollmentEpoch
             }) { result.append(id) }
         }
         return result
