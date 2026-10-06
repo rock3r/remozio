@@ -123,6 +123,24 @@ public final class PendingRequestDelivery {
             withdrawn: sorted(withdrawn), closure: closure, capacityLimitedRecipients: capacityLimited)
     }
 
+    /// Inspect one current enrollment without changing queue state or consuming withdrawals.
+    /// The owner selects this enrollment once from its protected trust snapshot before scanning requests.
+    func canDiscover(current: RetainedApprovalRequest, routing: PresenceRouting, authority: ApprovalTrustSnapshot,
+                     recipient: DeliveryRecipient, enrollment: ApprovalEnrollment, now: AuthorityMoment) -> Bool {
+        guard closure == nil, current.payload == original.payload, current.admittedAt == original.admittedAt,
+              current.deadlineMilliseconds == original.deadlineMilliseconds,
+              now.epoch == original.admittedAt.epoch, now.milliseconds >= lastTime,
+              current.phase == .queued || current.phase == .presented,
+              now.milliseconds < original.deadlineMilliseconds, authoritySupports(authority),
+              enrollment.phoneID == recipient.phoneID, enrollment.active,
+              let features = enrollment.capabilities.contracts[original.payload.contract],
+              original.payload.requiredFeatures.isSubset(of: features) else { return false }
+        if let entry = entries[recipient] {
+            return !entry.retired && (routing.destination == .phones || entry.dispatched)
+        }
+        return routing.destination == .phones && entries.count < maximumRecipients
+    }
+
     /// Recheck immediately before the first transport write, with no intervening await or authority-state change.
     /// A nil delivery means do not start. Always apply update, including its withdrawals, even when delivery is nil.
     /// The queue owns bounded retries of a started delivery, using the same identity and current reconciliation state.
