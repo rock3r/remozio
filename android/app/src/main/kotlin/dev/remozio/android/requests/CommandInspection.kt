@@ -161,6 +161,10 @@ private fun InspectionContent(
                             CommandInputKind.FILE -> R.string.input_file
                             CommandInputKind.TTY -> R.string.input_tty
                             CommandInputKind.PTY -> R.string.input_pty
+                            CommandInputKind.SOCKET -> R.string.input_socket
+                            CommandInputKind.DIRECTORY -> R.string.input_directory
+                            CommandInputKind.DEVICE -> R.string.input_device
+                            CommandInputKind.OTHER -> R.string.input_other
                         }))
                         if (capture.input.kind != CommandInputKind.NULL) Text(stringResource(R.string.input_not_captured))
                         BytesValue(R.string.input_path, capture.input.observedPath, raw)

@@ -15,10 +15,10 @@ final class CommandCaptureTests: XCTestCase {
         let rationale: String?
     }
     private struct Vectors: Decodable { let valid: [Row]; let invalid: [Row] }
-    private func vectors() throws -> Vectors {
+    private func vectors(_ version: Int = 1) throws -> Vectors {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        return try JSONDecoder().decode(Vectors.self, from: Data(contentsOf: root.appendingPathComponent("vectors/command-capture-v1.json")))
+        return try JSONDecoder().decode(Vectors.self, from: Data(contentsOf: root.appendingPathComponent("vectors/command-capture-v\(version).json")))
     }
     private func hex(_ value: String) -> Data {
         var result = Data(), cursor = value.startIndex
@@ -65,6 +65,26 @@ final class CommandCaptureTests: XCTestCase {
         XCTAssertEqual(rows.count, 86)
         for row in rows { XCTAssertThrowsError(try CommandCapture(canonicalBytes: hex(row.hex), limits: limits), row.name) }
     }
+    func testSchemaTwoAndExplicitVersionBinding() throws {
+        let rows = try vectors(2)
+        XCTAssertEqual(rows.valid.count, 13)
+        for row in rows.valid {
+            let bytes = hex(row.hex)
+            let capture = try CommandCapture(canonicalBytes: bytes, limits: limits, expectedSchemaVersion: 2)
+            XCTAssertEqual(capture.schemaVersion, 2)
+            XCTAssertEqual(capture.input.kind.rawValue, row.inputKind, row.name)
+            XCTAssertEqual(capture.canonicalBytes, bytes)
+            XCTAssertThrowsError(try CommandCapture(canonicalBytes: bytes, limits: limits), row.name)
+        }
+        for row in rows.invalid {
+            XCTAssertThrowsError(try CommandCapture(canonicalBytes: hex(row.hex), limits: limits, expectedSchemaVersion: row.name.hasPrefix("schema1-") ? 1 : 2), row.name)
+        }
+        let oldBytes = hex(try vectors().valid[0].hex)
+        XCTAssertThrowsError(try CommandCapture(canonicalBytes: oldBytes, limits: limits, expectedSchemaVersion: 2))
+        XCTAssertThrowsError(try CommandCapture(canonicalBytes: oldBytes, limits: limits, expectedSchemaVersion: 3))
+        XCTAssertEqual(CommandCapture.supportedSchemaVersions, [1, 2])
+    }
+
     func testIndependentResourceBoundsAndValueSemantics() throws {
         var bytes = hex(try vectors().valid[0].hex)
         let capture = try CommandCapture(canonicalBytes: bytes, limits: limits)

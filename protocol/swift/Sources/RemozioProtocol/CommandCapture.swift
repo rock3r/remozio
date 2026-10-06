@@ -33,7 +33,7 @@ public struct CapturedEnvironmentEntry: Equatable, Sendable {
     public let value: Data
     public let source: EnvironmentSource
 }
-public enum CommandInputKind: UInt64, Sendable { case null, pipe, file, tty, pty }
+public enum CommandInputKind: UInt64, Sendable { case null, pipe, file, tty, pty, socket, directory, device, other }
 public struct CapturedCommandInput: Equatable, Sendable {
     public let kind: CommandInputKind
     public let streamBinding: Data?
@@ -88,6 +88,8 @@ public struct CapturedSubmission: Equatable, Sendable {
 
 /// Parses command claims only. OS capture, authenticated issuance, and execution remain separate responsibilities.
 public struct CommandCapture: Equatable, Sendable {
+    public static let supportedSchemaVersions: Set<UInt64> = [1, 2]
+    public let schemaVersion: UInt64
     public let canonicalBytes: Data
     public let executable: CapturedExecutable
     public let arguments: [Data]
@@ -102,9 +104,12 @@ public struct CommandCapture: Equatable, Sendable {
     public let unverifiedRationale: String?
     public let submission: CapturedSubmission
 
-    public init(canonicalBytes: Data, limits: CBORLimits) throws {
+    public init(canonicalBytes: Data, limits: CBORLimits, expectedSchemaVersion: UInt64 = 1) throws {
         let root = try CaptureFields(DeterministicCBOR.decode(canonicalBytes, limits: limits), count: 13)
-        guard try root.uint(0) == 1 else { throw CommandCaptureError.version }
+        schemaVersion = try root.uint(0)
+        guard Self.supportedSchemaVersions.contains(expectedSchemaVersion), schemaVersion == expectedSchemaVersion else {
+            throw CommandCaptureError.version
+        }
         let executable = try CaptureFields(root[1], count: 3)
         self.executable = try CapturedExecutable(path: executable.path(0), identity: executable.identity(1), sha256: executable.bytes(2, count: 32))
         self.arguments = try root.array(2).map { try CaptureFields.cString($0) }
@@ -128,6 +133,7 @@ public struct CommandCapture: Equatable, Sendable {
         self.environment = environment
         let input = try CaptureFields(root[6], count: 4)
         let kind: CommandInputKind = try input.tag(0)
+        guard schemaVersion == 2 || kind.rawValue <= 4 else { throw CommandCaptureError.enumeration }
         let binding = try input.optionalBytes(1, count: 16)
         let path = try input.optionalPath(2)
         let identity = try input.optionalIdentity(3)

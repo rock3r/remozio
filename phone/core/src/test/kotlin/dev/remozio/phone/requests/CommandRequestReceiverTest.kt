@@ -19,8 +19,9 @@ class CommandRequestReceiverTest {
     private val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
     private fun id(value: Int, count: Int = 16) = ByteArray(count) { value.toByte() }
     private fun scope(mac: Int = 1) = ChannelScope(id(mac), id(2), id(3), id(4))
-    private class Wire(override val scope: ChannelScope, override val supportsCommands: Boolean = true,
-                       override val maximumPayloadBytes: Int = 65536) : RequestMessageChannel {
+    private class Wire(override val scope: ChannelScope, supportsCommands: Boolean = true,
+                       override val maximumPayloadBytes: Int = 65536,
+                       override val commandSchemas: Set<ULong> = if (supportsCommands) setOf(1u) else emptySet()) : RequestMessageChannel {
         val queue = Channel<ByteArray>(8)
         var closed = false
         val sent = Channel<ByteArray>(16)
@@ -37,8 +38,10 @@ class CommandRequestReceiverTest {
         }
         var requestID = 5
         var challengeValue = 6
-        val request get() = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(identity), id(2), id(requestID), id(challengeValue, 32),
-            emptySet(), 1000u, 61000u, capture, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), bound, bound)
+        var schema: ULong = 1u
+        var captureBytes = capture
+        val request get() = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, schema), id(identity), id(2), id(requestID), id(challengeValue, 32),
+            emptySet(), 1000u, 61000u, captureBytes, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), bound, bound)
         fun envelope(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose): ByteArray {
             val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
                 initSign(key.private); update(SigningInput.make(1u, type, purpose, body, bound, bound)); sign()
@@ -62,6 +65,38 @@ class CommandRequestReceiverTest {
         bind(enrollment, wire, time).run()
         assertTrue(wire.closed)
     }
+    @Test fun onlySharedImplementedSchemasEnableRequestDelivery() {
+        fun offer(schema: ULong, features: Set<ULong> = emptySet()) = ChannelRequestCapability(0u, 1u, schema, features)
+        assertEquals(setOf(1uL), commandChannelSchemas(listOf(offer(1u), offer(2u)), emptySet(), ChannelRole.MAC, listOf(offer(1u))))
+        assertEquals(setOf(2uL), commandChannelSchemas(listOf(offer(1u), offer(2u)), emptySet(), ChannelRole.MAC,
+            listOf(offer(2u), offer(3u), ChannelRequestCapability(8u, 1u, 1u, emptySet()))))
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), emptySet(), ChannelRole.MAC, listOf(offer(2u))) }
+        assertEquals(setOf(2uL), commandChannelSchemas(listOf(offer(2u)), emptySet(), ChannelRole.MAC, listOf(offer(2u, setOf(1u)))))
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(2u, setOf(1u))), emptySet(), ChannelRole.MAC, listOf(offer(2u))) }
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(3u)), emptySet(), ChannelRole.MAC, listOf(offer(3u))) }
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), setOf(1u), ChannelRole.MAC, listOf(offer(1u))) }
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), emptySet(), ChannelRole.PHONE, listOf(offer(1u))) }
+    }
+
+    @Test fun receivingSchemaTwoRequiresItsContractOnThisConnection() = runBlocking<Unit> {
+        val mac = Mac(); mac.schema = 2u
+        val root = (DeterministicCbor.decode(capture, bound) as CborValue.Fields).values
+        mac.captureBytes = DeterministicCbor.encode(CborValue.Fields(root + (0uL to CborValue.Unsigned(2u))), bound)
+        val enrollment = mac.enroll()
+        val old = Wire(scope()); old.queue.send(mac.issued()); old.queue.close()
+        assertFailsWith<IOException> { bind(enrollment, old).run() }
+        assertTrue(old.closed); assertTrue(enrollment.sessions().isEmpty())
+        val current = Wire(scope(), commandSchemas = setOf(1u, 2u))
+        current.queue.send(mac.issued()); current.queue.send(mac.status()); current.queue.close()
+        bind(enrollment, current).run()
+        val retained = enrollment.sessions().single()
+        assertEquals(2uL, retained.snapshot(ElapsedInstant(0, 100u)).capture!!.schemaVersion)
+        val downgrade = Wire(scope()); downgrade.queue.send(mac.issued()); downgrade.queue.close()
+        assertFailsWith<IOException> { bind(enrollment, downgrade).run() }
+        assertSame(retained, enrollment.sessions().single())
+        enrollment.close()
+    }
+
     @Test fun reconnectQueriesRetainedPendingAndTerminalOwnersWithoutSendingDecisions() = runBlocking<Unit> {
         withTimeout(3000) {
             val mac = Mac(); val enrollment = mac.enroll()
@@ -275,7 +310,7 @@ class CommandRequestReceiverTest {
         val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<ByteArray>()
         val oldWire = object : RequestMessageChannel {
             override val scope = scope()
-            override val supportsCommands = true
+            override val commandSchemas = setOf(1uL)
             override val maximumPayloadBytes = 65536
             var closed = false
             override suspend fun receive(): ByteArray? { entered.complete(Unit); return release.await() }

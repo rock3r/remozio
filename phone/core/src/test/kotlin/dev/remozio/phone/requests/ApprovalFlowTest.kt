@@ -33,7 +33,7 @@ class ApprovalFlowTest {
         fun receive(vararg messages: ByteArray) = runBlocking {
             val channel = object : RequestMessageChannel {
                 override val scope = ChannelScope(id(1), id(2), id(5), id(25))
-                override val supportsCommands = true
+                override val commandSchemas = setOf(1uL)
                 override val maximumPayloadBytes = 65536
                 val remaining = messages.iterator()
                 var closed = false

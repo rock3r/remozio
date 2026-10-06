@@ -14,7 +14,7 @@ import kotlinx.coroutines.sync.withLock
 
 internal interface RequestMessageChannel : AutoCloseable {
     val scope: ChannelScope
-    val supportsCommands: Boolean
+    val commandSchemas: Set<ULong>
     val maximumPayloadBytes: Int
     suspend fun receive(): ByteArray?
     suspend fun send(bytes: ByteArray) { throw IOException("Sending is unsupported") }
@@ -22,15 +22,22 @@ internal interface RequestMessageChannel : AutoCloseable {
 private class NegotiatedRequestChannel(private val channel: NegotiatedTLSChannel) : RequestMessageChannel {
     override val scope get() = channel.negotiated.peer.scope
     override val maximumPayloadBytes get() = channel.maximumPayloadBytes
-    override val supportsCommands: Boolean get() {
-        fun List<ChannelRequestCapability>.supports() = any { it.kind == 0uL && it.wireVersion == 1uL && it.schemaVersion == 1uL }
-        return channel.negotiated.peer.role == ChannelRole.MAC && channel.localRequests.supports() &&
-            channel.localRequests.all { it.kind == 0uL && it.wireVersion == 1uL && it.schemaVersion == 1uL && it.features.isEmpty() } &&
-            channel.localAuditVersions.isEmpty() && channel.negotiated.peer.requests.supports()
-    }
+    override val commandSchemas: Set<ULong> get() = commandChannelSchemas(
+        channel.localRequests, channel.localAuditVersions, channel.negotiated.peer.role, channel.negotiated.peer.requests)
     override suspend fun receive() = channel.receive()
     override suspend fun send(bytes: ByteArray) = channel.send(bytes)
     override fun close() = channel.close()
+}
+
+/** Only implemented local contracts can be advertised. Unknown peer contracts do not enable a handler. */
+internal fun commandChannelSchemas(local: List<ChannelRequestCapability>, localAuditVersions: Set<ULong>,
+                                  peerRole: ChannelRole, peer: List<ChannelRequestCapability>): Set<ULong> {
+    fun ChannelRequestCapability.known() = kind == 0uL && wireVersion == 1uL &&
+        schemaVersion in CommandCapture.supportedSchemaVersions
+    require(peerRole == ChannelRole.MAC && localAuditVersions.isEmpty() && local.all { it.known() && it.features.isEmpty() })
+    val shared = local.map { it.schemaVersion }.toSet().intersect(peer.filter { it.known() }.map { it.schemaVersion }.toSet())
+    require(shared.isNotEmpty())
+    return shared
 }
 
 /** Delivers authenticated captures and statuses. It grants no freshness, reachability, or action authority. */
@@ -38,6 +45,7 @@ class CommandRequestReceiver private constructor(
     private val enrollment: CommandRequestEnrollment,
     private val channel: RequestMessageChannel,
     private val maximumBodyBytes: Int,
+    private val commandSchemas: Set<ULong>,
     private val queryRetainedOnStart: Boolean,
     private val clock: () -> ElapsedInstant,
 ) : AutoCloseable {
@@ -62,7 +70,7 @@ class CommandRequestReceiver private constructor(
                         if (closed.get()) return@coroutineScope
                         val message = ApprovalMessage.decode(bytes, maximumBodyBytes)
                         require(message.type != ApprovalMessageType.DECISION)
-                        enrollment.deliver(this@CommandRequestReceiver, message, clock())
+                        enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas)
                     }
                 } finally { queries.cancelAndJoin() }
             }
@@ -105,11 +113,13 @@ class CommandRequestReceiver private constructor(
                           clock: () -> ElapsedInstant): CommandRequestReceiver {
             try {
                 val expected = ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(), phoneID, enrollmentEpoch)
-                require(channel.scope == expected && channel.supportsCommands)
+                require(channel.scope == expected)
+                val schemas = channel.commandSchemas.toSet()
+                require(schemas.isNotEmpty() && CommandCapture.supportedSchemaVersions.containsAll(schemas))
                 val maximum = maxOf(enrollment.limits.body.maxBytes, enrollment.limits.status.maxBytes)
                 require(maximum in 1..(16_777_216 - ApprovalMessage.OVERHEAD_BYTES))
                 require(channel.maximumPayloadBytes >= maximum + ApprovalMessage.OVERHEAD_BYTES)
-                val receiver = CommandRequestReceiver(enrollment, channel, maximum, queryRetainedOnStart, clock)
+                val receiver = CommandRequestReceiver(enrollment, channel, maximum, schemas, queryRetainedOnStart, clock)
                 enrollment.attach(receiver)
                 return receiver
             } catch (failure: Exception) { channel.close(); throw failure }

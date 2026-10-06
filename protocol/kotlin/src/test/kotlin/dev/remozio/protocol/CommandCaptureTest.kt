@@ -13,7 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class CommandCaptureTest {
     private val limits = CborLimits(8192, 16, 1024)
-    private fun vectors() = Json.parseToJsonElement(File(checkNotNull(System.getProperty("remozio.commandVectors"))).readText()).jsonObject
+    private fun vectors(version: Int = 1) = Json.parseToJsonElement(File(checkNotNull(System.getProperty(if (version == 1) "remozio.commandVectors" else "remozio.commandVectors2"))).readText()).jsonObject
     private fun hex(value: String) = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     private fun first() = hex(vectors().getValue("valid").jsonArray[0].jsonObject.getValue("hex").jsonPrimitive.content)
     @Test fun sharedCapturesPreserveExactBytesAndProvenance() {
@@ -59,6 +59,30 @@ class CommandCaptureTest {
             }
         }
     }
+    @Test fun schemaTwoAndExplicitVersionBinding() {
+        val rows = vectors(2)
+        assertEquals(13, rows.getValue("valid").jsonArray.size)
+        for (row in rows.getValue("valid").jsonArray) {
+            val fields = row.jsonObject
+            val bytes = hex(fields.getValue("hex").jsonPrimitive.content)
+            val capture = CommandCapture(bytes, limits, expectedSchemaVersion = 2u)
+            assertEquals(2uL, capture.schemaVersion)
+            assertEquals(fields.getValue("inputKind").jsonPrimitive.content.toULong(), capture.input.kind.wireValue)
+            assertContentEquals(bytes, capture.canonicalBytes)
+            assertFailsWith<CommandCaptureException> { CommandCapture(bytes, limits) }
+        }
+        for (row in rows.getValue("invalid").jsonArray) {
+            val fields = row.jsonObject
+            assertFailsWith<IllegalArgumentException>(fields.getValue("name").jsonPrimitive.content) {
+                CommandCapture(hex(fields.getValue("hex").jsonPrimitive.content), limits,
+                    expectedSchemaVersion = if (fields.getValue("name").jsonPrimitive.content.startsWith("schema1-")) 1u else 2u)
+            }
+        }
+        assertFailsWith<CommandCaptureException> { CommandCapture(first(), limits, expectedSchemaVersion = 2u) }
+        assertFailsWith<CommandCaptureException> { CommandCapture(first(), limits, expectedSchemaVersion = 3u) }
+        assertEquals(setOf(1uL, 2uL), CommandCapture.supportedSchemaVersions)
+    }
+
     @Test fun boundsAndImmutableSnapshots() {
         val bytes = first()
         val original = bytes.copyOf()
