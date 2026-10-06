@@ -143,7 +143,7 @@ final class AuthorityServiceTests: XCTestCase {
         }
         try assertReleased(fixture)
         XCTAssertThrowsError(try AuthorityService(configuration: config,
-            journal: AuthorityJournal(database: database(fixture, initialize: false)), requestProviders: bundle)) {
+            journal: AuthorityJournal(database: database(fixture, initialize: false)), requestProviders: bundle, reconcileExpired: { _ in })) {
             XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
         }
         try assertReleased(fixture)

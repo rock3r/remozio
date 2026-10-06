@@ -63,7 +63,7 @@ public final class AuthorityService: @unchecked Sendable {
     /// Protected signer loading and provisioning must precede construction. Closure retires the shared request owner.
     public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
                             requestProviders: AuthorityRequestProviders, maintenanceIntervalMilliseconds: Int = 1000,
-                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void = { _ in }) throws {
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
         try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
             validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders, reconcileExpired: reconcileExpired)
     }
