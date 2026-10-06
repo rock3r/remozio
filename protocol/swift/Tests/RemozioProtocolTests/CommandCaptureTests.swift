@@ -60,6 +60,39 @@ final class CommandCaptureTests: XCTestCase {
         XCTAssertEqual(capture.submission.nonce, Data(repeating: 2, count: 32))
         XCTAssertEqual(capture.submission.callerBinding, Data(repeating: 3, count: 16))
     }
+    private func produce(_ capture: CommandCapture, schema: UInt64? = nil, arguments: [Data]? = nil,
+                         input: CapturedCommandInput? = nil, limits: CBORLimits? = nil) throws -> CommandCapture {
+        try CommandCapture(schemaVersion: schema ?? capture.schemaVersion, executable: capture.executable,
+            arguments: arguments ?? capture.arguments, directory: capture.directory, target: capture.target,
+            environment: capture.environment, input: input ?? capture.input, ioMode: capture.ioMode,
+            disconnectBehavior: capture.disconnectBehavior, requester: capture.requester, ancestry: capture.ancestry,
+            unverifiedRationale: capture.unverifiedRationale, submission: capture.submission, limits: limits ?? self.limits)
+    }
+
+    func testProducerReencodesEverySharedVectorExactly() throws {
+        for version in [1, 2] {
+            for row in try vectors(version).valid {
+                let decoded = try CommandCapture(canonicalBytes: hex(row.hex), limits: limits, expectedSchemaVersion: UInt64(version))
+                XCTAssertEqual(try produce(decoded), decoded, row.name)
+                XCTAssertEqual(try produce(decoded).canonicalBytes, hex(row.hex), row.name)
+            }
+        }
+    }
+
+    func testProducerRejectsInvalidTypedContentsAndResourceOverflow() throws {
+        let capture = try CommandCapture(canonicalBytes: hex(vectors().valid[0].hex), limits: limits)
+        XCTAssertThrowsError(try produce(capture, arguments: []))
+        XCTAssertThrowsError(try produce(capture, arguments: [Data([0])]))
+        XCTAssertThrowsError(try produce(capture, schema: 3)) { XCTAssertEqual($0 as? CommandCaptureError, .version) }
+        let socket = CapturedCommandInput(kind: .socket, streamBinding: Data(repeating: 7, count: 16), observedPath: nil, identity: nil)
+        XCTAssertThrowsError(try produce(capture, schema: 1, input: socket))
+        XCTAssertEqual(try produce(capture, schema: 2, input: socket).input, socket)
+        let badNull = CapturedCommandInput(kind: .null, streamBinding: Data(repeating: 7, count: 16), observedPath: nil, identity: nil)
+        XCTAssertThrowsError(try produce(capture, input: badNull))
+        let small = try CBORLimits(maxBytes: capture.canonicalBytes.count - 1, maxDepth: 16, maxItems: 1024)
+        XCTAssertThrowsError(try produce(capture, limits: small)) { XCTAssertEqual($0 as? CBORError, .limitExceeded(.bytes)) }
+    }
+
     func testSharedInvalidCapturesFail() throws {
         let rows = try vectors().invalid
         XCTAssertEqual(rows.count, 86)

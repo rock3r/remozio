@@ -61,6 +61,12 @@ public final class CommandFilesystemCapture {
         } catch { close(); throw error }
     }
 
+    /// Borrow the retained directory only for this call. Do not close, retain, or pass the descriptor to another thread.
+    public func withBorrowedDirectoryDescriptor<T>(_ body: (Int32) throws -> T) throws -> T {
+        guard executableFD >= 0, directoryFD >= 0 else { throw CommandFilesystemCaptureError.closed }
+        return try body(directoryFD)
+    }
+
     public func close() {
         if executableFD >= 0 { _ = Darwin.close(executableFD); executableFD = -1 }
         if directoryFD >= 0 { _ = Darwin.close(directoryFD); directoryFD = -1 }

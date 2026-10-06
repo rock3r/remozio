@@ -45,3 +45,7 @@ The component does not execute a command. Root admission, requester lifetime, su
 Tests use temporary files under the current account. They cover complete hashing, symlinks, raw path bytes, replacement, in-place changes, directory replacement, cancellation, and changes during hashing.
 
 No root service is installed. These tests do not establish privileged execution or device end-to-end behavior.
+
+The retained working-directory descriptor can be borrowed through `withBorrowedDirectoryDescriptor` for later directory setup.
+The caller must serialize the callback and must not close, retain, or pass the descriptor to another thread.
+A closed capture cannot lend its old descriptor number.

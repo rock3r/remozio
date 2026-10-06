@@ -15,6 +15,8 @@ flowchart LR
 ```
 
 Native adapters now observe the authenticated caller, executable, directory, retained input object, and bounded caller ancestry.
+The [retained assembler](../docs/macos-command-capture-assembly.md) combines these observations with the original local submission and trusted policy context.
+The Swift producer encodes exact canonical bytes and applies the existing strict parser checks.
 Command admission and execution remain integration work.
 These codecs do not install or enable a production command handler.
 

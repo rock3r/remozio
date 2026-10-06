@@ -398,13 +398,13 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertEqual(try receiver.receive(timeoutMilliseconds: 1000).payload, Data([8]))
     }
 
-    private func inputSubmission(_ fd: Int32) throws -> ReceivedMachCommandInputSubmission {
+    private func inputSubmission(_ fd: Int32, payload: Data = Data([1])) throws -> ReceivedMachCommandInputSubmission {
         let endpoint = try Endpoint()
         var fileport: mach_port_t = UInt32(MACH_PORT_NULL)
         guard fileport_makeport(fd, &fileport) == 0 else { throw RetainedCommandInputError.system(errno) }
         defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
-        try endpoint.sendInput(Data([1]), fileport: fileport)
-        return try receiver(endpoint).receiveInput(timeoutMilliseconds: 1000)
+        try endpoint.sendInput(payload, fileport: fileport)
+        return try receiver(endpoint, maximum: 8192).receiveInput(timeoutMilliseconds: 1000)
     }
 
     func testSocketCapturePreservesQueuedInputAndSharedFlags() throws {
@@ -726,6 +726,184 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             auditSessionID: nil)) { XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer) }
         XCTAssertThrowsError(try submission.caller.captureAncestry(expression: selfExpression(), userID: geteuid(),
             auditSessionID: nil)) { XCTAssertEqual($0 as? MachCommandCallerError, .retired) }
+    }
+
+    private var assemblyLimits: CBORLimits { get throws { try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024) } }
+    private var assemblyBinding: Data { Data(repeating: 0xb1, count: 16) }
+    private var assemblyTarget: CommandTarget {
+        .init(uid: geteuid(), gid: getegid(), supplementaryGroups: [getegid()], observedName: nil)
+    }
+    private var assemblyEnvironment: [CapturedEnvironmentEntry] {
+        [.init(name: Data("PATH".utf8), value: Data("/synthetic/baseline".utf8), source: .minimal),
+         .init(name: Data("HOME".utf8), value: Data("/synthetic/home".utf8), source: .minimal)]
+    }
+    private func commandSubmission(executablePath: String = "/usr/bin/true") throws -> CommandSubmission {
+        try CommandSubmission(schemaVersion: 1, executablePath: Data(executablePath.utf8),
+            arguments: [Data("custom argv0".utf8), Data(), Data([0xff, 0x0a, 0x22])],
+            directoryPath: Data(FileManager.default.temporaryDirectory.path.utf8), requestedTargetUID: geteuid(),
+            environmentAdditions: [.init(name: Data("HOME".utf8), value: Data("/synthetic/requested".utf8)),
+                .init(name: Data("RAW".utf8), value: Data([0xfe, 0x0a]))],
+            ioMode: .pipes, disconnectBehavior: .terminate, unverifiedRationale: "pid=123, caller claim",
+            binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32), callerBinding: assemblyBinding),
+            limits: assemblyLimits)
+    }
+    private func assemble(_ received: ReceivedMachCommandInputSubmission, binding: Data? = nil, schema: UInt64 = 1,
+                          submissionSchema: UInt64 = 1, target: CommandTarget? = nil, minimal: [CapturedEnvironmentEntry]? = nil,
+                          limits: CBORLimits? = nil, checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
+        try RetainedCommandCapture(received: received, expectedCallerBinding: binding ?? assemblyBinding,
+            submissionSchemaVersion: submissionSchema, captureSchemaVersion: schema, expression: selfExpression(),
+            userID: geteuid(), auditSessionID: nil, resolvedTarget: target ?? assemblyTarget,
+            minimalEnvironment: minimal ?? assemblyEnvironment, streamBinding: Data(repeating: 0xb4, count: 16),
+            submissionLimits: assemblyLimits, captureLimits: limits ?? assemblyLimits, maximumAncestryEntries: 1,
+            checkCancellation: checkCancellation)
+    }
+    private func expectAssemblyResourcesRetired(_ received: ReceivedMachCommandInputSubmission) throws {
+        XCTAssertThrowsError(try received.input.withBorrowedDescriptor { _ in () }) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .closed)
+        }
+        XCTAssertThrowsError(try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .retired)
+        }
+    }
+
+    func testAssembledCommandPreservesInvocationAndUnreadOriginalInput() throws {
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+        let queued = Data("unconsumed source".utf8)
+        XCTAssertEqual(queued.withUnsafeBytes { Darwin.write(pipeFDs[1], $0.baseAddress, $0.count) }, queued.count)
+        let claims = try commandSubmission(), received = try inputSubmission(pipeFDs[0], payload: claims.canonicalBytes)
+        let owner = try assemble(received)
+        defer { owner.close() }
+        let value = owner.capture
+        XCTAssertEqual(value.arguments, claims.arguments)
+        XCTAssertEqual(value.target, assemblyTarget)
+        XCTAssertEqual(value.requester, received.caller.requester)
+        XCTAssertEqual(value.requester.pid, UInt32(getpid()))
+        XCTAssertEqual(value.unverifiedRationale, claims.unverifiedRationale)
+        XCTAssertEqual(value.submission, claims.binding)
+        XCTAssertEqual(value.input.kind, .pipe)
+        XCTAssertEqual(value.input.streamBinding, Data(repeating: 0xb4, count: 16))
+        XCTAssertEqual(value.environment.map(\.name), ["HOME", "PATH", "RAW"].map { Data($0.utf8) })
+        XCTAssertEqual(value.environment.map(\.source), [.requested, .minimal, .requested])
+        XCTAssertEqual(value.environment.map(\.value), [Data("/synthetic/requested".utf8), Data("/synthetic/baseline".utf8), Data([0xfe, 0x0a])])
+        let decoded = try CommandCapture(canonicalBytes: value.canonicalBytes, limits: assemblyLimits)
+        XCTAssertEqual(decoded, value)
+        try owner.withBorrowedDirectoryDescriptor { fd in
+            var directory = stat()
+            XCTAssertEqual(fstat(fd, &directory), 0)
+            XCTAssertEqual(directory.st_ino, value.directory.identity.inode)
+            XCTAssertEqual(UInt64(UInt32(bitPattern: directory.st_dev)), value.directory.identity.device)
+        }
+        let issued = try IssuedRequestPayload(contract: RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1),
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), requestID: Data(repeating: 3, count: 16),
+            challenge: Data(repeating: 4, count: 32), requiredFeatures: [], createdUnixMilliseconds: 10, expiresUnixMilliseconds: 20,
+            canonicalCapture: value.canonicalBytes, permittedActions: [.init(choice: .execute, scope: .currentRequest)],
+            bodyLimits: assemblyLimits, captureLimits: assemblyLimits)
+        let issuedAgain = try IssuedRequestPayload.decode(issued.encode(limits: assemblyLimits), bodyLimits: assemblyLimits,
+            captureLimits: assemblyLimits, localCapabilities: ContractCapabilities(contracts: [issued.contract: []]))
+        XCTAssertEqual(issuedAgain.canonicalCapture, value.canonicalBytes)
+        try owner.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        try owner.withBorrowedInputDescriptor { fd in
+            var bytes = [UInt8](repeating: 0, count: queued.count)
+            XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count)
+            XCTAssertEqual(Data(bytes), queued)
+        }
+        owner.close(); owner.close()
+        XCTAssertThrowsError(try owner.withBorrowedInputDescriptor { _ in () }) {
+            XCTAssertEqual($0 as? RetainedCommandCaptureError, .closed)
+        }
+        XCTAssertThrowsError(try owner.withBorrowedDirectoryDescriptor { _ in () }) {
+            XCTAssertEqual($0 as? RetainedCommandCaptureError, .closed)
+        }
+        try expectAssemblyResourcesRetired(received)
+    }
+
+    func testAssemblyRejectsWrongBindingsSchemasTargetsAndInvalidMinimalEnvironment() throws {
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = Darwin.close(fd) }
+        let claims = try commandSubmission()
+        let cases: [(ReceivedMachCommandInputSubmission) throws -> RetainedCommandCapture] = [
+            { try self.assemble($0, binding: Data(repeating: 0xcc, count: 16)) },
+            { try self.assemble($0, binding: Data()) }, { try self.assemble($0, schema: 3) },
+            { try self.assemble($0, submissionSchema: 2) },
+            { try self.assemble($0, target: .init(uid: self.assemblyTarget.uid ^ 1, gid: 0, supplementaryGroups: [], observedName: nil)) },
+            { try self.assemble($0, minimal: self.assemblyEnvironment + self.assemblyEnvironment) },
+            { try self.assemble($0, minimal: [.init(name: Data("PATH".utf8), value: Data(), source: .requested)]) },
+            { try self.assemble($0, minimal: [.init(name: Data("INVALID=NAME".utf8), value: Data(), source: .minimal)]) }
+        ]
+        for build in cases {
+            let received = try inputSubmission(fd, payload: claims.canonicalBytes)
+            XCTAssertThrowsError(try build(received))
+            try expectAssemblyResourcesRetired(received)
+        }
+        let malformed = try inputSubmission(fd, payload: Data([1]))
+        XCTAssertThrowsError(try assemble(malformed))
+        try expectAssemblyResourcesRetired(malformed)
+    }
+
+    func testAssemblyDoesNotDowngradeSocketInputToSchemaOne() throws {
+        var pair: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+        defer { for fd in pair { _ = Darwin.close(fd) } }
+        let claims = try commandSubmission()
+        let old = try inputSubmission(pair[0], payload: claims.canonicalBytes)
+        XCTAssertThrowsError(try assemble(old)) { XCTAssertEqual($0 as? CommandCaptureError, .enumeration) }
+        try expectAssemblyResourcesRetired(old)
+        let received = try inputSubmission(pair[0], payload: claims.canonicalBytes)
+        let owner = try assemble(received, schema: 2)
+        defer { owner.close() }
+        XCTAssertEqual(owner.capture.schemaVersion, 2)
+        XCTAssertEqual(owner.capture.input.kind, .socket)
+        XCTAssertNil(owner.capture.input.observedPath)
+        XCTAssertEqual(try CommandCapture(canonicalBytes: owner.capture.canonicalBytes, limits: assemblyLimits, expectedSchemaVersion: 2), owner.capture)
+    }
+
+    func testAssemblyOverflowAndCancellationRetireResourcesWithoutReadingInput() throws {
+        enum Cancelled: Error { case test }
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = Darwin.close(fd) }
+        let claims = try commandSubmission()
+        let oversized = try inputSubmission(fd, payload: claims.canonicalBytes)
+        XCTAssertThrowsError(try assemble(oversized, limits: CBORLimits(maxBytes: 20, maxDepth: 16, maxItems: 1024))) {
+            XCTAssertEqual($0 as? CBORError, .limitExceeded(.bytes))
+        }
+        try expectAssemblyResourcesRetired(oversized)
+        let cancelled = try inputSubmission(fd, payload: claims.canonicalBytes)
+        var checks = 0
+        XCTAssertThrowsError(try assemble(cancelled, checkCancellation: { checks += 1; if checks == 2 { throw Cancelled.test } })) {
+            XCTAssertTrue($0 is Cancelled)
+        }
+        try expectAssemblyResourcesRetired(cancelled)
+    }
+
+    func testAssemblyRecheckRetiresOwnerAfterExecutableReplacementOrPolicyFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let program = directory.appendingPathComponent("program")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: program)
+        XCTAssertEqual(chmod(program.path, 0o755), 0)
+        let claims = try commandSubmission(executablePath: program.path)
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = Darwin.close(fd) }
+        let received = try inputSubmission(fd, payload: claims.canonicalBytes), owner = try assemble(received)
+        let captured = owner.capture
+        try FileManager.default.removeItem(at: program)
+        try Data("#!/bin/sh\nexit 1\n".utf8).write(to: program)
+        XCTAssertEqual(chmod(program.path, 0o755), 0)
+        XCTAssertThrowsError(try owner.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil))
+        XCTAssertEqual(owner.capture, captured)
+        try expectAssemblyResourcesRetired(received)
+        XCTAssertThrowsError(try owner.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? RetainedCommandCaptureError, .closed)
+        }
+        let nextReceived = try inputSubmission(fd, payload: claims.canonicalBytes), next = try assemble(nextReceived)
+        XCTAssertThrowsError(try next.recheck(expression: selfExpression(), userID: geteuid() ^ 1, auditSessionID: nil))
+        try expectAssemblyResourcesRetired(nextReceived)
     }
 
     private func selfExpression() throws -> String {

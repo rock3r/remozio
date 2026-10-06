@@ -26,12 +26,18 @@ public struct CommandTarget: Equatable, Sendable {
     public let gid: UInt32
     public let supplementaryGroups: [UInt32]
     public let observedName: String?
+    public init(uid: UInt32, gid: UInt32, supplementaryGroups: [UInt32], observedName: String?) {
+        self.uid = uid; self.gid = gid; self.supplementaryGroups = supplementaryGroups; self.observedName = observedName
+    }
 }
 public enum EnvironmentSource: UInt64, Sendable { case minimal, requested }
 public struct CapturedEnvironmentEntry: Equatable, Sendable {
     public let name: Data
     public let value: Data
     public let source: EnvironmentSource
+    public init(name: Data, value: Data, source: EnvironmentSource) {
+        self.name = name; self.value = value; self.source = source
+    }
 }
 public enum CommandInputKind: UInt64, Sendable {
     case null, pipe, file, tty, pty, socket, directory, device, other
@@ -96,9 +102,12 @@ public struct CapturedSubmission: Equatable, Sendable {
     public let id: Data
     public let nonce: Data
     public let callerBinding: Data
+    public init(id: Data, nonce: Data, callerBinding: Data) {
+        self.id = id; self.nonce = nonce; self.callerBinding = callerBinding
+    }
 }
 
-/// Parses command claims only. OS capture, authenticated issuance, and execution remain separate responsibilities.
+/// Encodes and parses command claims. OS provenance, authenticated issuance, and execution remain separate responsibilities.
 public struct CommandCapture: Equatable, Sendable {
     public static let supportedSchemaVersions: Set<UInt64> = [1, 2]
     public let schemaVersion: UInt64
@@ -115,6 +124,43 @@ public struct CommandCapture: Equatable, Sendable {
     public let ancestry: CapturedAncestry
     public let unverifiedRationale: String?
     public let submission: CapturedSubmission
+
+    public init(schemaVersion: UInt64, executable: CapturedExecutable, arguments: [Data], directory: CapturedDirectory,
+                target: CommandTarget, environment: [CapturedEnvironmentEntry], input: CapturedCommandInput,
+                ioMode: CommandIOMode, disconnectBehavior: StartedCommandDisconnect, requester: CapturedRequester,
+                ancestry: CapturedAncestry, unverifiedRationale: String?, submission: CapturedSubmission,
+                limits: CBORLimits) throws {
+        guard Self.supportedSchemaVersions.contains(schemaVersion) else { throw CommandCaptureError.version }
+        func identity(_ value: CapturedFileIdentity) -> CBORValue {
+            .map([0: .unsigned(value.device), 1: .unsigned(value.inode)])
+        }
+        let executableValue: CBORValue = .map([0: .bytes(executable.path), 1: identity(executable.identity), 2: .bytes(executable.sha256)])
+        let directoryValue: CBORValue = .map([0: .bytes(directory.path), 1: identity(directory.identity)])
+        let targetValue: CBORValue = .map([0: .unsigned(UInt64(target.uid)), 1: .unsigned(UInt64(target.gid)),
+            2: .array(target.supplementaryGroups.map { .unsigned(UInt64($0)) }), 3: target.observedName.map { .text($0) } ?? .null])
+        let environmentValue: CBORValue = .array(environment.map {
+            .map([0: .bytes($0.name), 1: .bytes($0.value), 2: .unsigned($0.source.rawValue)])
+        })
+        let inputValue: CBORValue = .map([0: .unsigned(input.kind.rawValue), 1: input.streamBinding.map { .bytes($0) } ?? .null,
+            2: input.observedPath.map { .bytes($0) } ?? .null, 3: input.identity.map(identity) ?? .null])
+        let signingValue: CBORValue = .map([0: .unsigned(requester.signing.status.rawValue),
+            1: requester.signing.identifier.map { .text($0) } ?? .null, 2: requester.signing.team.map { .text($0) } ?? .null,
+            3: requester.signing.cdHash.map { .bytes($0) } ?? .null])
+        let requesterValue: CBORValue = .map([0: .bytes(requester.executablePath), 1: .unsigned(UInt64(requester.realUID)),
+            2: .unsigned(UInt64(requester.effectiveUID)), 3: .unsigned(UInt64(requester.pid)),
+            4: .unsigned(UInt64(requester.pidVersion)), 5: signingValue,
+            6: requester.sessionID.map { .unsigned(UInt64($0)) } ?? .null, 7: requester.ttyPath.map { .bytes($0) } ?? .null])
+        let ancestryValue: CBORValue = .map([0: .unsigned(ancestry.completeness.rawValue), 1: .array(ancestry.entries.map {
+            .map([0: .unsigned(UInt64($0.pid)), 1: .unsigned(UInt64($0.pidVersion)),
+                2: $0.executablePath.map { .bytes($0) } ?? .null, 3: .unsigned(UInt64($0.uid))])
+        }), 2: .unsigned(ancestry.reason.rawValue)])
+        let submissionValue: CBORValue = .map([0: .bytes(submission.id), 1: .bytes(submission.nonce), 2: .bytes(submission.callerBinding)])
+        let fields: CBORValue = .map([0: .unsigned(schemaVersion), 1: executableValue, 2: .array(arguments.map { .bytes($0) }),
+            3: directoryValue, 4: targetValue, 5: environmentValue, 6: inputValue, 7: .unsigned(ioMode.rawValue),
+            8: .unsigned(disconnectBehavior.rawValue), 9: requesterValue, 10: ancestryValue,
+            11: unverifiedRationale.map { .text($0) } ?? .null, 12: submissionValue])
+        try self.init(canonicalBytes: DeterministicCBOR.encode(fields, limits: limits), limits: limits, expectedSchemaVersion: schemaVersion)
+    }
 
     public init(canonicalBytes: Data, limits: CBORLimits, expectedSchemaVersion: UInt64 = 1) throws {
         let root = try CaptureFields(DeterministicCBOR.decode(canonicalBytes, limits: limits), count: 13)
@@ -183,7 +229,7 @@ public struct CommandCapture: Equatable, Sendable {
     }
 }
 
-private struct CaptureFields {
+struct CaptureFields {
     let values: [UInt64: CBORValue]
     init(_ value: CBORValue, count: UInt64) throws {
         guard case let .map(values) = value, Set(values.keys) == Set(0..<count) else { throw CommandCaptureError.fields }
