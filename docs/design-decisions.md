@@ -28,7 +28,7 @@ A process can still replace or modify the executable after the recheck and befor
 
 Do not silently relocate executable files, force another interpreter, or restrict commands to an immutable allowlist. The user accepted the documented race to preserve ordinary executable-location and argv behavior.
 
-The [macOS 26 and 27 experiment](experiments/macos-execution-binding.md) provides the measured evidence. Production execution still needs protected service integration, authorization policy, durable consumption, process I/O and recovery. Acceptance of this contract does not enable an unimplemented executor.
+The [macOS 26 and 27 experiment](experiments/macos-execution-binding.md) provides the measured evidence. Production execution still needs protected service integration, authorization policy, durable consumption, process I/O and recovery. Acceptance of this contract does not enable an unimplemented executor. The [filesystem capture component](macos-command-filesystem-capture.md) now implements capture and recheck without command dispatch.
 
 ## Test order and signing
 

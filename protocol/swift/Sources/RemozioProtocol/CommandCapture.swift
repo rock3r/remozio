@@ -6,15 +6,20 @@ public enum CommandCaptureError: Error, Equatable {
 public struct CapturedFileIdentity: Equatable, Sendable {
     public let device: UInt64
     public let inode: UInt64
+    public init(device: UInt64, inode: UInt64) { self.device = device; self.inode = inode }
 }
 public struct CapturedExecutable: Equatable, Sendable {
     public let path: Data
     public let identity: CapturedFileIdentity
     public let sha256: Data
+    public init(path: Data, identity: CapturedFileIdentity, sha256: Data) {
+        self.path = path; self.identity = identity; self.sha256 = sha256
+    }
 }
 public struct CapturedDirectory: Equatable, Sendable {
     public let path: Data
     public let identity: CapturedFileIdentity
+    public init(path: Data, identity: CapturedFileIdentity) { self.path = path; self.identity = identity }
 }
 public struct CommandTarget: Equatable, Sendable {
     public let uid: UInt32
