@@ -105,6 +105,7 @@ public final class ApprovalRequestCoordinator {
         var frameKey: Data?
     }
     private var entries: [Data: Entry] = [:]
+    private var expiryNotifications: [Data: ApprovalRequestState] = [:]
 
     public init(database: JournalDatabase, writer: AuditEpochWriter, clockEpoch: UUID,
                 maximumRequests: Int, maximumRetainedBytes: Int, requestLimits: CBORLimits, captureLimits: CBORLimits,
@@ -144,14 +145,16 @@ public final class ApprovalRequestCoordinator {
               draft.estimatedLifetimeMilliseconds == nil || draft.estimatedLifetimeMilliseconds! > 0 else {
             throw ApprovalCoordinatorError.invalidDraft
         }
-        guard entries.count < maximumRequests else { throw ApprovalCoordinatorError.capacityExceeded }
+        let orphanedExpiries = expiryNotifications.keys.lazy.filter { self.entries[$0] == nil }.count
+        guard entries.count + orphanedExpiries < maximumRequests else { throw ApprovalCoordinatorError.capacityExceeded }
         let payload = try IssuedRequestPayload(contract: draft.contract, macID: mac, accountID: account,
             requestID: random(16), challenge: random(32), requiredFeatures: draft.requiredFeatures,
             createdUnixMilliseconds: draft.createdUnixMilliseconds, expiresUnixMilliseconds: draft.expiresUnixMilliseconds,
             canonicalCapture: draft.capture, permittedActions: draft.actions, bodyLimits: requestLimits, captureLimits: captureLimits)
         let digest = try payload.requestDigest(bodyLimits: requestLimits, signingLimits: signingLimits)
         let bytes = try payload.encode(limits: requestLimits).count
-        guard bytes <= maximumRetainedBytes - retainedBytes, entries[payload.requestID] == nil else {
+        guard bytes <= maximumRetainedBytes - retainedBytes, entries[payload.requestID] == nil,
+              expiryNotifications[payload.requestID] == nil else {
             throw ApprovalCoordinatorError.capacityExceeded
         }
         let retained = try RetainedApprovalRequest(payload: payload, phase: .queued, admittedAt: draft.firstObservedAt,
@@ -194,7 +197,8 @@ public final class ApprovalRequestCoordinator {
         return try replace(requestID, phase: RequestLifecycle.transition(from: retained.phase, event: .present), reason: .none, now: now)
     }
 
-    /// Expires elapsed pending requests without phone traffic. Audit commits before any live state changes.
+    /// Expires elapsed requests and returns unreported committed expiries from every path once.
+    /// Reconcile this batch under the same service serialization. Audit commits before live state changes.
     public func expirePending(now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> [ApprovalRequestState] {
         try checkClock(now)
         let expired = entries.keys.filter { id in
@@ -209,7 +213,10 @@ public final class ApprovalRequestCoordinator {
                     reason: .authorizationExpired, receiptTimeMs: receiptTimeMs)
             }
         }
-        return try expired.map { try replace($0, phase: .expired, reason: .authorizationExpired, now: now) }
+        for id in expired { _ = try replace(id, phase: .expired, reason: .authorizationExpired, now: now) }
+        let notifications = expiryNotifications.keys.sorted { $0.lexicographicallyPrecedes($1) }.map { expiryNotifications[$0]! }
+        expiryNotifications.removeAll(keepingCapacity: true)
+        return notifications
     }
 
     /// A Mac-observed pending lifecycle change. A phone decline must use its signed decision instead.
@@ -543,7 +550,8 @@ public final class ApprovalRequestCoordinator {
         return outcome
     }
 
-    /// Terminal metadata remains in the journal. Forgetting it never admits an old request or clears durable consumption.
+    /// Terminal metadata remains in the journal. Forgetting never clears durable consumption or pending expiry cleanup.
+    /// An unreported expiry still occupies one bounded request slot until expirePending returns it.
     public func forgetTerminal(requestID: Data) throws {
         try running()
         guard let entry = entries[requestID], entry.state.phase.isTerminal else { throw ApprovalCoordinatorError.notPending }
@@ -583,6 +591,7 @@ public final class ApprovalRequestCoordinator {
             entry.byteCount = 0
         }
         entries[id] = entry
+        if phase == .expired { expiryNotifications[id] = entry.state }
         return entry.state
     }
 
@@ -618,7 +627,7 @@ public final class ApprovalRequestCoordinator {
     private func checkClock(_ now: AuthorityMoment) throws {
         try running()
         guard now.epoch == clockEpoch, lastTime == nil || now.milliseconds >= lastTime! else {
-            stopped = true; entries.removeAll(); retainedBytes = 0; deliveryBytes = 0
+            stopped = true; entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
             throw ApprovalCoordinatorError.invalidClock
         }
         lastTime = now.milliseconds

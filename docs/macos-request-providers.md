@@ -35,7 +35,7 @@ Each handler receives the service's existing sleep-inclusive clock. Request crea
 
 Request body limits reserve the signed carrier inside `maximumPayloadBytes`. Status/decision exchange additionally respects the 4096-byte IPC carrier bound. All operations use the same pinned signer. The coordinator still verifies each generated signature and resamples time/presence after signing.
 
-Periodic expiry uses the same bundle and service clock. Callers must supply a reconciliation callback for target-facing cleanup. Each expiry transition is returned once, so omitting cleanup would lose that transition. Expiry itself grants no execution or UI-click authority. A callback failure retires the service through the existing maintenance failure path.
+Periodic expiry uses the same bundle and service clock. Callers must supply a reconciliation callback for target-facing cleanup. A successful sweep returns each unreported expiry transition once, including expiries committed by request handlers. See the [expiry reconciliation contract](macos-expiry-reconciliation.md). Expiry itself grants no execution or UI-click authority. A callback failure retires the service through the existing maintenance failure path.
 
 ## Evidence and remaining integration
 
