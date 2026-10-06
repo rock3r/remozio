@@ -48,6 +48,9 @@ public struct CapturedSigningIdentity: Equatable, Sendable {
     public let identifier: String?
     public let team: String?
     public let cdHash: Data?
+    public init(status: CapturedSigningStatus, identifier: String?, team: String?, cdHash: Data?) {
+        self.status = status; self.identifier = identifier; self.team = team; self.cdHash = cdHash
+    }
 }
 public struct CapturedRequester: Equatable, Sendable {
     public let executablePath: Data
@@ -58,6 +61,11 @@ public struct CapturedRequester: Equatable, Sendable {
     public let signing: CapturedSigningIdentity
     public let sessionID: UInt32?
     public let ttyPath: Data?
+    public init(executablePath: Data, realUID: UInt32, effectiveUID: UInt32, pid: UInt32, pidVersion: UInt32,
+                signing: CapturedSigningIdentity, sessionID: UInt32?, ttyPath: Data?) {
+        self.executablePath = executablePath; self.realUID = realUID; self.effectiveUID = effectiveUID
+        self.pid = pid; self.pidVersion = pidVersion; self.signing = signing; self.sessionID = sessionID; self.ttyPath = ttyPath
+    }
 }
 public enum AncestryCompleteness: UInt64, Sendable { case complete, partial, unavailable }
 public enum AncestryReason: UInt64, Sendable { case none, exited, permission, truncated, unsupported }
