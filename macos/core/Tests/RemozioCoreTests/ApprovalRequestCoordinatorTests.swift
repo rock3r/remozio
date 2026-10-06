@@ -683,6 +683,40 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
     }
 
+    func testPendingDiscoveryIsStableBoundedAndDoesNotMarkHandoff() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, maximum: 2)
+        let first = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let second = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let binding = try frameBinding(db)
+        let expected = [first.requestID, second.requestID].sorted { $0.lexicographicallyPrecedes($1) }
+        XCTAssertEqual(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(120), receiptTimeMs: nil), expected)
+        XCTAssertEqual(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(130), receiptTimeMs: nil), expected)
+        XCTAssertTrue(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(.present), now: now(140), receiptTimeMs: nil).isEmpty)
+        XCTAssertThrowsError(try owner.admit(draft(), now: now(140), receiptTimeMs: nil))
+        XCTAssertEqual(try owner.state(requestID: first.requestID).phase, .queued)
+        XCTAssertEqual(try events(db, writer).map(\.kind), [.enrollmentAdded, .requestCreated, .requestCreated])
+    }
+    func testPendingDiscoveryKeepsHandedOffRequestDuringPresentAndExpiresIt() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        _ = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation })
+        XCTAssertEqual(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(.present), now: now(130), receiptTimeMs: nil), [request.requestID])
+        XCTAssertTrue(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(200), receiptTimeMs: nil).isEmpty)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
+        try owner.forgetTerminal(requestID: request.requestID)
+        XCTAssertTrue(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(210), receiptTimeMs: nil).isEmpty)
+    }
+    func testPendingDiscoveryRejectsStaleEnrollmentAndOmitsRetiredRequests() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(120), receiptTimeMs: nil)
+        XCTAssertTrue(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(130), receiptTimeMs: nil).isEmpty)
+        let stale = AuthorityPeerBinding(peer: try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096).peers.first }), revision: UUID())
+        XCTAssertThrowsError(try owner.pendingDeliveryRequestIDs(binding: stale, routing: routing(), now: now(140), receiptTimeMs: nil))
+    }
     private func frameBinding(_ db: JournalDatabase) throws -> AuthorityPeerBinding {
         let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
         return AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision)

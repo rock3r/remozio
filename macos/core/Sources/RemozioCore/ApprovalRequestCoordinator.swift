@@ -304,6 +304,43 @@ public final class ApprovalRequestCoordinator {
             routing: finalRouting, now: now(), receiptTimeMs: receiptTimeMs) { accept($0, frame) }
     }
 
+    /// Bounded discovery hints for one current enrollment, never approval or delivery acknowledgments.
+    /// The host serializes this call with authority changes. Fetch each frame through retainedDeliveryFrame.
+    public func pendingDeliveryRequestIDs(binding: AuthorityPeerBinding, routing: PresenceRouting,
+                                          now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> [Data] {
+        try checkClock(now)
+        let trust = try read { transaction in
+            try transaction.requireDirectApprovalBinding(binding)
+            return try transaction.requestDeliveryTrust()
+        }
+        if entries.values.contains(where: {
+            ($0.state.phase == .queued || $0.state.phase == .presented) && now.milliseconds >= $0.state.deadlineMilliseconds
+        }) {
+            _ = try expirePending(now: now, receiptTimeMs: receiptTimeMs)
+        }
+        var result: [Data] = []
+        for id in entries.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            guard let retained = entries[id]?.retained,
+                  retained.phase == .queued || retained.phase == .presented else { continue }
+            let delivery = try deliveryController(requestID: id, retained: retained)
+            let update = delivery.reconcile(current: retained, routing: routing, trust: trust, now: now) { _ in true }
+            guard let recipient = update.active.first(where: {
+                $0.recipient.phoneID == binding.scope.phoneID && $0.recipient.enrollmentEpoch == binding.scope.enrollmentEpoch
+            }) else { continue }
+            if routing.destination == .phones || update.dispatched.contains(where: { $0.id == recipient.id }) {
+                result.append(id)
+            }
+        }
+        return result
+    }
+
+    private func deliveryController(requestID: Data, retained: RetainedApprovalRequest) throws -> PendingRequestDelivery {
+        if let existing = entries[requestID]?.delivery { return existing }
+        let delivery = try PendingRequestDelivery(request: retained)
+        entries[requestID]?.delivery = delivery
+        return delivery
+    }
+
     /// Root-owned retry storage for the request-frame provider. Serialize with all authority state.
     /// A returned frame is a possible handoff, not phone receipt or consent. Never persist this cache.
     /// Callbacks must be synchronous and must not reenter or mutate authority state.
@@ -321,12 +358,7 @@ public final class ApprovalRequestCoordinator {
         catch ApprovalCoordinatorError.unknownRequest { return nil }
         guard state.phase == .queued || state.phase == .presented else { return nil }
         guard let entry = entries[requestID], let retained = entry.retained else { throw ApprovalCoordinatorError.notPending }
-        let delivery: PendingRequestDelivery
-        if let existing = entry.delivery { delivery = existing }
-        else {
-            delivery = try PendingRequestDelivery(request: retained)
-            entries[requestID]?.delivery = delivery
-        }
+        let delivery = try deliveryController(requestID: requestID, retained: retained)
         let currentRouting = try routing()
         let update = try reconcileDelivery(requestID: requestID, delivery: delivery, routing: currentRouting, now: now(),
             receiptTimeMs: receiptTimeMs) { _ in true }

@@ -50,3 +50,11 @@ A first fetch checks current enrollment, contract support, presence, deadline, a
 Present suppresses first delivery to a recipient. A recipient already handed a frame can retry while the request remains valid, as required for phone review across presence changes. This handoff is not proof of phone receipt. The provider does not mark the request presented or approved.
 
 The cache releases frames when requests leave queued/presented state, including authorization, cancellation, and expiry. It dies with the coordinator. Frame storage is bounded separately by the retained-payload budget plus one carrier overhead per request; recipients share a frame. Existing request and recipient limits also apply. This does not persist sensitive payloads or implement FCM scheduling, pending-set discovery, or decision submission.
+
+## Pending discovery owner
+
+`ApprovalRequestCoordinator.pendingDeliveryRequestIDs` returns the complete current set of eligible IDs for one validated enrollment. The set is bounded by the coordinator's request limit (at most 4096), sorted by ID, and contains no capture bytes. It is a discovery hint, not proof that a later fetch will succeed.
+
+The owner expires elapsed pending requests before producing the result. It applies current enrollment and contract support through the same recipient controller as frame retrieval. Present excludes new deliveries while retaining previously handed-off requests. Discovery itself does not mark a request dispatched, presented, or consumed, and repeated discovery creates no extra request audit events.
+
+This root API is not yet exposed by the IPC delivery extension or the phone wire protocol. Those callers must negotiate discovery support and fetch each result through the existing frame checks. They must not treat an empty discovery result as a signed terminal status for a previously known request.
