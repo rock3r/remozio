@@ -784,6 +784,28 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             now: { self.now(150) }, routing: { try self.routing() }, receiptTimeMs: nil,
             signer: { _ in XCTFail("Revoked phone signed"); throw Failure.fixture }))
     }
+    func testForgottenAndUnknownFrameRequestsReturnAbsenceWithoutHidingStorageFailure() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(120), receiptTimeMs: nil)
+        try owner.forgetTerminal(requestID: request.requestID)
+        for requestID in [request.requestID, id(99)] {
+            XCTAssertNil(try owner.retainedDeliveryFrame(binding: binding, requestID: requestID,
+                authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+                now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
+                signer: { _ in XCTFail("Unknown request signed"); throw Failure.fixture }))
+        }
+        let next = try owner.admit(draft(), now: now(140), receiptTimeMs: nil)
+        XCTAssertNotNil(try owner.retainedDeliveryFrame(binding: binding, requestID: next.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(150) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation }))
+        try db.close()
+        XCTAssertThrowsError(try owner.retainedDeliveryFrame(binding: binding, requestID: id(99),
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(160) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { _ in XCTFail("Closed storage signed"); throw Failure.fixture }))
+    }
     func testRetainedFrameBudgetIsReclaimedAfterRetirement() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, bytes: 4096)
         let binding = try frameBinding(db)

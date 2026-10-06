@@ -316,7 +316,9 @@ public final class ApprovalRequestCoordinator {
         }
         try read { try $0.requireDirectApprovalBinding(binding) }
         let time = try now()
-        let state = try deliveryState(requestID: requestID, now: time, receiptTimeMs: receiptTimeMs)
+        let state: ApprovalRequestState
+        do { state = try deliveryState(requestID: requestID, now: time, receiptTimeMs: receiptTimeMs) }
+        catch ApprovalCoordinatorError.unknownRequest { return nil }
         guard state.phase == .queued || state.phase == .presented else { return nil }
         guard let entry = entries[requestID], let retained = entry.retained else { throw ApprovalCoordinatorError.notPending }
         let delivery: PendingRequestDelivery
