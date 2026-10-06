@@ -31,6 +31,27 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             let reply = lock.withLock { let value = frameReply; frameReply = nil; return value }
             reply?(.requestFrame(Data()))
         }
+        private var discoveries = 0
+        private var discoveryReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var discoveryBinding: Data?
+        let discoverySent = XCTestExpectation(description: "held discovery")
+        var discoveryCount: Int { lock.withLock { discoveries } }
+        func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            reply(.discoveryVersion(lock.withLock { version }))
+        }
+        func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { discoveries += 1; discoveryBinding = binding; discoveryReply = reply }
+            discoverySent.fulfill()
+        }
+        func finishDiscovery() throws {
+            let (reply, binding) = lock.withLock {
+                let value = (discoveryReply, discoveryBinding); discoveryReply = nil; discoveryBinding = nil; return value
+            }
+            guard let reply, let binding else { return }
+            let peer = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: Data(repeating: 1, count: 16),
+                expectedAccountID: Data(repeating: 2, count: 16))
+            reply(.pendingRequests(try AuthorityPendingRequests.encode([Data(repeating: 8, count: 16)], binding: peer)))
+        }
         let snapshotSent = XCTestExpectation(description: "held snapshot")
         let validationSent = XCTestExpectation(description: "held validation")
         init(_ trust: DirectApprovalTrust) throws { bytes = try AuthorityTrustCodec.encodeSnapshot(trust) }
@@ -253,6 +274,72 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         await fulfillment(of: [driver.frameSent], timeout: 2)
         driver.interrupt(); driver.finishFrame()
         do { _ = try await pending.value; XCTFail("Disconnected fetch completed") } catch { }
+        await feed.close()
+        XCTAssertTrue(try XCTUnwrap(listeners.values.last).isClosed)
+        await host.close()
+    }
+    func testServiceRejectsDiscoveryWhenSessionIsReplacedDuringFetch() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        try await service.start()
+        let session = try await host.admit(trust.peers[0], generation: XCTUnwrap(listeners.generation))
+        let pending = Task { try await service.pendingRequestIDs(for: session) }
+        await fulfillment(of: [driver.discoverySent], timeout: 2)
+        try await host.replaceTrust(self.trust(empty: true))
+        try driver.finishDiscovery()
+        do { _ = try await pending.value; XCTFail("Retired phone session received discovery") } catch DirectHostError.staleSession { }
+        await service.close()
+    }
+    func testServiceReturnsDiscoveryOnlyForCurrentSession() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        try await service.start()
+        let session = try await host.admit(trust.peers[0], generation: XCTUnwrap(listeners.generation))
+        let pending = Task { try await service.pendingRequestIDs(for: session) }
+        await fulfillment(of: [driver.discoverySent], timeout: 2)
+        try driver.finishDiscovery()
+        let ids = try await pending.value; XCTAssertEqual(ids, [Data(repeating: 8, count: 16)])
+        await service.close()
+        do { _ = try await service.pendingRequestIDs(for: session); XCTFail("Closed service fetched") }
+        catch DirectHostError.stopped { }
+        XCTAssertEqual(driver.discoveryCount, 1)
+    }
+    func testDiscoveryRetrievalSerializesWithValidationAndCancellation() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+        try await feed.start(host: host)
+        let first = Task { try await feed.pendingRequestIDs(trust.peers[0], revision: trust.revision) }
+        await fulfillment(of: [driver.discoverySent], timeout: 2)
+        let cancelled = Task { try await feed.pendingRequestIDs(trust.peers[0], revision: trust.revision) }
+        try await waitForQueue(feed, count: 1)
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancelled fetch completed") } catch { }
+        let validation = Task { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
+        try await waitForQueue(feed, count: 1)
+        XCTAssertEqual(driver.validationCount, 0)
+        try driver.finishDiscovery()
+        let ids = try await first.value; XCTAssertEqual(ids, [Data(repeating: 8, count: 16)])
+        try await validation.value
+        XCTAssertEqual(driver.discoveryCount, 1); XCTAssertEqual(driver.validationCount, 1)
+        await feed.close(); await host.close()
+    }
+    func testUnsupportedDiscoveryPreserveCommonTrustOperations() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+        driver.setVersion(0); try await feed.start(host: host)
+        do {
+            _ = try await feed.pendingRequestIDs(trust.peers[0], revision: trust.revision)
+            XCTFail("Unsupported delivery accepted")
+        } catch AuthorityXPCError.unsupportedRequestDiscovery { }
+        XCTAssertEqual(driver.discoveryCount, 0)
+        try await feed.refresh(); try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testDisconnectRejectsLateDiscoveryReply() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let pending = Task { try await feed.pendingRequestIDs(trust.peers[0], revision: trust.revision) }
+        await fulfillment(of: [driver.discoverySent], timeout: 2)
+        driver.interrupt(); try driver.finishDiscovery()
+        do { _ = try await pending.value; XCTFail("Disconnected discovery completed") } catch { }
         await feed.close()
         XCTAssertTrue(try XCTUnwrap(listeners.values.last).isClosed)
         await host.close()

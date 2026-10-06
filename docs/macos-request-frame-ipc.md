@@ -70,3 +70,11 @@ The endpoint uses its existing OS identity guard and shared operation budget. Th
 Discovery and frame retrieval negotiate independently. Existing frame-version-one clients keep their existing behavior. Discovery creates no approval, queue acknowledgment, lifecycle transition, or terminal status. Phone network dispatch, notification scheduling, production provider installation, and decision submission remain separate integration work.
 
 The [discovery live evidence](experiments/evidence/2026-10-06-discovery-xpc.json) records 14 passing synthetic cases, including discovery selector bridging and rejection before discovery dispatch for wrong client/server identifiers. The temporary service was removed. This probe does not establish protected root installation, Developer ID policy, or device E2E.
+
+## Session discovery
+
+`DirectApprovalTransportService.pendingRequestIDs` validates the live phone session before discovery and after the authority reply. Session replacement, service closure, or cancellation prevents return of IDs to the caller.
+
+Discovery uses the trust feed's existing authority connection, bounded wait queue, and refresh priority. Cancelling queued discovery leaves the active operation running. An explicitly unsupported discovery extension preserves common trust operations and frame retrieval. Authority disconnection rejects late replies and retires the listener.
+
+This API returns discovery hints to a transport handler. It does not send them to the phone, mark requests handled, or schedule notifications. The network handler must retain its channel checks before sending and fetch each frame through the existing request checks.

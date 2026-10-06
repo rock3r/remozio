@@ -62,6 +62,19 @@ public actor DirectApprovalTransportService {
         return frame
     }
 
+    /// Discover requests for this live phone session. Fetch and verify each returned request separately.
+    public func pendingRequestIDs(for session: DirectApprovalSession) async throws -> [Data] {
+        guard started, !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        let ids = try await feed.pendingRequestIDs(session.peer, revision: session.revision)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+        return ids
+    }
+
     public func close() async {
         closed = true
         await host.close()

@@ -121,6 +121,20 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestDelivery
         } catch { await close(); throw error }
     }
+    /// Discover through the ordered authority connection. IDs are hints, never terminal request statuses.
+    public func pendingRequestIDs(_ peer: DirectApprovalPeer, revision: UUID) async throws -> [Data] {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
+        try await acquire()
+        defer { release() }
+        do {
+            let ids = try await activeChannel().pendingRequestIDs(binding: AuthorityPeerBinding(peer: peer, revision: revision))
+            try requireActive()
+            return ids
+        } catch AuthorityXPCError.unsupportedRequestDiscovery {
+            try requireActive()
+            throw AuthorityXPCError.unsupportedRequestDiscovery
+        } catch { await close(); throw error }
+    }
     public func close() async {
         if !closed {
             closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil
