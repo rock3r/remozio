@@ -1,0 +1,56 @@
+{
+  "experiment": "command-caller-audit-v1",
+  "measuredAtUTC": "2026-10-06T19:32:53.649339+00:00",
+  "host": {
+    "os": "26.6.2",
+    "build": "25G83",
+    "architecture": "arm64",
+    "sdk": "26.5",
+    "deploymentTarget": "26.0"
+  },
+  "sources": {
+    "message.h": "c84962c4150d9939fa21d7d513f62477819b223a4ef5c8447c7c627c1f8446ae",
+    "peer.c": "73da94c9a2a1d06c52b9cb75628f3929a8f272679587d434f4e6b098091d9c26",
+    "probe.c": "b69cb80f8a072657092da6ab0be74b9b539260a15e3c94f45d65bedd705ab635"
+  },
+  "observations": {
+    "first_message_has_audit_trailer": true,
+    "kernel_pid_matches_spawned_peer": true,
+    "kernel_uid_matches": true,
+    "forged_payload_pid_ignored": true,
+    "forged_payload_token_ignored": true,
+    "audit_bound_path_matches": true,
+    "audit_bound_code_available": true,
+    "signing_information_available": true,
+    "pinned_fixture_code_accepted": true,
+    "wrong_code_hash_rejected": true,
+    "second_message_has_audit_trailer": true,
+    "exec_preserves_pid": true,
+    "exec_changes_incarnation": true,
+    "old_token_path_rejected_while_peer_lives": true,
+    "new_token_path_matches": true,
+    "old_token_code_lookup_rejected": true,
+    "retained_old_code_rejected": true,
+    "new_token_code_available": true,
+    "new_code_matches_pin": true,
+    "peer_exit_observed": true,
+    "peer_exited_cleanly": true,
+    "exited_token_path_rejected": true,
+    "retained_exited_code_rejected": true,
+    "passed": true
+  },
+  "rejectionCases": [
+    "wrong_pin_retires_peer",
+    "silent_peer_retires",
+    "malformed_phase_retires",
+    "missing_exec_message_retires"
+  ],
+  "limits": [
+    "Unprivileged anonymous Mach endpoint; no installed service",
+    "Ad-hoc fixture pin; no Developer ID trust or production code floor",
+    "Exec and exit; no forced PID reuse",
+    "No Root command admission, policy, execution, or device E2E"
+  ],
+  "sourceJobURL": "https://github.com/rock3r/remozio/actions/runs/37518929508/job/112458952522",
+  "sourceCommit": "9d6c4e93b05b2e6d316208d96bd02adf0050bc1e"
+}

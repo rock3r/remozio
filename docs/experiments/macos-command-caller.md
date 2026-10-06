@@ -47,6 +47,12 @@ Both binaries use a macOS 26 deployment target. This local run does not prove ma
 
 All 23 identity observations passed. Four additional rejection cases passed.
 
+The [CI report](evidence/2026-10-06-command-caller-ci.json) records the same observations on macOS 26.6.2, arm64, with SDK 26.5.
+Its source hashes match commit `9d6c4e93b05b2e6d316208d96bd02adf0050bc1e`.
+The [source job](https://github.com/rock3r/remozio/actions/runs/37518929508/job/112458952522) provides the report provenance.
+This proves the fixture behavior on macOS 26. It does not prove installed privileged service behavior.
+
+
 | Check | Observed result |
 | --- | --- |
 | Kernel PID and effective UID | Match the spawned peer and current account |
