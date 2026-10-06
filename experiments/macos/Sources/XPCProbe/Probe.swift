@@ -8,6 +8,12 @@ import RemozioCore
 final class ProbeService: NSObject, ProbeProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
     func requestDeliveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    func requestDiscoveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    func pendingRequestIDs(_ binding: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        print("DISCOVERY_RECEIVED \(String(decoding: binding, as: UTF8.self))")
+        fflush(stdout)
+        reply(binding)
+    }
     func trustSnapshot(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void) { reply(false) }
     func requestFrame(_ binding: Data, requestID: Data, reply: @escaping @Sendable (Data?) -> Void) {
@@ -80,7 +86,7 @@ final class Completion: @unchecked Sendable {
             listener.delegate = delegate
             listener.activate()
             withExtendedLifetime((listener, delegate)) { RunLoop.current.run() }
-        case "ping", "guarded-ping", "frame", "empty", "nil":
+        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery":
             guard args.count == 4 else { exit(2) }
             let nonce = args[3]
             let completion = Completion()
@@ -114,6 +120,15 @@ final class Completion: @unchecked Sendable {
             if args[0] == "ping" || args[0] == "guarded-ping" {
                 proxy.ping(nonce) { @Sendable returned in
                     completion.finish(returned == nonce ? "accepted" : "wrong-reply")
+                }
+            } else if args[0] == "discovery" {
+                let version = Completion()
+                proxy.requestDiscoveryVersion { @Sendable value in version.finish(value == 1 ? "accepted" : "wrong-version") }
+                guard version.signal.wait(timeout: .now() + 10) == .success,
+                      version.value() == "accepted" else { print("version-failed"); exit(4) }
+                let expected = Data(nonce.utf8)
+                proxy.pendingRequestIDs(expected) { @Sendable returned in
+                    completion.finish(returned == expected ? "accepted" : "wrong-reply")
                 }
             } else {
                 let version = Completion()
