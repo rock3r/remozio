@@ -12,9 +12,15 @@ sequenceDiagram
     participant R as Caller receiver
     participant O as Request owner
     CLI->>K: Versioned submission bytes
-    K->>R: Message plus kernel audit trailer
+    R->>K: Wait without importing the message body
+    K-->>R: Required receive size
+    R->>K: Peek at the queued audit token and sequence
+    K-->>R: Kernel sender identity
     R->>K: Resolve dynamic code and raw executable path
     R->>R: Check configured code pin, account and audit session
+    R->>K: Receive the authenticated sender’s message
+    R->>R: Match size, ID, sequence and full audit token
+    R->>K: Recheck the retained caller
     R->>O: Untrusted payload plus retained caller identity
     O->>O: Validate submission and create the exact request
     O->>R: Recheck caller with current protected policy
@@ -39,6 +45,7 @@ Explicit close also retires it. Access must be serialized by its owner.
 ## Carrier version 1
 
 The owner lends a receive right and retains responsibility for its lifetime.
+The receiver must be its sole consumer. The owner serializes every preview, discard and receive.
 No endpoint or service is installed by this library.
 The owner supplies a positive maximum payload size and a positive receive timeout.
 It must select these values within its protected memory and request budgets.
@@ -61,7 +68,24 @@ Receive interruptions return an error instead of silently restarting the full ti
 
 The carrier version does not replace application protocol negotiation or schema validation.
 Descriptor transport, reply channels, and streaming I/O require their own designed extension.
-Complex messages can import resources before application rejection. This component alone does not establish a complete hostile-sender resource budget.
+The receiver authenticates the sender before allocating its message arena or importing message resources.
+It waits with a 32-byte buffer, `MACH_RCV_LARGE`, and a requested audit trailer.
+Even a bare header needs more space with that trailer, so the message remains queued.
+`mach_port_peek` then supplies the kernel audit token, sequence, and ID without importing its body.
+
+The bounded receive result supplies the user-space message size.
+The peek API reports the queued kernel representation size, which can differ.
+The peek API's returned byte count establishes the audit data length; its stored trailer header can still report eight bytes.
+The receiver compares the final message size, ID, sequence, and full audit token before returning any payload.
+It also rechecks the retained caller after receiving the message.
+
+For a rejected sender or invalid size or ID, a tiny receive without `MACH_RCV_LARGE` discards the queued message.
+The kernel destroys its body rather than importing transferred memory or descriptor rights into the receiver.
+Receive waits share a monotonic timeout budget. System identity checks are not preemptible, so this is not a hard operation deadline.
+
+An authenticated sender can still transfer resources before carrier version 1 rejects a complex packet.
+Kernel queue pressure and resources held during send are also outside this receiver's budget.
+Descriptor admission, trusted-sender resource limits, and complete denial-of-service protection remain separate work.
 
 ## Validation and limits
 
@@ -69,7 +93,11 @@ The focused tests send real Mach messages. They check payload preservation, malf
 They reject wrong accounts, audit sessions, and code hashes. The public release policy rejects the test host.
 A disposable signed child executes again with the same PID and a different PID version.
 Rechecks reject its old incarnation and its exited incarnation.
-A complex packet test checks that rejection releases an imported send right.
+Complex packet tests include a transferred send right and 64 KiB of synthetic out-of-line memory.
+Repeated previews retain the queue head without increasing its send-right references.
+A normal receive imports the right and memory as a positive control, and message destruction releases the right.
+A wrong account is rejected before complex-body parsing, and explicit discard preserves the next queued packet.
+Bare-header and empty-queue cases check the tiny receive path and timeout.
 
 The fixtures use internal ad-hoc policies. Product callers cannot select that fixture path.
 Ad-hoc signing appears as ad-hoc metadata, not verified publisher trust.
@@ -84,3 +112,6 @@ It does not prove PID reuse behavior or physical-device end-to-end behavior.
 The shim uses public installed Mach and Security declarations.
 Apple's [receive implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/mach_msg.c) describes partial body-error copyout.
 Apple's [Mach library implementation](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/mach/mach_msg.c) describes interruption retries and received-resource destruction.
+
+Apple’s [queue preview implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/mach_port.c) returns audit data without receiving the body.
+Its [message queue implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/ipc/ipc_mqueue.c) distinguishes queued kernel sizes from receive sizes.

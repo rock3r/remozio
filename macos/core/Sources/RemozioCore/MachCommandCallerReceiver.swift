@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 import RemozioMach
 import RemozioProtocol
@@ -37,16 +38,42 @@ public final class MachCommandCallerReceiver {
     /// A finite timeout keeps receive loops cancellable. Oversized and malformed packets fail without truncation.
     public func receive(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandSubmission {
         guard timeoutMilliseconds > 0 else { throw MachCommandCallerError.configuration }
+        let started = DispatchTime.now().uptimeNanoseconds
+        var preview = remozio_mach_preview_t()
+        let previewResult = remozio_preview_audit(port, timeoutMilliseconds, &preview)
+        if previewResult == MACH_RCV_TIMED_OUT { throw MachCommandCallerError.timeout }
+        guard previewResult == KERN_SUCCESS else { throw MachCommandCallerError.mach(previewResult) }
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
         let prefixBytes = headerBytes + 8
         let maximumMessage = (prefixBytes + maxPayloadBytes + 3) & ~3
+        guard preview.identifier == Self.messageID, preview.size >= prefixBytes, preview.size <= maximumMessage else {
+            _ = remozio_discard_message(port)
+            throw MachCommandCallerError.malformed
+        }
+        let caller: RetainedCommandCaller
+        do {
+            caller = try RetainedCommandCaller(token: preview.token, requirement: requirement,
+                userID: userID, auditSessionID: auditSessionID)
+        } catch {
+            _ = remozio_discard_message(port)
+            throw error
+        }
+        var completed = false
+        defer { if !completed { caller.close() } }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        let budget = UInt64(timeoutMilliseconds) * 1_000_000
+        guard elapsed < budget else {
+            _ = remozio_discard_message(port)
+            throw MachCommandCallerError.timeout
+        }
+        let remaining = UInt32((budget - elapsed + 999_999) / 1_000_000)
         let capacity = maximumMessage + MemoryLayout<mach_msg_audit_trailer_t>.size
         let storage = UnsafeMutableRawPointer.allocate(byteCount: capacity,
             alignment: max(MemoryLayout<mach_msg_header_t>.alignment, MemoryLayout<mach_msg_audit_trailer_t>.alignment))
         defer { storage.deallocate() }
         storage.initializeMemory(as: UInt8.self, repeating: 0, count: capacity)
         let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
-        let result = remozio_receive_audit(header, UInt32(capacity), port, timeoutMilliseconds)
+        let result = remozio_receive_audit(header, UInt32(capacity), port, remaining)
         if result == MACH_RCV_TIMED_OUT { throw MachCommandCallerError.timeout }
         guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         defer { mach_msg_destroy(header) }
@@ -62,7 +89,9 @@ public final class MachCommandCallerReceiver {
         }
         let trailer = storage.loadUnaligned(fromByteOffset: trailerOffset, as: mach_msg_audit_trailer_t.self)
         guard trailer.msgh_trailer_type == MACH_MSG_TRAILER_FORMAT_0,
-              trailer.msgh_trailer_size == MemoryLayout<mach_msg_audit_trailer_t>.size else {
+              trailer.msgh_trailer_size == MemoryLayout<mach_msg_audit_trailer_t>.size,
+              trailer.msgh_seqno == preview.sequence, value.msgh_size == preview.size, value.msgh_id == preview.identifier,
+              Self.sameToken(trailer.msgh_audit, preview.token) else {
             throw MachCommandCallerError.malformed
         }
         let version = UInt32(bigEndian: storage.loadUnaligned(fromByteOffset: headerBytes, as: UInt32.self))
@@ -74,9 +103,14 @@ public final class MachCommandCallerReceiver {
         for offset in (prefixBytes + count)..<size where storage.load(fromByteOffset: offset, as: UInt8.self) != 0 {
             throw MachCommandCallerError.malformed
         }
-        let caller = try RetainedCommandCaller(token: trailer.msgh_audit, requirement: requirement,
-            userID: userID, auditSessionID: auditSessionID)
+        try caller.recheck(requirement: requirement, userID: userID, auditSessionID: auditSessionID)
+        completed = true
         return ReceivedMachCommandSubmission(payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller)
+    }
+
+    private static func sameToken(_ first: audit_token_t, _ second: audit_token_t) -> Bool {
+        var first = first, second = second
+        return withUnsafeBytes(of: &first) { a in withUnsafeBytes(of: &second) { b in a.elementsEqual(b) } }
     }
 
     fileprivate static func compile(_ expression: String) throws -> SecRequirement {
@@ -132,10 +166,17 @@ public final class RetainedCommandCaller {
     }
 
     func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
+        guard code != nil else { throw MachCommandCallerError.retired }
+        do {
+            let requirement = try MachCommandCallerReceiver.compile(expression)
+            try recheck(requirement: requirement, userID: userID, auditSessionID: auditSessionID)
+        } catch { close(); throw error }
+    }
+
+    fileprivate func recheck(requirement: SecRequirement, userID: uid_t, auditSessionID: au_asid_t?) throws {
         guard let code else { throw MachCommandCallerError.retired }
         do {
             try Self.credentials(token, userID: userID, auditSessionID: auditSessionID)
-            let requirement = try MachCommandCallerReceiver.compile(expression)
             try Self.valid(code, requirement: requirement)
             guard try Self.path(token) == requester.executablePath else { throw MachCommandCallerError.wrongPeer }
         } catch { close(); throw error }

@@ -39,28 +39,56 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, UInt32(size), 0, 0, 1000, 0)
             guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         }
+        func sendPort(_ carried: mach_port_t, outOfLineBytes: Int = 0) throws {
+            let size = MemoryLayout<mach_msg_header_t>.size + MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size +
+                (outOfLineBytes > 0 ? MemoryLayout<mach_msg_ool_descriptor_t>.size : 0)
+            let storage = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: MemoryLayout<mach_msg_header_t>.alignment)
+            defer { storage.deallocate() }
+            storage.initializeMemory(as: UInt8.self, repeating: 0, count: size)
+            let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
+            header.pointee.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND) | MACH_MSGH_BITS_COMPLEX
+            header.pointee.msgh_size = UInt32(size)
+            header.pointee.msgh_remote_port = port
+            header.pointee.msgh_id = MachCommandCallerReceiver.messageID
+            storage.storeBytes(of: mach_msg_body_t(msgh_descriptor_count: outOfLineBytes > 0 ? 2 : 1), toByteOffset: MemoryLayout<mach_msg_header_t>.size, as: mach_msg_body_t.self)
+            var descriptor = mach_msg_port_descriptor_t()
+            descriptor.name = carried
+            descriptor.disposition = UInt32(MACH_MSG_TYPE_COPY_SEND)
+            descriptor.type = UInt32(MACH_MSG_PORT_DESCRIPTOR)
+            storage.storeBytes(of: descriptor, toByteOffset: MemoryLayout<mach_msg_header_t>.size + MemoryLayout<mach_msg_body_t>.size, as: mach_msg_port_descriptor_t.self)
+            let bytes = UnsafeMutableRawPointer.allocate(byteCount: max(1, outOfLineBytes), alignment: 8)
+            defer { bytes.deallocate() }
+            bytes.initializeMemory(as: UInt8.self, repeating: 0x5a, count: max(1, outOfLineBytes))
+            if outOfLineBytes > 0 {
+                var outOfLine = mach_msg_ool_descriptor_t()
+                outOfLine.address = bytes
+                outOfLine.size = UInt32(outOfLineBytes)
+                outOfLine.copy = UInt32(MACH_MSG_VIRTUAL_COPY)
+                outOfLine.type = UInt32(MACH_MSG_OOL_DESCRIPTOR)
+                storage.storeBytes(of: outOfLine, toByteOffset: MemoryLayout<mach_msg_header_t>.size +
+                    MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size,
+                    as: mach_msg_ool_descriptor_t.self)
+            }
+            let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, UInt32(size), 0, 0, 1000, 0)
+            guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        }
+
+        func sendBareHeader() throws {
+            var header = mach_msg_header_t()
+            header.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND)
+            header.msgh_size = UInt32(MemoryLayout<mach_msg_header_t>.size)
+            header.msgh_remote_port = port
+            header.msgh_id = MachCommandCallerReceiver.messageID
+            let result = mach_msg(&header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, header.msgh_size, 0, 0, 1000, 0)
+            guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        }
     }
 
     func testRejectedComplexPacketReleasesImportedSendRight() throws {
         let endpoint = try Endpoint(), carried = try Endpoint(), receiver = try receiver(endpoint)
         var baseline: mach_port_urefs_t = 0
         XCTAssertEqual(mach_port_get_refs(mach_task_self_, carried.port, MACH_PORT_RIGHT_SEND, &baseline), KERN_SUCCESS)
-        let size = MemoryLayout<mach_msg_header_t>.size + MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size
-        let storage = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: MemoryLayout<mach_msg_header_t>.alignment)
-        defer { storage.deallocate() }
-        storage.initializeMemory(as: UInt8.self, repeating: 0, count: size)
-        let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
-        header.pointee.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND) | MACH_MSGH_BITS_COMPLEX
-        header.pointee.msgh_size = UInt32(size)
-        header.pointee.msgh_remote_port = endpoint.port
-        header.pointee.msgh_id = MachCommandCallerReceiver.messageID
-        storage.storeBytes(of: mach_msg_body_t(msgh_descriptor_count: 1), toByteOffset: MemoryLayout<mach_msg_header_t>.size, as: mach_msg_body_t.self)
-        var descriptor = mach_msg_port_descriptor_t()
-        descriptor.name = carried.port
-        descriptor.disposition = UInt32(MACH_MSG_TYPE_COPY_SEND)
-        descriptor.type = UInt32(MACH_MSG_PORT_DESCRIPTOR)
-        storage.storeBytes(of: descriptor, toByteOffset: MemoryLayout<mach_msg_header_t>.size + MemoryLayout<mach_msg_body_t>.size, as: mach_msg_port_descriptor_t.self)
-        XCTAssertEqual(mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, UInt32(size), 0, 0, 1000, 0), KERN_SUCCESS)
+        try endpoint.sendPort(carried.port)
         XCTAssertThrowsError(try receiver.receive(timeoutMilliseconds: 1000)) {
             XCTAssertEqual($0 as? MachCommandCallerError, .malformed)
         }
@@ -69,6 +97,92 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertEqual(final, baseline)
         try endpoint.send(Data([1]))
         XCTAssertEqual(try receiver.receive(timeoutMilliseconds: 1000).payload, Data([1]))
+    }
+
+    private func sendReferences(_ port: mach_port_t) throws -> mach_port_urefs_t {
+        var count: mach_port_urefs_t = 0
+        let result = mach_port_get_refs(mach_task_self_, port, MACH_PORT_RIGHT_SEND, &count)
+        guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        return count
+    }
+
+    func testPreviewRetainsQueueHeadAndDoesNotImportSendRights() throws {
+        let endpoint = try Endpoint(), carried = try Endpoint()
+        let baseline = try sendReferences(carried.port)
+        try endpoint.sendPort(carried.port, outOfLineBytes: 65536)
+        var first = remozio_mach_preview_t(), second = remozio_mach_preview_t()
+        XCTAssertEqual(remozio_preview_audit(endpoint.port, 1000, &first), KERN_SUCCESS)
+        XCTAssertEqual(remozio_preview_audit(endpoint.port, 1000, &second), KERN_SUCCESS)
+        XCTAssertEqual(first.sequence, second.sequence)
+        XCTAssertEqual(first.identifier, MachCommandCallerReceiver.messageID)
+        XCTAssertEqual(audit_token_to_pid(first.token), getpid())
+        XCTAssertEqual(audit_token_to_euid(first.token), geteuid())
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        let capacity = Int(first.size) + MemoryLayout<mach_msg_audit_trailer_t>.size
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 8)
+        defer { storage.deallocate() }
+        storage.initializeMemory(as: UInt8.self, repeating: 0, count: capacity)
+        let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
+        let result = remozio_receive_audit(header, UInt32(capacity), endpoint.port, 1000)
+        XCTAssertEqual(result, KERN_SUCCESS)
+        guard result == KERN_SUCCESS else { return }
+        XCTAssertEqual(try sendReferences(carried.port), baseline + 1)
+        let trailer = storage.loadUnaligned(fromByteOffset: Int(first.size), as: mach_msg_audit_trailer_t.self)
+        XCTAssertEqual(trailer.msgh_seqno, first.sequence)
+        var receivedToken = trailer.msgh_audit, previewToken = first.token
+        XCTAssertTrue(withUnsafeBytes(of: &receivedToken) { a in
+            withUnsafeBytes(of: &previewToken) { b in a.elementsEqual(b) }
+        })
+        let outOfLine = storage.loadUnaligned(fromByteOffset: MemoryLayout<mach_msg_header_t>.size +
+            MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size,
+            as: mach_msg_ool_descriptor_t.self)
+        XCTAssertEqual(outOfLine.size, 65536)
+        XCTAssertEqual(outOfLine.type, UInt32(MACH_MSG_OOL_DESCRIPTOR))
+        if let address = outOfLine.address {
+            XCTAssertEqual(Data(bytes: address, count: Int(outOfLine.size)), Data(repeating: 0x5a, count: 65536))
+        } else { XCTFail("The received out-of-line buffer is missing") }
+        mach_msg_destroy(header)
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+    }
+
+    func testWrongSenderPolicyDiscardsComplexPacketBeforeImport() throws {
+        let endpoint = try Endpoint(), carried = try Endpoint()
+        let baseline = try sendReferences(carried.port)
+        let rejected = try receiver(endpoint, user: geteuid() ^ 1)
+        try endpoint.sendPort(carried.port, outOfLineBytes: 65536)
+        XCTAssertThrowsError(try rejected.receive(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer)
+        }
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        try endpoint.send(Data([4]))
+        XCTAssertEqual(try receiver(endpoint).receive(timeoutMilliseconds: 1000).payload, Data([4]))
+    }
+
+    func testDiscardConsumesOnlyThePreviewedQueueHead() throws {
+        let endpoint = try Endpoint(), carried = try Endpoint()
+        let baseline = try sendReferences(carried.port)
+        try endpoint.sendPort(carried.port, outOfLineBytes: 65536)
+        try endpoint.send(Data([5]))
+        var first = remozio_mach_preview_t(), second = remozio_mach_preview_t()
+        XCTAssertEqual(remozio_preview_audit(endpoint.port, 1000, &first), KERN_SUCCESS)
+        XCTAssertEqual(remozio_discard_message(endpoint.port), MACH_RCV_TOO_LARGE)
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(remozio_preview_audit(endpoint.port, 1000, &second), KERN_SUCCESS)
+        XCTAssertEqual(second.sequence, first.sequence + 1)
+        XCTAssertEqual(try receiver(endpoint).receive(timeoutMilliseconds: 1000).payload, Data([5]))
+    }
+
+    func testBareHeaderRemainsQueuedUntilExplicitDiscard() throws {
+        let endpoint = try Endpoint()
+        try endpoint.sendBareHeader()
+        var preview = remozio_mach_preview_t()
+        XCTAssertEqual(remozio_preview_audit(endpoint.port, 1000, &preview), KERN_SUCCESS)
+        XCTAssertEqual(preview.size, UInt32(MemoryLayout<mach_msg_header_t>.size))
+        XCTAssertThrowsError(try receiver(endpoint).receive(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .malformed)
+        }
+        try endpoint.send(Data([6]))
+        XCTAssertEqual(try receiver(endpoint).receive(timeoutMilliseconds: 1000).payload, Data([6]))
     }
 
     private final class Peer {
