@@ -310,6 +310,25 @@ public final class RetainedCommandCaller {
         } catch { close(); throw error }
     }
 
+    /// Observes parent links with kernel process incarnations. Ancestors are observations, not trusted initiators or consent.
+    public func captureAncestry(currentPolicy: XPCPeerPolicy, maximumEntries: Int = 16,
+                               checkCancellation: () throws -> Void = {}) throws -> CapturedAncestry {
+        try captureAncestry(expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
+            auditSessionID: currentPolicy.expectedAuditSessionID, maximumEntries: maximumEntries, checkCancellation: checkCancellation)
+    }
+
+    func captureAncestry(expression: String, userID: uid_t, auditSessionID: au_asid_t?, maximumEntries: Int = 16,
+                        checkCancellation: () throws -> Void = {}) throws -> CapturedAncestry {
+        guard (0...64).contains(maximumEntries) else { throw MachCommandCallerError.configuration }
+        try recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        do {
+            let result = try CommandAncestryObservation.capture(source: token, maximumEntries: maximumEntries,
+                checkCancellation: checkCancellation)
+            try recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            return result
+        } catch let failure as MachCommandCallerError { close(); throw failure }
+    }
+
     public func close() { code = nil }
 
     private static func credentials(_ token: audit_token_t, userID: uid_t, auditSessionID: au_asid_t?) throws {

@@ -4,12 +4,14 @@
 #include <Security/Security.h>
 #include <stdbool.h>
 #include <sys/fileport.h>
+#include <sys/types.h>
 typedef struct {
     mach_port_seqno_t sequence;
     mach_msg_size_t size;
     mach_msg_id_t identifier;
     audit_token_t token;
 } remozio_mach_preview_t;
+kern_return_t remozio_pid_audit_token(pid_t pid, audit_token_t * _Nonnull token, bool * _Nonnull missing);
 kern_return_t remozio_preview_audit(mach_port_t endpoint, mach_msg_timeout_t timeout,
     remozio_mach_preview_t * _Nonnull preview);
 kern_return_t remozio_discard_message(mach_port_t endpoint);

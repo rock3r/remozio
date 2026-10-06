@@ -80,11 +80,17 @@ public struct CapturedAncestor: Equatable, Sendable {
     public let pidVersion: UInt32
     public let executablePath: Data?
     public let uid: UInt32
+    public init(pid: UInt32, pidVersion: UInt32, executablePath: Data?, uid: UInt32) {
+        self.pid = pid; self.pidVersion = pidVersion; self.executablePath = executablePath; self.uid = uid
+    }
 }
 public struct CapturedAncestry: Equatable, Sendable {
     public let completeness: AncestryCompleteness
     public let entries: [CapturedAncestor]
     public let reason: AncestryReason
+    public init(completeness: AncestryCompleteness, entries: [CapturedAncestor], reason: AncestryReason) {
+        self.completeness = completeness; self.entries = entries; self.reason = reason
+    }
 }
 public struct CapturedSubmission: Equatable, Sendable {
     public let id: Data
