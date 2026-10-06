@@ -8,6 +8,7 @@ public actor DirectApprovalTransportService {
     private let host: DirectApprovalTransportHost
     private let useDefaultDelivery: Bool
     private let requestDeliveryTimeoutMilliseconds: UInt64
+    private let requestRefreshMilliseconds: UInt64
     private var started = false
     private var closed = false
 
@@ -17,9 +18,12 @@ public actor DirectApprovalTransportService {
                 maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000,
                 authorityTimeoutMilliseconds: UInt64 = 5000, refreshMilliseconds: UInt64 = 5000,
                 maximumWaiting: Int = 8, requestDeliveryTimeoutMilliseconds: UInt64 = 30_000,
+                requestRefreshMilliseconds: UInt64 = 5000,
                 handler: (@Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void)? = nil) throws {
-        guard (1...60_000).contains(requestDeliveryTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
+        guard (1...60_000).contains(requestDeliveryTimeoutMilliseconds),
+              (1...60_000).contains(requestRefreshMilliseconds) else { throw DirectListenerError.invalidConfiguration }
         self.requestDeliveryTimeoutMilliseconds = requestDeliveryTimeoutMilliseconds
+        self.requestRefreshMilliseconds = requestRefreshMilliseconds
         let feed = try AuthorityTrustFeed(serviceName: authorityServiceName, peerPolicy: authorityPolicy,
             macID: macID, accountID: accountID, timeoutMilliseconds: authorityTimeoutMilliseconds,
             refreshMilliseconds: refreshMilliseconds, maximumWaiting: maximumWaiting)
@@ -31,9 +35,10 @@ public actor DirectApprovalTransportService {
             handler: handler ?? { _, _ in throw DirectHostError.stopped })
     }
 
-    init(feed: AuthorityTrustFeed, host: DirectApprovalTransportHost, useDefaultDelivery: Bool = false) {
+    init(feed: AuthorityTrustFeed, host: DirectApprovalTransportHost, useDefaultDelivery: Bool = false, requestRefreshMilliseconds: UInt64 = 5000) {
         self.feed = feed; self.host = host; self.useDefaultDelivery = useDefaultDelivery
         requestDeliveryTimeoutMilliseconds = 30_000
+        self.requestRefreshMilliseconds = requestRefreshMilliseconds
     }
 
     deinit {
@@ -49,10 +54,10 @@ public actor DirectApprovalTransportService {
         do {
             try Task.checkCancellation()
             if useDefaultDelivery {
-                let timeout = requestDeliveryTimeoutMilliseconds
+                let timeout = requestDeliveryTimeoutMilliseconds, refresh = requestRefreshMilliseconds
                 try await host.configureHandler { [weak self] session, channel in
                     guard let self else { throw DirectHostError.stopped }
-                    try await self.deliverPendingRequests(for: session, over: channel, timeoutMilliseconds: timeout)
+                    try await self.runRequestExchange(for: session, over: channel, timeoutMilliseconds: timeout, refreshMilliseconds: refresh)
                 }
             }
             try await feed.start(host: host)
@@ -105,7 +110,7 @@ public actor DirectApprovalTransportService {
     }
 
     /// Sends one bounded discovery snapshot over the admitted channel. Writes are not phone receipts or approvals.
-    /// The default listener closes this fetch connection afterward. Custom handlers may continue with other operations.
+    /// Custom handlers may continue with other operations after this snapshot.
     /// Failure closes the channel. Missing or incompatible frames do not imply a terminal request outcome.
     public func deliverPendingRequests(for session: DirectApprovalSession, over channel: NegotiatedNetworkChannel,
                                        timeoutMilliseconds: UInt64 = 30_000) async throws {
@@ -143,7 +148,43 @@ public actor DirectApprovalTransportService {
         } onCancel: { channel.close() }
     }
 
-    private static func supports(_ frame: Data, maximumBytes: Int,
+    /// Runs until EOF, cancellation, or loss of the authority session. Decisions are never retried automatically.
+    public func runRequestExchange(for session: DirectApprovalSession, over channel: NegotiatedNetworkChannel,
+                                   timeoutMilliseconds: UInt64 = 30_000, refreshMilliseconds: UInt64 = 5000) async throws {
+        try await withTaskCancellationHandler {
+            do {
+                guard (1...60_000).contains(timeoutMilliseconds), (1...60_000).contains(refreshMilliseconds) else {
+                    throw ApprovalChannelError.invalidInput
+                }
+                try await validate(session)
+                let metadata = try await channel.negotiated()
+                guard metadata.peer.role == .phone, metadata.peer.scope == session.peer.scope, metadata.envelopeVersion == 1,
+                      session.peer.requests.contains(where: { local in metadata.peer.requests.contains {
+                          $0.kind == local.kind && $0.wireVersion == local.wireVersion && $0.schemaVersion == local.schemaVersion
+                      } }) else { throw ApprovalChannelError.invalidInput }
+                guard try await feed.supportsRequestExchange() else {
+                    try await deliverPendingRequests(for: session, over: channel, timeoutMilliseconds: timeoutMilliseconds)
+                    return
+                }
+                try await DirectApprovalRequestExchangeLoop(service: self, session: session, channel: channel,
+                    remoteRequests: metadata.peer.requests, timeoutMilliseconds: timeoutMilliseconds,
+                    refreshMilliseconds: refreshMilliseconds).run()
+            } catch {
+                await channel.closeAndWait()
+                throw error
+            }
+        } onCancel: { channel.close() }
+    }
+
+    func validate(_ session: DirectApprovalSession) async throws {
+        try Task.checkCancellation()
+        guard started, !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+    }
+
+    static func supports(_ frame: Data, maximumBytes: Int,
                                  local: [ChannelRequestCapability], remote: [ChannelRequestCapability]) throws -> Bool {
         guard frame.count <= maximumBytes, maximumBytes > ApprovalMessage.overheadBytes else {
             throw ApprovalChannelError.invalidInput
@@ -168,7 +209,7 @@ public actor DirectApprovalTransportService {
         return accepts(local) && accepts(remote)
     }
 
-    private static func send(_ frame: Data, over channel: NegotiatedNetworkChannel,
+    static func send(_ frame: Data, over channel: NegotiatedNetworkChannel,
                              deadline: ContinuousClock.Instant) async throws {
         guard ContinuousClock.now < deadline else { throw ApprovalChannelError.timedOut }
         do {

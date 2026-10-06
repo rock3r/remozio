@@ -22,7 +22,7 @@ sequenceDiagram
     Root->>Root: Sign current status; recheck time after signing
     Root-->>Transport: Signed status or explicit absence
     Transport->>Transport: Recheck live channel generation
-    Transport-->>Phone: Status delivery remains network integration work
+    Transport-->>Phone: Exact signed status in the current session envelope
 ```
 
 ## Local IPC contract
@@ -55,4 +55,4 @@ Native tests cover signed age/revision progression, expiry during signing, decli
 
 The [live XPC evidence](experiments/evidence/2026-10-06-request-exchange-xpc.json) records 19 passing cases and removal of the temporary service. The probe uses synthetic bytes and ad-hoc identifiers. It proves selector/Data bridging and rejection before dispatch for mismatched identifiers. It does not prove root installation, Developer ID policy, phone keys, or approval execution.
 
-The default network handler still sends a request snapshot and closes. A bidirectional network loop, Android decision sending, production signer/providers, terminal restart reconciliation, push scheduling, and protected app installation remain required. No service or device approval is enabled by this change.
+The [persistent approval channel](macos-approval-channel.md) connects this IPC path to the existing Android decision sender. Production signer/providers, terminal restart reconciliation, push scheduling, protected app installation, and execution assembly remain required. These components do not enable a service or device approval by themselves.

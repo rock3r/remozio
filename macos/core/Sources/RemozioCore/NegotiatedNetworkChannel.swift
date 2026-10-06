@@ -77,13 +77,16 @@ public actor NegotiatedNetworkChannel {
             outgoing = sequence == .max ? nil : sequence + 1
         } catch { await finish(); throw error }
     }
-    public func receive() async throws -> Data? {
+    public func receive(maximumBytes: Int? = nil) async throws -> Data? {
         do {
             try active()
-            guard state == .open, !reading, let metadata else { throw ApprovalChannelError.invalidInput }
+            let maximum = maximumBytes ?? maximumPayloadBytes
+            guard state == .open, !reading, let metadata, (1...maximumPayloadBytes).contains(maximum) else {
+                throw ApprovalChannelError.invalidInput
+            }
             reading = true; defer { reading = false }
-            guard let frame = try await readFrame(maximum: maximumPayloadBytes + 64) else { await finish(); return nil }
-            let envelope = try SessionEnvelope.decode(frame, maximumPayloadBytes: maximumPayloadBytes)
+            guard let frame = try await readFrame(maximum: maximum + 64) else { await finish(); return nil }
+            let envelope = try SessionEnvelope.decode(frame, maximumPayloadBytes: maximum)
             guard envelope.sessionID == metadata.sessionID, envelope.sequence == incoming else { throw ApprovalChannelError.invalidInput }
             incoming = envelope.sequence == .max ? nil : envelope.sequence + 1
             try active(); return envelope.payload
