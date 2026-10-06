@@ -83,32 +83,8 @@ This API returns discovery hints to a transport handler. It does not send them t
 
 ## Outbound channel delivery
 
-The transport service now has a default fetch handler. It discovers one bounded snapshot and sends available signed frames through `NegotiatedNetworkChannel`. It preserves each carrier byte and signature. Discovery IDs stay on the Mac. Missing frames and unsupported contracts or required features produce no unsigned status or approval.
+The service now uses a [persistent approval loop](macos-approval-channel.md) when the authority supports state exchange. It sends retained requests, receives signed decisions, and returns signed statuses. The [exchange IPC](macos-request-exchange-ipc.md) performs root validation and durable consumption.
 
-```mermaid
-sequenceDiagram
-    participant P as Enrolled phone channel
-    participant T as Transport service
-    participant A as Root authority
-    P->>T: Confirm enrollment-bound negotiation
-    T->>A: Validate and discover pending IDs
-    A-->>T: Bound discovery hints
-    loop Each ID, one frame at a time
-        T->>A: Validate and fetch retained signed frame
-        A-->>T: Exact frame or no frame
-        T->>T: Check channel scope, contract, features and size
-        T->>A: Revalidate current session
-        T-->>P: Original signed frame in session envelope
-    end
-    T->>P: Close completed fetch connection
-```
+`deliverPendingRequests` remains available to custom handlers. It sends one bounded snapshot with a total write deadline. It preserves carrier bytes and signatures, checks negotiated contracts/features, and revalidates the session before each write. Missing frames produce no unsigned outcome. Failure closes the channel and stops the scan.
 
-The phone must verify the authority signature and capture semantics. A transport write does not establish phone receipt, presentation, consent, or execution. The existing Android receiver keeps retained request owners on EOF and authenticates duplicates before reusing them.
-
-The default handler returns after the snapshot. The listener closes its fetch connection. An explicit custom handler remains in control and can call `deliverPendingRequests` without closing a successful channel. No live polling or decision handling is added here.
-
-The write deadline defaults to 30 seconds and has a constructor setting. No new write starts after that deadline; a blocked write closes the channel. Authority operations retain their separate bounded IPC deadlines and ordered queue. Cancellation, stale-session checks, invalid frames, and failed writes close the channel. A failed write stops the scan before fetching another frame.
-
-Tests use synthetic authority IPC and a negotiated in-memory phone stream. They verify exact signed bytes and sequences, absent requests, runtime features, wrong scopes, changed sessions, service closure, payload bounds, write failure, timeout, cancellation, and custom-handler ownership. These tests do not exercise native TLS sockets, Android hardware, protected installation, production key custody, push, or relay delivery. Production root providers and bidirectional decision/status assembly remain required.
-
-The [state and decision exchange](macos-request-exchange-ipc.md) adds a separately negotiated IPC extension for signed status and consumption. The default network fetch handler is unchanged.
+An authority that explicitly disables exchange retains this snapshot behavior. Its listener closes the completed fetch connection. Production root providers, signer custody, push scheduling, protected installation, and execution assembly remain required.

@@ -135,6 +135,15 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestDiscovery
         } catch { await close(); throw error }
     }
+    func supportsRequestExchange() async throws -> Bool {
+        try await acquire()
+        defer { release() }
+        do {
+            let supported = try await activeChannel().supportsRequestExchange()
+            try requireActive()
+            return supported
+        } catch { await close(); throw error }
+    }
     /// Status and signed decisions share the ordered authority connection. No decision is retried after an uncertain reply.
     public func exchangeRequest(_ peer: DirectApprovalPeer, revision: UUID, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }

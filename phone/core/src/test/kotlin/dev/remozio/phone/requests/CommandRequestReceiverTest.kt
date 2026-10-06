@@ -9,6 +9,8 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 class CommandRequestReceiverTest {
@@ -21,7 +23,10 @@ class CommandRequestReceiverTest {
                        override val maximumPayloadBytes: Int = 65536) : RequestMessageChannel {
         val queue = Channel<ByteArray>(8)
         var closed = false
+        val sent = Channel<ByteArray>(16)
+        var onSend: suspend (ByteArray) -> Unit = {}
         override suspend fun receive() = queue.receiveCatching().getOrNull()
+        override suspend fun send(bytes: ByteArray) { onSend(bytes); sent.send(bytes.copyOf()) }
         override fun close() { closed = true; queue.cancel() }
     }
     private inner class Mac(val identity: Int = 1) {
@@ -57,6 +62,111 @@ class CommandRequestReceiverTest {
         bind(enrollment, wire, time).run()
         assertTrue(wire.closed)
     }
+    @Test fun reconnectQueriesRetainedPendingAndTerminalOwnersWithoutSendingDecisions() = runBlocking<Unit> {
+        withTimeout(3000) {
+            val mac = Mac(); val enrollment = mac.enroll()
+            deliver(enrollment, mac, mac.issued(), mac.status())
+            val pending = enrollment.sessions().single()
+            mac.requestID = 9
+            deliver(enrollment, mac, mac.issued(), mac.status(true))
+            val owners = enrollment.sessions()
+            val wire = Wire(scope())
+            val receiver = CommandRequestReceiver.bind(enrollment, wire, id(3), id(4), queryRetainedOnStart = true) { ElapsedInstant(0, 200u) }
+            val receiving = async { receiver.run() }
+            val queries = List(2) { RequestStatusQuery.decode(wire.sent.receive()).requestID }
+            assertEquals(setOf(CborValue.Bytes(id(5)), CborValue.Bytes(id(9))), queries.toSet())
+            mac.requestID = 5
+            wire.queue.send(mac.status(true))
+            pending.revisions.first { it == 2uL }
+            assertEquals(RequestPhase.EXPIRED, pending.snapshot(ElapsedInstant(0, 200u)).status!!.status.phase)
+            assertEquals(owners, enrollment.sessions())
+            assertTrue(wire.sent.tryReceive().isFailure)
+            receiver.close(); receiving.await(); enrollment.close()
+        }
+    }
+
+    @Test fun initialConnectionDoesNotQueryNewCapturesReceivedAfterItStarts() = runBlocking<Unit> {
+        withTimeout(3000) {
+            val mac = Mac(); val enrollment = mac.enroll(); val wire = Wire(scope())
+            val receiver = CommandRequestReceiver.bind(enrollment, wire, id(3), id(4), queryRetainedOnStart = true) { ElapsedInstant(0, 100u) }
+            val receiving = async(start = CoroutineStart.UNDISPATCHED) { receiver.run() }
+            wire.queue.send(mac.issued()); wire.queue.send(mac.status())
+            enrollment.requestSessions.first { it.isNotEmpty() }.single().revisions.first { it == 1uL }
+            assertTrue(wire.sent.tryReceive().isFailure)
+            receiver.close(); receiving.await(); enrollment.close()
+        }
+    }
+
+    private fun decisionCarrier() = ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION,
+        byteArrayOf(0xa0.toByte()), ByteArray(64)).encode(bound.maxBytes)
+
+    @Test fun decisionsAndReconnectQueriesShareOneWriter() = runBlocking<Unit> {
+        withTimeout(3000) {
+            val mac = Mac(); val enrollment = mac.enroll()
+            deliver(enrollment, mac, mac.issued(), mac.status())
+            mac.requestID = 9; deliver(enrollment, mac, mac.issued(), mac.status())
+            val wire = Wire(scope()); val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+            val active = AtomicInteger(); val count = AtomicInteger()
+            wire.onSend = {
+                assertEquals(1, active.incrementAndGet())
+                try { if (count.incrementAndGet() == 1) { entered.complete(Unit); release.await() } }
+                finally { active.decrementAndGet() }
+            }
+            val receiver = CommandRequestReceiver.bind(enrollment, wire, id(3), id(4), queryRetainedOnStart = true) { ElapsedInstant(0, 100u) }
+            val receiving = async { receiver.run() }; entered.await()
+            val deciding = async(start = CoroutineStart.UNDISPATCHED) { receiver.sendDecision(decisionCarrier()) }
+            assertEquals(1, count.get())
+            release.complete(Unit); deciding.await()
+            val output = List(3) { wire.sent.receive() }
+            assertEquals(2, output.count { runCatching { RequestStatusQuery.decode(it) }.isSuccess })
+            assertEquals(1, output.count { it.contentEquals(decisionCarrier()) })
+            receiver.close(); receiving.await(); enrollment.close()
+        }
+    }
+
+    @Test fun cancellationAndReconnectDoNotRetryAWaitingDecision() = runBlocking<Unit> {
+        withTimeout(3000) {
+            val mac = Mac(); val enrollment = mac.enroll()
+            deliver(enrollment, mac, mac.issued(), mac.status())
+            val owner = enrollment.sessions().single()
+            val first = Wire(scope()); val entered = CompletableDeferred<Unit>()
+            first.onSend = { entered.complete(Unit); awaitCancellation() }
+            val receiver = CommandRequestReceiver.bind(enrollment, first, id(3), id(4), queryRetainedOnStart = true) { ElapsedInstant(0, 100u) }
+            val receiving = launch { receiver.run() }; entered.await()
+            val deciding = launch(start = CoroutineStart.UNDISPATCHED) { receiver.sendDecision(decisionCarrier()) }
+            deciding.cancelAndJoin(); receiving.cancelAndJoin()
+            assertTrue(first.closed); assertSame(owner, enrollment.sessions().single())
+            val second = Wire(scope())
+            val replacement = CommandRequestReceiver.bind(enrollment, second, id(3), id(4), queryRetainedOnStart = true) { ElapsedInstant(0, 200u) }
+            val resumed = async { replacement.run() }
+            assertEquals(owner.identity.requestID, RequestStatusQuery.decode(second.sent.receive()).requestID)
+            assertTrue(second.sent.tryReceive().isFailure)
+            replacement.close(); resumed.await(); enrollment.close()
+        }
+    }
+
+    @Test fun queryWriteFailureClosesConnectionButKeepsOwner() = runBlocking<Unit> {
+        withTimeout(3000) {
+            val mac = Mac(); val enrollment = mac.enroll()
+            deliver(enrollment, mac, mac.issued(), mac.status())
+            val owner = enrollment.sessions().single(); val wire = Wire(scope()); var attempts = 0
+            wire.onSend = { attempts++; throw IOException("Synthetic lost query") }
+            val receiver = CommandRequestReceiver.bind(enrollment, wire, id(3), id(4), queryRetainedOnStart = true) { ElapsedInstant(0, 100u) }
+            assertFailsWith<IOException> { receiver.run() }
+            assertEquals(1, attempts); assertTrue(wire.closed); assertSame(owner, enrollment.sessions().single())
+            enrollment.close()
+        }
+    }
+
+    @Test fun decisionWriterRejectsReadOnlyQueriesAndMacMessages() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll(); val wire = Wire(scope()); val receiver = bind(enrollment, wire)
+        for (bytes in listOf(mac.issued(), mac.status(), RequestStatusQuery(id(5)).encode())) {
+            assertFails { receiver.sendDecision(bytes) }
+        }
+        assertTrue(wire.sent.tryReceive().isFailure)
+        receiver.close(); enrollment.close()
+    }
+
     @Test fun sharedMemoryCapacityPreservesExistingOwnersAndTerminalStatusReleasesCapture() = runBlocking<Unit> {
         val budget = CommandMemoryBudget(capture.size.toLong() + 2048, 10000)
         val firstInbox = CommandRequestInbox(1, 128, budget)

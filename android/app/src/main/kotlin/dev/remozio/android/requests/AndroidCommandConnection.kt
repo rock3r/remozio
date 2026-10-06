@@ -37,8 +37,8 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
                 val relay = e.relayCredential?.let { credential -> ApprovalCarrierRoute { parent -> RelayConnector().connect(parent, credential) } }
                 channel = connector.connect(scope, androidDirectRoutes(context, e.macID.copyBytes()), relay,
                     directTimeoutMillis = LocalNetworkSettings(context).timeoutSeconds() * 1000L)
-                val receiver = CommandRequestReceiver.bind(enrollment, channel, e.phoneID.copyBytes(), e.epoch.copyBytes(), RequestElapsedClock::now)
-                NativeCommandWire(receiver, channel, identity)
+                val receiver = CommandRequestReceiver.bind(enrollment, channel, e.phoneID.copyBytes(), e.epoch.copyBytes(), clock = RequestElapsedClock::now)
+                NativeCommandWire(receiver, identity)
             } catch (failure: Throwable) {
                 channel?.close()
                 identity?.close()
@@ -50,12 +50,11 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
 
 private class NativeCommandWire(
     private val receiver: CommandRequestReceiver,
-    private val channel: NegotiatedTLSChannel,
     private val identity: AndroidTransportIdentity,
 ) : CommandConnectionWire {
     private val closed = AtomicBoolean(false)
     override suspend fun receive() = receiver.run()
-    override suspend fun send(bytes: ByteArray) = channel.send(bytes)
+    override suspend fun send(bytes: ByteArray) = receiver.sendDecision(bytes)
     override fun close() {
         if (closed.compareAndSet(false, true)) {
             try { receiver.close() } finally { identity.close() }
