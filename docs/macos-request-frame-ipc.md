@@ -55,6 +55,6 @@ The cache releases frames when requests leave queued/presented state, including 
 
 `ApprovalRequestCoordinator.pendingDeliveryRequestIDs` returns the complete current set of eligible IDs for one validated enrollment. The set is bounded by the coordinator's request limit (at most 4096), sorted by ID, and contains no capture bytes. It is a discovery hint, not proof that a later fetch will succeed.
 
-The owner expires elapsed pending requests before producing the result. It applies current enrollment and contract support through the same recipient controller as frame retrieval. Present excludes new deliveries while retaining previously handed-off requests. Discovery itself does not mark a request dispatched, presented, or consumed, and repeated discovery creates no extra request audit events.
+The owner expires elapsed pending requests before producing the result. It applies current enrollment and contract support through the same recipient controller as frame retrieval. Present excludes new deliveries while retaining previously handed-off requests. Discovery does not accept notification queue ownership or mark a request dispatched, presented, or consumed, and repeated discovery creates no extra request audit events.
 
 This root API is not yet exposed by the IPC delivery extension or the phone wire protocol. Those callers must negotiate discovery support and fetch each result through the existing frame checks. They must not treat an empty discovery result as a signed terminal status for a previously known request.

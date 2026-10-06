@@ -39,6 +39,19 @@ final class PendingRequestDeliveryTests: XCTestCase {
         try session.reconcile(current: request(phase: phase), routing: route(mode), trust: trust(phones), now: now(time), enqueue: enqueue)
     }
 
+    func testDiscoveryLeavesNotificationEnqueueAvailable() throws {
+        let request = try request(), session = try PendingRequestDelivery(request: request), phones = try [phone(5), phone(6)]
+        let discovered = try session.discover(current: request, routing: route(.away), trust: trust(phones), now: now())
+        XCTAssertEqual(discovered.count, 2)
+        XCTAssertEqual(try session.discover(current: request, routing: route(.away), trust: trust(phones), now: now()), discovered)
+        XCTAssertTrue(try session.discover(current: request, routing: route(.present), trust: trust(phones), now: now()).isEmpty)
+        var accepted: [PhoneRequestDelivery] = []
+        let queued = try reconcile(session, phones: phones) { accepted.append($0); return true }
+        XCTAssertEqual(Set(accepted.map(\.id)), Set(discovered.map(\.id)))
+        XCTAssertEqual(queued.newlyEnqueued, discovered)
+        _ = try reconcile(session, phones: phones) { _ in XCTFail("Queue already owns retries"); return true }
+    }
+
     func testLocalThenAwayPreservesIdentityAgeAndDeadlineForEveryPhone() throws {
         let request = try request(), session = try PendingRequestDelivery(request: request), phones = try [phone(5), phone(6)]
         let local = try reconcile(session, mode: .present, phones: phones) { _ in XCTFail("Local request must not enqueue"); return true }

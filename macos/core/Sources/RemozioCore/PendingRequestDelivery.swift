@@ -123,6 +123,16 @@ public final class PendingRequestDelivery {
             withdrawn: sorted(withdrawn), closure: closure, capacityLimitedRecipients: capacityLimited)
     }
 
+    /// Refresh eligibility without accepting notification queue ownership.
+    /// Previously dispatched recipients remain discoverable while presence routes new requests locally.
+    func discover(current: RetainedApprovalRequest, routing: PresenceRouting, trust: RequestDeliveryTrust,
+                  now: AuthorityMoment) -> [PhoneRequestDelivery] {
+        _ = reconcile(current: current, routing: routing, trust: trust, now: now) { _ in false }
+        return sorted(entries.values.filter {
+            !$0.retired && (routing.destination == .phones || $0.dispatched)
+        }.map(\.delivery))
+    }
+
     /// Recheck immediately before the first transport write, with no intervening await or authority-state change.
     /// A nil delivery means do not start. Always apply update, including its withdrawals, even when delivery is nil.
     /// The queue owns bounded retries of a started delivery, using the same identity and current reconciliation state.

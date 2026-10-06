@@ -323,13 +323,10 @@ public final class ApprovalRequestCoordinator {
             guard let retained = entries[id]?.retained,
                   retained.phase == .queued || retained.phase == .presented else { continue }
             let delivery = try deliveryController(requestID: id, retained: retained)
-            let update = delivery.reconcile(current: retained, routing: routing, trust: trust, now: now) { _ in true }
-            guard let recipient = update.active.first(where: {
+            let recipients = delivery.discover(current: retained, routing: routing, trust: trust, now: now)
+            if recipients.contains(where: {
                 $0.recipient.phoneID == binding.scope.phoneID && $0.recipient.enrollmentEpoch == binding.scope.enrollmentEpoch
-            }) else { continue }
-            if routing.destination == .phones || update.dispatched.contains(where: { $0.id == recipient.id }) {
-                result.append(id)
-            }
+            }) { result.append(id) }
         }
         return result
     }
