@@ -90,6 +90,20 @@ public actor DirectApprovalTransportService {
         return ids
     }
 
+    /// Exchange state for this live session. A lost response does not prove that a submitted decision lost.
+    public func exchangeRequest(for session: DirectApprovalSession, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
+        guard started, !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        let status = try await feed.exchangeRequest(session.peer, revision: session.revision,
+            requestID: requestID, decisionFrame: decisionFrame)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+        try await host.validate(session)
+        try Task.checkCancellation()
+        guard !closed else { throw DirectHostError.stopped }
+        return status
+    }
+
     /// Sends one bounded discovery snapshot over the admitted channel. Writes are not phone receipts or approvals.
     /// The default listener closes this fetch connection afterward. Custom handlers may continue with other operations.
     /// Failure closes the channel. Missing or incompatible frames do not imply a terminal request outcome.

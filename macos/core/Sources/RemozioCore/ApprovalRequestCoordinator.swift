@@ -21,12 +21,18 @@ public struct ApprovalRequestDraft: Sendable {
     public let deadlineMilliseconds: UInt64
     public let createdUnixMilliseconds: UInt64
     public let expiresUnixMilliseconds: UInt64
+    public let observationID: Data?
+    public let estimatedLifetimeMilliseconds: UInt64?
+    public let lateObservation: Bool
     public init(contract: RequestContract, requiredFeatures: Set<UInt64>, capture: Data, actions: [CapturedAction],
                 firstObservedAt: AuthorityMoment, deadlineMilliseconds: UInt64,
-                createdUnixMilliseconds: UInt64, expiresUnixMilliseconds: UInt64) {
+                createdUnixMilliseconds: UInt64, expiresUnixMilliseconds: UInt64, observationID: Data? = nil,
+                estimatedLifetimeMilliseconds: UInt64? = nil, lateObservation: Bool = false) {
         self.contract = contract; self.requiredFeatures = requiredFeatures; self.capture = capture; self.actions = actions
         self.firstObservedAt = firstObservedAt; self.deadlineMilliseconds = deadlineMilliseconds
         self.createdUnixMilliseconds = createdUnixMilliseconds; self.expiresUnixMilliseconds = expiresUnixMilliseconds
+        self.observationID = observationID; self.estimatedLifetimeMilliseconds = estimatedLifetimeMilliseconds
+        self.lateObservation = lateObservation
     }
 }
 
@@ -85,6 +91,12 @@ public final class ApprovalRequestCoordinator {
     private var deliveryBytes = 0
     private struct Entry {
         var state: ApprovalRequestState
+        let contract: RequestContract
+        let permittedActions: Set<CapturedAction>
+        let observationID: Data
+        let estimatedLifetimeMilliseconds: UInt64?
+        let lateObservation: Bool
+        var statusRevision: UInt64 = 0
         var retained: RetainedApprovalRequest?
         let category: AuditCategory
         var byteCount: Int
@@ -127,7 +139,11 @@ public final class ApprovalRequestCoordinator {
     public func admit(_ draft: ApprovalRequestDraft, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
         try checkClock(now)
         guard draft.firstObservedAt.epoch == clockEpoch, draft.firstObservedAt.milliseconds <= now.milliseconds,
-              now.milliseconds < draft.deadlineMilliseconds else { throw ApprovalCoordinatorError.invalidDraft }
+              now.milliseconds < draft.deadlineMilliseconds,
+              draft.observationID == nil || draft.observationID?.count == 16,
+              draft.estimatedLifetimeMilliseconds == nil || draft.estimatedLifetimeMilliseconds! > 0 else {
+            throw ApprovalCoordinatorError.invalidDraft
+        }
         guard entries.count < maximumRequests else { throw ApprovalCoordinatorError.capacityExceeded }
         let payload = try IssuedRequestPayload(contract: draft.contract, macID: mac, accountID: account,
             requestID: random(16), challenge: random(32), requiredFeatures: draft.requiredFeatures,
@@ -141,6 +157,7 @@ public final class ApprovalRequestCoordinator {
         let retained = try RetainedApprovalRequest(payload: payload, phase: .queued, admittedAt: draft.firstObservedAt,
             deadlineMilliseconds: draft.deadlineMilliseconds)
         let category = category(payload.contract.requestKind)
+        let observationID = try draft.observationID ?? random(16)
         try write { tx in
             let trust = try tx.approvalTrustSnapshot()
             guard trust.allowedContracts.contains(payload.contract), let features = trust.authorityCapabilities.contracts[payload.contract],
@@ -152,6 +169,8 @@ public final class ApprovalRequestCoordinator {
         entries[payload.requestID] = Entry(state: ApprovalRequestState(macID: mac, accountID: account, requestDigest: digest, challenge: payload.challenge,
             reason: .none, terminalAt: nil, decisionPhoneID: nil, requestID: payload.requestID, phase: .queued,
             revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
+            contract: payload.contract, permittedActions: Set(payload.permittedActions), observationID: observationID,
+            estimatedLifetimeMilliseconds: draft.estimatedLifetimeMilliseconds, lateObservation: draft.lateObservation,
             retained: retained, category: category, byteCount: bytes)
         retainedBytes += bytes
         return payload
@@ -385,6 +404,96 @@ public final class ApprovalRequestCoordinator {
                 return true
             }
         return result
+    }
+
+    /// Returns fresh signed state and optionally consumes one authenticated phone decision. It never dispatches a target.
+    /// Serialize this call with all authority state. Supply a trusted non-exportable signer; callbacks must not reenter.
+    /// A lost reply can follow committed consumption. Reconcile status rather than retrying target execution.
+    public func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data? = nil,
+                                authorityPublicKey: Data, maximumBodyBytes: Int,
+                                now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                                signer: (Data) throws -> Data) throws -> Data? {
+        guard requestID.count == 16, (1...(16_777_216 - ApprovalMessage.overheadBytes)).contains(maximumBodyBytes) else {
+            throw ApprovalCoordinatorError.invalidConfiguration
+        }
+        guard authorityPublicKey.count == 65, authorityPublicKey.first == 4,
+              (try? P256.Signing.PublicKey(x963Representation: authorityPublicKey)) != nil else {
+            throw DecisionVerificationError.invalidTrustedState
+        }
+        let enrollment = try read { transaction in
+            try transaction.requireDirectApprovalBinding(binding)
+            guard let enrollment = try transaction.requestDeliveryTrust().enrollments.first(where: {
+                $0.approval.phoneID == binding.scope.phoneID && $0.epoch == binding.scope.enrollmentEpoch
+            }) else { throw EnrollmentJournalError.unavailableEnrollment }
+            return enrollment.approval
+        }
+        let initialTime = try now()
+        let current: ApprovalRequestState
+        do { current = try deliveryState(requestID: requestID, now: initialTime, receiptTimeMs: receiptTimeMs) }
+        catch ApprovalCoordinatorError.unknownRequest { return nil }
+        if let decisionFrame {
+            guard let entry = entries[requestID] else { throw ApprovalCoordinatorError.unknownRequest }
+            let message = try ApprovalMessage.decode(decisionFrame, maximumBodyBytes: maximumBodyBytes)
+            let decision = try DecisionPayload.decode(message.body, limits: decisionLimits)
+            guard message.type == .decision, decision.macID == mac, decision.accountID == account,
+                  decision.requestID == requestID, decision.requestDigest == current.requestDigest,
+                  decision.challenge == current.challenge, decision.phoneID == binding.scope.phoneID else {
+                throw DecisionVerificationError.wrongRequest
+            }
+            let requirement = try ActionPolicy.requirement(for: decision.action, requestKind: entry.contract.requestKind,
+                retainedPermittedActions: entry.permittedActions)
+            let purpose: SigningPurpose
+            switch requirement.purpose {
+            case .cancellation: purpose = .cancellation
+            case .oneTimeUI: purpose = .oneTimeUI
+            case .biometricAuthorization: purpose = .biometricAuthorization
+            }
+            guard let key = enrollment.keys.first(where: { $0.id == decision.keyID }),
+                  key.keyClass == requirement.keyClass, message.purpose == purpose else {
+                throw DecisionVerificationError.wrongKeyClass
+            }
+            guard try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey,
+                wireVersion: message.wireVersion, messageType: .decision, purpose: purpose,
+                canonicalPayload: message.body, payloadLimits: decisionLimits, inputLimits: signingLimits) else {
+                throw DecisionVerificationError.invalidSignature
+            }
+            if current.phase == .queued || current.phase == .presented {
+                do {
+                    _ = try consume(canonicalDecision: message.body, signature: message.signature,
+                        authenticatedPhoneID: binding.scope.phoneID, authenticatedEnrollmentEpoch: binding.scope.enrollmentEpoch,
+                        now: now(), receiptTimeMs: receiptTimeMs)
+                } catch ApprovalCoordinatorError.expired {
+                    // Expiry committed before consumption. Return that state through the same signed response path.
+                }
+            }
+        }
+        // A pending request can cross its deadline during signing. Discard that snapshot and sign its committed expiry.
+        for _ in 0..<2 {
+            let time = try now()
+            let state = try deliveryState(requestID: requestID, now: time, receiptTimeMs: receiptTimeMs)
+            guard let entry = entries[requestID], entry.statusRevision < UInt64.max else {
+                throw ApprovalCoordinatorError.unavailable
+            }
+            let revision = entry.statusRevision + 1
+            entries[requestID]?.statusRevision = revision
+            let status = try state.statusPayload(observationID: entry.observationID, observationRevision: revision, now: time,
+                estimatedLifetimeMs: entry.estimatedLifetimeMilliseconds, lateObservation: entry.lateObservation)
+            let limits = try CBORLimits(maxBytes: maximumBodyBytes, maxDepth: 4, maxItems: 64)
+            let body = try status.encode(limits: limits)
+            let input = try SigningInput.make(wireVersion: 1, messageType: .status, purpose: .status,
+                canonicalPayload: body, payloadLimits: limits, inputLimits: signingLimits)
+            let signature = try signer(input)
+            guard try ApprovalSignature.verify(signature: signature, publicKey: authorityPublicKey,
+                wireVersion: 1, messageType: .status, purpose: .status,
+                canonicalPayload: body, payloadLimits: limits, inputLimits: signingLimits) else {
+                throw DecisionVerificationError.invalidSignature
+            }
+            let final = try deliveryState(requestID: requestID, now: now(), receiptTimeMs: receiptTimeMs)
+            guard final == state else { continue }
+            return try ApprovalMessage(wireVersion: 1, type: .status, purpose: .status, body: body,
+                signature: signature).encode(maximumBodyBytes: maximumBodyBytes)
+        }
+        throw ApprovalCoordinatorError.unavailable
     }
 
     private func deliveryState(requestID: Data, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> ApprovalRequestState {

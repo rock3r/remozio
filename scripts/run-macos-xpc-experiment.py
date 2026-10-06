@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client")
+    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -111,6 +111,11 @@ def experiment(report):
                 ("discovery-bytes", "discovery", trusted, TRUSTED, 0),
                 ("discovery-wrong-server", "discovery", trusted, OTHER, 3),
                 ("discovery-wrong-client", "discovery", other, TRUSTED, 3),
+                ("exchange-bytes", "exchange", trusted, TRUSTED, 0),
+                ("exchange-empty", "exchange-empty", trusted, TRUSTED, 0),
+                ("exchange-nil", "exchange-nil", trusted, TRUSTED, 0),
+                ("exchange-wrong-server", "exchange", trusted, OTHER, 3),
+                ("exchange-wrong-client", "exchange", other, TRUSTED, 3),
                 ("frame-bytes", "frame", trusted, TRUSTED, 0),
                 ("frame-empty", "empty", trusted, TRUSTED, 0),
                 ("frame-nil", "nil", trusted, TRUSTED, 0),

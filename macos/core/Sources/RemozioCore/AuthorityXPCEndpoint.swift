@@ -30,6 +30,8 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let accountID: Data
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
+    private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private var exchangeReady = false
     private var discoveryReady = false
     private var deliveryReady = false
     private var ready = false
@@ -44,13 +46,14 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                             snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
                             validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
                             requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
-         pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil) throws {
+                            pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
+                            exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil) throws {
         guard peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
         _ = try peerPolicy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: peerPolicy)
         self.init(macID: macID, accountID: accountID, budget: budget,
             verify: { _ = try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
-            snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs)
+            snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
         connection.exportedObject = self
@@ -63,9 +66,10 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
          validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
          requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
-         pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil) {
+         pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
+         exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil) {
         self.macID = macID; self.accountID = accountID; self.budget = budget
-        self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs
+        self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
     }
     public func close() {
         let notify = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
@@ -123,6 +127,29 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                 // The handler rechecks enrollment and code policy inside the root's request-owner lock.
                 guard let result = try frame(peer, requestID) else { return Data() }
                 try AuthorityRequestFrame.validate(result, binding: peer, requestID: requestID)
+                return result
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
+    }
+    public func requestExchangeVersion(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let version: UInt64 = try work {
+                let supported = exchange != nil
+                lock.withLock { exchangeReady = supported }
+                return supported ? 1 : 0
+            }
+            send { reply(version) }
+        } catch { close(); reply(0) }
+    }
+    public func exchangeRequest(_ binding: Data, query: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try work {
+                guard lock.withLock({ exchangeReady }), let exchange else { throw AuthorityXPCEndpointError.unavailable }
+                let peer = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
+                let request = try AuthorityRequestExchange.decode(query)
+                guard let result = try exchange(peer, request.requestID, request.decisionFrame) else { return Data() }
+                try AuthorityRequestExchange.validateResponse(result, binding: peer, requestID: request.requestID)
                 return result
             }
             send { reply(bytes) }

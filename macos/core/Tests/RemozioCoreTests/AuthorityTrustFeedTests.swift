@@ -52,6 +52,21 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
                 expectedAccountID: Data(repeating: 2, count: 16))
             reply(.pendingRequests(try AuthorityPendingRequests.encode([Data(repeating: 8, count: 16)], binding: peer)))
         }
+        private var exchanges = 0
+        private var exchangeReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        let exchangeSent = XCTestExpectation(description: "held exchange")
+        var exchangeCount: Int { lock.withLock { exchanges } }
+        func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            reply(.exchangeVersion(lock.withLock { version }))
+        }
+        func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { exchanges += 1; exchangeReply = reply }
+            exchangeSent.fulfill()
+        }
+        func finishExchange() {
+            let reply = lock.withLock { let value = exchangeReply; exchangeReply = nil; return value }
+            reply?(.exchange(Data()))
+        }
         let snapshotSent = XCTestExpectation(description: "held snapshot")
         let validationSent = XCTestExpectation(description: "held validation")
         init(_ trust: DirectApprovalTrust) throws { bytes = try AuthorityTrustCodec.encodeSnapshot(trust) }
@@ -343,6 +358,51 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         await feed.close()
         XCTAssertTrue(try XCTUnwrap(listeners.values.last).isClosed)
         await host.close()
+    }
+    func testServiceRejectsExchangeReplyAfterSessionReplacement() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)
+        let service = DirectApprovalTransportService(feed: feed, host: host)
+        try await service.start()
+        let session = try await host.admit(trust.peers[0], generation: XCTUnwrap(listeners.generation))
+        let pending = Task { try await service.exchangeRequest(for: session, requestID: Data(repeating: 8, count: 16)) }
+        await fulfillment(of: [driver.exchangeSent], timeout: 2)
+        try await host.replaceTrust(self.trust(empty: true)); driver.finishExchange()
+        do { _ = try await pending.value; XCTFail("Retired session received status") } catch DirectHostError.staleSession {}
+        await service.close()
+    }
+    func testExchangeUsesOrderedQueueAndDoesNotSendCancelledDecision() async throws {
+        let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+        try await feed.start(host: host)
+        let first = Task { try await feed.exchangeRequest(trust.peers[0], revision: trust.revision,
+            requestID: Data(repeating: 8, count: 16)) }
+        await fulfillment(of: [driver.exchangeSent], timeout: 2)
+        let cancelled = Task { try await feed.exchangeRequest(trust.peers[0], revision: trust.revision,
+            requestID: Data(repeating: 8, count: 16), decisionFrame: Data([1])) }
+        try await waitForQueue(feed, count: 1); cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancelled decision sent") } catch {}
+        driver.finishExchange(); let status = try await first.value; XCTAssertNil(status)
+        XCTAssertEqual(driver.exchangeCount, 1)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testUnsupportedExchangeKeepsTrustUsableAndDisconnectRejectsLateReply() async throws {
+        for unsupported in [false, true] {
+            let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+            if unsupported { driver.setVersion(0) }
+            try await feed.start(host: host)
+            if unsupported {
+                do { _ = try await feed.exchangeRequest(trust.peers[0], revision: trust.revision,
+                    requestID: Data(repeating: 8, count: 16)); XCTFail() } catch AuthorityXPCError.unsupportedRequestExchange {}
+                try await feed.refresh(); XCTAssertEqual(driver.exchangeCount, 0)
+            } else {
+                let pending = Task { try await feed.exchangeRequest(trust.peers[0], revision: trust.revision,
+                    requestID: Data(repeating: 8, count: 16)) }
+                await fulfillment(of: [driver.exchangeSent], timeout: 2)
+                driver.interrupt(); driver.finishExchange()
+                do { _ = try await pending.value; XCTFail("Disconnected exchange completed") } catch {}
+            }
+            await feed.close(); await host.close()
+        }
     }
     private func waitForQueue(_ feed: AuthorityTrustFeed, count: Int) async throws {
         let deadline = ContinuousClock.now + .seconds(2)

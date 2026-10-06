@@ -53,3 +53,7 @@ This checks the actual Objective-C protocol declaration and NSXPC value bridging
 - Credential custody, authority rollback protection, real approval actions, and Android interoperability.
 
 The probe is experiment code, not the production IPC layer. Its hello method has no side effects, and its only payload method echoes a synthetic nonce. Timeouts and crashes fail the experiment; they are not counted as expected rejections.
+
+## State and decision exchange selector
+
+[The exchange evidence](evidence/2026-10-06-request-exchange-xpc.json) adds five cases to the discovery baseline. All 19 passed. The probe negotiates the production exchange selector and tests nonempty, empty, and nil Data replies. Wrong client and server identifiers prevent query dispatch. Synthetic echo bytes do not establish decision verification, durable consumption, or signed-status delivery. Native root tests cover those component checks separately.

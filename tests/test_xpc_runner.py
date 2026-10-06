@@ -21,10 +21,10 @@ class ExperimentTests(unittest.TestCase):
     def test_frame_cases_require_dispatch_only_for_matching_peers(self):
         accepted = subprocess.CompletedProcess([], 0, "accepted", "")
         rejected = subprocess.CompletedProcess([], 3, "rejected:NSCocoaErrorDomain:4102", "")
-        for name in ("frame-bytes", "frame-empty", "frame-nil"):
+        for name in ("frame-bytes", "frame-empty", "frame-nil", "exchange-bytes", "exchange-empty", "exchange-nil"):
             self.assertTrue(runner.case_matches(name, accepted, 0, True))
             self.assertFalse(runner.case_matches(name, accepted, 0, False))
-        for name in ("frame-wrong-client", "frame-wrong-server"):
+        for name in ("frame-wrong-client", "frame-wrong-server", "exchange-wrong-client", "exchange-wrong-server"):
             self.assertTrue(runner.case_matches(name, rejected, 3, False))
             self.assertFalse(runner.case_matches(name, rejected, 3, True))
 
