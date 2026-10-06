@@ -11,7 +11,8 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Keys and durable authority | [Disposable enclave signing and restoration measured](macos-key-custody.md) | Pre-login availability, code access, crash and rollback cases |
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Protected local checkpoint, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | Accepted pathname/recheck contract; protected executor integration |
-| Command caller identity | [Kernel audit token, code pin, exec and exit measured](macos-command-caller.md) | macOS 26 repeat, production IPC, trusted signing floor, protected admission |
+| Command caller identity | [Kernel audit token, code pin, exec and exit measured on macOS 26 and 27](macos-command-caller.md) | Production IPC, trusted signing floor, protected admission |
+| Command input transfer | [Fileport identity, queued input, later streaming and PTY resize measured](macos-command-fileport.md) | macOS 26 repeat, authenticated descriptor channel, resource budgets, capture and executor integration |
 | Streaming encrypted channel | [TLS](tls-channel.md) and [WebSocket carrier](websocket-carrier.md) harnesses | Android keys, Cloudflare integration, protected identities, and reconnect |
 | Native TLS key custody | [Disposable enclave identity and TLS exchange measured](macos-enclave-tls.md) | macOS 26 runtime, pre-login access, protected service identity, Android hardware peer |
 | Presence signals | [One-shot probe prepared](macos-presence.md) | GUI-session observations, remote desktop usability, lock and brightness support |
