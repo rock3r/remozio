@@ -1,6 +1,8 @@
-# Command capture schema 1
+# Command capture schemas 1 and 2
 
-`CommandCapture` parses the command-specific payload for approval wire 1, command action schema 1. Swift and Kotlin expose typed, immutable fields while retaining the exact canonical bytes. Parsing validates structure and representation; it does not establish that an OS query produced a claim.
+`CommandCapture` supports approval wire 1 with command capture schemas 1 and 2. Swift and Kotlin retain typed fields and exact canonical bytes.
+
+The caller supplies the expected schema from the authenticated request contract. The default is schema 1 for existing callers. The inner version must match exactly. Parsing establishes structure, not OS provenance.
 
 ```mermaid
 flowchart LR
@@ -20,7 +22,7 @@ Every map has exactly the documented keys. Optional observations use explicit CB
 
 | Key | Field | Type |
 | --- | --- | --- |
-| 0 | Capture schema | Unsigned `1` |
+| 0 | Capture schema | Unsigned `1` or `2`, matching the signed contract |
 | 1 | Effective executable | Map below |
 | 2 | Complete argv, including argv[0] | Nonempty array of raw byte strings |
 | 3 | Working directory | Map below |
@@ -50,7 +52,23 @@ The authority builds the deterministic environment before approval and executes 
 
 ## Input and requester provenance
 
-Stdin is `{0: kind, 1: stream binding16|null, 2: observed absolute path bytes|null, 3: file identity|null}`. Kinds are null `0`, caller-controlled pipe `1`, file `2`, caller-controlled TTY `3`, and caller-controlled PTY `4`. Null input requires all three remaining values to be null. Other kinds require the opaque stream binding. Available path and identity observations remain optional.
+Stdin is `{0: kind, 1: stream binding16|null, 2: observed absolute path bytes|null, 3: file identity|null}`.
+
+| Kind | Tag | Supported schemas |
+| --- | --- | --- |
+| Null | 0 | 1, 2 |
+| Caller-controlled pipe | 1 | 1, 2 |
+| File | 2 | 1, 2 |
+| Caller-controlled TTY | 3 | 1, 2 |
+| Caller-controlled PTY | 4 | 1, 2 |
+| Caller-controlled socket | 5 | 2 |
+| Directory | 6 | 2 |
+| Caller-controlled device | 7 | 2 |
+| Other caller-controlled source | 8 | 2 |
+
+Null input requires all three remaining values to be null. Other kinds require the opaque stream binding. Available path and identity observations remain optional.
+
+Schema 2 keeps all existing fields and tag meanings. Schema 1 rejects tags 5 through 8. Future tags and schemas fail in both parsers. An unavailable classification must use `other`, never a fabricated file or pipe label. A directory label does not promise that reading succeeds.
 
 The authority retains the actual stream behind that binding. A path or stream ID alone cannot open, replace, or authorize an input stream. The phone must disclose that caller-controlled content is not captured or approved byte-for-byte. Streaming remains supported.
 
@@ -75,7 +93,13 @@ Submission bindings are `{0: ID16, 1: nonce32, 2: caller-channel binding16}`. Th
 
 ## Integration rules
 
-Verify the issued request and its exact command/wire/schema contract before selecting this parser. Preserve its bytes in the request digest. Successful parsing must not itself change capability advertisements or enable controls for an unsupported contract.
+Verify the issued request and its exact command/wire/schema contract before selecting this parser. Preserve its bytes in the request digest. Successful parsing must not itself enable an unsupported contract.
+
+The Android command connection advertises implemented schemas 1 and 2, with no optional features. The receiver retains their intersection with the authenticated Mac offer. Each new request must use that connection's shared schema. The signed outer schema and inner capture schema must match before inbox admission. Unknown peer contracts remain opaque. Unsupported local advertisements fail.
+
+Existing authenticated request owners survive reconnects. Status messages refer to their retained request digests and do not introduce another capture. A duplicate request still needs a supported contract on the current connection. Direct `open` and `accept` callers keep schema 1 by default.
+
+The producer must choose a contract before encoding the capture. Never relabel a socket, directory, or device to fit schema 1. A peer without schema 2 cannot receive those captures through this handler.
 
 The phone must render every relevant signed value without letting a value create a fake label or row. Make controls, newlines, bidi characters, empty values, and invalid UTF-8 unambiguous. Keep readable details and expandable exact arguments; never replace the signed invocation with a cosmetic shell summary. Rationale must always be labelled unverified.
 
@@ -83,7 +107,11 @@ The authority still must capture the OS values, bind the live caller and streams
 
 ## Evidence and bounds
 
-Both implementations pass nine valid and 86 invalid shared fixtures. Cases cover every input and signing tag, missing observations, unsigned boundaries, nested unknown fields, invalid byte lengths, NULs, relative paths, duplicate/unsorted environment entries, and ancestry consistency. Separate tests cover immutable snapshots, resource bounds, and preservation through the issued-request wrapper.
+Schema 1 retains its nine valid and 86 invalid shared fixtures unchanged. Schema 2 adds 13 valid and 16 invalid shared fixtures.
+
+Both parsers require explicit version selection. Phone tests cover signed version mismatches, disjoint offers, unknown contracts, and schema downgrade after reconnect.
+
+The schema 1 cases cover every input and signing tag, missing observations, unsigned boundaries, nested unknown fields, invalid byte lengths, NULs, relative paths, duplicate/unsorted environment entries, and ancestry consistency. Separate tests cover immutable snapshots, resource bounds, and preservation through the issued-request wrapper.
 
 The caller supplies explicit byte, depth, and item budgets. Nothing is truncated. Test budgets are not product limits; legitimate oversized captures need the design's explicit Request too large result.
 

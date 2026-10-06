@@ -43,6 +43,10 @@
     <string name="input_file">Standard input: file</string>
     <string name="input_tty">Standard input: caller-controlled terminal</string>
     <string name="input_pty">Standard input: caller-controlled pseudo-terminal</string>
+    <string name="input_socket">Standard input: caller-controlled socket</string>
+    <string name="input_directory">Standard input: directory</string>
+    <string name="input_device">Standard input: caller-controlled device</string>
+    <string name="input_other">Standard input: other caller-controlled source</string>
     <string name="input_not_captured">Input content is not captured or approved byte-for-byte. Terminal input can also come from automation.</string>
     <string name="input_path">Observed input path</string>
     <string name="io_pty">I/O mode: pseudo-terminal</string>

@@ -95,12 +95,15 @@ class CommandRequestEnrollment internal constructor(
 
     /** Even duplicates authenticate first. Reuse the existing owner instead of resetting its status or timing. */
     @Synchronized
-    fun accept(body: ByteArray, signature: ByteArray): CommandRequestSession =
-        memoryBudget?.parse { acceptParsed(body, signature) } ?: acceptParsed(body, signature)
+    fun accept(body: ByteArray, signature: ByteArray): CommandRequestSession = acceptNegotiated(body, signature, setOf(1u))
 
-    private fun acceptParsed(body: ByteArray, signature: ByteArray): CommandRequestSession {
+    @Synchronized
+    private fun acceptNegotiated(body: ByteArray, signature: ByteArray, schemas: Set<ULong>): CommandRequestSession =
+        memoryBudget?.parse { acceptParsed(body, signature, schemas) } ?: acceptParsed(body, signature, schemas)
+
+    private fun acceptParsed(body: ByteArray, signature: ByteArray, schemas: Set<ULong>): CommandRequestSession {
         if (closed) reject(InboxRejection.CLOSED)
-        val candidate = CommandRequestSession.open(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits)
+        val candidate = CommandRequestSession.open(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits, schemas)
         try {
             val existing = requests[candidate.identity]
             if (existing != null) {
@@ -161,12 +164,12 @@ class CommandRequestEnrollment internal constructor(
 
     /** The identity check and state update share the enrollment monitor with replacement and removal. */
     @Synchronized
-    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant) {
+    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant, schemas: Set<ULong>) {
         if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
         val body = message.body.copyBytes()
         val signature = message.signature.copyBytes()
         when (message.type) {
-            ApprovalMessageType.REQUEST -> try { accept(body, signature) } catch (failure: InboxException) {
+            ApprovalMessageType.REQUEST -> try { acceptNegotiated(body, signature, schemas) } catch (failure: InboxException) {
                 when (failure.reason) {
                     InboxRejection.CAPACITY -> limited.value = true
                     InboxRejection.RETIRED_REQUEST -> Unit

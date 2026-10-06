@@ -31,7 +31,7 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
                 identity = AndroidTransportIdentities.load(e.transportKey.alias, e.transportKey.publicKey.copyBytes())
                 val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), e.transportPublicKey.copyBytes(),
                     ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
-                    listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(),
+                    listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet()), ChannelRequestCapability(0u, 1u, 2u, emptySet())), emptySet(),
                     maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES,
                     trustedMinimum = record.pairing?.minimumEnvelopeVersion ?: 1u)
                 val relay = e.relayCredential?.let { credential -> ApprovalCarrierRoute { parent -> RelayConnector().connect(parent, credential) } }

@@ -80,6 +80,32 @@ class CommandRequestSessionTest {
         }
     }
 
+    private fun captureVersion(version: ULong): ByteArray {
+        val root = (DeterministicCbor.decode(capture, bound) as CborValue.Fields).values
+        return DeterministicCbor.encode(CborValue.Fields(root + (0uL to CborValue.Unsigned(version))), bound)
+    }
+
+    @Test fun signedContractMustMatchInnerCaptureAndNegotiatedSchema() {
+        fun negotiated(request: IssuedRequestPayload, schemas: Set<ULong>): CommandRequestSession {
+            val body = request.encode(bound)
+            return CommandRequestSession.open(body, sign(body), mac, account, publicKey(pair), limits, schemas)
+        }
+        negotiated(request(schema = 2u, capture = captureVersion(2u)), setOf(1u, 2u)).use {
+            assertEquals(2uL, it.snapshot(time()).capture!!.schemaVersion)
+        }
+        negotiated(request, setOf(1u, 2u)).close()
+        assertEquals(CommandCaptureFailure.VERSION, assertFailsWith<CommandCaptureException> {
+            negotiated(request(schema = 1u, capture = captureVersion(2u)), setOf(1u, 2u))
+        }.reason)
+        assertEquals(CommandCaptureFailure.VERSION, assertFailsWith<CommandCaptureException> {
+            negotiated(request(schema = 2u), setOf(1u, 2u))
+        }.reason)
+        assertEquals(IssuedRequestFailure.UNSUPPORTED_CONTRACT, assertFailsWith<IssuedRequestException> {
+            negotiated(request(schema = 2u, capture = captureVersion(2u)), setOf(1u))
+        }.reason)
+        assertFailsWith<IllegalArgumentException> { negotiated(request, setOf(3u)) }
+    }
+
     @Test fun validTerminalUpdateReleasesCaptureBeforePublishingRevisionAndCannotResurrect() {
         val session = open()
         observe(session, status())

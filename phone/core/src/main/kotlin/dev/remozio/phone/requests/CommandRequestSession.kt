@@ -111,9 +111,7 @@ class CommandRequestSession private constructor(
     }
 
     companion object {
-        private val capabilities = ContractCapabilities(mapOf(RequestContract(RequestKind.COMMAND, 1u, 1u) to emptySet()))
-
-        /** The expected IDs and public key must come from a trusted enrollment, never from the message. */
+        /** IDs and the key come from trusted enrollment. Schemas come from this authenticated channel; the legacy default is schema 1. */
         fun open(
             body: ByteArray,
             signature: ByteArray,
@@ -121,6 +119,7 @@ class CommandRequestSession private constructor(
             expectedAccountID: ByteArray,
             trustedAuthorityPublicKey: ByteArray,
             limits: RequestLimits,
+            negotiatedSchemas: Set<ULong> = setOf(1u),
         ): CommandRequestSession {
             require(expectedMacID.size == 16 && expectedAccountID.size == 16)
             if (body.size > limits.body.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
@@ -131,11 +130,13 @@ class CommandRequestSession private constructor(
                     SigningPurpose.ISSUED_REQUEST, canonical, limits.body, limits.signing)) {
                 throw CommandSessionException(CommandSessionRejection.INVALID_SIGNATURE)
             }
+            require(negotiatedSchemas.isNotEmpty() && CommandCapture.supportedSchemaVersions.containsAll(negotiatedSchemas))
+            val capabilities = ContractCapabilities(negotiatedSchemas.associate { RequestContract(RequestKind.COMMAND, 1u, it) to emptySet<ULong>() })
             val request = IssuedRequestPayload.decode(canonical, limits.body, limits.capture, capabilities)
             if (!request.macID.contentEquals(expectedMacID) || !request.accountID.contentEquals(expectedAccountID)) {
                 throw CommandSessionException(CommandSessionRejection.WRONG_AUTHORITY)
             }
-            val capture = CommandCapture(request.canonicalCapture, limits.capture)
+            val capture = CommandCapture(request.canonicalCapture, limits.capture, expectedSchemaVersion = request.contract.schemaVersion)
             return CommandRequestSession(capture,
                 RequestStatusTracker(request, key, limits.status, limits.signing, limits.body),
                 CommandRequestIdentity(CborValue.Bytes(request.macID), CborValue.Bytes(request.accountID),

@@ -12,7 +12,7 @@ data class CapturedDirectory(val path: CborValue.Bytes, val identity: CapturedFi
 data class CommandTarget(val uid: UInt, val gid: UInt, val supplementaryGroups: List<UInt>, val observedName: String?)
 enum class EnvironmentSource(override val wireValue: ULong) : CommandWireTag { MINIMAL(0u), REQUESTED(1u) }
 data class CapturedEnvironmentEntry(val name: CborValue.Bytes, val value: CborValue.Bytes, val source: EnvironmentSource)
-enum class CommandInputKind(override val wireValue: ULong) : CommandWireTag { NULL(0u), PIPE(1u), FILE(2u), TTY(3u), PTY(4u) }
+enum class CommandInputKind(override val wireValue: ULong) : CommandWireTag { NULL(0u), PIPE(1u), FILE(2u), TTY(3u), PTY(4u), SOCKET(5u), DIRECTORY(6u), DEVICE(7u), OTHER(8u) }
 data class CapturedCommandInput(val kind: CommandInputKind, val streamBinding: CborValue.Bytes?, val observedPath: CborValue.Bytes?, val identity: CapturedFileIdentity?)
 enum class CommandIOMode(override val wireValue: ULong) : CommandWireTag { PIPES(0u), PTY(1u) }
 enum class StartedCommandDisconnect(override val wireValue: ULong) : CommandWireTag { TERMINATE(0u), CONTINUE_RUNNING(1u) }
@@ -27,7 +27,9 @@ data class CapturedAncestry(val completeness: AncestryCompleteness, val entries:
 data class CapturedSubmission(val id: CborValue.Bytes, val nonce: CborValue.Bytes, val callerBinding: CborValue.Bytes)
 
 /** Parses claims only. OS capture, authenticated issuance, and execution are separate responsibilities. */
-class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits) {
+class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong = 1u) {
+    companion object { val supportedSchemaVersions: Set<ULong> = Collections.unmodifiableSet(setOf(1u, 2u)) }
+    val schemaVersion: ULong
     private val original: CborValue.Bytes
     val canonicalBytes: ByteArray get() = original.copyBytes()
     val canonicalByteCount: Int get() = original.size
@@ -49,7 +51,8 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits) {
         if (canonicalBytes.size > limits.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
         original = CborValue.Bytes(canonicalBytes)
         val root = CaptureFields(DeterministicCbor.decode(original.copyBytes(), limits), 13)
-        ensure(root.uint(0u) == 1uL, CommandCaptureFailure.VERSION)
+        schemaVersion = root.uint(0u)
+        ensure(expectedSchemaVersion in supportedSchemaVersions && schemaVersion == expectedSchemaVersion, CommandCaptureFailure.VERSION)
         val executable = CaptureFields(root[1u], 3)
         this.executable = CapturedExecutable(executable.path(0u), executable.identity(1u), executable.bytes(2u, 32))
         arguments = immutable(root.array(2u).map { CaptureFields.cString(it) })
@@ -71,6 +74,7 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits) {
         })
         val input = CaptureFields(root[6u], 4)
         val kind = input.tag(0u, CommandInputKind.entries)
+        ensure(schemaVersion == 2uL || kind.wireValue <= 4uL, CommandCaptureFailure.ENUMERATION)
         val binding = input.optionalBytes(1u, 16)
         val path = input.optionalPath(2u)
         val identity = input.optionalIdentity(3u)
