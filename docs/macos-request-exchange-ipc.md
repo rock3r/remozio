@@ -37,7 +37,7 @@ The endpoint uses the existing OS identity guard and shared work budget. The sta
 
 ## Root ownership
 
-`ApprovalRequestCoordinator.exchangeRequest` signs retained state. The trusted provider supplies the authority key, signer, and service clock. Use a status body budget no larger than both `configuration.maximumRequestBodyBytes` and 3968 bytes. No provider is installed by default.
+`ApprovalRequestCoordinator.exchangeRequest` signs retained state. The trusted provider supplies the authority key, signer, and service clock. Use a status body budget no larger than both `configuration.maximumRequestBodyBytes` and 3968 bytes. The [root provider bundle](macos-request-providers.md) supplies these limits and one hardware signer to a request-enabled service constructor. Configuration-only startup remains trust-only.
 
 Admission retains a stable observation ID, lifetime estimate, and late-observation flag. Adapters can supply the original observation ID when issuing a new challenge for the same target. The default creates a new random observation ID. Status revisions increase on every signing attempt, including failed attempts. They remain separate from lifecycle revisions.
 

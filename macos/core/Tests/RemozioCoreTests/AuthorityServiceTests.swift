@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
@@ -118,6 +119,43 @@ final class AuthorityServiceTests: XCTestCase {
         XCTAssertNotNil(service)
         service = nil
         try assertReleased(fixture)
+    }
+
+    func testProviderConfigurationMismatchReleasesJournalBeforeActivation() throws {
+        let fixture = try Fixture(), config = try configuration(fixture), key = P256.Signing.PrivateKey()
+        let bundle = try AuthorityRequestProviders(configuration: configuration(fixture, wrongScope: true), publicKey: key.publicKey.x963Representation,
+            signing: { _ in XCTFail("Mismatched service signed"); return Data() }, routing: { throw AuthorityRequestSignerError.unavailable })
+        let journal = AuthorityJournal(database: try database(fixture))
+        XCTAssertThrowsError(try AuthorityService(configuration: config, journal: journal, validateSelf: { _ in },
+            requestProviders: bundle, reconcileExpired: { _ in })) {
+            XCTAssertEqual($0 as? AuthorityServiceConfigurationError, .invalidConfiguration)
+        }
+        try assertReleased(fixture)
+    }
+    func testProviderServiceRejectsMixedHandlersAndRetainsSelfValidation() throws {
+        let fixture = try Fixture(), config = try configuration(fixture), key = P256.Signing.PrivateKey()
+        let bundle = try AuthorityRequestProviders(configuration: config, publicKey: key.publicKey.x963Representation,
+            signing: { _ in XCTFail("Unstarted service signed"); return Data() }, routing: { throw AuthorityRequestSignerError.unavailable })
+        let journal = AuthorityJournal(database: try database(fixture))
+        XCTAssertThrowsError(try AuthorityService(configuration: config, journal: journal, validateSelf: { _ in },
+            requestFrame: { _, _, _, _ in XCTFail("Mixed handler"); return nil }, requestProviders: bundle, reconcileExpired: { _ in })) {
+            XCTAssertEqual($0 as? AuthorityServiceConfigurationError, .invalidConfiguration)
+        }
+        try assertReleased(fixture)
+        XCTAssertThrowsError(try AuthorityService(configuration: config,
+            journal: AuthorityJournal(database: database(fixture, initialize: false)), requestProviders: bundle, reconcileExpired: { _ in })) {
+            XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
+        }
+        try assertReleased(fixture)
+    }
+    func testPublicSignerLoadRequiresRootBeforeReadingTheRecord() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Normal-user admission guard") }
+        let fixture = try Fixture(), journal = AuthorityJournal(database: try database(fixture))
+        defer { try? journal.close() }
+        XCTAssertThrowsError(try EnclaveAuthorityRequestSigner.load(path: "/not-read", configuration: configuration(fixture),
+            expectedPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation, journal: journal)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
     }
     private final class Fixture {
         let root: URL

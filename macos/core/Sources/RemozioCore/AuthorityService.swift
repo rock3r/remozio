@@ -59,6 +59,15 @@ public final class AuthorityService: @unchecked Sendable {
             maintain: maintain, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest)
     }
 
+    /// Installs discovery, signed request delivery, decision/status exchange, and periodic expiry with the same service clock.
+    /// Protected signer loading and provisioning must precede construction. Closure retires the shared request owner.
+    public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
+                            requestProviders: AuthorityRequestProviders, maintenanceIntervalMilliseconds: Int = 1000,
+                            reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void) throws {
+        try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
+            validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders, reconcileExpired: reconcileExpired)
+    }
+
     /// Internal lifecycle fixture. Public constructors always validate the running authority against retained policy.
     init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
          maintenanceIntervalMilliseconds: Int = 1000, maintain: (@Sendable () throws -> Void)? = nil,
@@ -66,7 +75,9 @@ public final class AuthorityService: @unchecked Sendable {
          requestClock: (@Sendable () throws -> AuthorityMoment)? = nil,
          requestFrame: AuthorityRequestFrameProvider? = nil,
          pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
-         exchangeRequest: AuthorityRequestExchangeProvider? = nil) throws {
+         exchangeRequest: AuthorityRequestExchangeProvider? = nil,
+         requestProviders: AuthorityRequestProviders? = nil,
+         reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil) throws {
         self.journal = journal
         do {
             if let requestClock { self.requestClock = requestClock }
@@ -77,18 +88,25 @@ public final class AuthorityService: @unchecked Sendable {
         } catch { try? journal.close(); throw error }
         do {
             try validateSelf(journal)
+            try requestProviders?.requireConfiguration(configuration)
+            guard requestProviders == nil || (requestFrame == nil && pendingRequestIDs == nil && exchangeRequest == nil && maintain == nil) else {
+                throw AuthorityServiceConfigurationError.invalidConfiguration
+            }
+            let selectedFrame = requestProviders?.requestFrame ?? requestFrame
+            let selectedPending = requestProviders?.pendingRequestIDs ?? pendingRequestIDs
+            let selectedExchange = requestProviders?.exchangeRequest ?? exchangeRequest
             let frameClock = self.requestClock
             let frameHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data) throws -> Data?)?
-            if let requestFrame {
-                frameHandler = { owner, binding, requestID in try requestFrame(owner, binding, requestID, frameClock) }
+            if let selectedFrame {
+                frameHandler = { owner, binding, requestID in try selectedFrame(owner, binding, requestID, frameClock) }
             } else { frameHandler = nil }
             let pendingHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding) throws -> [Data])?
-            if let pendingRequestIDs {
-                pendingHandler = { owner, binding in try pendingRequestIDs(owner, binding, frameClock) }
+            if let selectedPending {
+                pendingHandler = { owner, binding in try selectedPending(owner, binding, frameClock) }
             } else { pendingHandler = nil }
             let exchangeHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)?
-            if let exchangeRequest {
-                exchangeHandler = { owner, binding, id, decision in try exchangeRequest(owner, binding, id, decision, frameClock) }
+            if let selectedExchange {
+                exchangeHandler = { owner, binding, id, decision in try selectedExchange(owner, binding, id, decision, frameClock) }
             } else { exchangeHandler = nil }
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,
                 peerPolicy: configuration.transportPolicy, macID: configuration.macID,
@@ -101,7 +119,15 @@ public final class AuthorityService: @unchecked Sendable {
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)
-            if let maintain {
+            if let requestProviders, let reconcileExpired {
+                let clock = self.requestClock
+                maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: maintenanceIntervalMilliseconds, work: {
+                    try journal.withRequests { owner in
+                        let states = try requestProviders.expirePending(owner, clock: clock)
+                        try reconcileExpired(states)
+                    }
+                }, failed: { [weak self] in try? self?.close() })
+            } else if let maintain {
                 maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: maintenanceIntervalMilliseconds,
                     work: maintain, failed: { [weak self] in try? self?.close() })
             }
