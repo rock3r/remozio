@@ -172,6 +172,53 @@ The producer and executor must keep the descriptor associated with the original 
 A captured access mode is not a promise of later read success.
 This method does not approve input bytes, allocate an execution permit, or execute a command.
 
+## Observing caller ancestry
+
+`caller.captureAncestry(currentPolicy:maximumEntries:checkCancellation:)` starts from the retained caller's kernel audit token.
+It rechecks the current protected policy before and after the observation.
+An exec, exit, identity mismatch, or failed policy check retires the caller record.
+It cannot recover by finding another process with the same PID.
+
+```mermaid
+flowchart LR
+    C[Recheck retained caller] --> S[Sample current process]
+    S --> P[Sample parent identity]
+    P --> R[Recheck child identity and parent link]
+    R --> E[Append observed parent]
+    E --> P
+    E --> F[Reached root or observation limit]
+    F --> V[Recheck retained caller]
+```
+
+The C shim obtains a task name right and reads `TASK_AUDIT_TOKEN` through the public Mach API.
+It releases that right after each query. The kernel token supplies the PID version and effective UID.
+The adapter samples parent links with `PROC_PIDT_SHORTBSDINFO` between two matching full audit-token observations.
+It reads available executable paths through `proc_pidpath_audittoken`, preserving their raw bytes.
+An unavailable path remains null. The adapter does not invent a PID version from a reserved BSD field.
+
+Each parent is sampled before the child identity and parent link are checked again.
+A changed link or process incarnation stops the walk. Already observed ancestors remain in the result.
+A changed original caller rejects the operation instead of returning a partial chain.
+The owner must serialize access to the caller record.
+
+| Observation | Result |
+| --- | --- |
+| Walk reaches parent PID zero | Complete, reason none |
+| Configured entry limit reached | Partial or unavailable, reason truncated |
+| OS reports permission denial | Partial or unavailable, reason permission |
+| OS reports exit or a changed PID version | Partial or unavailable, reason exited |
+| Unclassified API failure, changed credentials, changed link, or cycle | Partial or unavailable, reason unsupported |
+
+An empty limited result is unavailable. A limited result with entries is partial.
+The default limit is 16 entries. The owner can select 0 through 64; other values fail before observation.
+Zero reports a truncated chain when the caller has a parent.
+Cancellation checks run between samples and propagate to the owner without creating a completed result.
+OS identity calls cannot be preempted, so this callback does not establish a hard deadline.
+
+The chain records successive OS observations. It is not an atomic process-tree snapshot or a promise that every ancestor remains alive.
+An observed path and UID do not establish publisher trust, user consent, or the identity of a person or AI model.
+Permission failures retain honest limits. Protected Root availability and other-account ancestry remain unproven deployment checks.
+
 ## Validation and limits
 
 The focused tests send real Mach messages. They check payload preservation, malformed packet rejection, queue recovery, and timeouts.
@@ -191,7 +238,7 @@ The [audit-token experiment](experiments/macos-command-caller.md) also has retai
 Process identity is not request consent or channel continuity.
 The future admission owner must bind the submission, request nonce, lifetime, and transport channel.
 It must enforce the current component role and security floor from protected release metadata.
-This library does not check caller ancestry or sudoers policy, install Root, read stdin content, or execute commands.
+This library does not check sudoers policy, install Root, read stdin content, or execute commands.
 It does not prove PID reuse behavior or physical-device end-to-end behavior.
 
 The shim uses public installed Mach and Security declarations.
@@ -209,3 +256,8 @@ Source-observation tests use real imported fileports for pipes, files, sockets, 
 They preserve queued bytes, file offsets, and shared flags, reject write-only input, and keep the original object after path replacement.
 They check binding lengths, schema requirements, and closed-owner behavior.
 They do not prove atomic observations, immutable content, or read success for every possible device.
+
+Ancestry tests verify the actual parent of a disposable signed Mach sender, kernel PID-version bits, raw paths, and effective UIDs.
+They reject old incarnations after exec and exit, invalid limits, wrong account policies, and retired caller records.
+Deterministic race tests cover changed parent links, changed caller and ancestor incarnations, cycles, missing paths, permission limits, and cancellation.
+They do not prove an atomic process tree, PID reuse, protected Root installation, or physical-device end-to-end behavior.

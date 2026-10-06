@@ -674,6 +674,60 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testAncestryUsesActualParentIncarnationAndKeepsItsBoundedPrefix() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint)
+        let submission = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        defer { submission.caller.close() }
+        var selfToken = audit_token_t()
+        XCTAssertEqual(remozio_pid_audit_token(getpid(), &selfToken), KERN_SUCCESS)
+        let capture = try submission.caller.captureAncestry(expression: peer.expression, userID: geteuid(),
+            auditSessionID: nil, maximumEntries: 1)
+        XCTAssertEqual(capture.entries.count, 1)
+        XCTAssertEqual(capture.entries.first?.pid, UInt32(getpid()))
+        XCTAssertEqual(capture.entries.first?.pidVersion, UInt32(bitPattern: audit_token_to_pidversion(selfToken)))
+        XCTAssertEqual(capture.entries.first?.uid, geteuid())
+        XCTAssertNotNil(capture.entries.first?.executablePath)
+        XCTAssertEqual(capture.completeness, .partial)
+        XCTAssertEqual(capture.reason, .truncated)
+        let disabled = try submission.caller.captureAncestry(expression: peer.expression, userID: geteuid(),
+            auditSessionID: nil, maximumEntries: 0)
+        XCTAssertEqual(disabled.completeness, .unavailable)
+        XCTAssertEqual(disabled.reason, .truncated)
+        XCTAssertTrue(disabled.entries.isEmpty)
+        try peer.advance()
+        let next = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        defer { next.caller.close() }
+        XCTAssertEqual(next.caller.requester.pid, submission.caller.requester.pid)
+        XCTAssertNotEqual(next.caller.requester.pidVersion, submission.caller.requester.pidVersion)
+        XCTAssertThrowsError(try submission.caller.captureAncestry(expression: peer.expression, userID: geteuid(), auditSessionID: nil))
+        XCTAssertThrowsError(try submission.caller.captureAncestry(expression: peer.expression, userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .retired)
+        }
+        try peer.stop()
+        XCTAssertThrowsError(try next.caller.captureAncestry(expression: peer.expression, userID: geteuid(), auditSessionID: nil))
+        XCTAssertThrowsError(try next.caller.captureAncestry(expression: peer.expression, userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .retired)
+        }
+    }
+
+    func testAncestryRechecksCurrentPolicyAndPropagatesCancellation() throws {
+        enum Cancelled: Error { case test }
+        let endpoint = try Endpoint(), receiver = try receiver(endpoint)
+        try endpoint.send(Data([1]))
+        let submission = try receiver.receive(timeoutMilliseconds: 1000)
+        for limit in [-1, 65] {
+            XCTAssertThrowsError(try submission.caller.captureAncestry(expression: selfExpression(), userID: geteuid(),
+                auditSessionID: nil, maximumEntries: limit)) { XCTAssertEqual($0 as? MachCommandCallerError, .configuration) }
+        }
+        XCTAssertThrowsError(try submission.caller.captureAncestry(expression: selfExpression(), userID: geteuid(),
+            auditSessionID: nil, checkCancellation: { throw Cancelled.test })) { XCTAssertTrue($0 is Cancelled) }
+        try submission.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        XCTAssertThrowsError(try submission.caller.captureAncestry(expression: selfExpression(), userID: geteuid() ^ 1,
+            auditSessionID: nil)) { XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer) }
+        XCTAssertThrowsError(try submission.caller.captureAncestry(expression: selfExpression(), userID: geteuid(),
+            auditSessionID: nil)) { XCTAssertEqual($0 as? MachCommandCallerError, .retired) }
+    }
+
     private func selfExpression() throws -> String {
         var code: SecCode?, information: CFDictionary?
         XCTAssertEqual(SecCodeCopySelf([], &code), errSecSuccess)

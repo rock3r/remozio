@@ -14,7 +14,7 @@ flowchart LR
     D --> A[Explicit decision]
 ```
 
-Native adapters now observe the authenticated caller, executable, directory, and retained input object.
+Native adapters now observe the authenticated caller, executable, directory, retained input object, and bounded caller ancestry.
 Command admission and execution remain integration work.
 These codecs do not install or enable a production command handler.
 
@@ -89,7 +89,7 @@ Signing observations are `{0: status, 1: identifier text|null, 2: team text|null
 
 Ancestry is `{0: completeness, 1: ordered entries, 2: reason}`. Completeness is complete `0`, partial `1`, or unavailable `2`. Reason is none `0`, process exited `1`, permission `2`, truncated `3`, or unsupported `4`. Complete requires reason none; partial and unavailable require a limitation reason. Unavailable requires no entries.
 
-Each ancestor is `{0: positive PID up to Int32.max, 1: PID-version UInt32, 2: absolute executable path bytes|null, 3: UID32}`. Entries run from the immediate parent outward. They describe observations at submission time. Neither a complete chain nor an authenticated frontend proves which person or AI model initiated the command.
+Each ancestor is `{0: positive PID up to Int32.max, 1: PID-version UInt32, 2: absolute executable path bytes|null, 3: UID32}`. Entries run from the immediate parent outward. The UID is the observed effective UID. They describe observations at submission time. Neither a complete chain nor an authenticated frontend proves which person or AI model initiated the command.
 
 Submission bindings are `{0: ID16, 1: nonce32, 2: caller-channel binding16}`. They are opaque bytes. The service must associate them with its verified IPC peer and retained caller/session lifetime. A supplied identifier is not proof of that association.
 
