@@ -1012,15 +1012,29 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             return Data([7])
         }
         XCTAssertEqual(result, Data([7]))
+        let discoveryRouting = try routing(), discoveryTime = now(120)
+        let pending = try access.pendingRequestIDs(binding: binding) { requests, received in
+            XCTAssertThrowsError(try journal.write { _ in XCTFail("Reentered discovery owner") }) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+            return try requests.pendingDeliveryRequestIDs(binding: received, routing: discoveryRouting, now: discoveryTime)
+        }
+        XCTAssertEqual(pending, [payload.requestID])
         let stale = try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID())
         XCTAssertThrowsError(try access.requestFrame(binding: stale, requestID: payload.requestID) { _, _, _ in
             XCTFail("Stale enrollment reached handler"); return nil
+        }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
+        XCTAssertThrowsError(try access.pendingRequestIDs(binding: stale) { _, _ in
+            XCTFail("Stale enrollment reached discovery"); return []
         }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
         let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
             installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
         _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: installed.revision) }
         XCTAssertThrowsError(try access.requestFrame(binding: binding, requestID: payload.requestID) { _, _, _ in
             XCTFail("Obsolete transport reached handler"); return nil
+        }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
+        XCTAssertThrowsError(try access.pendingRequestIDs(binding: binding) { _, _ in
+            XCTFail("Obsolete transport reached discovery"); return []
         }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
     }
 

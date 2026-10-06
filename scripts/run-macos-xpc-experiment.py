@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client")
+    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -108,6 +108,9 @@ def experiment(report):
                 ("guarded-wrong-server", "guarded-ping", trusted, OTHER, 3),
                 ("guarded-matching-peers", "guarded-ping", trusted, TRUSTED, 0),
                 ("matching-peers-after-rejections", "ping", trusted, TRUSTED, 0),
+                ("discovery-bytes", "discovery", trusted, TRUSTED, 0),
+                ("discovery-wrong-server", "discovery", trusted, OTHER, 3),
+                ("discovery-wrong-client", "discovery", other, TRUSTED, 3),
                 ("frame-bytes", "frame", trusted, TRUSTED, 0),
                 ("frame-empty", "empty", trusted, TRUSTED, 0),
                 ("frame-nil", "nil", trusted, TRUSTED, 0),

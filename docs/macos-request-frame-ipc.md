@@ -57,4 +57,16 @@ The cache releases frames when requests leave queued/presented state, including 
 
 Discovery omits elapsed requests without changing their lifecycle state. The maintenance path retains responsibility for expiry and cleanup. The owner selects the requesting enrollment once from current trust. Each request then checks only that recipient and its contract support. Discovery creates no queue entries or delivery identities. Present excludes new deliveries while retaining previously handed-off requests. Discovery does not accept notification queue ownership or mark a request dispatched, presented, or consumed, and repeated discovery creates no extra request audit events.
 
-This root API is not yet exposed by the IPC delivery extension or the phone wire protocol. Those callers must negotiate discovery support and fetch each result through the existing frame checks. They must not treat an empty discovery result as a signed terminal status for a previously known request.
+The separate discovery IPC extension exposes this root API to authenticated transport callers. Phone wire exposure remains pending. Callers must negotiate discovery support and fetch each result through the existing frame checks. They must not treat an empty discovery result as a signed terminal status for a previously known request.
+
+## Discovery IPC
+
+Discovery has a separate optional version-one extension. After common hello, the transport calls `requestDiscoveryVersion`. Zero disables discovery. The client sends no binding until the result is exactly one. Unknown versions leave common trust calls and frame retrieval available. A server without the selector can retire the attempted connection before any binding is sent.
+
+`pendingRequestIDs(binding)` returns canonical CBOR with exactly three fields: key zero is schema version one, key one is the exact encoded peer binding, and key two is the sorted request-ID array. The response contains at most 4096 unique 16-byte IDs and is bounded to 128 KiB. Both ends validate the response. An encoded empty list means no current discovery hints; nil, empty Data, malformed bytes, or a mismatched binding retires the connection.
+
+The endpoint uses its existing OS identity guard and shared operation budget. The standard listener rechecks current transport code policy and the peer binding under the same authority lock as request discovery. The service passes its own clock to an optional trusted discovery provider. That provider calls the root discovery API using current local presence; no provider is installed by default.
+
+Discovery and frame retrieval negotiate independently. Existing frame-version-one clients keep their existing behavior. Discovery creates no approval, queue acknowledgment, lifecycle transition, or terminal status. Phone network dispatch, notification scheduling, production provider installation, and decision submission remain separate integration work.
+
+The [discovery live evidence](experiments/evidence/2026-10-06-discovery-xpc.json) records 14 passing synthetic cases, including discovery selector bridging and rejection before discovery dispatch for wrong client/server identifiers. The temporary service was removed. This probe does not establish protected root installation, Developer ID policy, or device E2E.
