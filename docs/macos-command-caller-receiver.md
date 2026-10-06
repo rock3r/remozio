@@ -81,6 +81,7 @@ It also rechecks the retained caller after receiving the message.
 
 For a rejected sender or invalid size or ID, a tiny receive without `MACH_RCV_LARGE` discards the queued message.
 The kernel destroys its body rather than importing transferred memory or descriptor rights into the receiver.
+A failed discard surfaces its Mach error, including interruption; the caller must recover before treating that queue head as consumed.
 Receive waits share a monotonic timeout budget. System identity checks are not preemptible, so this is not a hard operation deadline.
 
 An authenticated sender can still transfer resources before carrier version 1 rejects a complex packet.

@@ -47,7 +47,7 @@ public final class MachCommandCallerReceiver {
         let prefixBytes = headerBytes + 8
         let maximumMessage = (prefixBytes + maxPayloadBytes + 3) & ~3
         guard preview.identifier == Self.messageID, preview.size >= prefixBytes, preview.size <= maximumMessage else {
-            _ = remozio_discard_message(port)
+            try discardQueueHead()
             throw MachCommandCallerError.malformed
         }
         let caller: RetainedCommandCaller
@@ -55,7 +55,7 @@ public final class MachCommandCallerReceiver {
             caller = try RetainedCommandCaller(token: preview.token, requirement: requirement,
                 userID: userID, auditSessionID: auditSessionID)
         } catch {
-            _ = remozio_discard_message(port)
+            try discardQueueHead()
             throw error
         }
         var completed = false
@@ -63,7 +63,7 @@ public final class MachCommandCallerReceiver {
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         let budget = UInt64(timeoutMilliseconds) * 1_000_000
         guard elapsed < budget else {
-            _ = remozio_discard_message(port)
+            try discardQueueHead()
             throw MachCommandCallerError.timeout
         }
         let remaining = UInt32((budget - elapsed + 999_999) / 1_000_000)
@@ -106,6 +106,13 @@ public final class MachCommandCallerReceiver {
         try caller.recheck(requirement: requirement, userID: userID, auditSessionID: auditSessionID)
         completed = true
         return ReceivedMachCommandSubmission(payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller)
+    }
+
+    private func discardQueueHead() throws {
+        let result = remozio_discard_message(port)
+        guard result == MACH_MSG_SUCCESS || result == MACH_RCV_TOO_LARGE else {
+            throw MachCommandCallerError.mach(result)
+        }
     }
 
     private static func sameToken(_ first: audit_token_t, _ second: audit_token_t) -> Bool {
