@@ -26,6 +26,8 @@ This establishes an ownership boundary, not an admission or execution gate. Targ
 ## Native command ownership
 
 `admitCommand` transfers a `RetainedCommandCapture` into the same entry as its immutable issued request.
+The public API uses Swift's `sending` parameter to prevent reuse of the command or any retained alias after transfer.
+The internal fixture policy seam permits serialized aliases only to inspect resource cleanup in tests.
 The draft must contain the exact captured bytes, the same command schema, and execute/decline for the current request.
 The host supplies the current protected caller policy. The owner rechecks the original caller and files before admission.
 It samples the authority clock after that work, so an elapsed deadline cannot use the earlier observation time.
@@ -68,3 +70,7 @@ They verify terminal cleanup, pending expiry, cancellation, changed policy, dupl
 Injected audit failures preserve existing resources on rollback and release rejected admission resources.
 A fresh clock check rejects a deadline reached during the recheck.
 The tests use synthetic keys and disposable storage. They do not execute a command or exercise a phone.
+
+The local gate also compiles a valid public transfer and two rejected reuse probes.
+Both direct command reuse and retained-alias reuse must fail Swift's ownership check.
+These probes compile only; they create no request and execute no command.

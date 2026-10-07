@@ -148,11 +148,12 @@ public final class ApprovalRequestCoordinator {
         entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
     }
 
-    /// Transfers the command once. The draft must contain its exact capture and the command action set.
+    /// Transfers the command once. Callers cannot reuse the command or its aliases after this call.
+    /// The draft must contain its exact capture and the command action set.
     /// A first transfer owns resources on success or failure. A repeated transfer leaves the existing owner intact.
     /// The host must complete current elevation-policy validation, admission storage gates, and submission replay checks first.
     /// The clock callback runs after the OS recheck. It must not reenter this owner or the journal.
-    public func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
+    public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                              checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
         try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) {
@@ -160,7 +161,8 @@ public final class ApprovalRequestCoordinator {
         }
     }
 
-    /// Internal fixture policy seam. Production always uses the protected release policy above.
+    /// Internal fixture policy seam. Tests retain aliases only to inspect OS cleanup under serialized access.
+    /// Production always uses the exclusive transfer and protected release policy above.
     func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
                       userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                       checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
