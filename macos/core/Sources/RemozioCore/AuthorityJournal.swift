@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Security
+import SQLite3
 import RemozioProtocol
 
 /// Owns the authority's sole journal connection. Only Sendable results can leave a serialized transaction.
@@ -53,7 +54,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         try lock.withLock {
             try requireNoRequestOperation()
             guard let storage else { return }
-            try database.read { _ in () }
+            try withStorageFailureCleanup { try database.read { _ in () } }
             guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
             requestStartupAttempted = true
             do {
@@ -124,11 +125,13 @@ public final class AuthorityJournal: @unchecked Sendable {
     public func withRequests<Value: Sendable>(_ body: @Sendable (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
         try lock.withLock {
             try requireNoRequestOperation()
-            try database.read { _ in () } // Reject closed storage or entry from a transaction callback.
-            guard let requests else { throw ApprovalCoordinatorError.unavailable }
-            requestOperationActive = true
-            defer { requestOperationActive = false }
-            return try body(requests)
+            return try withStorageFailureCleanup {
+                try database.read { _ in () } // Reject closed storage or entry from a transaction callback.
+                guard let requests else { throw ApprovalCoordinatorError.unavailable }
+                requestOperationActive = true
+                defer { requestOperationActive = false }
+                return try body(requests)
+            }
         }
     }
 
@@ -148,25 +151,38 @@ public final class AuthorityJournal: @unchecked Sendable {
     public func read<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {
             try requireNoRequestOperation()
-            if let storage {
-                let checkpoint = try storage.continuity.read()
-                guard !checkpoint.recoveryRequired, checkpoint.pending == nil else { throw JournalDatabaseError.unavailable }
-                return try database.read { transaction in
-                    let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
-                        epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation,
-                        authorityGeneration: checkpoint.committed.authorityGeneration)
-                    guard actual == checkpoint.committed else { throw JournalDatabaseError.unavailable }
-                    return try body(transaction)
+            return try withStorageFailureCleanup {
+                if let storage {
+                    let checkpoint: ContinuityState
+                    do {
+                        checkpoint = try storage.continuity.read()
+                        guard !checkpoint.recoveryRequired, checkpoint.pending == nil else { throw JournalDatabaseError.unavailable }
+                    } catch {
+                        retireAfterValidationFailure(error, continuity: storage.continuity)
+                        throw error
+                    }
+                    return try database.read { transaction in
+                        do {
+                            let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
+                                epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation,
+                                authorityGeneration: checkpoint.committed.authorityGeneration)
+                            guard actual == checkpoint.committed else { throw JournalDatabaseError.unavailable }
+                        } catch {
+                            retireAfterValidationFailure(error, continuity: storage.continuity)
+                            throw error
+                        }
+                        return try body(transaction)
+                    }
                 }
+                return try database.read(body)
             }
-            return try database.read(body)
         }
     }
     public func write<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {
             try requireNoRequestOperation()
             guard storage == nil else { throw JournalDatabaseError.readOnly }
-            return try database.write(body)
+            return try withStorageFailureCleanup { try database.write(body) }
         }
     }
     public func close() throws {
@@ -174,9 +190,36 @@ public final class AuthorityJournal: @unchecked Sendable {
             try requireNoRequestOperation()
             try database.close()
             storage?.continuity.close()
-            requests?.close()
-            requests = nil
+            retireRequests()
         }
+    }
+
+    private func withStorageFailureCleanup<Value>(_ body: () throws -> Value) throws -> Value {
+        do { return try body() }
+        catch {
+            if database.retired { retireRequests() }
+            throw error
+        }
+    }
+
+    private func retireAfterValidationFailure(_ error: Error, continuity: ContinuityStore) {
+        if database.retired || continuity.retired || !isStorageContention(error) { retireRequests() }
+    }
+
+    private func isStorageContention(_ error: Error) -> Bool {
+        let code: Int32
+        switch error {
+        case ContinuityStoreError.storage(let value): code = value
+        case JournalDatabaseError.storage(let value): code = value
+        case AuditJournalError.storage(let value): code = value
+        default: return false
+        }
+        return code & 0xff == SQLITE_BUSY || code & 0xff == SQLITE_LOCKED
+    }
+
+    private func retireRequests() {
+        requests?.close()
+        requests = nil
     }
 
     public func trustSnapshot(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64 = 1,

@@ -13,7 +13,11 @@ flowchart LR
 
 `withRequests` holds the same lock as journal reads, writes, and closure. A synchronous callback can perform multiple coordinator operations before another thread changes trust. Only Sendable results may leave the callback. The callback must not await or retain the coordinator elsewhere. Reentry through any public journal operation is rejected; entering request work from an existing transaction is also rejected.
 
-Storage validation precedes the callback. Successful closure drops live request captures; failed closure does not discard the coordinator. The existing initializer remains available for trust-only service startup and rejects request access as unavailable.
+Storage validation precedes the callback. Successful closure drops live request captures; failed closure does not discard the coordinator.
+Fatal database failures in owner reads, writes, and request preflight also release the live captures before returning.
+Unrecoverable continuity failures and checkpoint mismatches retire the live coordinator.
+Ordinary callback rejection, rejected reentry, and temporary SQLite contention preserve healthy requests and their objects.
+Contention cannot preserve an already retired database or continuity connection. The existing initializer remains available for trust-only service startup and rejects request access as unavailable.
 
 `AuthorityService` accepts this prepared journal owner. Its listener uses the same owner for trust queries, and service closure retires request access and releases storage.
 
