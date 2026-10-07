@@ -35,6 +35,28 @@ func transfer(owner: ApprovalRequestCoordinator, command: sending RetainedComman
             "journal-command-reuse": (journal_prefix + admission + "    command.close()\n}\n", False),
             "journal-alias-reuse": (journal_prefix + "    let alias = command\n" + admission + "    alias.close()\n}\n", False),
         })
+        hello_prefix = """import Foundation
+import RemozioCore
+func transfer(hello: sending MachCommandHello, policy: XPCPeerPolicy, mac: Data, account: Data) throws {
+"""
+        hello_transfer = "    _ = try RetainedCommandHandshake(hello: hello, macID: mac, accountID: account, currentPolicy: policy)\n"
+        input_prefix = """import Foundation
+import RemozioCore
+import RemozioProtocol
+func transfer(owner: RetainedCommandHandshake, received: sending ReceivedMachCommandInputSubmission,
+              policy: XPCPeerPolicy, target: CommandTarget, limits: CBORLimits, stream: Data) throws {
+"""
+        input_transfer = """    _ = try owner.assemble(received: received, currentPolicy: policy, captureSchemaVersion: 2,
+        resolvedTarget: target, minimalEnvironment: [], streamBinding: stream, submissionLimits: limits, captureLimits: limits)
+"""
+        probes.update({
+            "hello-valid": (hello_prefix + hello_transfer + "}\n", True),
+            "hello-reuse": (hello_prefix + hello_transfer + "    hello.close()\n}\n", False),
+            "hello-alias-reuse": (hello_prefix + "    let alias = hello\n" + hello_transfer + "    alias.close()\n}\n", False),
+            "received-valid": (input_prefix + input_transfer + "}\n", True),
+            "received-reuse": (input_prefix + input_transfer + "    received.input.close()\n}\n", False),
+            "received-alias-reuse": (input_prefix + "    let alias = received\n" + input_transfer + "    alias.input.close()\n}\n", False),
+        })
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
@@ -50,7 +72,7 @@ func transfer(owner: ApprovalRequestCoordinator, command: sending RetainedComman
                 passed = result.returncode != 0 and "SendingRisksDataRace" in result.stderr
             if not passed:
                 raise SystemExit("Command ownership probe failed: " + name + "\n" + result.stderr[:4096])
-    print("Command ownership: coordinator and journal transfers accepted; command and alias reuse rejected.")
+    print("Command ownership: coordinator, journal, hello, and input transfers accepted; object and alias reuse rejected.")
 
 
 if __name__ == "__main__":

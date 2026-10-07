@@ -76,7 +76,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         }
 
-        func sendInput(_ payload: Data, fileport: mach_port_t, version: UInt32 = 2, descriptorCount: Int = 1) throws {
+        func sendInput(_ payload: Data, fileport: mach_port_t, version: UInt32 = 2, descriptorCount: Int = 1,
+                       identifier: mach_msg_id_t = MachCommandCallerReceiver.inputMessageID) throws {
             let headerBytes = MemoryLayout<mach_msg_header_t>.size
             let bodyBytes = MemoryLayout<mach_msg_body_t>.size
             let descriptorBytes = MemoryLayout<mach_msg_port_descriptor_t>.size
@@ -89,7 +90,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             header.pointee.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND) | MACH_MSGH_BITS_COMPLEX
             header.pointee.msgh_size = UInt32(size)
             header.pointee.msgh_remote_port = port
-            header.pointee.msgh_id = MachCommandCallerReceiver.inputMessageID
+            header.pointee.msgh_id = identifier
             storage.storeBytes(of: mach_msg_body_t(msgh_descriptor_count: UInt32(descriptorCount)),
                 toByteOffset: headerBytes, as: mach_msg_body_t.self)
             for index in 0..<descriptorCount {
@@ -1551,4 +1552,260 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertThrowsError(try MachCommandCallerReceiver(receivePort: 0, expression: selfExpression(),
             userID: geteuid(), auditSessionID: nil, maxPayloadBytes: 64))
     }
+    private var handshakeMac: Data { Data(repeating: 0xd1, count: 16) }
+    private var handshakeAccount: Data { Data(repeating: 0xd2, count: 16) }
+    private func hello(_ endpoint: Endpoint, reply: Endpoint, capabilities: CommandHandshakeCapabilities = .current) throws -> MachCommandHello {
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: capabilities)
+        try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        return try receiver(endpoint, maximum: 8192).receiveHello(timeoutMilliseconds: 1000)
+    }
+    private func serverHandshake(_ hello: MachCommandHello, expression: String? = nil) throws -> RetainedCommandHandshake {
+        try RetainedCommandHandshake(hello: hello, macID: handshakeMac, accountID: handshakeAccount,
+            expression: expression ?? selfExpression(), userID: geteuid(), auditSessionID: nil)
+    }
+    // The worker completes before tests borrow the retained session. This is not a product transfer wrapper.
+    private final class HandshakeResult: @unchecked Sendable {
+        let completed = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var result: Result<RetainedCommandHandshake, Error>?
+        func finish(_ result: Result<RetainedCommandHandshake, Error>) { lock.withLock { self.result = result }; completed.signal() }
+        func take() throws -> RetainedCommandHandshake {
+            guard completed.wait(timeout: .now() + 6) == .success else { throw MachCommandCallerError.timeout }
+            return try lock.withLock { try XCTUnwrap(result).get() }
+        }
+    }
+
+    func testRealMachHandshakeAuthenticatesBothSendersAndCreatesFreshBindings() throws {
+        var previous: Data?
+        for _ in 0..<2 {
+            let endpoint = try Endpoint(), port = endpoint.port, expression = try selfExpression(), uid = geteuid()
+            let mac = handshakeMac, account = handshakeAccount, result = HandshakeResult()
+            DispatchQueue.global().async {
+                result.finish(Result {
+                    let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
+                        userID: uid, auditSessionID: nil, maxPayloadBytes: 4096)
+                    let hello = try receiver.receiveHello(timeoutMilliseconds: 5000)
+                    return try RetainedCommandHandshake(hello: hello, macID: mac, accountID: account,
+                        expression: expression, userID: uid, auditSessionID: nil)
+                })
+            }
+            let client = try MachCommandHandshakeClient.negotiate(authorityPort: port, expression: expression, userID: uid,
+                auditSessionID: nil, macID: mac, accountID: account)
+            let server = try result.take()
+            defer { client.close(); server.close() }
+            XCTAssertEqual(client.profile, server.profile)
+            XCTAssertEqual(server.profile.wireVersion, 1)
+            XCTAssertEqual(server.profile.submissionSchemaVersion, 1)
+            XCTAssertEqual(server.profile.inputCarrierVersion, 2)
+            XCTAssertEqual(server.profile.callerBinding.count, 16)
+            if let previous { XCTAssertNotEqual(previous, server.profile.callerBinding) }
+            previous = server.profile.callerBinding
+        }
+    }
+
+    func testHandshakeReplyRightOwnershipClosesOnDiscardAndNegotiationFailure() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), baseline = try sendReferences(reply.port)
+        var packet: MachCommandHello? = try hello(endpoint, reply: reply)
+        XCTAssertEqual(try sendReferences(reply.port), baseline + 1)
+        packet?.close(); packet = nil
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        let invalid = try hello(endpoint, reply: reply)
+        XCTAssertThrowsError(try RetainedCommandHandshake(hello: invalid, macID: Data(), accountID: handshakeAccount,
+            expression: selfExpression(), userID: geteuid(), auditSessionID: nil))
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        XCTAssertThrowsError(try invalid.take()) { XCTAssertEqual($0 as? MachCommandHandshakeError, .retired) }
+    }
+
+    func testHelloRejectsWrongSenderMalformedDescriptorsCarrierAndOversizeBeforeImport() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), baseline = try sendReferences(reply.port)
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32)).canonicalBytes
+        let rejected = try receiver(endpoint, user: geteuid() ^ 1, maximum: 16384)
+        try MachCommandWire.send(offer, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        XCTAssertThrowsError(try rejected.receiveHello(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer)
+        }
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        let receiver = try receiver(endpoint, maximum: 16384)
+        for variant in 0..<3 {
+            try endpoint.sendInput(variant == 2 ? Data(count: 4097) : offer, fileport: reply.port,
+                version: variant == 0 ? 2 : 1, descriptorCount: variant == 1 ? 2 : 1,
+                identifier: MachCommandCallerReceiver.helloMessageID)
+            XCTAssertThrowsError(try receiver.receiveHello(timeoutMilliseconds: 1000))
+            XCTAssertEqual(try sendReferences(reply.port), baseline)
+        }
+        let valid = try hello(endpoint, reply: reply)
+        valid.close()
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+    }
+
+    func testHelloAndCommandInputCarriersCannotSubstituteForEachOther() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), receiver = try receiver(endpoint)
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32)).canonicalBytes
+        try MachCommandWire.send(offer, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        XCTAssertThrowsError(try receiver.receiveInput(timeoutMilliseconds: 1000))
+        try endpoint.sendInput(offer, fileport: reply.port)
+        XCTAssertThrowsError(try receiver.receiveHello(timeoutMilliseconds: 1000))
+    }
+
+    func testUnsupportedHandshakeReturnsAuthenticatedIncompatibilityWithoutDowngrade() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint()
+        let old = try CommandHandshakeCapabilities(wireVersions: [1], submissionSchemaVersions: [1], inputCarrierVersions: [1])
+        let packet = try hello(endpoint, reply: reply, capabilities: old)
+        XCTAssertThrowsError(try serverHandshake(packet)) { XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible) }
+        let response = try receiver(reply).receiveHelloReply(timeoutMilliseconds: 1000)
+        defer { response.caller.close() }
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: old)
+        XCTAssertThrowsError(try CommandHandshakeReply.decode(response.payload, offer: offer, macID: handshakeMac, accountID: handshakeAccount)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+        }
+    }
+
+    func testHandshakeSendTimeoutReleasesPseudoReceivedRightsAndPreservesBorrowedPorts() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint()
+        var status = mach_port_status_t(), count = mach_msg_type_number_t(MemoryLayout<mach_port_status_t>.size / MemoryLayout<integer_t>.size)
+        XCTAssertEqual(withUnsafeMutablePointer(to: &status) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                mach_port_get_attributes(mach_task_self_, endpoint.port, Int32(MACH_PORT_RECEIVE_STATUS), $0, &count)
+            }
+        }, KERN_SUCCESS)
+        for _ in 0..<status.mps_qlimit { try endpoint.send(Data([1])) }
+        let endpointBaseline = try sendReferences(endpoint.port), replyBaseline = try sendReferences(reply.port)
+        for _ in 0..<3 {
+            XCTAssertThrowsError(try MachCommandWire.send(Data([1]), destination: endpoint.port, replyPort: reply.port,
+                identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 10)) {
+                XCTAssertEqual($0 as? MachCommandCallerError, .mach(MACH_SEND_TIMED_OUT))
+            }
+            XCTAssertEqual(try sendReferences(endpoint.port), endpointBaseline)
+            XCTAssertEqual(try sendReferences(reply.port), replyBaseline)
+        }
+        let receiver = try receiver(endpoint)
+        for _ in 0..<status.mps_qlimit { let value = try receiver.receive(timeoutMilliseconds: 1000); value.caller.close() }
+        XCTAssertEqual(try sendReferences(endpoint.port), endpointBaseline)
+    }
+
+    func testClientTimeoutAndCancellationRetainBorrowedAuthorityRight() throws {
+        let endpoint = try Endpoint(), baseline = try sendReferences(endpoint.port)
+        XCTAssertThrowsError(try MachCommandHandshakeClient.negotiate(authorityPort: endpoint.port, expression: selfExpression(),
+            userID: geteuid(), auditSessionID: nil, macID: handshakeMac, accountID: handshakeAccount, timeoutMilliseconds: 10))
+        XCTAssertEqual(try sendReferences(endpoint.port), baseline)
+        XCTAssertThrowsError(try MachCommandHandshakeClient.negotiate(authorityPort: endpoint.port, expression: selfExpression(),
+            userID: geteuid(), auditSessionID: nil, macID: handshakeMac, accountID: handshakeAccount,
+            checkCancellation: { throw MachCommandHandshakeError.retired }))
+        XCTAssertEqual(try sendReferences(endpoint.port), baseline)
+    }
+
+    func testNegotiatedSenderAssemblesExactCaptureAndRejectsOtherBindingWithoutReadingInput() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), session = try serverHandshake(hello(endpoint, reply: reply))
+        defer { session.close() }
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+        let pending = Data("unread".utf8)
+        XCTAssertEqual(pending.withUnsafeBytes { Darwin.write(pipeFDs[1], $0.baseAddress, $0.count) }, pending.count)
+        let original = try commandSubmission()
+        let claims = try CommandSubmission(schemaVersion: 1, executablePath: original.executablePath, arguments: original.arguments,
+            directoryPath: original.directoryPath, requestedTargetUID: original.requestedTargetUID, environmentAdditions: original.environmentAdditions,
+            ioMode: original.ioMode, disconnectBehavior: original.disconnectBehavior, unverifiedRationale: original.unverifiedRationale,
+            binding: .init(id: original.binding.id, nonce: original.binding.nonce, callerBinding: session.profile.callerBinding), limits: assemblyLimits)
+        let received = try inputSubmission(pipeFDs[0], payload: claims.canonicalBytes)
+        let command = try session.assemble(received: received, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)
+        defer { command.close() }
+        XCTAssertEqual(command.capture.submission, claims.binding)
+        XCTAssertEqual(command.capture.arguments, claims.arguments)
+        try command.withBorrowedInputDescriptor { fd in
+            var bytes = [UInt8](repeating: 0, count: pending.count)
+            XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count)
+            XCTAssertEqual(Data(bytes), pending)
+        }
+        let wrong = try inputSubmission(pipeFDs[0], payload: original.canonicalBytes)
+        XCTAssertThrowsError(try session.assemble(received: wrong, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits))
+        try expectAssemblyResourcesRetired(wrong)
+        try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        session.close()
+        let afterClose = try inputSubmission(pipeFDs[0], payload: claims.canonicalBytes)
+        XCTAssertThrowsError(try session.assemble(received: afterClose, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
+        }
+        try expectAssemblyResourcesRetired(afterClose)
+    }
+
+    func testHandshakeAuditBindingRejectsAnotherRealProcessAndExecIncarnation() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint)
+        let receiver = try receiver(endpoint, expression: peer.expression)
+        let first = try receiver.receive(timeoutMilliseconds: 5000)
+        defer { first.caller.close() }
+        let parentEndpoint = try Endpoint()
+        try parentEndpoint.send(Data([1]))
+        let parent = try self.receiver(parentEndpoint).receive(timeoutMilliseconds: 1000)
+        defer { parent.caller.close() }
+        XCTAssertFalse(first.caller.hasSameAuditBinding(as: parent.caller))
+        XCTAssertTrue(first.caller.hasSameAuditBinding(as: first.caller))
+        try peer.advance()
+        let second = try receiver.receive(timeoutMilliseconds: 5000)
+        defer { second.caller.close() }
+        XCTAssertEqual(first.caller.requester.pid, second.caller.requester.pid)
+        XCTAssertNotEqual(first.caller.requester.pidVersion, second.caller.requester.pidVersion)
+        XCTAssertFalse(first.caller.hasSameAuditBinding(as: second.caller))
+        try peer.stop()
+    }
+
+    func testSessionAssemblyRejectsAnotherKernelSenderEvenWithTheCorrectBinding() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint), reply = try Endpoint()
+        let verified = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        XCTAssertEqual(mach_port_mod_refs(mach_task_self_, reply.port, MACH_PORT_RIGHT_SEND, 1), KERN_SUCCESS)
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32))
+        let hello = MachCommandHello(payload: try offer.canonicalBytes, caller: verified.caller, reply: MachCommandReplyRight(taking: reply.port))
+        let session = try serverHandshake(hello, expression: "true")
+        defer { session.close() }
+        let original = try commandSubmission()
+        let claims = try CommandSubmission(schemaVersion: 1, executablePath: original.executablePath, arguments: original.arguments,
+            directoryPath: original.directoryPath, requestedTargetUID: original.requestedTargetUID, environmentAdditions: original.environmentAdditions,
+            ioMode: original.ioMode, disconnectBehavior: original.disconnectBehavior, unverifiedRationale: original.unverifiedRationale,
+            binding: .init(id: original.binding.id, nonce: original.binding.nonce, callerBinding: session.profile.callerBinding), limits: assemblyLimits)
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { _ = Darwin.close(fd) }
+        let incoming = try inputSubmission(fd, payload: claims.canonicalBytes)
+        XCTAssertThrowsError(try session.assemble(received: incoming, expression: "true", userID: geteuid(), auditSessionID: nil,
+            captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .wrongBinding)
+        }
+        try expectAssemblyResourcesRetired(incoming)
+        try peer.advance()
+        let replacement = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        replacement.caller.close()
+        try peer.stop()
+    }
+
+    func testPublicClientRequiresRootPolicyBeforeSendingAnyHello() throws {
+        let endpoint = try Endpoint()
+        let policy = try XPCPeerPolicy(teamID: "ABCD123456", componentIdentifier: "dev.remozio.authority",
+            approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: geteuid())
+        XCTAssertThrowsError(try MachCommandHandshakeClient.negotiate(authorityPort: endpoint.port, authorityPolicy: policy,
+            macID: handshakeMac, accountID: handshakeAccount)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try receiver(endpoint).receiveHello(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testClientRejectsActualReplySenderWithWrongCredentialsBeforeDecodingItsPayload() throws {
+        let reply = try Endpoint()
+        try reply.send(Data([0]), identifier: MachCommandCallerReceiver.helloReplyMessageID)
+        XCTAssertThrowsError(try receiver(reply, user: geteuid() ^ 1).receiveHelloReply(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer)
+        }
+    }
+
 }
