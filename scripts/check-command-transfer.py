@@ -34,7 +34,8 @@ func transfer(owner: ApprovalRequestCoordinator, command: sending RetainedComman
             path.write_text(source)
             result = subprocess.run([
                 "swiftc", "-c", "-swift-version", "6", "-target", "arm64-apple-macosx26.0",
-                "-I", binary, "-Xcc", "-fmodule-map-file=" + str(module_map),
+                "-I", binary, "-I", str(Path(binary) / "Modules"),
+                "-Xcc", "-fmodule-map-file=" + str(module_map),
                 "-module-cache-path", str(scratch / "cache"), str(path), "-o", str(scratch / (name + ".o")),
             ], capture_output=True, text=True, timeout=60)
             if accepted:
