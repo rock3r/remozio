@@ -72,6 +72,11 @@ public final class RetainedCommandCapture {
         requestOwned = true
     }
 
+    /// Preflight may reject a first transfer before the coordinator can claim it.
+    func closeIfUnclaimed() {
+        if !requestOwned { close() }
+    }
+
     /// Invoke after durable permit consumption and current elevation-policy validation, immediately before dispatch.
     public func recheck(currentPolicy: XPCPeerPolicy, checkCancellation: () throws -> Void = {}) throws {
         try recheck(expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,

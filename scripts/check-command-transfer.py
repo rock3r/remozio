@@ -29,6 +29,12 @@ func transfer(owner: ApprovalRequestCoordinator, command: sending RetainedComman
             "command-reuse": (prefix + admission + "    command.close()\n}\n", False),
             "alias-reuse": (prefix + "    let alias = command\n" + admission + "    alias.close()\n}\n", False),
         }
+        journal_prefix = prefix.replace("owner: ApprovalRequestCoordinator", "owner: AuthorityJournal")
+        probes.update({
+            "journal-valid": (journal_prefix + admission + "}\n", True),
+            "journal-command-reuse": (journal_prefix + admission + "    command.close()\n}\n", False),
+            "journal-alias-reuse": (journal_prefix + "    let alias = command\n" + admission + "    alias.close()\n}\n", False),
+        })
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
@@ -44,7 +50,7 @@ func transfer(owner: ApprovalRequestCoordinator, command: sending RetainedComman
                 passed = result.returncode != 0 and "SendingRisksDataRace" in result.stderr
             if not passed:
                 raise SystemExit("Command ownership probe failed: " + name + "\n" + result.stderr[:4096])
-    print("Command ownership: valid transfer accepted; command and alias reuse rejected.")
+    print("Command ownership: coordinator and journal transfers accepted; command and alias reuse rejected.")
 
 
 if __name__ == "__main__":

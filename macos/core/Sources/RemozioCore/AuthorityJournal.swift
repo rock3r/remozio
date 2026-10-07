@@ -135,6 +135,53 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Transfers a command into the serialized request owner, without a Sendable capture wrapper.
+    /// A failed first transfer closes its objects. Rejected reentry leaves previously owned objects intact.
+    /// The host completes negotiation, replay checks, and current elevation-policy validation before this call.
+    /// The synchronous callbacks must not await or reenter this journal.
+    public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
+                             now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                             checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        lock.lock()
+        defer { lock.unlock() }
+        let requests: ApprovalRequestCoordinator
+        do { requests = try commandAdmissionOwner() }
+        catch { command.closeIfUnclaimed(); throw error }
+        requestOperationActive = true
+        defer { requestOperationActive = false }
+        do {
+            return try requests.admitCommand(command, draft: draft, currentPolicy: currentPolicy,
+                now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+        } catch {
+            if database.retired { retireRequests() }
+            throw error
+        }
+    }
+
+    /// Serialized fixture seam. Aliases only observe resource cleanup; production uses the exclusive transfer above.
+    func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
+                      userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                      checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try lock.withLock {
+            let requests: ApprovalRequestCoordinator
+            do { requests = try commandAdmissionOwner() }
+            catch { command.closeIfUnclaimed(); throw error }
+            requestOperationActive = true
+            defer { requestOperationActive = false }
+            return try withStorageFailureCleanup {
+                try requests.admitCommand(command, draft: draft, expression: expression, userID: userID,
+                    auditSessionID: auditSessionID, now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+            }
+        }
+    }
+
+    private func commandAdmissionOwner() throws -> ApprovalRequestCoordinator {
+        try requireNoRequestOperation()
+        try withStorageFailureCleanup { try database.read { _ in () } }
+        guard let requests else { throw ApprovalCoordinatorError.unavailable }
+        return requests
+    }
+
     /// Keeps policy and recipient validation under the same lock as request work.
     func withValidatedRequests<Value: Sendable>(validate: @Sendable (JournalTransaction) throws -> Void,
                                                body: @Sendable (ApprovalRequestCoordinator) throws -> Value) throws -> Value {

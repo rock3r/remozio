@@ -26,7 +26,12 @@ This establishes an ownership boundary, not an admission or execution gate. Targ
 ## Native command ownership
 
 `admitCommand` transfers a `RetainedCommandCapture` into the same entry as its immutable issued request.
-The public API uses Swift's `sending` parameter to prevent reuse of the command or any retained alias after transfer.
+Both the coordinator and journal expose a public `sending` API.
+A production adapter transfers directly through `AuthorityJournal.admitCommand` under the journal lock.
+It does not capture the command in an `@Sendable` callback or use an unchecked wrapper.
+Swift prevents reuse of the command or any retained alias after transfer.
+Journal preflight rejects closed storage, unavailable request owners, and callback reentry before forwarding.
+It releases an unclaimed rejected capture while preserving a capture already held by a request.
 The internal fixture policy seam permits serialized aliases only to inspect resource cleanup in tests.
 The draft must contain the exact captured bytes, the same command schema, and execute/decline for the current request.
 The host supplies the current protected caller policy. The owner rechecks the original caller and files before admission.
@@ -71,6 +76,9 @@ Injected audit failures preserve existing resources on rollback and release reje
 A fresh clock check rejects a deadline reached during the recheck.
 The tests use synthetic keys and disposable storage. They do not execute a command or exercise a phone.
 
-The local gate also compiles a valid public transfer and two rejected reuse probes.
+The local gate compiles valid public coordinator and journal transfers, plus rejected reuse probes for each.
 Both direct command reuse and retained-alias reuse must fail Swift's ownership check.
 These probes compile only; they create no request and execute no command.
+They support both direct and `Modules` SwiftPM build layouts.
+Real journal tests verify first-transfer preflight cleanup, committed cancellation, duplicate ownership, and callback reentry.
+A failed clock callback resets the admission guard, so the next valid request can proceed.
