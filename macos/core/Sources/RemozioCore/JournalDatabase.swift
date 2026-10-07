@@ -25,6 +25,9 @@ public final class JournalDatabase {
     private var active: UUID?
     private var unavailable = false
 
+    /// Inspect only under owner serialization. A retired connection cannot resume; this grants no storage authority.
+    var retired: Bool { db == nil || unavailable }
+
     /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
     public static func open(directoryPath: String, macID: Data, accountID: Data,
                             recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,

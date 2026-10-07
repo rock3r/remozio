@@ -98,6 +98,7 @@ public final class ApprovalRequestCoordinator {
         let lateObservation: Bool
         var statusRevision: UInt64 = 0
         var retained: RetainedApprovalRequest?
+        var command: RetainedCommandCapture?
         let category: AuditCategory
         var byteCount: Int
         var delivery: PendingRequestDelivery?
@@ -137,7 +138,59 @@ public final class ApprovalRequestCoordinator {
         checkpointed = commits
     }
 
+    deinit { close() }
+
+    /// Retires live requests and their OS resources. The journal owner closes storage separately.
+    /// This does not overwrite durable decisions or claim an execution outcome.
+    public func close() {
+        stopped = true
+        for entry in entries.values { entry.command?.close() }
+        entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
+    }
+
+    /// Transfers the command once. Callers cannot reuse the command or its aliases after this call.
+    /// The draft must contain its exact capture and the command action set.
+    /// A first transfer owns resources on success or failure. A repeated transfer leaves the existing owner intact.
+    /// The host must complete current elevation-policy validation, admission storage gates, and submission replay checks first.
+    /// The clock callback runs after the OS recheck. It must not reenter this owner or the journal.
+    public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
+                             now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                             checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) {
+            try command.recheck(currentPolicy: currentPolicy, checkCancellation: checkCancellation)
+        }
+    }
+
+    /// Internal fixture policy seam. Tests retain aliases only to inspect OS cleanup under serialized access.
+    /// Production always uses the exclusive transfer and protected release policy above.
+    func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft, expression: String,
+                      userID: uid_t, auditSessionID: au_asid_t?, now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                      checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try admitCommand(command, draft: draft, now: now, receiptTimeMs: receiptTimeMs) {
+            try command.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID,
+                checkCancellation: checkCancellation)
+        }
+    }
+
+    private func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft,
+                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?, recheck: () throws -> Void) throws -> IssuedRequestPayload {
+        try command.claimForRequestOwner()
+        do {
+            let actions: Set<CapturedAction> = [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)]
+            guard draft.contract.requestKind == .command, draft.contract.schemaVersion == command.capture.schemaVersion,
+                  draft.capture == command.capture.canonicalBytes, draft.actions.count == actions.count,
+                  Set(draft.actions) == actions else { throw ApprovalCoordinatorError.invalidDraft }
+            try recheck()
+            return try admit(draft, command: command, now: now(), receiptTimeMs: receiptTimeMs)
+        } catch { command.close(); throw error }
+    }
+
     public func admit(_ draft: ApprovalRequestDraft, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
+        try admit(draft, command: nil, now: now, receiptTimeMs: receiptTimeMs)
+    }
+
+    private func admit(_ draft: ApprovalRequestDraft, command: RetainedCommandCapture?, now: AuthorityMoment,
+                       receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
         try checkClock(now)
         guard draft.firstObservedAt.epoch == clockEpoch, draft.firstObservedAt.milliseconds <= now.milliseconds,
               now.milliseconds < draft.deadlineMilliseconds,
@@ -174,7 +227,7 @@ public final class ApprovalRequestCoordinator {
             revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
             contract: payload.contract, permittedActions: Set(payload.permittedActions), observationID: observationID,
             estimatedLifetimeMilliseconds: draft.estimatedLifetimeMilliseconds, lateObservation: draft.lateObservation,
-            retained: retained, category: category, byteCount: bytes)
+            retained: retained, command: command, category: category, byteCount: bytes)
         retainedBytes += bytes
         return payload
     }
@@ -586,6 +639,7 @@ public final class ApprovalRequestCoordinator {
             guard let old = entry.retained else { throw ApprovalCoordinatorError.notPending }
             entry.retained = try .init(payload: old.payload, phase: phase, admittedAt: old.admittedAt, deadlineMilliseconds: old.deadlineMilliseconds)
         } else {
+            entry.command?.close(); entry.command = nil
             entry.retained = nil
             retainedBytes -= entry.byteCount
             entry.byteCount = 0
@@ -611,23 +665,32 @@ public final class ApprovalRequestCoordinator {
     }
     private func read<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
         try running()
-        if let checkpointed { return try checkpointed.read(body) }
-        return try database.read(body)
+        do {
+            if let checkpointed { return try checkpointed.read(body) }
+            return try database.read(body)
+        } catch { retireAfterStorageFailure(); throw error }
     }
 
     private func write<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
         try running()
-        if let checkpointed {
-            return try checkpointed.write(epoch: writer.epoch, recoverRejectedBody: true, body)
-        }
-        return try database.write(body)
+        do {
+            if let checkpointed { return try checkpointed.write(epoch: writer.epoch, recoverRejectedBody: true, body) }
+            return try database.write(body)
+        } catch { retireAfterStorageFailure(); throw error }
     }
 
-    private func running() throws { if stopped || checkpointed?.retired == true { throw ApprovalCoordinatorError.unavailable } }
+    private func retireAfterStorageFailure() {
+        if database.retired || checkpointed?.retired == true { close() }
+    }
+
+    private func running() throws {
+        if checkpointed?.retired == true { close() }
+        if stopped { throw ApprovalCoordinatorError.unavailable }
+    }
     private func checkClock(_ now: AuthorityMoment) throws {
         try running()
         guard now.epoch == clockEpoch, lastTime == nil || now.milliseconds >= lastTime! else {
-            stopped = true; entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
+            close()
             throw ApprovalCoordinatorError.invalidClock
         }
         lastTime = now.milliseconds

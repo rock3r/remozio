@@ -1,8 +1,10 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioMach
 import RemozioProtocol
 import Security
+import SQLite3
 import XCTest
 @testable import RemozioCore
 
@@ -904,6 +906,545 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let nextReceived = try inputSubmission(fd, payload: claims.canonicalBytes), next = try assemble(nextReceived)
         XCTAssertThrowsError(try next.recheck(expression: selfExpression(), userID: geteuid() ^ 1, auditSessionID: nil))
         try expectAssemblyResourcesRetired(nextReceived)
+    }
+
+    private final class CommandRequestFixture {
+        let root: URL
+        let db: JournalDatabase
+        let writer: AuditEpochWriter
+        private let standaloneRequests: ApprovalRequestCoordinator?
+        var requests: ApprovalRequestCoordinator { standaloneRequests! }
+        let authority: AuthorityJournal?
+        let clock = UUID()
+        let biometric = P256.Signing.PrivateKey()
+        let decision = P256.Signing.PrivateKey()
+        let limits: CBORLimits
+        let contract: RequestContract
+        var continuity: ContinuityStore?
+        init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true) throws {
+            limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
+            contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+            guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
+            defer { free(canonical) }
+            root = URL(fileURLWithPath: String(cString: canonical)).appendingPathComponent(UUID().uuidString)
+            let directory = root.appendingPathComponent("store")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "journal.sqlite"] {
+                let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw MachCommandCallerError.unavailable }; _ = Darwin.close(fd)
+            }
+            let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), epoch = Data(repeating: 3, count: 16)
+            db = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
+                macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+            let contract = self.contract
+            let capabilities = ContractCapabilities(contracts: [contract: []])
+            let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+            let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(epoch), 4: .unsigned(1),
+                5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+            ]), limits: limits), limits: limits)
+            let writer = try db.write { try $0.createEpoch(descriptor) }
+            self.writer = writer
+            let enrollment = try StoredApprovalEnrollment(epoch: Data(repeating: 9, count: 16), notificationTag: Data(repeating: 10, count: 32),
+                identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                approval: ApprovalEnrollment(phoneID: Data(repeating: 5, count: 16), active: true, capabilities: capabilities, keys: [
+                    EnrolledApprovalKey(id: Data(repeating: 6, count: 16), keyClass: .biometric, publicKey: biometric.publicKey.x963Representation),
+                    EnrolledApprovalKey(id: Data(repeating: 7, count: 16), keyClass: .decision, publicKey: decision.publicKey.x963Representation),
+                ]))
+            _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+                eventID: Data(repeating: 30, count: 16), receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
+            if checkpointed {
+                let directory = root.appendingPathComponent("continuity")
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                for name in ["writer.lock", "continuity.sqlite"] {
+                    let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                    guard fd >= 0 else { throw MachCommandCallerError.unavailable }; _ = Darwin.close(fd)
+                }
+                let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
+                    generation: 1, authorityGeneration: 1) }
+                let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
+                    macID: mac, accountID: account, initialize: initial)
+                continuity = store
+                if owned {
+                    try db.close(); store.close()
+                    let anchor = root.path, limits = self.limits
+                    let storage = try AuthorityStorage(openJournal: {
+                        try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+                            macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                            maximumConsumptions: 30, busyMilliseconds: 100, initialize: false)
+                    }, openContinuity: { _ in
+                        try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
+                            macID: mac, accountID: account, initialize: nil)
+                    })
+                    let authority = try AuthorityJournal(storage: storage)
+                    if ready { try authority.prepareRequests(clockEpoch: clock, maximumPayloadBytes: 16384) }
+                    self.authority = authority
+                    standaloneRequests = nil
+                } else {
+                    authority = nil
+                    standaloneRequests = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
+                        maximumRequests: maximumRequests, maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits,
+                        decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+                }
+            } else {
+                if owned {
+                    try db.close()
+                    let ownedDatabase = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
+                        macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                        maximumConsumptions: 30, busyMilliseconds: 100, initialize: false)
+                    let ownedDescriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                        0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(Data(repeating: 4, count: 16)),
+                        4: .unsigned(1), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+                    ]), limits: limits), limits: limits)
+                    if ready {
+                        let ownedWriter = try ownedDatabase.write { try $0.createEpoch(ownedDescriptor) }
+                        let requests = try ApprovalRequestCoordinator(database: ownedDatabase, writer: ownedWriter, clockEpoch: clock,
+                            maximumRequests: maximumRequests, maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits,
+                            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+                        authority = AuthorityJournal(requests: requests)
+                    } else {
+                        authority = AuthorityJournal(database: ownedDatabase)
+                    }
+                    standaloneRequests = nil
+                } else {
+                    authority = nil
+                    standaloneRequests = try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: clock,
+                        maximumRequests: maximumRequests, maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits,
+                        decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+                }
+            }
+        }
+        deinit { try? authority?.close(); try? db.close(); continuity?.close(); try? FileManager.default.removeItem(at: root) }
+        func now(_ milliseconds: UInt64 = 110) -> AuthorityMoment { .init(epoch: clock, milliseconds: milliseconds) }
+        func draft(_ command: RetainedCommandCapture, capture: Data? = nil, contract: RequestContract? = nil,
+                   actions: [CapturedAction]? = nil) -> ApprovalRequestDraft {
+            .init(contract: contract ?? self.contract, requiredFeatures: [], capture: capture ?? command.capture.canonicalBytes,
+                actions: actions ?? [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+                firstObservedAt: now(100), deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+        }
+        func consume(_ request: IssuedRequestPayload, decline: Bool = false) throws -> ConsumptionReceipt {
+            let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
+                requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
+                phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: decline ? 7 : 6, count: 16),
+                action: request.permittedActions.first { $0.choice == (decline ? .decline : .execute) }!).encode(limits: limits)
+            let signature = try (decline ? decision : biometric).signature(for: SigningInput.make(wireVersion: 1, messageType: .decision,
+                purpose: decline ? .cancellation : .biometricAuthorization, canonicalPayload: body, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+            return try requests.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: Data(repeating: 5, count: 16),
+                authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16), now: now(120), receiptTimeMs: nil)
+        }
+        var auditHead: UInt64 { get throws { try db.read { try XCTUnwrap($0.epoch(writer.epoch)).head } } }
+        func sql(_ statement: String, continuity: Bool = false) throws {
+            var connection: OpaquePointer?
+            guard sqlite3_open(root.appendingPathComponent(continuity ? "continuity/continuity.sqlite" : "store/journal.sqlite").path, &connection) == SQLITE_OK,
+                  let connection else { throw MachCommandCallerError.unavailable }
+            defer { sqlite3_close(connection) }
+            guard sqlite3_exec(connection, statement, nil, nil, nil) == SQLITE_OK else { throw MachCommandCallerError.unavailable }
+        }
+    }
+    private func admitCommand(_ command: RetainedCommandCapture, fixture: CommandRequestFixture,
+                              draft: ApprovalRequestDraft? = nil, userID: uid_t? = nil,
+                              checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try fixture.requests.admitCommand(command, draft: draft ?? fixture.draft(command), expression: selfExpression(),
+            userID: userID ?? geteuid(), auditSessionID: nil, now: { fixture.now() }, receiptTimeMs: nil, checkCancellation: checkCancellation)
+    }
+    private func requestCommand() throws -> (ReceivedMachCommandInputSubmission, RetainedCommandCapture) {
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { _ = Darwin.close(fd) }
+        let received = try inputSubmission(fd, payload: commandSubmission().canonicalBytes)
+        return (received, try assemble(received))
+    }
+
+    func testCommandAdmissionRetainsExactCaptureThroughBiometricConsumptionAndTerminalOutcome() throws {
+        let fixture = try CommandRequestFixture(), (received, command) = try requestCommand()
+        let request = try admitCommand(command, fixture: fixture)
+        XCTAssertEqual(request.canonicalCapture, command.capture.canonicalBytes)
+        XCTAssertEqual(try fixture.requests.pendingRequest(requestID: request.requestID, now: fixture.now(), receiptTimeMs: nil).payload, request)
+        try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        _ = try fixture.requests.markPresented(requestID: request.requestID, now: fixture.now(), receiptTimeMs: nil)
+        let receipt = try fixture.consume(request)
+        XCTAssertEqual(receipt.decision.requestDigest, try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits))
+        XCTAssertEqual(try fixture.requests.consumedRequest(requestID: request.requestID, now: fixture.now(120)).payload.canonicalCapture,
+            command.capture.canonicalBytes)
+        try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch,
+            now: fixture.now(120), receiptTimeMs: nil)
+        try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 1, event: .verifySuccess,
+            now: fixture.now(130), receiptTimeMs: nil)
+        try expectAssemblyResourcesRetired(received)
+        XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+        XCTAssertEqual(try fixture.requests.historicalOutcome(requestID: request.requestID)?.phase, .succeeded)
+    }
+
+    func testCommandDeclineAndPendingRetirementCloseOriginalObjects() throws {
+        for reason in [PendingRequestRetirement.cancelled, .deadlineElapsed, .targetTimedOut, .targetDisappeared, .authorityRestart] {
+            let fixture = try CommandRequestFixture(), (received, command) = try requestCommand()
+            let request = try admitCommand(command, fixture: fixture)
+            _ = try fixture.requests.retirePending(requestID: request.requestID, reason: reason,
+                now: fixture.now(reason == .deadlineElapsed ? 200 : 120), receiptTimeMs: nil)
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+        }
+        let fixture = try CommandRequestFixture(), (received, command) = try requestCommand()
+        let request = try admitCommand(command, fixture: fixture)
+        _ = try fixture.consume(request, decline: true)
+        XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .declined)
+        try expectAssemblyResourcesRetired(received)
+    }
+
+    func testCommandExpirySweepAndExplicitCloseRetireResources() throws {
+        for sweep in [true, false] {
+            let fixture = try CommandRequestFixture(), (received, command) = try requestCommand()
+            let request = try admitCommand(command, fixture: fixture)
+            if sweep { XCTAssertEqual(try fixture.requests.expirePending(now: fixture.now(200), receiptTimeMs: nil).first?.requestID, request.requestID) }
+            else {
+                fixture.requests.close(); fixture.requests.close()
+                XCTAssertThrowsError(try fixture.requests.state(requestID: request.requestID))
+            }
+            try expectAssemblyResourcesRetired(received)
+        }
+    }
+
+    func testCommandAdmissionRejectsCaptureActionSchemaAndPeerChangesWithoutAudit() throws {
+        enum Cancelled: Error { case test }
+        for variant in 0..<6 {
+            let fixture = try CommandRequestFixture(), (received, command) = try requestCommand(), head = try fixture.auditHead
+            let draft: ApprovalRequestDraft
+            switch variant {
+            case 0: draft = fixture.draft(command, capture: Data([0xa0]))
+            case 1: draft = try fixture.draft(command, contract: RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 2))
+            case 2: draft = fixture.draft(command, actions: [.init(choice: .execute, scope: .currentRequest)])
+            case 3: draft = fixture.draft(command, actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .execute, scope: .currentRequest)])
+            default: draft = fixture.draft(command)
+            }
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: draft,
+                userID: variant == 4 ? geteuid() ^ 1 : nil, checkCancellation: { if variant == 5 { throw Cancelled.test } }))
+            XCTAssertEqual(try fixture.auditHead, head)
+            try expectAssemblyResourcesRetired(received)
+        }
+    }
+
+    func testCommandDuplicateOwnershipAndCapacityFailureKeepFirstRequestIntact() throws {
+        let fixture = try CommandRequestFixture(maximumRequests: 1), (firstReceived, first) = try requestCommand()
+        let request = try admitCommand(first, fixture: fixture), head = try fixture.auditHead
+        XCTAssertThrowsError(try admitCommand(first, fixture: fixture)) { XCTAssertEqual($0 as? RetainedCommandCaptureError, .alreadyOwned) }
+        XCTAssertEqual(try fixture.auditHead, head)
+        try first.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        let (secondReceived, second) = try requestCommand()
+        XCTAssertThrowsError(try admitCommand(second, fixture: fixture)) { XCTAssertEqual($0 as? ApprovalCoordinatorError, .capacityExceeded) }
+        try expectAssemblyResourcesRetired(secondReceived)
+        XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+        try firstReceived.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        fixture.requests.close()
+        try expectAssemblyResourcesRetired(firstReceived)
+    }
+
+    func testCommandAdmissionSamplesClockAfterRecheckAndRejectsElapsedDeadline() throws {
+        let fixture = try CommandRequestFixture(), (received, command) = try requestCommand(), head = try fixture.auditHead
+        var rechecked = false, clockSampled = false
+        XCTAssertThrowsError(try fixture.requests.admitCommand(command, draft: fixture.draft(command), expression: selfExpression(),
+            userID: geteuid(), auditSessionID: nil, now: {
+                XCTAssertTrue(rechecked); clockSampled = true
+                return fixture.now(200)
+            }, receiptTimeMs: nil, checkCancellation: { rechecked = true })) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidDraft)
+        }
+        XCTAssertTrue(clockSampled)
+        XCTAssertEqual(try fixture.auditHead, head)
+        try expectAssemblyResourcesRetired(received)
+    }
+
+    func testCommandCheckpointFailureClosesResourcesBeforeTheFailingOperationReturns() throws {
+        for read in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: true), (received, command) = try requestCommand()
+            let request = try admitCommand(command, fixture: fixture)
+            try XCTUnwrap(fixture.continuity).close()
+            if read { XCTAssertThrowsError(try fixture.requests.state(requestID: request.requestID)) }
+            else {
+                XCTAssertThrowsError(try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+                    now: fixture.now(120), receiptTimeMs: nil))
+            }
+            // No additional coordinator call can trigger deferred cleanup before these assertions.
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+        }
+    }
+
+    func testCommandFatalJournalOperationsCloseResourcesWithoutAnotherCoordinatorCall() throws {
+        for checkpointed in [true, false] {
+            for closed in [true, false] {
+                for read in [true, false] {
+                    let fixture = try CommandRequestFixture(checkpointed: checkpointed), (received, command) = try requestCommand()
+                    let request = try admitCommand(command, fixture: fixture)
+                    if closed { try fixture.db.close() }
+                    else { XCTAssertEqual(chmod(fixture.root.appendingPathComponent("store/journal.sqlite").path, 0o644), 0) }
+                    if read { XCTAssertThrowsError(try fixture.requests.state(requestID: request.requestID)) }
+                    else {
+                        XCTAssertThrowsError(try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+                            now: fixture.now(120), receiptTimeMs: nil))
+                    }
+                    try expectAssemblyResourcesRetired(received)
+                    XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+                }
+            }
+        }
+    }
+
+    func testCommandOrdinaryJournalReadCallbackFailurePreservesLiveResources() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), (received, command) = try requestCommand()
+            let request = try admitCommand(command, fixture: fixture)
+            XCTAssertThrowsError(try fixture.requests.historicalOutcome(requestID: Data())) {
+                XCTAssertEqual($0 as? ConsumptionJournalError, .wrongScope)
+            }
+            try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+            XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+        }
+    }
+
+    // Deliberate aliases let invalid callback tests inspect cleanup. Normal journal admission needs no wrapper.
+    private struct TestCommandInspection: @unchecked Sendable { let command: RetainedCommandCapture }
+    private func admitOwnedCommand(_ command: RetainedCommandCapture, fixture: CommandRequestFixture,
+                                   draft: ApprovalRequestDraft? = nil, now: (() throws -> AuthorityMoment)? = nil,
+                                   checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+        let authority = try XCTUnwrap(fixture.authority)
+        return try authority.admitCommand(command, draft: draft ?? fixture.draft(command), expression: selfExpression(), userID: geteuid(),
+            auditSessionID: nil, now: now ?? { fixture.now() }, receiptTimeMs: nil, checkCancellation: checkCancellation)
+    }
+
+    func testJournalCommandTransferRetainsExactRequestUntilCommittedCancellation() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            XCTAssertEqual(request.canonicalCapture, command.capture.canonicalBytes)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+            try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            let now = fixture.now(120)
+            _ = try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: now, receiptTimeMs: nil) }
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+        }
+    }
+
+    func testJournalCommandPreflightFailureReleasesFirstTransfer() throws {
+        for checkpointed in [true, false] {
+            for failure in 0..<3 {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, ready: failure != 0)
+                let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+                if failure == 1 { try authority.close() }
+                if failure == 2 { XCTAssertEqual(chmod(fixture.root.appendingPathComponent("store/journal.sqlite").path, 0o644), 0) }
+                XCTAssertThrowsError(try admitOwnedCommand(command, fixture: fixture)) {
+                    if failure == 0 { XCTAssertEqual($0 as? ApprovalCoordinatorError, .unavailable) }
+                }
+                try expectAssemblyResourcesRetired(received)
+                XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+            }
+        }
+    }
+
+    func testJournalCommandDuplicateAndCallbackReentryPreserveExistingOwner() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            XCTAssertThrowsError(try admitOwnedCommand(command, fixture: fixture)) {
+                XCTAssertEqual($0 as? RetainedCommandCaptureError, .alreadyOwned)
+            }
+            let inspection = TestCommandInspection(command: command)
+            let draft = fixture.draft(command), expression = try selfExpression(), uid = geteuid(), now = fixture.now()
+            try authority.withRequests { _ in
+                XCTAssertThrowsError(try authority.admitCommand(inspection.command, draft: draft, expression: expression,
+                    userID: uid, auditSessionID: nil, now: { now }, receiptTimeMs: nil)) {
+                    XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+                }
+            }
+            try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try received.caller.recheck(expression: expression, userID: uid, auditSessionID: nil)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+        }
+    }
+
+    func testJournalCommandTransactionReentryClosesOnlyRejectedTransfer() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), (originalReceived, original) = try requestCommand()
+            let request = try admitOwnedCommand(original, fixture: fixture)
+            let (received, command) = try requestCommand(), inspection = TestCommandInspection(command: command)
+            let draft = fixture.draft(command), expression = try selfExpression(), uid = geteuid(), now = fixture.now()
+            try authority.read { _ in
+                XCTAssertThrowsError(try authority.admitCommand(inspection.command, draft: draft, expression: expression,
+                    userID: uid, auditSessionID: nil, now: { now }, receiptTimeMs: nil)) {
+                    XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+                }
+            }
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+            try original.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try originalReceived.caller.recheck(expression: expression, userID: uid, auditSessionID: nil)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+        }
+    }
+
+    func testJournalCommandClockCallbackCannotReenterAndFailureResetsAdmission() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+            XCTAssertThrowsError(try admitOwnedCommand(command, fixture: fixture, now: {
+                try authority.read { _ in () }
+                return fixture.now()
+            })) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive) }
+            try expectAssemblyResourcesRetired(received)
+            let (nextReceived, next) = try requestCommand()
+            _ = try admitOwnedCommand(next, fixture: fixture)
+            try next.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try nextReceived.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        }
+    }
+
+    func testCommandOwnerStorageFailureClosesResourcesBeforeReturning() throws {
+        for checkpointed in [true, false] {
+            for replaced in [true, false] {
+                for operation in checkpointed ? [0, 1, 3] : [0, 1, 2] {
+                    let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+                    let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+                    _ = try admitOwnedCommand(command, fixture: fixture)
+                    let path = fixture.root.appendingPathComponent("store/journal.sqlite").path
+                    if replaced { XCTAssertEqual(Darwin.rename(path, path + ".removed"), 0) }
+                    else { XCTAssertEqual(chmod(path, 0o644), 0) }
+                    switch operation {
+                    case 0: XCTAssertThrowsError(try authority.read { _ in () })
+                    case 1: XCTAssertThrowsError(try authority.withRequests { _ in XCTFail("fatal storage entered callback") })
+                    case 2: XCTAssertThrowsError(try authority.write { _ in () })
+                    default: XCTAssertThrowsError(try authority.prepareRequests(clockEpoch: UUID(), maximumPayloadBytes: 16384))
+                    }
+                    try expectAssemblyResourcesRetired(received)
+                    XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+                }
+            }
+        }
+    }
+
+    func testCommandOwnerContinuityFailureClosesResourcesBeforeReturning() throws {
+        for failure in 0..<4 {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+            _ = try admitOwnedCommand(command, fixture: fixture)
+            let path = fixture.root.appendingPathComponent("continuity/continuity.sqlite").path
+            switch failure {
+            case 0: XCTAssertEqual(Darwin.rename(path, path + ".removed"), 0)
+            case 1: XCTAssertEqual(chmod(path, 0o644), 0)
+            case 2: try fixture.sql("UPDATE continuity_v1 SET repair=1 WHERE id=1", continuity: true)
+            default: try fixture.sql("UPDATE audit_epochs_v1 SET head=X'0000000000000002'")
+            }
+            XCTAssertThrowsError(try authority.read { _ in () })
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+        }
+    }
+
+    func testCommandOwnerTemporaryStorageContentionPreservesResources() throws {
+        for checkpointed in [true, false] {
+            for continuity in checkpointed ? [true, false] : [false] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+                let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+                let request = try admitOwnedCommand(command, fixture: fixture)
+                var connection: OpaquePointer?
+                let path = fixture.root.appendingPathComponent(continuity ? "continuity/continuity.sqlite" : "store/journal.sqlite").path
+                guard sqlite3_open(path, &connection) == SQLITE_OK, let connection else { throw MachCommandCallerError.unavailable }
+                do {
+                    defer { sqlite3_exec(connection, "ROLLBACK", nil, nil, nil); sqlite3_close(connection) }
+                    XCTAssertEqual(sqlite3_exec(connection, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+                    XCTAssertThrowsError(try authority.read { _ = try $0.approvalTrustSnapshot() })
+                }
+                try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+                try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+                try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+                XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+            }
+        }
+    }
+
+    func testCommandOwnerCallbackRejectionAndReentryPreserveResources() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), (received, command) = try requestCommand()
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            XCTAssertThrowsError(try authority.read { _ in throw JournalDatabaseError.unavailable }) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+            }
+            if !checkpointed {
+                XCTAssertThrowsError(try authority.write { _ in throw JournalDatabaseError.unavailable })
+            }
+            XCTAssertThrowsError(try authority.withRequests { _ in throw JournalDatabaseError.unavailable })
+            try authority.read { _ in
+                XCTAssertThrowsError(try authority.withRequests { _ in () }) {
+                    XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+                }
+            }
+            try authority.withRequests { _ in
+                XCTAssertThrowsError(try authority.read { _ in () }) {
+                    XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+                }
+            }
+            try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+        }
+    }
+
+    func testCommandCoordinatorDestructionClosesAnExternallyRetainedCapture() throws {
+        let (received, command) = try requestCommand()
+        do {
+            let fixture = try CommandRequestFixture()
+            _ = try admitCommand(command, fixture: fixture)
+            try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        }
+        try expectAssemblyResourcesRetired(received)
+        XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+    }
+
+    func testCommandClockFailureClosesOriginalObjects() throws {
+        let fixture = try CommandRequestFixture(), (received, command) = try requestCommand()
+        let request = try admitCommand(command, fixture: fixture)
+        XCTAssertThrowsError(try fixture.requests.markPresented(requestID: request.requestID, now: fixture.now(109), receiptTimeMs: nil)) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidClock)
+        }
+        try expectAssemblyResourcesRetired(received)
+    }
+
+    func testCommandAdmissionAuditFailureReleasesObjectsAndRetirementRollbackKeepsThem() throws {
+        for variant in 0..<4 {
+            let admissionFailure = variant % 2 == 0
+            let fixture = try CommandRequestFixture(checkpointed: variant >= 2), (received, command) = try requestCommand()
+            let request = try admissionFailure ? nil : admitCommand(command, fixture: fixture)
+            let head = try fixture.auditHead
+            try fixture.sql("CREATE TRIGGER reject_command_event BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+            if admissionFailure {
+                XCTAssertThrowsError(try admitCommand(command, fixture: fixture))
+                try expectAssemblyResourcesRetired(received)
+            } else {
+                let request = try XCTUnwrap(request)
+                XCTAssertThrowsError(try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+                    now: fixture.now(120), receiptTimeMs: nil))
+                XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+                try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+                try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+                try fixture.sql("DROP TRIGGER reject_command_event")
+                _ = try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+                    now: fixture.now(120), receiptTimeMs: nil)
+                try expectAssemblyResourcesRetired(received)
+            }
+            if admissionFailure { XCTAssertEqual(try fixture.auditHead, head) }
+            else { XCTAssertEqual(try fixture.auditHead, head + 1) }
+        }
     }
 
     private func selfExpression() throws -> String {

@@ -59,6 +59,7 @@ Shared schema 1 and 2 vectors re-encode to their exact original canonical bytes.
 
 Construction takes ownership of the received caller and input on both success and failure.
 The host must not reuse or copy that received submission into another request owner.
+The [live request coordinator](../macos/core/authority-request-owner.md#native-command-ownership) accepts each assembled owner once through `admitCommand`.
 A failed parse, binding/context check, observation, size limit, or cancellation closes the transferred resources.
 The host serializes all access and closes the owner on request retirement.
 

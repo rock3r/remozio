@@ -10,6 +10,8 @@ public final class ContinuityStore {
     private let lease: ProtectedContinuityLease
     private var db: OpaquePointer?
     private var unavailable = false
+    /// Negative connection state for serialized owner cleanup, not authority to resume work.
+    var retired: Bool { db == nil || unavailable }
     private let macID: Data
     private let accountID: Data
 
