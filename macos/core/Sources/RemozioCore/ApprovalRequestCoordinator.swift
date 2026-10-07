@@ -663,20 +663,22 @@ public final class ApprovalRequestCoordinator {
     }
     private func read<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
         try running()
-        if let checkpointed {
-            do { return try checkpointed.read(body) }
-            catch { if checkpointed.retired { close() }; throw error }
-        }
-        return try database.read(body)
+        do {
+            if let checkpointed { return try checkpointed.read(body) }
+            return try database.read(body)
+        } catch { retireAfterStorageFailure(); throw error }
     }
 
     private func write<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
         try running()
-        if let checkpointed {
-            do { return try checkpointed.write(epoch: writer.epoch, recoverRejectedBody: true, body) }
-            catch { if checkpointed.retired { close() }; throw error }
-        }
-        return try database.write(body)
+        do {
+            if let checkpointed { return try checkpointed.write(epoch: writer.epoch, recoverRejectedBody: true, body) }
+            return try database.write(body)
+        } catch { retireAfterStorageFailure(); throw error }
+    }
+
+    private func retireAfterStorageFailure() {
+        if database.retired || checkpointed?.retired == true { close() }
     }
 
     private func running() throws {

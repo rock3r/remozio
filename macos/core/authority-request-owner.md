@@ -46,7 +46,8 @@ stateDiagram-v2
 Queued, presented, authorized, and executing entries retain the original OS objects.
 A terminal transition closes them only after its audit transaction commits.
 An audit rollback leaves the previous pending state and objects intact.
-An unrecoverable checkpoint read or write closes all live objects before propagating the failure.
+An unrecoverable checkpoint or journal read/write closes all live objects before propagating the failure.
+Cleanup checks the journal connection itself, including failures outside a checkpoint callback.
 A proved rollback that preserves the checkpoint writer does not retire those objects.
 Owner shutdown and an invalid authority clock release all live objects without inventing a durable outcome.
 `AuthorityJournal.close` explicitly retires the coordinator after successful storage closure.

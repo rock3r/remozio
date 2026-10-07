@@ -1130,6 +1130,40 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testCommandFatalJournalOperationsCloseResourcesWithoutAnotherCoordinatorCall() throws {
+        for checkpointed in [true, false] {
+            for closed in [true, false] {
+                for read in [true, false] {
+                    let fixture = try CommandRequestFixture(checkpointed: checkpointed), (received, command) = try requestCommand()
+                    let request = try admitCommand(command, fixture: fixture)
+                    if closed { try fixture.db.close() }
+                    else { XCTAssertEqual(chmod(fixture.root.appendingPathComponent("store/journal.sqlite").path, 0o644), 0) }
+                    if read { XCTAssertThrowsError(try fixture.requests.state(requestID: request.requestID)) }
+                    else {
+                        XCTAssertThrowsError(try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+                            now: fixture.now(120), receiptTimeMs: nil))
+                    }
+                    try expectAssemblyResourcesRetired(received)
+                    XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+                }
+            }
+        }
+    }
+
+    func testCommandOrdinaryJournalReadCallbackFailurePreservesLiveResources() throws {
+        for checkpointed in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), (received, command) = try requestCommand()
+            let request = try admitCommand(command, fixture: fixture)
+            XCTAssertThrowsError(try fixture.requests.historicalOutcome(requestID: Data())) {
+                XCTAssertEqual($0 as? ConsumptionJournalError, .wrongScope)
+            }
+            try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+            XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+        }
+    }
+
     func testCommandCoordinatorDestructionClosesAnExternallyRetainedCapture() throws {
         let (received, command) = try requestCommand()
         do {
