@@ -918,7 +918,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let decision = P256.Signing.PrivateKey()
         let limits: CBORLimits
         let contract: RequestContract
-        init(maximumRequests: Int = 8) throws {
+        var continuity: ContinuityStore?
+        init(maximumRequests: Int = 8, checkpointed: Bool = false) throws {
             limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
             contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
@@ -951,11 +952,28 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 ]))
             _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
                 eventID: Data(repeating: 30, count: 16), receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
-            requests = try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: clock, maximumRequests: maximumRequests,
-                maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits, decisionLimits: limits,
-                signingLimits: limits, auditLimits: limits)
+            if checkpointed {
+                let directory = root.appendingPathComponent("continuity")
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                for name in ["writer.lock", "continuity.sqlite"] {
+                    let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                    guard fd >= 0 else { throw MachCommandCallerError.unavailable }; _ = Darwin.close(fd)
+                }
+                let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
+                    generation: 1, authorityGeneration: 1) }
+                let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
+                    macID: mac, accountID: account, initialize: initial)
+                continuity = store
+                requests = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
+                    maximumRequests: maximumRequests, maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits,
+                    decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+            } else {
+                requests = try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: clock, maximumRequests: maximumRequests,
+                    maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits, decisionLimits: limits,
+                    signingLimits: limits, auditLimits: limits)
+            }
         }
-        deinit { try? db.close(); try? FileManager.default.removeItem(at: root) }
+        deinit { try? db.close(); continuity?.close(); try? FileManager.default.removeItem(at: root) }
         func now(_ milliseconds: UInt64 = 110) -> AuthorityMoment { .init(epoch: clock, milliseconds: milliseconds) }
         func draft(_ command: RetainedCommandCapture, capture: Data? = nil, contract: RequestContract? = nil,
                    actions: [CapturedAction]? = nil) -> ApprovalRequestDraft {
@@ -1096,6 +1114,22 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         try expectAssemblyResourcesRetired(received)
     }
 
+    func testCommandCheckpointFailureClosesResourcesBeforeTheFailingOperationReturns() throws {
+        for read in [true, false] {
+            let fixture = try CommandRequestFixture(checkpointed: true), (received, command) = try requestCommand()
+            let request = try admitCommand(command, fixture: fixture)
+            try XCTUnwrap(fixture.continuity).close()
+            if read { XCTAssertThrowsError(try fixture.requests.state(requestID: request.requestID)) }
+            else {
+                XCTAssertThrowsError(try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+                    now: fixture.now(120), receiptTimeMs: nil))
+            }
+            // No additional coordinator call can trigger deferred cleanup before these assertions.
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
+        }
+    }
+
     func testCommandCoordinatorDestructionClosesAnExternallyRetainedCapture() throws {
         let (received, command) = try requestCommand()
         do {
@@ -1117,8 +1151,9 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
 
     func testCommandAdmissionAuditFailureReleasesObjectsAndRetirementRollbackKeepsThem() throws {
-        for admissionFailure in [true, false] {
-            let fixture = try CommandRequestFixture(), (received, command) = try requestCommand()
+        for variant in 0..<4 {
+            let admissionFailure = variant % 2 == 0
+            let fixture = try CommandRequestFixture(checkpointed: variant >= 2), (received, command) = try requestCommand()
             let request = try admissionFailure ? nil : admitCommand(command, fixture: fixture)
             let head = try fixture.auditHead
             try fixture.sql("CREATE TRIGGER reject_command_event BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
