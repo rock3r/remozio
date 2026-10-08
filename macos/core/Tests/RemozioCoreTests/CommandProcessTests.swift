@@ -244,7 +244,10 @@ final class CommandProcessTests: XCTestCase {
         try until(process) { $0.exec_observed }
         var ready = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
         XCTAssertEqual(poll(&ready, 1, 1000), 1)
-        guard ready.revents & Int16(POLLIN) != 0 else { return }
+        guard ready.revents & Int16(POLLIN) != 0 else {
+            XCTFail("The private PTY did not provide readable output")
+            throw CocoaError(.executableRuntimeMismatch)
+        }
         var text = [UInt8](repeating: 0, count: 3)
         XCTAssertEqual(read(master, &text, 3), 3); XCTAssertEqual(Data(text), Data("PTY".utf8))
         let ended = try until(process) { $0.reaped }

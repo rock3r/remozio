@@ -55,6 +55,13 @@ static int mark_private(int fd, bool nonblocking, bool writing) {
     if (writing && fcntl(fd, F_SETNOSIGPIPE, 1) < 0) return system_error();
     return 0;
 }
+static int private_pipe(int ends[2]) {
+    if (pipe(ends) < 0) return system_error();
+    int error = mark_private(ends[0], false, false);
+    if (!error) error = mark_private(ends[1], false, false);
+    if (error) { close_descriptor(&ends[0]); close_descriptor(&ends[1]); }
+    return error;
+}
 int remozio_command_process_spawn(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, remozio_command_process_t **result) {
     if (!result) return EINVAL;
@@ -87,7 +94,8 @@ int remozio_command_process_spawn(const char *path, const void *frame, size_t co
     struct stat cwd;
     if (fstat(directory, &cwd) < 0) { failure = system_error(); goto cleanup; }
     if (!S_ISDIR(cwd.st_mode)) { failure = EINVAL; goto cleanup; }
-    if (pipe(config) < 0 || pipe(status) < 0 || pipe(release) < 0) { failure = system_error(); goto cleanup; }
+    if ((failure = private_pipe(config)) || (failure = private_pipe(status)) ||
+        (failure = private_pipe(release))) goto cleanup;
     process->configuration = config[1]; config[1] = -1;
     process->status = status[0]; status[0] = -1;
     process->release = release[1]; release[1] = -1;
@@ -99,6 +107,7 @@ int remozio_command_process_spawn(const char *path, const void *frame, size_t co
         copies[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 128);
         if (copies[i] < 0) { failure = system_error(); goto cleanup; }
     }
+    close_descriptor(&config[0]); close_descriptor(&status[1]); close_descriptor(&release[0]);
     process->events = kqueue();
     if (process->events < 0) { failure = system_error(); goto cleanup; }
     if ((failure = mark_private(process->events, false, false))) goto cleanup;

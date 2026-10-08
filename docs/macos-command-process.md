@@ -28,7 +28,11 @@ sequenceDiagram
 The factory validates and copies the bounded private frame before spawning.
 It borrows stdin, stdout, stderr and the retained directory without reading, writing or changing their shared flags.
 Owned duplicates start at descriptor 128 before mapping to child descriptors 0–6. This avoids source/destination collisions.
+Each raw pipe endpoint receives `FD_CLOEXEC` immediately after that pipe is created.
+Raw child endpoints close as soon as their owned duplicates exist, before spawn setup.
 Only the explicit mappings survive `POSIX_SPAWN_CLOEXEC_DEFAULT`.
+Darwin's public `pipe` API does not atomically set close-on-exec. The host must use close-on-exec defaults for every concurrent launch.
+This avoids inheritance during the short interval between pipe creation and descriptor marking.
 The launcher receives only its path and `--execute`, with an empty environment.
 The approved raw argv and deterministic environment travel through the private frame.
 

@@ -35,3 +35,13 @@ The required Kotlin/Android gate passed. Its XML reports contain 95 protocol, 19
 All 532 tests report zero failures, errors and skipped tests. APK assembly and Android lint passed.
 The Gradle run took 19.254 seconds, with 62 tasks: two executed and sixty up-to-date.
 The compact workflow finished and removed its managed logs.
+
+## Review fixes
+
+The review found raw pipe endpoints without close-on-exec flags during spawn setup.
+Both ends now receive those flags immediately after each pipe creation.
+Raw child endpoints close before spawn setup once their owned duplicates exist.
+The Darwin public pipe API leaves a short creation-to-marking interval; concurrent host launches must use close-on-exec defaults.
+The PTY test now explicitly fails when poll returns without readable output.
+The full native gate passed again, including all eleven process tests. Clang analysis again reported zero diagnostics.
+The required Kotlin/Android gate passed again in 19.260 seconds.
