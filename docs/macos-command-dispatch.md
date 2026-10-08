@@ -46,6 +46,7 @@ The controller assumes no default policy based on administrator membership.
 A failed preparation or final check cancels the helper without releasing the approved program.
 A failed dispatch commit never releases it. A failed result commit produces one Unknown on the original terminal channel.
 If the coordinator remains usable, retain the original execution owner and retry only the durable Unknown transition.
+Runtime and launcher failures before spawning use the same outcome owner. That owner has no runtime validation and cannot spawn.
 A later commit cannot revise the caller's Unknown result or repeat execution.
 If storage retires, native cleanup still completes; startup recovery must reconcile the unresolved durable outcome.
 Known exit and signal values come only from the retained native process owner after kernel execution evidence and reaping.
@@ -68,6 +69,8 @@ They exercise success, failure, signals, replay rejection, callback reentry, fin
 Re-enrollment tests preserve retired history in either epoch order.
 Result recovery tests hold real SQLite contention or clock failure, then verify one durable Unknown without another execution or reply.
 They also close storage while that commit is pending and verify that native cleanup completes.
+Pre-spawn runtime and launcher failures retain the same outcome path through commit recovery.
+A separate boundary test verifies that a failure owner without runtime validation cannot spawn or release.
 The fixture launcher performs no credential change and is never embedded or installed.
 
 This change connects the pipe execution path. It does not install or expose a command service.
@@ -79,6 +82,6 @@ The previous reap condition reached the three-second failure boundary with exit 
 The corrected condition reaped the same sleep command without cancellation and returned exit 0.
 It retained no kernel exec or exit observation. That fallback therefore cannot establish a known program result.
 
-The complete local gate passed with 1,146 core tests, 97 Swift protocol tests and 532 Kotlin/Android tests.
+The complete local gate passed with 1,148 core tests, 97 Swift protocol tests and 532 Kotlin/Android tests.
 The debug APK build and Android lint passed.
 Distinct requester-exited-before-start classification remains part of the host integration gate.

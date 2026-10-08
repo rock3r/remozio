@@ -513,13 +513,11 @@ extension AuthorityJournal {
                 context = try validatedRead { try runtime($0, approval, capture) }
                 checkLauncher = try launcher(context)
             } catch {
-                var result: CommandTerminalOutcome = .unknown
-                do {
-                    _ = try requests.recordOutcome(requestID: requestID, expectedRevision: 0, event: .proveNoDispatch,
-                        now: clock(), receiptTimeMs: receiptTime())
-                    result = .failedBeforeStart
-                } catch { }
-                try? resources.sendTerminalOutcome(result); resources.close(); throw error
+                let execution = CommandExecution(resources: resources, approval: approval, clock: clock, receiptTime: receiptTime)
+                commandExecutions[requestID] = execution
+                startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
+                finishCommandExecution(requestID, execution: execution, observedOutcome: .failedBeforeStart)
+                throw error
             }
             let execution = CommandExecution(resources: resources, approval: approval, clock: clock, receiptTime: receiptTime,
                 callerExpression: context.callerExpression, callerUserID: context.userID, callerSessionID: context.sessionID,
@@ -558,33 +556,39 @@ extension AuthorityJournal {
                         try execution.release()
                     } catch { execution.cancelBeforeRelease() }
                 case .terminal(let nativeOutcome):
-                    let commitOutcome: CommandTerminalOutcome = execution.terminalCommitFailed ? .unknown : nativeOutcome
-                    var delivered: CommandTerminalOutcome = .unknown
-                    if let requests, !requests.retired {
-                        do {
-                            let event: RequestEvent
-                            switch commitOutcome {
-                            case .exited(0): event = .verifySuccess
-                            case .exited, .signalled: event = .verifyFailure
-                            case .failedBeforeStart: event = execution.dispatchRevision == 0 ? .proveNoDispatch : .verifyFailure
-                            default: event = .loseOutcome
-                            }
-                            _ = try requests.recordOutcome(requestID: id, expectedRevision: execution.dispatchRevision,
-                                event: event, now: execution.clock(), receiptTimeMs: execution.receiptTime())
-                            delivered = commitOutcome
-                        } catch {
-                            execution.terminalCommitFailed = true
-                            try? execution.resources.sendTerminalOutcome(.unknown)
-                            if !requests.retired { continue }
-                            retireRequests()
-                        }
-                    }
-                    try? execution.resources.sendTerminalOutcome(delivered)
-                    if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id) }
+                    finishCommandExecution(id, execution: execution, observedOutcome: nativeOutcome)
                 }
             }
             if commandExecutions.isEmpty { commandCleanupTimer?.cancel(); commandCleanupTimer = nil; commandPollIntervalMilliseconds = nil }
         }
+    }
+
+    /// Runs only under the journal lock and request-operation guard, including failed pre-spawn validation.
+    private func finishCommandExecution(_ id: Data, execution: CommandExecution, observedOutcome: CommandTerminalOutcome) {
+        let commitOutcome: CommandTerminalOutcome = execution.terminalCommitFailed ? .unknown : observedOutcome
+        var delivered: CommandTerminalOutcome = .unknown
+        if let requests, !requests.retired {
+            do {
+                let event: RequestEvent
+                switch commitOutcome {
+                case .exited(0): event = .verifySuccess
+                case .exited, .signalled: event = .verifyFailure
+                case .failedBeforeStart: event = execution.dispatchRevision == 0 ? .proveNoDispatch : .verifyFailure
+                default: event = .loseOutcome
+                }
+                _ = try requests.recordOutcome(requestID: id, expectedRevision: execution.dispatchRevision,
+                    event: event, now: execution.clock(), receiptTimeMs: execution.receiptTime())
+                delivered = commitOutcome
+            } catch {
+                execution.terminalCommitFailed = true
+                try? execution.resources.sendTerminalOutcome(.unknown)
+                if !requests.retired { return }
+                retireRequests()
+            }
+        }
+        try? execution.resources.sendTerminalOutcome(delivered)
+        if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id) }
+        if commandExecutions.isEmpty { commandCleanupTimer?.cancel(); commandCleanupTimer = nil; commandPollIntervalMilliseconds = nil }
     }
 
     private func startCommandCleanup(intervalMilliseconds: Int) {

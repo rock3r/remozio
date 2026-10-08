@@ -4384,18 +4384,23 @@ extension MachCommandCallerReceiverTests {
     }
     private func beginDispatch(_ fixture: CommandRequestFixture, request: IssuedRequestPayload, launcher: String,
                                elevation: @escaping (CommandCapture) throws -> Void = { _ in },
-                               clock: (() throws -> AuthorityMoment)? = nil) throws {
+                               clock: (() throws -> AuthorityMoment)? = nil,
+                               runtimeFailure: Bool = false, launcherFailure: Bool = false) throws {
         let authority = try XCTUnwrap(fixture.authority), expression = try selfExpression(), now = fixture.now(130)
         try authority.beginCommandExecution(requestID: request.requestID, childPath: launcher,
             preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: elevation, clock: clock ?? { now },
             runtime: { tx, approval, capture in
+                if runtimeFailure { throw CommandExecutionError.policyChanged }
                 try approval.requireCurrent(tx.requestDeliveryTrust())
                 let snapshot = try XCTUnwrap(tx.codePolicy())
                 let frontend = try XCTUnwrap(snapshot.policy.entries.first(where: { $0.role == .commandFrontend }))
                 let token = try XCTUnwrap(snapshot.roleRevisions[.commandFrontend])
                 return CommandExecutionRuntime(child: frontend, childRevision: token, frontendRevision: token,
                     callerExpression: expression, userID: capture.requester.effectiveUID, sessionID: nil)
-            }, launcher: { _ in { } })
+            }, launcher: { _ in
+                if launcherFailure { throw CommandExecutionError.policyChanged }
+                return { }
+            })
     }
     private func awaitDispatchCleanup(_ authority: AuthorityJournal) throws {
         let deadline = Date().addingTimeInterval(8)
@@ -4526,15 +4531,66 @@ extension MachCommandCallerReceiverTests {
         private var calls = 0
         private var failTerminal = true
         let now: AuthorityMoment
-        init(now: AuthorityMoment) { self.now = now }
+        let failStartingCall: Int
+        init(now: AuthorityMoment, failStartingCall: Int = 4) { self.now = now; self.failStartingCall = failStartingCall }
         func read() throws -> AuthorityMoment {
             try lock.withLock {
                 calls += 1
-                if calls >= 4 && failTerminal { throw CommandExecutionError.unavailable }
+                if calls >= failStartingCall && failTerminal { throw CommandExecutionError.unavailable }
                 return now
             }
         }
         func recover() { lock.withLock { failTerminal = false } }
+    }
+    func testCommandOutcomeOwnerWithoutRuntimeValidationCannotSpawnOrRelease() throws {
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let launcher = try dispatchLauncher(fixture), marker = fixture.root.appendingPathComponent("unvalidated-target")
+        let (_, command, _, _) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+            executablePath: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
+        let request = try admitCommand(command, fixture: fixture)
+        _ = try fixture.consume(request)
+        let approval = try fixture.requests.authorizedCommandApproval(requestID: request.requestID, now: fixture.now(130))
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+        let now = fixture.now(130)
+        let owner = CommandExecution(resources: resources, approval: approval, clock: { now }, receiptTime: { nil })
+        defer {
+            owner.cancelBeforeRelease()
+            let deadline = Date().addingTimeInterval(8)
+            while !owner.dispose() && Date() < deadline { _ = owner.poll(); usleep(1000) }
+        }
+        XCTAssertThrowsError(try owner.prepare(path: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)) {
+            XCTAssertEqual($0 as? CommandExecutionError, .unavailable)
+        }
+        XCTAssertThrowsError(try owner.release()) { XCTAssertEqual($0 as? CommandExecutionError, .unavailable) }
+        XCTAssertTrue(owner.dispose())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+    func testNativeDispatchPreSpawnValidationFailureRetainsUnknownUntilCommitRecovers() throws {
+        for checkpointed in [false, true] {
+            for runtimeFailure in [false, true] {
+                let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: marker) }
+                let test = try nativeDispatchFixture(checkpointed: checkpointed, path: "/usr/bin/touch",
+                    arguments: [Data("touch".utf8), Data(marker.path.utf8)])
+                let clock = TerminalCommitClock(now: test.fixture.now(130), failStartingCall: 3)
+                XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher,
+                    clock: clock.read, runtimeFailure: runtimeFailure, launcherFailure: !runtimeFailure)) {
+                    XCTAssertEqual($0 as? CommandExecutionError, .policyChanged)
+                }
+                XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
+                XCTAssertEqual(test.authority.activeCommandCount, 1)
+                let id = test.request.requestID
+                XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .authorized)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+                XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher))
+                clock.recover()
+                try awaitDispatchCleanup(test.authority)
+                let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+                XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 1)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+                XCTAssertThrowsError(try receiver(test.terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+            }
+        }
     }
     func testNativeDispatchTransientClockFailureRetainsOutcomeUntilDurableUnknownCommits() throws {
         for checkpointed in [false, true] {

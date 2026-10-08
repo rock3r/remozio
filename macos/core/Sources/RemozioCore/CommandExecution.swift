@@ -10,11 +10,14 @@ final class CommandExecution {
     let approval: CommandExecutionApproval
     let clock: () throws -> AuthorityMoment
     let receiptTime: () -> UInt64?
-    let callerExpression: String
-    let callerUserID: uid_t
-    let callerSessionID: au_asid_t?
-    let validateLauncher: () throws -> Void
-    let validateElevation: (CommandCapture) throws -> Void
+    private struct Validation {
+        let callerExpression: String
+        let callerUserID: uid_t
+        let callerSessionID: au_asid_t?
+        let launcher: () throws -> Void
+        let elevation: (CommandCapture) throws -> Void
+    }
+    private let validation: Validation?
     private var process: OpaquePointer?
     private var released = false
     private var cancelledBeforeRelease = false
@@ -23,18 +26,37 @@ final class CommandExecution {
     var dispatchRevision: UInt64 = 0
     var terminalCommitFailed = false
 
-    init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,
-         clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64?,
-         callerExpression: String, callerUserID: uid_t, callerSessionID: au_asid_t?,
-         validateLauncher: @escaping () throws -> Void, validateElevation: @escaping (CommandCapture) throws -> Void) {
+    private init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,
+                 clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64?, validation: Validation?) {
         self.resources = resources; self.approval = approval; self.clock = clock; self.receiptTime = receiptTime
-        self.callerExpression = callerExpression; self.callerUserID = callerUserID; self.callerSessionID = callerSessionID
-        self.validateLauncher = validateLauncher; self.validateElevation = validateElevation
+        self.validation = validation
+    }
+    convenience init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,
+                     clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64?,
+                     callerExpression: String, callerUserID: uid_t, callerSessionID: au_asid_t?,
+                     validateLauncher: @escaping () throws -> Void, validateElevation: @escaping (CommandCapture) throws -> Void) {
+        self.init(resources: resources, approval: approval, clock: clock, receiptTime: receiptTime,
+            validation: Validation(callerExpression: callerExpression, callerUserID: callerUserID,
+                callerSessionID: callerSessionID, launcher: validateLauncher, elevation: validateElevation))
+    }
+    /// Retains only a failed pre-spawn outcome. This owner has no runtime validation and cannot spawn.
+    convenience init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,
+                     clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64?) {
+        self.init(resources: resources, approval: approval, clock: clock, receiptTime: receiptTime, validation: nil)
+    }
+    func validateLauncher() throws {
+        guard let validation else { throw CommandExecutionError.unavailable }
+        try validation.launcher()
+    }
+    func validateElevation(_ capture: CommandCapture) throws {
+        guard let validation else { throw CommandExecutionError.unavailable }
+        try validation.elevation(capture)
     }
 
     /// A failed spawn can still return a live child. Retain and retire that child through ordinary polling.
     func prepare(path: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
-        guard resources.capture.ioMode == .pipes else { throw CommandExecutionError.unavailable }
+        guard validation != nil, !disposed, !released, !cancelledBeforeRelease, process == nil,
+              resources.capture.ioMode == .pipes else { throw CommandExecutionError.unavailable }
         let frame = try CommandChildLaunchSpecification(capture: resources.capture,
             preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask).canonicalBytes
         try validateLauncher(); try validateElevation(resources.capture)
@@ -50,7 +72,9 @@ final class CommandExecution {
     }
 
     func recheck() throws {
-        try resources.recheck(expression: callerExpression, userID: callerUserID, auditSessionID: callerSessionID)
+        guard let validation else { throw CommandExecutionError.unavailable }
+        try resources.recheck(expression: validation.callerExpression, userID: validation.callerUserID,
+            auditSessionID: validation.callerSessionID)
     }
 
     /// Call only after the dispatch transition commits and all final checks pass.
@@ -84,8 +108,9 @@ final class CommandExecution {
             return .terminal(.unknown)
         }
         if released {
-            if resources.capture.disconnectBehavior == .terminate {
-                do { try resources.recheckCaller(expression: callerExpression, userID: callerUserID, auditSessionID: callerSessionID) }
+            if resources.capture.disconnectBehavior == .terminate, let validation {
+                do { try resources.recheckCaller(expression: validation.callerExpression, userID: validation.callerUserID,
+                    auditSessionID: validation.callerSessionID) }
                 catch { _ = remozio_command_process_cancel(process) }
             }
             return .running
