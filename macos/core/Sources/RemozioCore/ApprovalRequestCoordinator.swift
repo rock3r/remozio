@@ -86,6 +86,7 @@ public final class ApprovalRequestCoordinator {
     private let auditLimits: CBORLimits
     private var lastTime: UInt64?
     private var stopped = false
+    var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
     private var deliveryBytes = 0
@@ -104,6 +105,7 @@ public final class ApprovalRequestCoordinator {
         var delivery: PendingRequestDelivery?
         var frame: Data?
         var frameKey: Data?
+        var commandApprovalEnrollment: CommandApprovalEnrollment?
     }
     private var entries: [Data: Entry] = [:]
     private var expiryNotifications: [Data: ApprovalRequestState] = [:]
@@ -391,14 +393,21 @@ public final class ApprovalRequestCoordinator {
         let decision = try DecisionPayload.decode(canonicalDecision, limits: decisionLimits)
         guard decision.phoneID == authenticatedPhoneID else { throw ApprovalCoordinatorError.wrongPhone }
         let retained = try pending(decision.requestID, now: now, receiptTimeMs: receiptTimeMs)
-        let receipt = try write { tx in
+        let (receipt, enrollment) = try write { tx in
             let trust = try tx.requestDeliveryTrust()
-            guard trust.enrollments.contains(where: {
+            guard let enrollment = trust.enrollments.first(where: {
                 $0.approval.phoneID == authenticatedPhoneID && $0.epoch == authenticatedEnrollmentEpoch && $0.approval.active
             }) else { throw EnrollmentJournalError.unavailableEnrollment }
-            return try tx.consume(canonicalDecision: canonicalDecision, signature: signature, retained: retained,
+            let receipt = try tx.consume(canonicalDecision: canonicalDecision, signature: signature, retained: retained,
                 expectedTrustRevision: trust.approval.revision, now: now, eventID: random(16), receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedHead: head(tx), requestLimits: requestLimits, signingLimits: signingLimits)
+            guard let key = enrollment.approval.keys.first(where: { $0.id == decision.keyID }) else {
+                throw DecisionVerificationError.wrongKey
+            }
+            return (receipt, CommandApprovalEnrollment(epoch: enrollment.epoch, key: key))
+        }
+        if retained.payload.contract.requestKind == .command, receipt.event.outcome == .accepted {
+            entries[decision.requestID]?.commandApprovalEnrollment = enrollment
         }
         _ = try replace(decision.requestID, phase: receipt.event.outcome == .noDispatch ? .declined : .authorized,
             reason: receipt.event.outcome == .noDispatch ? .declined : .none, now: now, decisionPhoneID: receipt.decision.phoneID)
@@ -660,6 +669,19 @@ public final class ApprovalRequestCoordinator {
         guard let entry = entries[requestID], let retained = entry.retained,
               retained.phase == .authorized || retained.phase == .executing else { throw ApprovalCoordinatorError.notPending }
         return retained
+    }
+
+    /// Current original approval metadata for the internal controller. This snapshot grants no dispatch permission.
+    func authorizedCommandApproval(requestID: Data, now: AuthorityMoment) throws -> CommandExecutionApproval {
+        try checkClock(now)
+        guard let entry = entries[requestID], entry.state.phase == .authorized,
+              let retained = entry.retained, retained.payload.contract.requestKind == .command,
+              entry.command != nil, let enrollment = entry.commandApprovalEnrollment, let outcome = try read({ try $0.consumptionOutcome(requestID: requestID) }),
+              outcome.phase == .authorized, outcome.revision == 0,
+              outcome.receipt.decision.action.choice == .execute,
+              outcome.receipt.decision.requestDigest == entry.state.requestDigest,
+              outcome.receipt.decision.challenge == entry.state.challenge else { throw ApprovalCoordinatorError.notPending }
+        return CommandExecutionApproval(retained: retained, receipt: outcome.receipt, enrollment: enrollment)
     }
 
     /// Internal transfer to the same serialized Root execution owner. The result is non-Sendable and grants no release permission.
