@@ -18,6 +18,7 @@ public final class JournalDatabase {
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?
     private var consumption: ConsumptionJournal?
+    private var commandReplay: CommandSubmissionReplayJournal?
     private var gateway: GatewayAuthorityJournal?
     private var enrollment: EnrollmentJournal?
     private var routing: RoutingJournal?
@@ -31,22 +32,25 @@ public final class JournalDatabase {
     /// `initialize` is an explicit setup operation on an empty, already provisioned file. Never use it as recovery.
     public static func open(directoryPath: String, macID: Data, accountID: Data,
                             recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil) throws -> JournalDatabase {
+                            maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
+                            maximumCommandSubmissions: Int = 1_000_000) throws -> JournalDatabase {
         try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
                             recordLimits: recordLimits, descriptorLimits: descriptorLimits, decisionLimits: decisionLimits,
                             maximumConsumptions: maximumConsumptions, busyMilliseconds: busyMilliseconds,
-                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy)
+                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy, maximumCommandSubmissions: maximumCommandSubmissions)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
-         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil) throws {
+         maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
+         maximumCommandSubmissions: Int = 1_000_000) throws {
         self.lease = lease
         self.recordLimits = recordLimits
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
-                  maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
+                  maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max),
+                  maximumCommandSubmissions > 0, maximumCommandSubmissions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
                   migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9 || migrateFromVersion == 10 || migrateFromVersion == 11,
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
@@ -78,6 +82,7 @@ public final class JournalDatabase {
             let consumption = ConsumptionJournal(connection: connection, macID: macID, accountID: accountID,
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
+            commandReplay = CommandSubmissionReplayJournal(connection: connection, macID: macID, accountID: accountID, maximumRows: maximumCommandSubmissions)
             enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
             if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
             if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy) }
@@ -144,6 +149,12 @@ public final class JournalDatabase {
         _ = try access(token)
         guard let consumption else { throw JournalDatabaseError.expiredTransaction }
         return consumption
+    }
+
+    fileprivate func commandReplayLedger(_ token: UUID) throws -> CommandSubmissionReplayJournal {
+        _ = try access(token)
+        guard let commandReplay else { throw JournalDatabaseError.expiredTransaction }
+        return commandReplay
     }
 
     fileprivate func gatewayLedger(_ token: UUID) throws -> GatewayAuthorityJournal {
@@ -247,7 +258,7 @@ public final class JournalDatabase {
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
         let version = try integer("PRAGMA user_version")
         guard try integer("PRAGMA application_id") == Self.applicationID,
-              expectedVersion.map({ version == $0 }) ?? (version == 12 || version == 13 || version == 14) else {
+              expectedVersion.map({ version == $0 }) ?? (12...15).contains(version) else {
             throw JournalDatabaseError.incompatibleStore
         }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
@@ -285,6 +296,7 @@ public final class JournalDatabase {
         if version >= 12 { queries.append("SELECT setup,phone,epoch,transcript,proof FROM main.pairing_commits_v1 LIMIT 0") }
         if version >= 14 { queries.append("SELECT epoch,evidence FROM main.history_recoveries_v1 LIMIT 0") }
         if version >= 13 { queries.append("SELECT id,revision,policy FROM main.authority_code_policy_v1 LIMIT 0") }
+        if version >= 15 { queries.append("SELECT mac,account,submission,nonce,caller,capture FROM main.command_submissions_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -293,6 +305,7 @@ public final class JournalDatabase {
     private func shutdown() {
         tables = nil
         consumption = nil
+        commandReplay = nil
         gateway = nil
         enrollment = nil
         routing = nil
@@ -348,6 +361,33 @@ public final class JournalTransaction {
     public func continuityDigests() throws -> JournalContinuityDigests {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.continuityDigests(token)
+    }
+
+    /// Explicit protected installation. Commit the schema change through CheckpointedJournal before accepting commands.
+    public func installCommandSubmissionReplay() throws {
+        try withCommandReplay(write: true) { try $0.install() }
+    }
+
+    /// Reserve the ID and nonce together. The host supplies verified capture metadata and separate admission gates.
+    /// Publish this historical result only after both durable stores commit. It grants no action authority.
+    public func reserveCommandSubmission(_ value: CommandSubmissionReservation) throws -> CommandSubmissionReservation {
+        try withCommandReplay(write: true) { try $0.reserve(value) }
+    }
+
+    public func commandSubmissionReservation(submissionID: Data) throws -> CommandSubmissionReservation? {
+        try withCommandReplay(write: false) { try $0.read(submissionID: submissionID) }
+    }
+
+    private func withCommandReplay<T>(write: Bool, _ body: (CommandSubmissionReplayJournal) throws -> T) throws -> T {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.commandReplayLedger(token))
+        } catch {
+            failed = true
+            if error as? CommandSubmissionReplayError == .corruptData || error as? AuthorityCodePolicyError == .corruptData { headMismatch = true }
+            throw error
+        }
     }
 
     func historyRecovery(epoch: Data) throws -> HistoryRecoveryIntent? {

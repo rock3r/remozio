@@ -8,6 +8,138 @@ import RemozioProtocol
 final class CheckpointedJournalTests: XCTestCase {
     private enum Fault: Error { case injected }
 
+    private func commandReservation() throws -> CommandSubmissionReservation {
+        try CommandSubmissionReservation(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            submission: CapturedSubmission(id: Data(repeating: 8, count: 16), nonce: Data(repeating: 9, count: 32),
+                callerBinding: Data(repeating: 10, count: 16)), captureDigest: Data(repeating: 11, count: 32))
+    }
+    private func installCommandReplay(_ fixture: Fixture) throws -> CheckpointedJournal {
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        try commits.write(epoch: fixture.epoch) { try $0.installCommandSubmissionReplay() }
+        return commits
+    }
+
+    func testCommandReplayCheckpointAndReservationSurviveRestartWithoutCreatingAnAuditEvent() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+        let before = try fixture.store.read().committed
+        XCTAssertEqual(try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }, value)
+        let after = try fixture.store.read().committed
+        XCTAssertNotEqual(before.authorityDigest, after.authorityDigest)
+        XCTAssertEqual(before.ledgerDigest, after.ledgerDigest)
+        XCTAssertEqual(after.journalHead, 0)
+        XCTAssertEqual(after.generation, before.generation + 1)
+        try fixture.reopen()
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(after))
+        let restarted = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertEqual(try restarted.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, value)
+        XCTAssertThrowsError(try restarted.write(epoch: fixture.epoch, recoverRejectedBody: true) { try $0.reserveCommandSubmission(value) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+        }
+        XCTAssertFalse(restarted.retired)
+        XCTAssertEqual(try fixture.store.read().committed, after)
+    }
+
+    func testCommandReplayMalformedSubmissionFieldsAreRejectedBeforeCheckpointWork() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+        let before = try fixture.store.read()
+        for (field, expected) in [(0, 16), (1, 32), (2, 16)] {
+            for length in [0, expected - 1, expected + 1] {
+                let wrong = Data(repeating: 7, count: length)
+                let binding = CapturedSubmission(id: field == 0 ? wrong : value.submission.id,
+                    nonce: field == 1 ? wrong : value.submission.nonce,
+                    callerBinding: field == 2 ? wrong : value.submission.callerBinding)
+                XCTAssertThrowsError(try CommandSubmissionReservation(macID: value.macID, accountID: value.accountID,
+                    submission: binding, captureDigest: value.captureDigest)) {
+                    XCTAssertEqual($0 as? CommandSubmissionReplayError, .invalidConfiguration)
+                }
+            }
+        }
+        XCTAssertFalse(commits.retired)
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertEqual(try commits.read { try $0.continuityDigests().authority }, before.committed.authorityDigest)
+        XCTAssertEqual(try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }, value)
+    }
+
+    func testCommandReplayCommitFailuresNeverReleaseAResultAndReconcileTheReservation() throws {
+        for finalize in [false, true] {
+            let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+            let before = try fixture.store.read().committed
+            let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
+            try fixture.sql("CREATE TRIGGER fail_replay BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END")
+            XCTAssertThrowsError(try commits.write(epoch: fixture.epoch, recoverRejectedBody: true) { try $0.reserveCommandSubmission(value) })
+            XCTAssertTrue(commits.retired)
+            let pending = try fixture.store.read().pending
+            XCTAssertEqual(pending != nil, finalize)
+            try fixture.sql("DROP TRIGGER fail_replay")
+            try fixture.reopen()
+            let result = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
+            if finalize { XCTAssertEqual(result, .finalized(try XCTUnwrap(pending))) }
+            else { XCTAssertEqual(result, .unchanged(before)) }
+            XCTAssertEqual(try fixture.journal.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, finalize ? value : nil)
+        }
+    }
+
+    func testCommandReplaySchemaMigrationReconcilesAfterPrepareOrFinalizeFailure() throws {
+        for finalize in [false, true] {
+            let fixture = try Fixture(), commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+            _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+            let before = try fixture.store.read().committed
+            let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
+            try fixture.sql("CREATE TRIGGER fail_replay_schema BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END")
+            XCTAssertThrowsError(try commits.write(epoch: fixture.epoch) { try $0.installCommandSubmissionReplay() })
+            XCTAssertTrue(commits.retired)
+            let pending = try fixture.store.read().pending
+            try fixture.sql("DROP TRIGGER fail_replay_schema")
+            try fixture.reopen()
+            let result = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
+            if finalize {
+                XCTAssertEqual(result, .finalized(try XCTUnwrap(pending)))
+                XCTAssertNil(try fixture.journal.read { try $0.commandSubmissionReservation(submissionID: Data(repeating: 8, count: 16)) })
+            } else {
+                XCTAssertEqual(result, .unchanged(before))
+                XCTAssertThrowsError(try fixture.journal.read { try $0.commandSubmissionReservation(submissionID: Data(repeating: 8, count: 16)) }) {
+                    XCTAssertEqual($0 as? CommandSubmissionReplayError, .unavailable)
+                }
+            }
+            XCTAssertEqual(try fixture.journal.read { try $0.codePolicy()?.policy }, try codePolicy())
+        }
+    }
+
+    func testMissingCommandReplayReservationRequiresRepairInsteadOfHistoryRecovery() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
+        try fixture.sql("DELETE FROM command_submissions_v1", journal: true)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .repairRequired)
+        XCTAssertTrue(try fixture.store.read().recoveryRequired)
+        XCTAssertThrowsError(try recoverHistory(fixture)) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+        }
+        XCTAssertThrowsError(try fixture.store.historyRecovery()) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .recoveryRequired)
+        }
+    }
+
+    func testAuditHistoryRecoveryPreservesCommandReplayReservationsAndSchema() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
+        let before = try fixture.store.read().committed
+        try fixture.journal.write { try fixture.append($0) }
+        let recovered = try recoverHistory(fixture)
+        XCTAssertNotEqual(before.journalEpoch, recovered.journalEpoch)
+        XCTAssertEqual(before.authorityDigest, recovered.authorityDigest)
+        XCTAssertEqual(try fixture.journal.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, value)
+        XCTAssertNotNil(try fixture.journal.read { try $0.historyRecovery(epoch: recovered.journalEpoch) })
+        try fixture.reopen()
+        XCTAssertEqual(try recoverHistory(fixture), recovered)
+        let restarted = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertThrowsError(try restarted.write(epoch: recovered.journalEpoch, recoverRejectedBody: true) { try $0.reserveCommandSubmission(value) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+        }
+        XCTAssertFalse(restarted.retired)
+        XCTAssertEqual(try restarted.read { try $0.codePolicy()?.policy }, try codePolicy())
+    }
+
     func testRejectedBodyCanContinueOnlyAfterVerifiedRollback() throws {
         let fixture = try Fixture(), before = try fixture.store.read()
         let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
