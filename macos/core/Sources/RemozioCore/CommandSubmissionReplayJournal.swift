@@ -79,6 +79,16 @@ final class CommandSubmissionReplayJournal {
         return value
     }
 
+    /// A scoped absence observation covers both identifiers. It grants no retry authority by itself.
+    func contains(_ submission: CapturedSubmission) throws -> Bool {
+        try requireInstalled()
+        guard submission.id.count == 16, submission.nonce.count == 32, submission.callerBinding.count == 16 else {
+            throw CommandSubmissionReplayError.invalidConfiguration
+        }
+        return try statement("SELECT 1 FROM main.command_submissions_v1 WHERE mac=? AND account=? AND (submission=? OR nonce=?) LIMIT 1",
+            values: [macID, accountID, submission.id, submission.nonce]) { try step($0) == SQLITE_ROW }
+    }
+
     func read(submissionID: Data) throws -> CommandSubmissionReservation? {
         try requireInstalled()
         guard submissionID.count == 16 else { throw CommandSubmissionReplayError.invalidConfiguration }

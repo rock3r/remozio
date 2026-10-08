@@ -14,7 +14,7 @@ public final class RetainedCommandCapture {
     private let filesystem: CommandFilesystemCapture
     let admissionProfile: CommandHandshakeProfile?
     let submissionDigest: Data
-    private let admissionReply: MachCommandReplyRight?
+    private var admissionReply: MachCommandReplyRight?
     private var closed = false
     private var requestOwned = false
 
@@ -127,13 +127,13 @@ public final class RetainedCommandCapture {
         try admissionReply.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
     }
 
-    /// The serialized owner supplies actual state. A failed delivery cannot change an admitted request.
-    func sendAdmissionOutcome(_ outcome: CommandAdmissionOutcome, macID: Data, accountID: Data) throws {
-        guard let profile = admissionProfile, profile.supportsAdmissionResults else { return }
-        guard profile.macID == macID, profile.accountID == accountID else { throw CommandAdmissionResultError.wrongBinding }
-        let payload = CommandAdmissionResultPayload(profile: profile, submission: capture.submission,
-            submissionDigest: submissionDigest, outcome: outcome)
-        try sendAdmissionReply(payload.canonicalBytes)
+    /// Detach only after the first request transfer. Recheck cleanup cannot close the attempt owner's reply.
+    func takeAdmissionReply() throws -> MachCommandReplyRight? {
+        guard requestOwned, !closed else { throw RetainedCommandCaptureError.closed }
+        guard admissionProfile?.supportsAdmissionResults == true else { return nil }
+        let reply = admissionReply
+        admissionReply = nil
+        return reply
     }
 
     public func close() {

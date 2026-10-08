@@ -456,14 +456,190 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
-    func testTypedDraftRejectionDoesNotClaimNoAdmissionProof() throws {
-        let fixture = try CommandRequestFixture(), reply = try Endpoint(), (command, submission, profile) = try typedRequestCommand(reply: reply)
-        XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: fixture.draft(command, capture: Data([0xa0]))))
+    private func typedOutcome(_ reply: Endpoint, submission: CommandSubmission, profile: CommandHandshakeProfile) throws -> CommandAdmissionOutcome {
         let raw = try receiver(reply, maximum: 4096).receiveAdmissionReply(timeoutMilliseconds: 1000)
         defer { raw.caller.close() }
-        let result = try CommandAdmissionResultPayload.decode(raw.payload, profile: profile, original: submission)
-        XCTAssertEqual(result.outcome, .uncertain(.admissionRejected)); XCTAssertEqual(result.retryClass, .never)
-        XCTAssertNil(try fixture.reservation(submission.binding.id))
+        return try CommandAdmissionResultPayload.decode(raw.payload, profile: profile, original: submission).outcome
+    }
+
+    func testTypedDraftRejectionProvesBothIdentifiersAbsent() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply)
+            let before = try fixture.auditRecordCount, baseline = try sendReferences(reply.port)
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: fixture.draft(command, capture: Data([0xa0]))))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
+            XCTAssertEqual(try sendReferences(reply.port), baseline - 1)
+            XCTAssertEqual(try fixture.auditRecordCount, before); XCTAssertNil(try fixture.reservation(submission.binding.id))
+            XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+        }
+    }
+
+    func testTypedOwnedJournalRefusalKeepsItsReplyAndAllowsIndependentFreshAdmission() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply)
+            XCTAssertThrowsError(try admitOwnedCommand(command, fixture: fixture, draft: fixture.draft(command, capture: Data([0xa0]))))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
+            XCTAssertNil(try fixture.reservation(submission.binding.id))
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+            let freshReply = try Endpoint()
+            let binding = CapturedSubmission(id: Data(repeating: 88, count: 16), nonce: Data(repeating: 89, count: 32), callerBinding: assemblyBinding)
+            let (fresh, original, selected) = try typedRequestCommand(reply: freshReply, binding: binding)
+            let request = try admitOwnedCommand(fresh, fixture: fixture)
+            XCTAssertNotNil(try fixture.reservation(original.binding.id))
+            guard case .admitted(let identity) = try typedOutcome(freshReply, submission: original, profile: selected) else {
+                return XCTFail("Fresh request was not admitted")
+            }
+            XCTAssertEqual(identity.requestID, request.requestID)
+            try fresh.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        }
+    }
+
+    func testTypedCapacityRefusalPreservesExistingRequestAndStorage() throws {
+        for checkpointed in [false, true] {
+            for journalCapacity in [false, true] {
+                let fixture = try CommandRequestFixture(maximumRequests: journalCapacity ? 8 : 1,
+                    checkpointed: checkpointed, maximumSubmissions: journalCapacity ? 1 : 30)
+                let firstReply = try Endpoint(), (first, _, _) = try typedRequestCommand(reply: firstReply)
+                let request = try admitCommand(first, fixture: fixture), before = try fixture.auditRecordCount
+                let secondReply = try Endpoint()
+                let binding = CapturedSubmission(id: Data(repeating: 88, count: 16), nonce: Data(repeating: 89, count: 32), callerBinding: assemblyBinding)
+                let (second, submission, profile) = try typedRequestCommand(reply: secondReply, binding: binding)
+                XCTAssertThrowsError(try admitCommand(second, fixture: fixture))
+                XCTAssertEqual(try typedOutcome(secondReply, submission: submission, profile: profile), .notAdmitted(.capacityExceeded, .never))
+                XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+                try first.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+                XCTAssertEqual(try fixture.auditRecordCount, before)
+                XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+            }
+        }
+    }
+
+    func testTypedRolledBackStorageFailureCanProveNoAdmission() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply), before = try fixture.auditRecordCount
+            try fixture.sql("CREATE TRIGGER fail_command_insert BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'fixture write failure'); END")
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.storageUnavailable, .storageUnavailable))
+            XCTAssertEqual(try fixture.auditRecordCount, before)
+            XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+        }
+    }
+
+    func testTypedCheckpointFailureNeverClaimsNoAdmissionEvenAfterJournalCommit() throws {
+        for prepare in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: true), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply), before = try fixture.auditRecordCount
+            let condition = prepare ? "NEW.pending IS NOT NULL" : "NEW.pending IS NULL"
+            try fixture.sql("CREATE TRIGGER fail_command_checkpoint BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'fixture checkpoint failure'); END", continuity: true)
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.storageFailure))
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+            XCTAssertEqual(try fixture.auditRecordCount, before + (prepare ? 0 : 1))
+            XCTAssertTrue(try XCTUnwrap(fixture.continuity).read().pending != nil || prepare)
+        }
+    }
+
+    func testTypedProtocolDraftRefusalsRequireAbsenceBeforeReportingTheirExactReason() throws {
+        for checkpointed in [false, true] {
+            for kind in 0..<3 {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+                let (command, submission, profile) = try typedRequestCommand(reply: reply), base = fixture.draft(command)
+                let contract = try kind == 0 ? RequestContract(requestKind: .command, wireVersion: 2, schemaVersion: base.contract.schemaVersion) : base.contract
+                let draft = ApprovalRequestDraft(contract: contract, requiredFeatures: base.requiredFeatures, capture: base.capture, actions: base.actions,
+                    firstObservedAt: base.firstObservedAt, deadlineMilliseconds: base.deadlineMilliseconds,
+                    createdUnixMilliseconds: kind == 0 ? base.createdUnixMilliseconds : base.expiresUnixMilliseconds + UInt64(kind - 1),
+                    expiresUnixMilliseconds: base.expiresUnixMilliseconds)
+                let before = try fixture.auditRecordCount
+                XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: draft)) {
+                    XCTAssertEqual($0 as? IssuedRequestError, kind == 0 ? .unsupportedContract : .invalidTimes)
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile),
+                    .notAdmitted(kind == 0 ? .unsupported : .invalidRequest, .never))
+                XCTAssertEqual(try fixture.auditRecordCount, before)
+                XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+                XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            }
+        }
+    }
+
+    func testTypedProtocolErrorsFromCallbacksStillCannotClaimNoAdmission() throws {
+        for checkpointed in [false, true] {
+            for failure: IssuedRequestError in [.unsupportedContract, .invalidTimes] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+                let (command, submission, profile) = try typedRequestCommand(reply: reply)
+                XCTAssertThrowsError(try admitCommand(command, fixture: fixture, checkCancellation: { throw failure })) {
+                    XCTAssertEqual($0 as? IssuedRequestError, failure)
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+                XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+            }
+        }
+    }
+
+    func testTypedUnsupportedContractRefusalUsesVerifiedRollback() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply), base = fixture.draft(command)
+            let draft = ApprovalRequestDraft(contract: base.contract, requiredFeatures: [999], capture: base.capture, actions: base.actions,
+                firstObservedAt: base.firstObservedAt, deadlineMilliseconds: base.deadlineMilliseconds,
+                createdUnixMilliseconds: base.createdUnixMilliseconds, expiresUnixMilliseconds: base.expiresUnixMilliseconds)
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: draft)) {
+                XCTAssertEqual($0 as? DecisionVerificationError, .unsupportedContract)
+            }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.unsupported, .never))
+            XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+        }
+    }
+
+    func testTypedAbsenceProofCoversHistoricalNonceAndSubmissionSeparately() throws {
+        for checkpointed in [false, true] {
+            for reuseNonce in [false, true] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed), firstReply = try Endpoint()
+                let (first, original, _) = try typedRequestCommand(reply: firstReply)
+                let request = try admitCommand(first, fixture: fixture)
+                _ = try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled, now: fixture.now(120), receiptTimeMs: nil)
+                let binding = CapturedSubmission(id: reuseNonce ? Data(repeating: 88, count: 16) : original.binding.id,
+                    nonce: reuseNonce ? original.binding.nonce : Data(repeating: 89, count: 32), callerBinding: assemblyBinding)
+                let reply = try Endpoint(), (command, submission, profile) = try typedRequestCommand(reply: reply, binding: binding)
+                XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: fixture.draft(command, capture: Data([0xa0]))))
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.duplicateSubmission))
+                XCTAssertTrue(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+                if reuseNonce { XCTAssertNil(try fixture.reservation(submission.binding.id)) }
+            }
+        }
+    }
+
+    func testTypedCallbackErrorsCannotForgeAnOwnerRefusalAndRetainReplyAfterCleanup() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply)
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture, checkCancellation: { throw ApprovalCoordinatorError.capacityExceeded }))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+            XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+        }
+    }
+
+    func testTypedFailedAbsenceReadRemainsUncertainAndClosesAllResources() throws {
+        for failure in 0..<3 {
+            let fixture = try CommandRequestFixture(checkpointed: true), reply = try Endpoint()
+            let (command, submission, profile) = try typedRequestCommand(reply: reply)
+            if failure == 0 { try fixture.db.close() }
+            if failure == 1 { try fixture.sql("UPDATE audit_epochs_v1 SET head=X'0000000000000002'") }
+            if failure == 2 { XCTAssertEqual(chmod(fixture.root.appendingPathComponent("store/journal.sqlite").path, 0o644), 0) }
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: fixture.draft(command, capture: Data([0xa0]))))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.storageFailure))
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
     }
 
     func testTypedAdmissionNegotiatesTheNewWireAndMatchesItsOriginalSubmission() throws {
