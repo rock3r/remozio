@@ -126,6 +126,8 @@ func transfer(host: CommandReceiveHost, journal: AuthorityJournal, peer: XPCPeer
         probes["host-command-reuse"] = (host_prefix + host_body.replace("receiptTimeMs: nil)", "receiptTimeMs: nil)\n        command.close()") + "}\n", False)
         probes["host-command-alias-reuse"] = (host_prefix + host_body.replace("        _ = try journal.admitCommand", "        let alias = command\n        _ = try journal.admitCommand").replace("receiptTimeMs: nil)", "receiptTimeMs: nil)\n        alias.close()") + "}\n", False)
         probes["host-run-valid"] = (host_prefix + host_body.replace("_ = try host.poll", "try host.run") + "}\n", True)
+        probes["proof-observe-valid"] = ("import RemozioCore\nfunc observe(_ result: VerifiedCommandAdmissionResult) -> CommandAdmissionRetryClass { result.retryClass }\n", True)
+        probes["proof-forge"] = ("import RemozioCore\nfunc forge() -> VerifiedCommandAdmissionResult { VerifiedCommandAdmissionResult() }\n", False)
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
@@ -137,11 +139,13 @@ func transfer(host: CommandReceiveHost, journal: AuthorityJournal, peer: XPCPeer
             ], capture_output=True, text=True, timeout=60)
             if accepted:
                 passed = result.returncode == 0
+            elif name == "proof-forge":
+                passed = result.returncode != 0 and "fileprivate" in result.stderr
             else:
                 passed = result.returncode != 0 and "SendingRisksDataRace" in result.stderr
             if not passed:
                 raise SystemExit("Command ownership probe failed: " + name + "\n" + result.stderr[:4096])
-    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected.")
+    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected; verified result construction remains private.")
 
 
 if __name__ == "__main__":

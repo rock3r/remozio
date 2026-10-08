@@ -30,7 +30,8 @@ sequenceDiagram
 The handshake envelope format is version 1. It is a Mac-local protocol, separate from the phone protocol.
 The default profile implements wire version 1, command submission schema 1, and input carrier version 2.
 An explicit [admission reply profile](macos-command-admission-replies.md) supports input carrier 3 and its private reply right. It does not negotiate retry authority.
-The frontend advertises explicit sets. Root selects the highest common implemented version in each set.
+The frontend advertises explicit sets. Root selects the highest common implemented wire/carrier pair.
+The [typed result contract](macos-command-admission-results.md) uses wire 2 with input carrier 3; legacy combinations remain supported.
 There is no fallback to a carrier without the original input fileport.
 An authenticated incompatibility reply creates no retained session.
 Unknown fields, malformed sets, unsupported selections, changed scope, and wrong nonces fail without submitting a command.

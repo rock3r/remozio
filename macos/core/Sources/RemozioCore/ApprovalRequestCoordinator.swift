@@ -176,14 +176,31 @@ public final class ApprovalRequestCoordinator {
     private func admitCommand(_ command: RetainedCommandCapture, draft: ApprovalRequestDraft,
                               now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?, recheck: () throws -> Void) throws -> IssuedRequestPayload {
         try command.claimForRequestOwner()
+        let payload: IssuedRequestPayload
         do {
+            if let profile = command.admissionProfile, profile.supportsAdmissionResults {
+                guard profile.macID == mac, profile.accountID == account else { throw ApprovalCoordinatorError.invalidDraft }
+            }
             let actions: Set<CapturedAction> = [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)]
             guard draft.contract.requestKind == .command, draft.contract.schemaVersion == command.capture.schemaVersion,
                   draft.capture == command.capture.canonicalBytes, draft.actions.count == actions.count,
                   Set(draft.actions) == actions else { throw ApprovalCoordinatorError.invalidDraft }
             try recheck()
-            return try admit(draft, command: command, now: now(), receiptTimeMs: receiptTimeMs)
-        } catch { command.close(); throw error }
+            payload = try admit(draft, command: command, now: now(), receiptTimeMs: receiptTimeMs)
+        } catch {
+            let reason: CommandAdmissionUncertainty = error as? CommandSubmissionReplayError == .alreadyReserved
+                ? .duplicateSubmission : .admissionRejected
+            // Rejection alone proves no rollback or historical absence. It cannot authorize a fresh submission.
+            try? command.sendAdmissionOutcome(.uncertain(reason), macID: mac, accountID: account)
+            command.close(); throw error
+        }
+        // Admission is complete. Reply loss must not enter rejection cleanup or close the retained command.
+        if command.admissionProfile?.supportsAdmissionResults == true, let state = entries[payload.requestID]?.state {
+            let identity = CommandAdmittedRequest(requestID: state.requestID, requestDigest: state.requestDigest, challenge: state.challenge)
+            do { try command.sendAdmissionOutcome(.admitted(identity), macID: mac, accountID: account) }
+            catch { /* The client observes uncertainty. The admitted request keeps its normal lifetime. */ }
+        }
+        return payload
     }
 
     /// Admits a non-command adapter draft. Commands require the retained-object transfer in `admitCommand`.
