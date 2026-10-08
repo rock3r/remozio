@@ -3919,12 +3919,14 @@ extension MachCommandCallerReceiverTests {
 }
 
 extension MachCommandCallerReceiverTests {
-    private func ownerIOCommand(admission: Endpoint, terminal: Endpoint) throws ->
+    private func ownerIOCommand(admission: Endpoint, terminal: Endpoint, inputDescriptor: Int32? = nil,
+                                executablePath: String = "/usr/bin/true") throws ->
         (ReceivedMachCommandInputSubmission, RetainedCommandCapture, CommandSubmission, CommandHandshakeProfile) {
-        let endpoint = try Endpoint(), input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        let endpoint = try Endpoint(), input = inputDescriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        let output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
         guard input >= 0, output >= 0 else { throw MachCommandCallerError.unavailable }
-        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
-        let submission = try commandSubmission()
+        defer { if inputDescriptor == nil { _ = Darwin.close(input) }; _ = Darwin.close(output) }
+        let submission = try commandSubmission(executablePath: executablePath)
         let profile = CommandHandshakeProfile(wireVersion: 3, submissionSchemaVersion: 1, inputCarrierVersion: 4,
             callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
         try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
@@ -4157,5 +4159,148 @@ extension MachCommandCallerReceiverTests {
                 XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
             }
         }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    func testExecutionResourceTransferRequiresConsumedOriginalCommandAndCannotRepeat() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed)
+            let admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            XCTAssertThrowsError(try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(115)))
+            XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+            _ = try fixture.consume(request)
+            let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+            defer { resources.close() }
+            XCTAssertEqual(resources.capture.canonicalBytes, request.canonicalCapture)
+            XCTAssertEqual(resources.request.requestID, request.requestID)
+            XCTAssertEqual(try sendReferences(terminalPort.port), 2)
+            command.close()
+            XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            XCTAssertThrowsError(try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130)))
+            try resources.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+            try resources.withBorrowedDescriptors { input, output, error, directory in
+                for fd in [input, output, error, directory] { XCTAssertGreaterThanOrEqual(fcntl(fd, F_GETFD), 0) }
+                var info = stat(); XCTAssertEqual(fstat(directory, &info), 0); XCTAssertEqual(info.st_mode & S_IFMT, S_IFDIR)
+            }
+            fixture.requests.close()
+            try resources.withBorrowedDescriptors { input, _, _, _ in XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0) }
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10))
+            try resources.sendTerminalOutcome(.unknown)
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .unknown)
+            XCTAssertThrowsError(try resources.sendTerminalOutcome(.unknown))
+            XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+        }
+    }
+
+    func testFinalExecutionRecheckRetiresStreamsButKeepsTheOriginalBoundTerminal() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed)
+            let admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try fixture.consume(request)
+            let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+            defer { resources.close() }
+            XCTAssertThrowsError(try resources.recheck(expression: "identifier \"dev.remozio.wrong\"", userID: geteuid(), auditSessionID: nil))
+            XCTAssertThrowsError(try resources.withBorrowedDescriptors { _, _, _, _ in () })
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertEqual(try sendReferences(terminalPort.port), 2)
+            _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 0,
+                event: .loseOutcome, now: fixture.now(130), receiptTimeMs: nil)
+            try resources.sendTerminalOutcome(.unknown)
+            let result = try ownerTerminal(terminalPort, submission: submission, admission: admission)
+            XCTAssertEqual(result.outcome, .unknown)
+            XCTAssertEqual(result.request.requestDigest, resources.request.requestDigest)
+            XCTAssertEqual(result.request.challenge, request.challenge)
+            XCTAssertEqual(result.submission, submission.binding)
+            XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10))
+        }
+    }
+
+    func testExecutionResourceTransferRejectsDeclinedOrAlreadyDispatchedRequests() throws {
+        for decline in [false, true] {
+            let fixture = try CommandRequestFixture()
+            let admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitCommand(command, fixture: fixture)
+            _ = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try fixture.consume(request, decline: decline)
+            if !decline {
+                _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 0,
+                    event: .beginDispatch, now: fixture.now(130), receiptTimeMs: nil)
+            }
+            XCTAssertThrowsError(try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130)))
+        }
+    }
+
+    func testExecutionTerminalFullQueueConsumesOneNonblockingAttempt() throws {
+        let fixture = try CommandRequestFixture()
+        let admissionPort = try Endpoint(), terminalPort = try Endpoint()
+        let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+        let request = try admitCommand(command, fixture: fixture)
+        _ = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try fixture.consume(request)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+        for _ in 0..<5 { try terminalPort.send(Data([1]), identifier: MachCommandCallerReceiver.terminalReplyMessageID) }
+        let started = DispatchTime.now().uptimeNanoseconds
+        XCTAssertThrowsError(try resources.sendTerminalOutcome(.unknown))
+        XCTAssertLessThan(DispatchTime.now().uptimeNanoseconds - started, 2_000_000_000)
+        XCTAssertThrowsError(try resources.sendTerminalOutcome(.unknown))
+        resources.close(); try expectAssemblyResourcesRetired(received)
+        XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testExecutionHandoffPreservesQueuedPipeInputAfterPendingOwnerCloses() throws {
+        var pipeFDs = [Int32](repeating: -1, count: 2)
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { for fd in pipeFDs { Darwin.close(fd) } }
+        let flags = fcntl(pipeFDs[0], F_GETFL)
+        XCTAssertGreaterThanOrEqual(flags, 0)
+        XCTAssertEqual(fcntl(pipeFDs[0], F_SETFL, flags | O_NONBLOCK), 0)
+        let original = Data("unread execution source".utf8)
+        XCTAssertEqual(original.withUnsafeBytes { write(pipeFDs[1], $0.baseAddress, $0.count) }, original.count)
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort, inputDescriptor: pipeFDs[0])
+        let request = try admitCommand(command, fixture: fixture)
+        _ = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try fixture.consume(request)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+        defer { resources.close() }
+        command.close(); fixture.requests.close()
+        var actual = [UInt8](repeating: 0, count: original.count)
+        try resources.withBorrowedDescriptors { input, _, _, _ in
+            XCTAssertEqual(read(input, &actual, actual.count), actual.count)
+        }
+        XCTAssertEqual(Data(actual), original)
+    }
+
+    func testChangedExecutableAtFinalRecheckKeepsOriginalTerminalWithoutReplacingCapture() throws {
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+        let path = fixture.root.appendingPathComponent("approved-program")
+        try Data(contentsOf: URL(fileURLWithPath: "/usr/bin/true")).write(to: path)
+        XCTAssertEqual(chmod(path.path, 0o700), 0)
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort, executablePath: path.path)
+        let request = try admitCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try fixture.consume(request)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+        defer { resources.close() }
+        try Data("replaced program bytes".utf8).write(to: path)
+        XCTAssertThrowsError(try resources.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil))
+        XCTAssertThrowsError(try resources.withBorrowedDescriptors { _, _, _, _ in () })
+        XCTAssertEqual(resources.capture.canonicalBytes, request.canonicalCapture)
+        _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 0,
+            event: .loseOutcome, now: fixture.now(130), receiptTimeMs: nil)
+        try resources.sendTerminalOutcome(.unknown)
+        XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .unknown)
     }
 }

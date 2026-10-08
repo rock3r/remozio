@@ -39,25 +39,36 @@ final class RetainedCommandOutputDescriptor {
 final class RetainedCommandOutputChannels {
     let output: RetainedCommandOutputDescriptor
     let error: RetainedCommandOutputDescriptor
-    private let result: MachCommandReplyRight
+    private var result: MachCommandReplyRight?
     private var closed = false
     init(output: RetainedCommandOutputDescriptor, error: RetainedCommandOutputDescriptor, result: MachCommandReplyRight) {
         self.output = output; self.error = error; self.result = result
     }
     func recheck() throws {
         guard !closed else { throw RetainedCommandOutputError.closed }
-        try output.recheck(); try error.recheck(); try result.recheck()
+        try recheckStreams(); guard let result else { throw RetainedCommandOutputError.closed }; try result.recheck()
     }
     func sendTerminalResult(_ bytes: Data, timeoutMilliseconds: UInt32) throws {
         guard !closed else { throw RetainedCommandOutputError.closed }
+        guard let result else { throw RetainedCommandOutputError.closed }
         try result.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
     }
     func sendTerminalNonblocking(_ bytes: Data) throws {
         guard !closed else { throw RetainedCommandOutputError.closed }
+        guard let result else { throw RetainedCommandOutputError.closed }
         try result.sendTerminalNonblocking(bytes)
     }
+    func recheckStreams() throws {
+        guard !closed else { throw RetainedCommandOutputError.closed }
+        try output.recheck(); try error.recheck()
+    }
+    func takeTerminalReply() throws -> MachCommandReplyRight {
+        guard !closed, let result else { throw RetainedCommandOutputError.closed }
+        self.result = nil
+        return result
+    }
     func close() {
-        if !closed { closed = true; output.close(); error.close(); result.close() }
+        if !closed { closed = true; output.close(); error.close(); result?.close(); result = nil }
     }
     deinit { close() }
 }
