@@ -151,7 +151,8 @@ public final class ApprovalRequestCoordinator {
     /// Transfers the command once. Callers cannot reuse the command or its aliases after this call.
     /// The draft must contain its exact capture and the command action set.
     /// A first transfer owns resources on success or failure. A repeated transfer leaves the existing owner intact.
-    /// The host must complete current elevation-policy validation, admission storage gates, and submission replay checks first.
+    /// The host must complete current elevation-policy validation and admission storage gates first.
+    /// This owner reserves the submission ID and nonce in the request creation transaction.
     /// The clock callback runs after the OS recheck. It must not reenter this owner or the journal.
     public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
@@ -219,6 +220,11 @@ public final class ApprovalRequestCoordinator {
             guard trust.allowedContracts.contains(payload.contract), let features = trust.authorityCapabilities.contracts[payload.contract],
                   payload.requiredFeatures.isSubset(of: features) else { throw DecisionVerificationError.unsupportedContract }
             guard try tx.consumption(requestID: payload.requestID) == nil else { throw ApprovalCoordinatorError.invalidDraft }
+            if let command {
+                let reservation = try CommandSubmissionReservation(macID: mac, accountID: account, submission: command.capture.submission,
+                    captureDigest: Data(SHA256.hash(data: command.capture.canonicalBytes)))
+                _ = try tx.reserveCommandSubmission(reservation)
+            }
             try append(tx, requestID: payload.requestID, category: category, kind: .requestCreated, outcome: .pending,
                 reason: .none, receiptTimeMs: receiptTimeMs)
         }

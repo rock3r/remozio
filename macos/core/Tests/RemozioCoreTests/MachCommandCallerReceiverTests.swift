@@ -743,14 +743,14 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         [.init(name: Data("PATH".utf8), value: Data("/synthetic/baseline".utf8), source: .minimal),
          .init(name: Data("HOME".utf8), value: Data("/synthetic/home".utf8), source: .minimal)]
     }
-    private func commandSubmission(executablePath: String = "/usr/bin/true") throws -> CommandSubmission {
+    private func commandSubmission(executablePath: String = "/usr/bin/true", binding: CapturedSubmission? = nil) throws -> CommandSubmission {
         try CommandSubmission(schemaVersion: 1, executablePath: Data(executablePath.utf8),
             arguments: [Data("custom argv0".utf8), Data(), Data([0xff, 0x0a, 0x22])],
             directoryPath: Data(FileManager.default.temporaryDirectory.path.utf8), requestedTargetUID: geteuid(),
             environmentAdditions: [.init(name: Data("HOME".utf8), value: Data("/synthetic/requested".utf8)),
                 .init(name: Data("RAW".utf8), value: Data([0xfe, 0x0a]))],
             ioMode: .pipes, disconnectBehavior: .terminate, unverifiedRationale: "pid=123, caller claim",
-            binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32), callerBinding: assemblyBinding),
+            binding: binding ?? .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32), callerBinding: assemblyBinding),
             limits: assemblyLimits)
     }
     private func assemble(_ received: ReceivedMachCommandInputSubmission, binding: Data? = nil, schema: UInt64 = 1,
@@ -927,7 +927,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let limits: CBORLimits
         let contract: RequestContract
         var continuity: ContinuityStore?
-        init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true, commandSchema: UInt64 = 1) throws {
+        init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true, commandSchema: UInt64 = 1,
+             installReplay: Bool = true, maximumSubmissions: Int = 30) throws {
             limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
             contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: commandSchema)
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
@@ -942,7 +943,16 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), epoch = Data(repeating: 3, count: 16)
             db = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                 macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+                maximumConsumptions: 30, busyMilliseconds: 100, initialize: true, maximumCommandSubmissions: maximumSubmissions)
+            if installReplay {
+                let policy = try AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .commandFrontend, teamID: "TEAMID1234",
+                    identifier: "dev.remozio.test.frontend", installedGeneration: 1, minimumGeneration: 1,
+                    codeDirectoryHash: Data(repeating: 1, count: 20), active: true)])
+                try db.write { transaction in
+                    _ = try transaction.installCodePolicy(policy, expectedRevision: nil)
+                    try transaction.installCommandSubmissionReplay()
+                }
+            }
             let contract = self.contract
             let capabilities = ContractCapabilities(contracts: [contract: []])
             let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
@@ -978,7 +988,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     let storage = try AuthorityStorage(openJournal: {
                         try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
                             macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                            maximumConsumptions: 30, busyMilliseconds: 100, initialize: false)
+                            maximumConsumptions: 30, busyMilliseconds: 100, initialize: false, maximumCommandSubmissions: maximumSubmissions)
                     }, openContinuity: { _ in
                         try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
                             macID: mac, accountID: account, initialize: nil)
@@ -998,7 +1008,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     try db.close()
                     let ownedDatabase = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                         macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                        maximumConsumptions: 30, busyMilliseconds: 100, initialize: false)
+                        maximumConsumptions: 30, busyMilliseconds: 100, initialize: false, maximumCommandSubmissions: maximumSubmissions)
                     let ownedDescriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
                         0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(Data(repeating: 4, count: 16)),
                         4: .unsigned(1), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
@@ -1040,6 +1050,23 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16), now: now(120), receiptTimeMs: nil)
         }
         var auditHead: UInt64 { get throws { try db.read { try XCTUnwrap($0.epoch(writer.epoch)).head } } }
+        var auditRecordCount: Int64 {
+            get throws {
+                var connection: OpaquePointer?, row: OpaquePointer?
+                guard sqlite3_open_v2(root.appendingPathComponent("store/journal.sqlite").path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+                      let connection else { throw MachCommandCallerError.unavailable }
+                defer { sqlite3_close(connection) }
+                guard sqlite3_prepare_v2(connection, "SELECT count(*) FROM audit_records_v1", -1, &row, nil) == SQLITE_OK,
+                      let row else { throw MachCommandCallerError.unavailable }
+                defer { sqlite3_finalize(row) }
+                guard sqlite3_step(row) == SQLITE_ROW else { throw MachCommandCallerError.unavailable }
+                return sqlite3_column_int64(row, 0)
+            }
+        }
+        func reservation(_ submissionID: Data) throws -> CommandSubmissionReservation? {
+            if let authority { return try authority.read { try $0.commandSubmissionReservation(submissionID: submissionID) } }
+            return try db.read { try $0.commandSubmissionReservation(submissionID: submissionID) }
+        }
         func sql(_ statement: String, continuity: Bool = false) throws {
             var connection: OpaquePointer?
             guard sqlite3_open(root.appendingPathComponent(continuity ? "continuity/continuity.sqlite" : "store/journal.sqlite").path, &connection) == SQLITE_OK,
@@ -1049,17 +1076,190 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
     private func admitCommand(_ command: RetainedCommandCapture, fixture: CommandRequestFixture,
-                              draft: ApprovalRequestDraft? = nil, userID: uid_t? = nil,
+                              draft: ApprovalRequestDraft? = nil, userID: uid_t? = nil, nowMilliseconds: UInt64 = 110,
                               checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
         try fixture.requests.admitCommand(command, draft: draft ?? fixture.draft(command), expression: selfExpression(),
-            userID: userID ?? geteuid(), auditSessionID: nil, now: { fixture.now() }, receiptTimeMs: nil, checkCancellation: checkCancellation)
+            userID: userID ?? geteuid(), auditSessionID: nil, now: { fixture.now(nowMilliseconds) }, receiptTimeMs: nil, checkCancellation: checkCancellation)
     }
-    private func requestCommand() throws -> (ReceivedMachCommandInputSubmission, RetainedCommandCapture) {
-        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+    private func requestCommand(binding: CapturedSubmission? = nil, inputFD: Int32? = nil) throws -> (ReceivedMachCommandInputSubmission, RetainedCommandCapture) {
+        let fd = inputFD ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else { throw MachCommandCallerError.unavailable }
-        defer { _ = Darwin.close(fd) }
-        let received = try inputSubmission(fd, payload: commandSubmission().canonicalBytes)
+        defer { if inputFD == nil { _ = Darwin.close(fd) } }
+        let received = try inputSubmission(fd, payload: commandSubmission(binding: binding).canonicalBytes)
         return (received, try assemble(received))
+    }
+
+    func testCommandReplayAdmissionCommitsOriginalBindingAndCaptureDigest() throws {
+        for checkpointed in [false, true] {
+            for owned in [false, true] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: owned)
+                let (_, command) = try requestCommand(), capture = command.capture, head = try fixture.auditRecordCount
+                let request = try owned ? admitOwnedCommand(command, fixture: fixture) : admitCommand(command, fixture: fixture)
+                let reserved = try XCTUnwrap(fixture.reservation(capture.submission.id))
+                XCTAssertEqual(reserved.macID, request.macID); XCTAssertEqual(reserved.accountID, request.accountID)
+                XCTAssertEqual(reserved.submission, capture.submission)
+                XCTAssertEqual(reserved.captureDigest, Data(SHA256.hash(data: capture.canonicalBytes)))
+                XCTAssertEqual(try fixture.auditRecordCount, head + 1)
+                if let store = fixture.continuity, !owned {
+                    let checkpoint = try store.read()
+                    XCTAssertNil(checkpoint.pending)
+                    XCTAssertEqual(checkpoint.committed.journalHead, UInt64(head + 1))
+                }
+                try command.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+            }
+        }
+    }
+
+    func testCommandReplayAdmissionRejectsIndependentIDAndNonceReuseWithoutRetiringFirstRequest() throws {
+        for checkpointed in [false, true] {
+            for owned in [false, true] {
+                for reusedID in [false, true] {
+                    let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: owned)
+                    var descriptors: [Int32] = [-1, -1]
+                    XCTAssertEqual(pipe(&descriptors), 0)
+                    defer { for fd in descriptors { _ = Darwin.close(fd) } }
+                    let queued = Data("original unread input".utf8)
+                    XCTAssertEqual(queued.withUnsafeBytes { Darwin.write(descriptors[1], $0.baseAddress, $0.count) }, queued.count)
+                    let (received, first) = try requestCommand(inputFD: descriptors[0]), binding = first.capture.submission
+                    let request = try owned ? admitOwnedCommand(first, fixture: fixture) : admitCommand(first, fixture: fixture)
+                    let before = try fixture.reservation(binding.id), head = try fixture.auditRecordCount
+                    let replay = CapturedSubmission(id: reusedID ? binding.id : Data(repeating: 0xc2, count: 16),
+                        nonce: reusedID ? Data(repeating: 0xc3, count: 32) : binding.nonce, callerBinding: binding.callerBinding)
+                    let (incoming, second) = try requestCommand(binding: replay)
+                    XCTAssertThrowsError(try owned ? admitOwnedCommand(second, fixture: fixture) : admitCommand(second, fixture: fixture)) {
+                        XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+                    }
+                    try expectAssemblyResourcesRetired(incoming)
+                    XCTAssertEqual(try fixture.auditRecordCount, head)
+                    XCTAssertEqual(try fixture.reservation(binding.id), before)
+                    if !reusedID { XCTAssertNil(try fixture.reservation(replay.id)) }
+                    let state: ApprovalRequestState
+                    if let authority = fixture.authority {
+                        state = try authority.withRequests { try $0.state(requestID: request.requestID) }
+                    } else { state = try fixture.requests.state(requestID: request.requestID) }
+                    XCTAssertEqual(state.phase, .queued)
+                    try received.caller.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+                    try first.withBorrowedInputDescriptor { fd in
+                        var bytes = [UInt8](repeating: 0, count: queued.count)
+                        XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), queued.count)
+                        XCTAssertEqual(Data(bytes), queued)
+                    }
+                }
+            }
+        }
+    }
+
+    func testCommandReplayAdmissionAuditFailureRollsBackReservationAndAllowsFreshCapture() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed), (received, command) = try requestCommand()
+            let binding = command.capture.submission, head = try fixture.auditRecordCount
+            let boundary = try fixture.continuity?.read()
+            try fixture.sql("CREATE TRIGGER reject_replay_admission BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture))
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertNil(try fixture.reservation(binding.id)); XCTAssertEqual(try fixture.auditRecordCount, head)
+            if let boundary { XCTAssertEqual(try fixture.continuity?.read(), boundary) }
+            try fixture.sql("DROP TRIGGER reject_replay_admission")
+            let (_, fresh) = try requestCommand(binding: binding)
+            _ = try admitCommand(fresh, fixture: fixture)
+            XCTAssertNotNil(try fixture.reservation(binding.id)); XCTAssertEqual(try fixture.auditRecordCount, head + 1)
+        }
+    }
+
+    func testCommandReplayAdmissionCapacityDoesNotEvictEvidenceOrCloseEarlierCommand() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, maximumSubmissions: 1)
+            let (_, first) = try requestCommand(), original = first.capture.submission
+            let request = try admitCommand(first, fixture: fixture), head = try fixture.auditRecordCount
+            let binding = CapturedSubmission(id: Data(repeating: 0xc2, count: 16), nonce: Data(repeating: 0xc3, count: 32),
+                callerBinding: original.callerBinding)
+            let (incoming, second) = try requestCommand(binding: binding)
+            XCTAssertThrowsError(try admitCommand(second, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandSubmissionReplayError, .capacityExceeded)
+            }
+            try expectAssemblyResourcesRetired(incoming)
+            XCTAssertEqual(try fixture.auditRecordCount, head); XCTAssertNil(try fixture.reservation(binding.id))
+            XCTAssertNotNil(try fixture.reservation(original.id))
+            XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
+            try first.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        }
+    }
+
+    func testCommandReplayAdmissionRequiresExplicitInstalledStoreBeforePublication() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, installReplay: false)
+            let (received, command) = try requestCommand(), head = try fixture.auditRecordCount
+            XCTAssertThrowsError(try admitCommand(command, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandSubmissionReplayError, .unavailable)
+            }
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertEqual(try fixture.auditRecordCount, head)
+            XCTAssertNil(try fixture.db.read { try $0.codePolicy() })
+        }
+    }
+
+    func testCommandReplayAdmissionPendingRetirementNeverFreesIDOrNonce() throws {
+        for checkpointed in [false, true] {
+            for decline in [false, true] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed), (_, command) = try requestCommand()
+                let binding = command.capture.submission, request = try admitCommand(command, fixture: fixture)
+                if decline { _ = try fixture.consume(request, decline: true) }
+                else { _ = try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled, now: fixture.now(120), receiptTimeMs: nil) }
+                let reserved = try fixture.reservation(binding.id), head = try fixture.auditRecordCount
+                let (received, replay) = try requestCommand(binding: binding)
+                XCTAssertThrowsError(try admitCommand(replay, fixture: fixture, nowMilliseconds: 120)) {
+                    XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+                }
+                try expectAssemblyResourcesRetired(received)
+                XCTAssertEqual(try fixture.reservation(binding.id), reserved); XCTAssertNotNil(reserved)
+                XCTAssertEqual(try fixture.auditRecordCount, head)
+            }
+        }
+    }
+
+    func testCommandReplayAdmissionRestartReconcilesAuditAndReservationTogether() throws {
+        for stage in 0..<3 {
+            let fixture = try CommandRequestFixture(checkpointed: true), (received, command) = try requestCommand()
+            let binding = command.capture.submission, captureDigest = Data(SHA256.hash(data: command.capture.canonicalBytes))
+            let originalStore = try XCTUnwrap(fixture.continuity), before = try originalStore.read().committed
+            let count = try fixture.auditRecordCount
+            var issued: IssuedRequestPayload?
+            if stage == 0 {
+                issued = try admitCommand(command, fixture: fixture)
+            } else {
+                let condition = stage == 1 ? "NEW.pending IS NOT NULL" : "NEW.pending IS NULL"
+                try fixture.sql("CREATE TRIGGER reject_admission_checkpoint BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END", continuity: true)
+                XCTAssertThrowsError(try issued = admitCommand(command, fixture: fixture))
+                XCTAssertNil(issued)
+                try expectAssemblyResourcesRetired(received)
+                try fixture.sql("DROP TRIGGER reject_admission_checkpoint", continuity: true)
+            }
+            let state = try originalStore.read()
+            XCTAssertEqual(state.pending != nil, stage == 2)
+            fixture.requests.close()
+            try expectAssemblyResourcesRetired(received)
+            try fixture.db.close(); originalStore.close()
+            let journal = try JournalDatabase(lease: ProtectedJournalLease(anchor: fixture.root.path, relativeDirectory: "store", owner: getuid()),
+                macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), recordLimits: fixture.limits,
+                descriptorLimits: fixture.limits, decisionLimits: fixture.limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: false)
+            let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path, relativeDirectory: "continuity", owner: getuid()),
+                macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), initialize: nil)
+            defer { try? journal.close(); store.close() }
+            let recovered = try JournalCheckpointRecovery.reconcile(journal: journal, continuity: store)
+            if stage == 2 { XCTAssertEqual(recovered, .finalized(try XCTUnwrap(state.pending))) }
+            else { XCTAssertEqual(recovered, .unchanged(stage == 0 ? state.committed : before)) }
+            let reservation = try journal.read { try $0.commandSubmissionReservation(submissionID: binding.id) }
+            XCTAssertEqual(reservation != nil, stage != 1)
+            XCTAssertEqual(try fixture.auditRecordCount, count + (stage == 1 ? 0 : 1))
+            if let reservation {
+                XCTAssertEqual(reservation.submission, binding); XCTAssertEqual(reservation.captureDigest, captureDigest)
+                let commits = CheckpointedJournal(journal: journal, continuity: store)
+                XCTAssertThrowsError(try commits.write(epoch: fixture.writer.epoch, recoverRejectedBody: true) { try $0.reserveCommandSubmission(reservation) }) {
+                    XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+                }
+                XCTAssertFalse(commits.retired)
+            }
+        }
     }
 
     func testCommandAdmissionRetainsExactCaptureThroughBiometricConsumptionAndTerminalOutcome() throws {
@@ -1082,6 +1282,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         try expectAssemblyResourcesRetired(received)
         XCTAssertThrowsError(try command.withBorrowedDirectoryDescriptor { _ in () })
         XCTAssertEqual(try fixture.requests.historicalOutcome(requestID: request.requestID)?.phase, .succeeded)
+        XCTAssertNotNil(try fixture.reservation(command.capture.submission.id))
     }
 
     func testCommandDeclineAndPendingRetirementCloseOriginalObjects() throws {
@@ -1110,6 +1311,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 XCTAssertThrowsError(try fixture.requests.state(requestID: request.requestID))
             }
             try expectAssemblyResourcesRetired(received)
+            XCTAssertNotNil(try fixture.reservation(command.capture.submission.id))
         }
     }
 
@@ -1128,6 +1330,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: draft,
                 userID: variant == 4 ? geteuid() ^ 1 : nil, checkCancellation: { if variant == 5 { throw Cancelled.test } }))
             XCTAssertEqual(try fixture.auditHead, head)
+            XCTAssertNil(try fixture.reservation(command.capture.submission.id))
             try expectAssemblyResourcesRetired(received)
         }
     }
