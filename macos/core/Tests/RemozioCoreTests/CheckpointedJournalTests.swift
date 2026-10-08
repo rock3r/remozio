@@ -876,7 +876,8 @@ final class CheckpointedJournalTests: XCTestCase {
 
     func testLegacyCodePolicyUpgradePreservesUnchangedRoleRevisionAcrossReopen() throws {
         let fixture = try Fixture()
-        let initial = try fixture.journal.write { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
+        let legacyPolicy = try legacyCodePolicy()
+        let initial = try fixture.journal.write { try $0.installCodePolicy(legacyPolicy, expectedRevision: nil) }
         let legacyBytes = try initial.policy.bytes.map { String(format: "%02x", $0) }.joined()
         try fixture.sql("UPDATE authority_code_policy_v1 SET policy=x'\(legacyBytes)'", journal: true)
         try fixture.reopen()
@@ -892,6 +893,47 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, upgraded)
         let noOp = try fixture.journal.write { try $0.installCodePolicy(extended, expectedRevision: upgraded.revision) }
         XCTAssertEqual(noOp, upgraded)
+    }
+
+    private func legacyCodePolicy() throws -> AuthorityCodePolicy {
+        let limits = try CBORLimits(maxBytes: 8192, maxDepth: 4, maxItems: 256)
+        guard case .map(var fields) = try DeterministicCBOR.decode(codePolicy().bytes, limits: limits) else {
+            throw AuthorityCodePolicyError.corruptData
+        }
+        fields[0] = .unsigned(1)
+        return try AuthorityCodePolicy.decode(DeterministicCBOR.encode(.map(fields), limits: limits))
+    }
+
+    func testCommandChildCatalogUpgradePreservesCheckpointAndRoleFloorsAcrossReopen() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let legacy = try legacyCodePolicy()
+        let initial = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(legacy, expectedRevision: nil) }
+        let before = try fixture.store.read().committed
+        let child = try AuthorityCodeEntry(role: .commandChild, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.command-child",
+            installedGeneration: 5, minimumGeneration: 4, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+        let policy = try AuthorityCodePolicy(entries: initial.policy.entries + [child])
+        let upgraded = try commits.write(epoch: fixture.epoch) {
+            try $0.installCodePolicy(policy, expectedRevision: initial.revision)
+        }
+        let after = try fixture.store.read().committed
+        XCTAssertEqual(upgraded.policy.formatVersion, 2)
+        XCTAssertEqual(upgraded.roleRevisions[.authority], initial.roleRevisions[.authority])
+        XCTAssertNotNil(upgraded.roleRevisions[.commandChild])
+        XCTAssertEqual(upgraded.policy.entries.first { $0.role == .authority }, initial.policy.entries.first)
+        XCTAssertEqual(upgraded.policy.entries.first { $0.role == .commandChild }, child)
+        XCTAssertEqual(after.authorityGeneration, try XCTUnwrap(before.authorityGeneration) + 1)
+        XCTAssertNotEqual(after.authorityDigest, before.authorityDigest)
+        XCTAssertEqual(after.ledgerDigest, before.ledgerDigest)
+        XCTAssertEqual(after.journalHead, before.journalHead)
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, upgraded)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(after))
+        XCTAssertThrowsError(try fixture.journal.write {
+            try $0.installCodePolicy(legacy, expectedRevision: upgraded.revision)
+        }) { XCTAssertEqual($0 as? AuthorityCodePolicyError, .rollback) }
+        XCTAssertEqual(try fixture.journal.read { try $0.codePolicy() }, upgraded)
+        XCTAssertEqual(try fixture.store.read().committed, after)
     }
 
     private func recoveringOwner(_ fixture: Fixture,
