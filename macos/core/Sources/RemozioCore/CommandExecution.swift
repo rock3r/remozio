@@ -56,7 +56,7 @@ final class CommandExecution {
     /// A failed spawn can still return a live child. Retain and retire that child through ordinary polling.
     func prepare(path: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
         guard validation != nil, !disposed, !released, !cancelledBeforeRelease, process == nil,
-              resources.capture.ioMode == .pipes else { throw CommandExecutionError.unavailable }
+              resources.capture.ioMode == .pipes, !resources.requiresStreamPump else { throw CommandExecutionError.unavailable }
         let frame = try CommandChildLaunchSpecification(capture: resources.capture,
             preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask).canonicalBytes
         try validateLauncher(); try validateElevation(resources.capture)

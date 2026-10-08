@@ -21,7 +21,9 @@ public struct CommandHandshakeCapabilities: Equatable, Sendable {
         input: [UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion)])
     public static let executionChannels = CommandHandshakeCapabilities(knownWire: [3], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.ioInputCarrierVersion)])
-    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2, 3], submission: CommandSubmission.supportedSchemaVersions,
+    public static let streamingExecution = CommandHandshakeCapabilities(knownWire: [4], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.ioInputCarrierVersion)])
+    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2, 3, 4], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion), UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion), UInt64(MachCommandCallerReceiver.ioInputCarrierVersion)])
     private init(knownWire: Set<UInt64>, submission: Set<UInt64>, input: Set<UInt64>) {
         wireVersions = knownWire; submissionSchemaVersions = submission; inputCarrierVersions = input
@@ -95,8 +97,9 @@ public struct CommandHandshakeProfile: Equatable, Sendable {
             callerBinding: binding, macID: mac, accountID: account)
     }
     var supportsAdmissionResults: Bool { submissionSchemaVersion == 1 &&
-        ((wireVersion == 2 && inputCarrierVersion == 3) || (wireVersion == 3 && inputCarrierVersion == 4)) }
-    var supportsExecutionChannels: Bool { wireVersion == 3 && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+        ((wireVersion == 2 && inputCarrierVersion == 3) || ([3, 4].contains(wireVersion) && inputCarrierVersion == 4)) }
+    var supportsExecutionChannels: Bool { [3, 4].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+    var supportsStreamingExecution: Bool { wireVersion == 4 && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
     func supported(by capabilities: CommandHandshakeCapabilities) -> Bool {
         let understood = (wireVersion == 1 && submissionSchemaVersion == 1 && [2, 3].contains(inputCarrierVersion)) || supportsAdmissionResults
         return understood && capabilities.wireVersions.contains(wireVersion) && capabilities.submissionSchemaVersions.contains(submissionSchemaVersion)
@@ -172,7 +175,7 @@ public final class RetainedCommandHandshake {
         let wires = offer.capabilities.wireVersions.intersection(capabilities.wireVersions).sorted(by: >)
         let inputs = offer.capabilities.inputCarrierVersions.intersection(capabilities.inputCarrierVersions).sorted(by: >)
         let selected = wires.flatMap { wire in inputs.compactMap { input -> (UInt64, UInt64)? in
-            (wire == 1 && [2, 3].contains(input)) || (wire == 2 && input == 3) || (wire == 3 && input == 4) ? (wire, input) : nil
+            (wire == 1 && [2, 3].contains(input)) || (wire == 2 && input == 3) || ([3, 4].contains(wire) && input == 4) ? (wire, input) : nil
         } }.first
         guard let (wire, input) = selected,
               let submission = offer.capabilities.submissionSchemaVersions.intersection(capabilities.submissionSchemaVersions).max() else {
@@ -362,6 +365,18 @@ final class MachCommandReplyRight {
         defer { close() }
         try MachCommandWire.sendTerminalNonblocking(bytes, destination: port)
     }
+    func copyStreamRight() throws -> MachCommandAuthorityPort {
+        guard identifier == MachCommandCallerReceiver.terminalReplyMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
+        try recheck()
+        return try MachCommandAuthorityPort(copying: port)
+    }
+    func takeControlRight() throws -> MachCommandAuthorityPort {
+        guard identifier == MachCommandCallerReceiver.streamControlMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
+        try recheck()
+        let copied = try MachCommandAuthorityPort(copying: port)
+        close()
+        return copied
+    }
     func close() { if port != MACH_PORT_NULL { _ = mach_port_deallocate(mach_task_self_, port); port = 0 } }
     deinit { close() }
 }
@@ -385,13 +400,24 @@ final class MachCommandAuthorityPort {
 
 final class MachCommandPrivateReplyPort {
     var port: mach_port_t = 0
-    init() throws {
+    init(queueLimit: UInt32? = nil) throws {
+        if let queueLimit, !(1...64).contains(queueLimit) { throw MachCommandHandshakeError.invalidConfiguration }
         let result = mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port)
         guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         let inserted = mach_port_insert_right(mach_task_self_, port, port, UInt32(MACH_MSG_TYPE_MAKE_SEND))
         guard inserted == KERN_SUCCESS else {
             _ = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1)
             port = 0; throw MachCommandCallerError.mach(inserted)
+        }
+        if let queueLimit {
+            var limits = mach_port_limits_t(mpl_qlimit: queueLimit)
+            let count = MemoryLayout<mach_port_limits_t>.size / MemoryLayout<natural_t>.size
+            let result = withUnsafeMutablePointer(to: &limits) {
+                $0.withMemoryRebound(to: Int32.self, capacity: count) {
+                    mach_port_set_attributes(mach_task_self_, port, MACH_PORT_LIMITS_INFO, $0, mach_msg_type_number_t(count))
+                }
+            }
+            if result != KERN_SUCCESS { close(); throw MachCommandCallerError.mach(result) }
         }
     }
     func close() {
@@ -421,9 +447,24 @@ enum MachCommandWire {
         try sendPacket(bytes, destination: destination, replyPort: nil,
             identifier: MachCommandCallerReceiver.terminalReplyMessageID, timeoutMilliseconds: 0)
     }
+    static func sendStream(_ bytes: Data, destination: mach_port_t, openedControl: mach_port_t? = nil,
+                           toAuthority: Bool = false) throws -> Bool {
+        guard !toAuthority || openedControl == nil else { throw MachCommandHandshakeError.invalidConfiguration }
+        let identifier = toAuthority ? MachCommandCallerReceiver.streamControlMessageID :
+            (openedControl == nil ? MachCommandCallerReceiver.streamOutputMessageID : MachCommandCallerReceiver.streamOpenedMessageID)
+        do {
+            try sendPacket(bytes, destination: destination, replyPort: openedControl, identifier: identifier,
+                timeoutMilliseconds: 0, maximumPayloadBytes: CommandStreamFrame.maximumBytes)
+            return true
+        } catch MachCommandCallerError.mach(let result) {
+            let code = result & ~MACH_MSG_MASK
+            if code == MACH_SEND_TIMED_OUT || code == MACH_SEND_INTERRUPTED { return false }
+            throw MachCommandCallerError.mach(result)
+        }
+    }
     private static func sendPacket(_ bytes: Data, destination: mach_port_t, replyPort: mach_port_t?, identifier: mach_msg_id_t,
-                                   timeoutMilliseconds: UInt32) throws {
-        guard !bytes.isEmpty, bytes.count <= CommandHandshakeOffer.maximumBytes else { throw MachCommandHandshakeError.invalidConfiguration }
+                                   timeoutMilliseconds: UInt32, maximumPayloadBytes: Int = CommandHandshakeOffer.maximumBytes) throws {
+        guard destination != MACH_PORT_NULL, destination != UInt32.max, !bytes.isEmpty, bytes.count <= maximumPayloadBytes else { throw MachCommandHandshakeError.invalidConfiguration }
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
         let metadata = headerBytes + (replyPort == nil ? 0 : MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size)
         let size = (metadata + 8 + bytes.count + 3) & ~3
