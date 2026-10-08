@@ -199,8 +199,9 @@ int remozio_command_process_poll(remozio_command_process_t *process, remozio_com
     }
     int status_error = pump_status(process);
     if (!error) error = status_error;
-    /* On an observer fault, cancellation still allows a nonblocking reap. Never infer exec from that fallback. */
-    if (!process->state.reaped && !process->state.ownership_lost && (process->state.exit_observed || (process->cancelled && error))) {
+    /* A fault still permits a nonblocking reap of the exclusively owned child, without killing released work.
+     * Never infer exec from this fallback. */
+    if (!process->state.reaped && !process->state.ownership_lost && (process->state.exit_observed || error)) {
         int status = 0;
         pid_t ended = waitpid(process->state.pid, &status, WNOHANG);
         if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; }

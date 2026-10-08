@@ -40,6 +40,7 @@ int main(int argc, char **argv) {
         if(write(5,ready,12)!=12)return 70;
         if(strstr(argv[0],"closed-release-child")) {for(;;)pause();}
         unsigned char release=0;if(exact(6,&release,1)||release!=1)return 70;close(6);
+        if(strstr(argv[0],"late-fault-child")) {unsigned char extra=1;write(5,&extra,1);}
         execve(spec.executable,spec.arguments,spec.environment);
         return 70;
     }
@@ -51,6 +52,7 @@ int main(int argc, char **argv) {
     if(getpgrp()!=getpid())return 94;
     if(!strcmp(argv[3],"pty")) {if(!isatty(0)||getsid(0)!=getpid()||tcgetpgrp(0)!=getpgrp())return 99;return write(1,"PTY",3)==3?7:98;}
     if(!strcmp(argv[3],"signal")) {raise(SIGTERM);return 95;}
+    if(!strcmp(argv[3],"short-wait")) {usleep(300000);return 0;}
     if(!strcmp(argv[3],"wait")) {for(;;)pause();}
     struct stat held,named;if(stat(".",&held)||stat(getenv("CWD"),&named)||held.st_ino!=named.st_ino||held.st_dev!=named.st_dev)return 96;
     char input[64]={0};ssize_t n=read(0,input,sizeof(input));if(n<0)return 97;

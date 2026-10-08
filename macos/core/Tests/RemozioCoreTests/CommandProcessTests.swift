@@ -255,3 +255,25 @@ final class CommandProcessTests: XCTestCase {
     }
 
 }
+
+
+extension CommandProcessTests {
+    func testObserverFailureReapsOwnedReleasedChildWithoutCancellationOrExecutionInference() throws {
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "observer-fault", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach"), harness = directory.appendingPathComponent("observer-fault")
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror", "-I", native.path,
+            "-I", native.appendingPathComponent("include").path, source.path,
+            native.appendingPathComponent("CommandChildSpecification.c").path, "-o", harness.path]
+        try compiler.run(); compiler.waitUntilExit()
+        XCTAssertEqual(compiler.terminationStatus, 0)
+        guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
+        let file = directory.appendingPathComponent("frame")
+        try frame(mode: "short-wait").write(to: file)
+        let probe = Process(); probe.executableURL = harness; probe.currentDirectoryURL = directory
+        probe.arguments = [launcher.path, file.path]
+        try probe.run(); probe.waitUntilExit()
+        XCTAssertEqual(probe.terminationStatus, 0)
+    }
+}

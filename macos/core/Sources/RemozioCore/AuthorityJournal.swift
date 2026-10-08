@@ -13,6 +13,10 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
     private var requestStartupAttempted = false
+    private var commandExecutions: [Data: CommandExecution] = [:]
+    private var commandCleanupTimer: DispatchSourceTimer?
+    private var commandPollIntervalMilliseconds: Int?
+    private var commandRuntimeChecks: [Data: () throws -> Void] = [:]
 
     /// Transfer exclusive ownership. The caller must not keep another user of this connection.
     public init(database: sending JournalDatabase) { self.database = database }
@@ -391,6 +395,7 @@ public final class AuthorityJournal: @unchecked Sendable {
             try database.close()
             storage?.continuity.close()
             retireRequests()
+            for execution in commandExecutions.values { execution.cancelBeforeRelease() }
         }
     }
 
@@ -439,3 +444,159 @@ public final class AuthorityJournal: @unchecked Sendable {
 
 public enum CommandAdmissionControllerError: Error, Equatable { case refused(CommandAdmissionRejectionReason) }
 private struct CommandAdmissionCallbackFailure: Error { let underlying: Error }
+
+
+extension AuthorityJournal {
+    /// Counts live native owners, including cancelled helpers that still need reaping.
+    public var activeCommandCount: Int { lock.withLock { commandExecutions.count } }
+
+    /// Protected host integration. The elevation callback must enforce the selected administrator policy without reentry.
+    /// This pipe path stays inactive until the host installs the command endpoint. PTY integration remains a separate gate.
+    public func beginCommandExecution(requestID: Data, childPath: String, preparationMilliseconds: UInt32,
+                                      fileCreationMask: UInt32, maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
+                                      validateElevation: @escaping @Sendable (CommandCapture) throws -> Void,
+                                      clock: @escaping @Sendable () throws -> AuthorityMoment, receiptTime: @escaping @Sendable () -> UInt64? = { nil }) throws {
+        try beginCommandExecution(requestID: requestID, childPath: childPath,
+            preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask,
+            maximumActiveCommands: maximumActiveCommands, pollIntervalMilliseconds: pollIntervalMilliseconds, validateElevation: validateElevation, clock: clock, receiptTime: receiptTime,
+            runtime: { tx, approval, capture in
+                guard geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+                try AuthoritySelfValidation.validate(transaction: tx)
+                try approval.requireCurrent(tx.requestDeliveryTrust())
+                guard let snapshot = try tx.codePolicy(),
+                      let child = snapshot.policy.entries.first(where: { $0.role == .commandChild }), child.active,
+                      let frontend = snapshot.policy.entries.first(where: { $0.role == .commandFrontend }), frontend.active,
+                      let childRevision = snapshot.roleRevisions[.commandChild],
+                      let frontendRevision = snapshot.roleRevisions[.commandFrontend] else { throw CommandExecutionError.policyChanged }
+                let policy = try XPCPeerPolicy(teamID: frontend.teamID, componentIdentifier: frontend.identifier,
+                    approvedCodeDirectoryHashes: [frontend.codeDirectoryHash], expectedUserID: capture.requester.effectiveUID)
+                return CommandExecutionRuntime(child: child, childRevision: childRevision,
+                    frontendRevision: frontendRevision, callerExpression: policy.requirement,
+                    userID: capture.requester.effectiveUID, sessionID: nil)
+            }, launcher: { context in
+                let path = try ProtectedExecutablePath.acquire(path: childPath)
+                return {
+                    let policy = try XPCPeerPolicy(teamID: context.child.teamID, componentIdentifier: context.child.identifier,
+                        approvedCodeDirectoryHashes: [context.child.codeDirectoryHash], expectedUserID: 0)
+                    let evidence = try SignedExecutableValidation.validate(path, policy: policy,
+                        committedFloor: context.child.minimumGeneration, installedGeneration: context.child.installedGeneration)
+                    guard evidence.generation == context.child.installedGeneration else { throw CommandExecutionError.policyChanged }
+                }
+            })
+    }
+
+    /// Fixture identity seam. Native spawning, durable transitions and original resources follow the production path.
+    func beginCommandExecution(requestID: Data, childPath: String, preparationMilliseconds: UInt32,
+                               fileCreationMask: UInt32, maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
+                               validateElevation: @escaping (CommandCapture) throws -> Void,
+                               clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64? = { nil },
+                               runtime: @escaping @Sendable (JournalTransaction, CommandExecutionApproval, CommandCapture) throws -> CommandExecutionRuntime,
+                               launcher: (CommandExecutionRuntime) throws -> () throws -> Void) throws {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard (100...60_000).contains(preparationMilliseconds), fileCreationMask <= 0o777,
+                  (1...1024).contains(maximumActiveCommands), (10...1000).contains(pollIntervalMilliseconds) else {
+                throw CommandExecutionError.invalidConfiguration
+            }
+            guard commandExecutions.count < maximumActiveCommands,
+                  commandExecutions.isEmpty || commandPollIntervalMilliseconds == pollIntervalMilliseconds, commandExecutions[requestID] == nil, let requests else {
+                throw CommandExecutionError.unavailable
+            }
+            requestOperationActive = true
+            defer { requestOperationActive = false }
+            let approval = try requests.authorizedCommandApproval(requestID: requestID, now: clock())
+            let resources = try requests.takeAuthorizedCommandExecution(requestID: requestID, now: clock())
+            let capture = resources.capture
+            let context: CommandExecutionRuntime
+            let checkLauncher: () throws -> Void
+            do {
+                context = try validatedRead { try runtime($0, approval, capture) }
+                checkLauncher = try launcher(context)
+            } catch {
+                var result: CommandTerminalOutcome = .unknown
+                do {
+                    _ = try requests.recordOutcome(requestID: requestID, expectedRevision: 0, event: .proveNoDispatch,
+                        now: clock(), receiptTimeMs: receiptTime())
+                    result = .failedBeforeStart
+                } catch { }
+                try? resources.sendTerminalOutcome(result); resources.close(); throw error
+            }
+            let execution = CommandExecution(resources: resources, approval: approval, clock: clock, receiptTime: receiptTime,
+                callerExpression: context.callerExpression, callerUserID: context.userID, callerSessionID: context.sessionID,
+                validateLauncher: checkLauncher, validateElevation: validateElevation)
+            commandExecutions[requestID] = execution
+            startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
+            do { try execution.prepare(path: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask) }
+            catch { execution.cancelBeforeRelease(); throw error }
+            // The closure stays under this journal's lock and can only verify the same original controller.
+            commandRuntimeChecks[requestID] = {
+                let current = try self.validatedRead { try runtime($0, approval, capture) }
+                guard current == context else { throw CommandExecutionError.policyChanged }
+                try execution.validateLauncher(); try execution.validateElevation(resources.capture)
+            }
+        }
+    }
+
+    /// Native cleanup does not require available storage or a live request coordinator.
+    func pollCommandExecutions() {
+        lock.withLock {
+            guard !requestOperationActive else { return }
+            requestOperationActive = true
+            defer { requestOperationActive = false }
+            for (id, execution) in commandExecutions {
+                switch execution.poll() {
+                case .preparing, .running: continue
+                case .prepared:
+                    do {
+                        guard let requests, let validate = commandRuntimeChecks[id] else { throw CommandExecutionError.unavailable }
+                        try validate(); try execution.recheck()
+                        _ = try requests.recordOutcome(requestID: id, expectedRevision: 0, event: .beginDispatch,
+                            now: execution.clock(), receiptTimeMs: execution.receiptTime())
+                        execution.dispatchRevision = 1
+                        try execution.validateLauncher(); try execution.validateElevation(execution.resources.capture)
+                        try execution.recheck()
+                        try execution.release()
+                    } catch { execution.cancelBeforeRelease() }
+                case .terminal(let nativeOutcome):
+                    var delivered: CommandTerminalOutcome = .unknown
+                    if let requests {
+                        do {
+                            let event: RequestEvent
+                            switch nativeOutcome {
+                            case .exited(0): event = .verifySuccess
+                            case .exited, .signalled: event = .verifyFailure
+                            case .failedBeforeStart: event = execution.dispatchRevision == 0 ? .proveNoDispatch : .verifyFailure
+                            default: event = .loseOutcome
+                            }
+                            _ = try requests.recordOutcome(requestID: id, expectedRevision: execution.dispatchRevision,
+                                event: event, now: execution.clock(), receiptTimeMs: execution.receiptTime())
+                            delivered = nativeOutcome
+                        } catch { }
+                    }
+                    try? execution.resources.sendTerminalOutcome(delivered)
+                    if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id) }
+                }
+            }
+            if commandExecutions.isEmpty { commandCleanupTimer?.cancel(); commandCleanupTimer = nil; commandPollIntervalMilliseconds = nil }
+        }
+    }
+
+    private func startCommandCleanup(intervalMilliseconds: Int) {
+        guard commandCleanupTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dev.remozio.authority.commands"))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(intervalMilliseconds), leeway: .milliseconds(2))
+        // This lease retains the journal until every owned child is reaped or proven lost, including after close().
+        timer.setEventHandler { self.pollCommandExecutions() }
+        commandPollIntervalMilliseconds = intervalMilliseconds
+        commandCleanupTimer = timer; timer.resume()
+    }
+}
+
+struct CommandExecutionRuntime: Equatable, Sendable {
+    let child: AuthorityCodeEntry
+    let childRevision: UUID
+    let frontendRevision: UUID
+    let callerExpression: String
+    let userID: uid_t
+    let sessionID: au_asid_t?
+}

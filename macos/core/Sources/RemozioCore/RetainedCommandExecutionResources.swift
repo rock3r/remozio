@@ -43,6 +43,12 @@ final class RetainedCommandExecutionResources {
         } catch { retireExecutionResources(); throw error }
     }
 
+    /// Checks the original caller without treating executable changes as a running-command cancellation.
+    func recheckCaller(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
+        guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
+        try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+    }
+
     /// Borrow only during this serialized callback. Do not close or retain these descriptors.
     func withBorrowedDescriptors<Value>(_ body: (Int32, Int32, Int32, Int32) throws -> Value) throws -> Value {
         guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
