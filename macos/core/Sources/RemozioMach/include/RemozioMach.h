@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <sys/fileport.h>
 #include <sys/types.h>
+#include "RemozioCommandChild.h"
 typedef struct {
     mach_port_seqno_t sequence;
     mach_msg_size_t size;

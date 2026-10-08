@@ -53,3 +53,14 @@ The trust-query service uses storage ceilings of 16 MiB, depth 32, and 262,144 C
 Protected installation must validate the executable identity and release build floor before activation. It must protect the launch path, provision the service account and journal, and load the correct launchd registration. This build target does not satisfy those installation gates by itself. Do not deploy the ad-hoc build as a privileged service.
 
 The packaging check runs only rejection paths: missing arguments and, as a normal user, non-root startup. It verifies the embedded binary's architecture, signature identity, and runtime flags. It does not start the listener or open a journal. Root activation, signal shutdown with live IPC, and pre-login recovery remain unproven.
+
+## Embedded command child
+
+`RemozioCommandChild` is embedded at `Contents/Helpers/RemozioCommandChild` with separate Debug and Release identities.
+This small C executable prepares target credentials in a fresh process. It avoids forking the multithreaded Swift authority runtime.
+It does not listen for requests or elevate an ordinary caller.
+The authority does not launch it yet.
+
+The [private launch contract](../../docs/macos-command-child.md) defines bounded input, retained descriptors and the release barrier.
+The build check verifies both embedded signatures and unprivileged refusal without consuming stdin or writing to the command streams.
+The parent supervisor, protected installation and current elevation policy remain required before use.
