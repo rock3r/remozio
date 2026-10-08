@@ -662,6 +662,25 @@ public final class ApprovalRequestCoordinator {
         return retained
     }
 
+    /// Internal transfer to the same serialized Root execution owner. The result is non-Sendable and grants no release permission.
+    func takeAuthorizedCommandExecution(requestID: Data, now: AuthorityMoment) throws -> RetainedCommandExecutionResources {
+        try checkClock(now)
+        guard var entry = entries[requestID], entry.state.phase == .authorized,
+              let retained = entry.retained, retained.payload.contract.requestKind == .command,
+              let command = entry.command else { throw ApprovalCoordinatorError.notPending }
+        let outcome = try read { try $0.consumptionOutcome(requestID: requestID) }
+        guard let outcome, outcome.phase == .authorized, outcome.revision == 0,
+              outcome.receipt.event.category == .command, outcome.receipt.decision.action.choice == .execute,
+              outcome.receipt.decision.requestDigest == entry.state.requestDigest,
+              outcome.receipt.decision.challenge == entry.state.challenge else { throw ApprovalCoordinatorError.notPending }
+        let identity = CommandAdmittedRequest(requestID: entry.state.requestID,
+            requestDigest: entry.state.requestDigest, challenge: entry.state.challenge)
+        let resources = try command.takeExecutionResources(request: identity)
+        entry.command = nil
+        entries[requestID] = entry
+        return resources
+    }
+
     /// Retained winner and result for Already handled responses. It cannot recreate a live request after restart.
     public func historicalOutcome(requestID: Data) throws -> ConsumptionOutcome? {
         try running()

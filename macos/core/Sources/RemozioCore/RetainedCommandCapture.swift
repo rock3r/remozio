@@ -171,6 +171,20 @@ public final class RetainedCommandCapture {
         try outputs.sendTerminalNonblocking(payload.canonicalBytes)
     }
 
+    /// Transfer only from the serialized admitted request owner. This grants no dispatch permission.
+    func takeExecutionResources(request: CommandAdmittedRequest) throws -> RetainedCommandExecutionResources {
+        guard requestOwned, !closed, let outputs, let profile = admissionProfile,
+              profile.supportsExecutionChannels else { throw RetainedCommandCaptureError.closed }
+        let template = CommandTerminalResultPayload(profile: profile, submission: capture.submission,
+            submissionDigest: submissionDigest, request: request, outcome: .unknown)
+        _ = try template.canonicalBytes
+        let terminal = try outputs.takeTerminalReply()
+        closed = true
+        admissionReply?.close(); admissionReply = nil
+        return RetainedCommandExecutionResources(capture: capture, caller: caller, input: input, filesystem: filesystem,
+            outputs: outputs, terminal: terminal, profile: profile, submissionDigest: submissionDigest, request: request)
+    }
+
     public func close() {
         if !closed { filesystem.close(); outputs?.close(); caller.close(); input.close(); admissionReply?.close(); closed = true }
     }
