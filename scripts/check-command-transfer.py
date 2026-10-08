@@ -24,8 +24,20 @@ func transfer(owner: ApprovalRequestCoordinator, command: sending RetainedComman
               now: () throws -> AuthorityMoment) throws {
 """
         admission = "    _ = try owner.admitCommand(command, draft: draft, currentPolicy: policy, now: now, receiptTimeMs: nil)\n"
+        readiness_probe = """import Foundation
+import Darwin
+import RemozioCore
+import RemozioProtocol
+func submit(template: CommandSubmission, policy: XPCPeerPolicy, limits: CBORLimits,
+            mac: Data, account: Data, lookup: () throws -> mach_port_t) throws -> VerifiedCommandAdmissionResult {
+    try CommandCallerReadiness.submit(template, inputDescriptor: 0, authorityPort: lookup,
+        authorityPolicy: policy, macID: mac, accountID: account, submissionLimits: limits,
+        configuration: CommandCallerReadinessConfiguration(timeoutMilliseconds: 30000))
+}
+"""
         probes = {
             "valid": (prefix + admission + "}\n", True),
+            "caller-readiness-valid": (readiness_probe, True),
             "command-reuse": (prefix + admission + "    command.close()\n}\n", False),
             "alias-reuse": (prefix + "    let alias = command\n" + admission + "    alias.close()\n}\n", False),
         }
