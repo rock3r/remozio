@@ -230,6 +230,80 @@ final class CommandProcessTests: XCTestCase {
         XCTAssertEqual(remozio_command_process_signal(process, SIGTERM), ESRCH)
     }
 
+    func testRetainedPrivatePtyDrainsLargeBinaryOutputAndCancellationBeforeDisposal() throws {
+        for cancellation in [false, true] {
+            let seed = try RetainedCommandPTY()
+            var attributes = termios()
+            try seed.withBorrowedSlave { descriptor in
+                guard tcgetattr(descriptor, &attributes) == 0 else { throw RetainedCommandPTYError.native(errno) }
+            }
+            seed.close(); cfmakeraw(&attributes)
+            let pty = try RetainedCommandPTY(attributes: attributes)
+            defer { pty.close() }
+            let resources = try Resources(directory: directory), bytes = try frame(mode: cancellation ? "pty-infinite" : "pty-bulk", ioMode: .pty)
+            var handle: OpaquePointer?
+            XCTAssertEqual(try pty.withBorrowedSlave { slave in
+                bytes.withUnsafeBytes { remozio_command_process_spawn(launcher.path, $0.baseAddress, $0.count,
+                    slave, slave, slave, resources.cwd, &handle) }
+            }, 0)
+            let process = try XCTUnwrap(handle)
+            defer { retire(process) }
+            pty.sealSlave()
+            try until(process) { $0.prepared }; XCTAssertEqual(remozio_command_process_release(process), 0)
+            var observation = remozio_command_process_observation_t(), output = Data(), ended = false, cancelled = false
+            let deadline = Date().addingTimeInterval(5)
+            while !observation.reaped || !ended {
+                XCTAssertEqual(remozio_command_process_poll(process, &observation), 0)
+                switch try pty.read(maximumBytes: 8192) {
+                case .bytes(let bytes):
+                    XCTAssertLessThanOrEqual(bytes.count, 8192)
+                    let offset = output.count
+                    XCTAssertEqual(bytes, Data((offset..<(offset + bytes.count)).map { UInt8($0 % 251) }))
+                    output.append(bytes)
+                case .end: ended = true
+                case .waiting: usleep(1000)
+                }
+                if cancellation && output.count >= 65_536 && !cancelled {
+                    XCTAssertEqual(remozio_command_process_cancel(process), 0); cancelled = true
+                }
+                if Date() > deadline { throw CocoaError(.executableRuntimeMismatch) }
+            }
+            XCTAssertTrue(observation.exec_observed)
+            XCTAssertEqual(observation.wait_status, cancellation ? SIGKILL : 7 << 8)
+            if cancellation { XCTAssertGreaterThanOrEqual(output.count, 65_536) }
+            else { XCTAssertEqual(output.count, 1_048_576) }
+        }
+    }
+
+    func testRetainedPrivatePtySealsParentSlaveAndDrainsBeforeOwnedChildDisposal() throws {
+        let pty = try RetainedCommandPTY(size: winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0))
+        defer { pty.close() }
+        let resources = try Resources(directory: directory), bytes = try frame(mode: "pty", ioMode: .pty)
+        var handle: OpaquePointer?
+        let result = try pty.withBorrowedSlave { slave in
+            bytes.withUnsafeBytes { remozio_command_process_spawn(launcher.path, $0.baseAddress, $0.count,
+                slave, slave, slave, resources.cwd, &handle) }
+        }
+        XCTAssertEqual(result, 0)
+        let process = try XCTUnwrap(handle)
+        defer { retire(process) }
+        pty.sealSlave()
+        try until(process) { $0.prepared }; XCTAssertEqual(remozio_command_process_release(process), 0)
+        var observation = remozio_command_process_observation_t(), output = Data(), ended = false
+        let deadline = Date().addingTimeInterval(5)
+        while !observation.reaped || !ended {
+            XCTAssertEqual(remozio_command_process_poll(process, &observation), 0)
+            switch try pty.read() {
+            case .bytes(let bytes): output.append(bytes)
+            case .end: ended = true
+            case .waiting: usleep(1000)
+            }
+            if Date() > deadline { throw CocoaError(.executableRuntimeMismatch) }
+        }
+        XCTAssertEqual(output, Data("PTY".utf8))
+        XCTAssertTrue(observation.exec_observed); XCTAssertEqual(observation.wait_status, 7 << 8)
+    }
+
     func testPtyModeCreatesANewSessionAndAttachesThePrivateSlave() throws {
         var master: Int32 = -1, slave: Int32 = -1
         guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw CocoaError(.fileReadUnknown) }
