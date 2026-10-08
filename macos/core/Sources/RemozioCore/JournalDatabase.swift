@@ -378,6 +378,11 @@ public final class JournalTransaction {
         try withCommandReplay(write: false) { try $0.read(submissionID: submissionID) }
     }
 
+    /// Internal observation through the current protected transaction. The admission owner must validate continuity and scope.
+    func commandSubmissionReserved(_ submission: CapturedSubmission) throws -> Bool {
+        try withCommandReplay(write: false) { try $0.contains(submission) }
+    }
+
     private func withCommandReplay<T>(write: Bool, _ body: (CommandSubmissionReplayJournal) throws -> T) throws -> T {
         do {
             _ = try tables(write: write)
