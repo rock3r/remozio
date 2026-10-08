@@ -11,6 +11,7 @@ public final class RetainedCommandCapture {
     private let caller: RetainedCommandCaller
     private let input: RetainedCommandInputDescriptor
     private let filesystem: CommandFilesystemCapture
+    private let admissionReply: MachCommandReplyRight?
     private var closed = false
     private var requestOwned = false
 
@@ -58,8 +59,9 @@ public final class RetainedCommandCapture {
             try filesystem.recheck(checkCancellation: checkCancellation)
             try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
             self.capture = capture; self.caller = received.caller; self.input = received.input; self.filesystem = filesystem
+            self.admissionReply = received.reply
         } catch {
-            heldFilesystem?.close(); received.caller.close(); received.input.close()
+            heldFilesystem?.close(); received.caller.close(); received.input.close(); received.reply?.close()
             throw error
         }
     }
@@ -107,8 +109,14 @@ public final class RetainedCommandCapture {
         return try filesystem.withBorrowedDirectoryDescriptor(body)
     }
 
+    /// Only the serialized request controller may reply after transfer. The bytes convey no semantics by themselves.
+    func sendAdmissionReply(_ bytes: Data, timeoutMilliseconds: UInt32 = 5000) throws {
+        guard !closed, let admissionReply else { throw MachCommandHandshakeError.retired }
+        try admissionReply.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
     public func close() {
-        if !closed { filesystem.close(); caller.close(); input.close(); closed = true }
+        if !closed { filesystem.close(); caller.close(); input.close(); admissionReply?.close(); closed = true }
     }
 
     private static func environment(minimal: [CapturedEnvironmentEntry], additions: [CommandEnvironmentAddition]) throws -> [CapturedEnvironmentEntry] {

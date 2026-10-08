@@ -13,6 +13,11 @@ public struct CommandHandshakeCapabilities: Equatable, Sendable {
     public let inputCarrierVersions: Set<UInt64>
     public static let current = CommandHandshakeCapabilities(knownWire: [1], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion)])
+    /// Explicit carrier support. The serial host keeps its legacy default until its reply controller is integrated.
+    public static let admissionReplies = CommandHandshakeCapabilities(knownWire: [1], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion)])
+    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion), UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion)])
     private init(knownWire: Set<UInt64>, submission: Set<UInt64>, input: Set<UInt64>) {
         wireVersions = knownWire; submissionSchemaVersions = submission; inputCarrierVersions = input
     }
@@ -106,7 +111,7 @@ struct CommandHandshakeReply {
         guard fields[2] == .unsigned(1), let raw = fields[3] else { throw MachCommandHandshakeError.invalidMessage }
         let profile = try CommandHandshakeProfile.decode(raw)
         guard profile.macID == macID, profile.accountID == accountID else { throw MachCommandHandshakeError.wrongBinding }
-        guard profile.supported(by: offer.capabilities), profile.supported(by: .current) else {
+        guard profile.supported(by: offer.capabilities), profile.supported(by: .implemented) else {
             throw MachCommandHandshakeError.incompatible
         }
         return profile
@@ -148,9 +153,9 @@ public final class RetainedCommandHandshake {
         var completed = false
         defer { reply.close(); if !completed { caller.close() } }
         guard macID.count == 16, accountID.count == 16, (1...60_000).contains(timeoutMilliseconds),
-              capabilities.wireVersions.isSubset(of: CommandHandshakeCapabilities.current.wireVersions),
-              capabilities.submissionSchemaVersions.isSubset(of: CommandHandshakeCapabilities.current.submissionSchemaVersions),
-              capabilities.inputCarrierVersions.isSubset(of: CommandHandshakeCapabilities.current.inputCarrierVersions) else {
+              capabilities.wireVersions.isSubset(of: CommandHandshakeCapabilities.implemented.wireVersions),
+              capabilities.submissionSchemaVersions.isSubset(of: CommandHandshakeCapabilities.implemented.submissionSchemaVersions),
+              capabilities.inputCarrierVersions.isSubset(of: CommandHandshakeCapabilities.implemented.inputCarrierVersions) else {
             throw MachCommandHandshakeError.invalidConfiguration
         }
         try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
@@ -185,6 +190,7 @@ public final class RetainedCommandHandshake {
                   checkCancellation: @Sendable () throws -> Void = {}) throws -> sending RetainedCommandCapture {
         do {
             guard !closed else { throw MachCommandHandshakeError.retired }
+            guard UInt64(received.carrierVersion) == profile.inputCarrierVersion else { throw MachCommandHandshakeError.incompatible }
             try checkCancellation()
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
             try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
@@ -212,12 +218,24 @@ public final class RetainedCommandHandshake {
 public final class VerifiedCommandHandshake {
     public let profile: CommandHandshakeProfile
     private let authority: RetainedCommandCaller
-    init(profile: CommandHandshakeProfile, authority: RetainedCommandCaller) { self.profile = profile; self.authority = authority }
+    private let destination: MachCommandAuthorityPort
+    init(profile: CommandHandshakeProfile, authority: RetainedCommandCaller, destination: MachCommandAuthorityPort) {
+        self.profile = profile; self.authority = authority; self.destination = destination
+    }
+    func borrowedAuthorityPort() throws -> mach_port_t { try destination.borrowed() }
     public func recheck(currentPolicy: XPCPeerPolicy) throws {
         guard currentPolicy.expectedUserID == 0 else { throw MachCommandHandshakeError.invalidConfiguration }
         try authority.recheck(currentPolicy: currentPolicy)
     }
-    public func close() { authority.close() }
+    func authenticateReplyAuthority(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
+        try authority.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+    }
+    func authenticateReply(_ caller: RetainedCommandCaller, expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
+        try authority.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        guard authority.hasSameAuditBinding(as: caller) else { throw MachCommandHandshakeError.wrongBinding }
+    }
+    public func close() { authority.close(); destination.close() }
     deinit { close() }
 }
 
@@ -239,6 +257,9 @@ public enum MachCommandHandshakeClient {
         guard authorityPort != MACH_PORT_NULL, authorityPort != UInt32.max, macID.count == 16, accountID.count == 16,
               (1...60_000).contains(timeoutMilliseconds) else { throw MachCommandHandshakeError.invalidConfiguration }
         try checkCancellation()
+        let destination = try MachCommandAuthorityPort(copying: authorityPort)
+        var destinationTransferred = false
+        defer { if !destinationTransferred { destination.close() } }
         let started = DispatchTime.now().uptimeNanoseconds
         let endpoint = try MachCommandPrivateReplyPort()
         defer { endpoint.close() }
@@ -261,25 +282,45 @@ public enum MachCommandHandshakeClient {
         try response.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         try checkCancellation()
         guard DispatchTime.now().uptimeNanoseconds - started < budget else { throw MachCommandCallerError.timeout }
-        completed = true
-        return VerifiedCommandHandshake(profile: profile, authority: response.caller)
+        completed = true; destinationTransferred = true
+        return VerifiedCommandHandshake(profile: profile, authority: response.caller, destination: destination)
     }
 }
 
 final class MachCommandReplyRight {
     private var port: mach_port_t
-    init(taking port: mach_port_t) { self.port = port }
+    private let identifier: mach_msg_id_t
+    init(taking port: mach_port_t, identifier: mach_msg_id_t = MachCommandCallerReceiver.helloReplyMessageID) {
+        self.port = port; self.identifier = identifier
+    }
     func send(_ bytes: Data, timeoutMilliseconds: UInt32) throws {
         guard port != MACH_PORT_NULL else { throw MachCommandHandshakeError.retired }
         defer { close() }
         try MachCommandWire.send(bytes, destination: port, replyPort: nil,
-            identifier: MachCommandCallerReceiver.helloReplyMessageID, timeoutMilliseconds: timeoutMilliseconds)
+            identifier: identifier, timeoutMilliseconds: timeoutMilliseconds)
     }
     func close() { if port != MACH_PORT_NULL { _ = mach_port_deallocate(mach_task_self_, port); port = 0 } }
     deinit { close() }
 }
 
-private final class MachCommandPrivateReplyPort {
+/// Keeps the negotiated send right alive. An unrelated port or recycled name cannot replace it during submission.
+final class MachCommandAuthorityPort {
+    private var port: mach_port_t
+    init(copying port: mach_port_t) throws {
+        guard port != MACH_PORT_NULL, port != UInt32.max else { throw MachCommandHandshakeError.invalidConfiguration }
+        let result = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_SEND, 1)
+        guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        self.port = port
+    }
+    func borrowed() throws -> mach_port_t {
+        guard port != MACH_PORT_NULL else { throw MachCommandHandshakeError.retired }
+        return port
+    }
+    func close() { if port != MACH_PORT_NULL { _ = mach_port_deallocate(mach_task_self_, port); port = 0 } }
+    deinit { close() }
+}
+
+final class MachCommandPrivateReplyPort {
     var port: mach_port_t = 0
     init() throws {
         let result = mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port)

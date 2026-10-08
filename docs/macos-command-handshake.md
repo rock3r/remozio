@@ -28,7 +28,8 @@ sequenceDiagram
 ## Local protocol selection
 
 The handshake envelope format is version 1. It is a Mac-local protocol, separate from the phone protocol.
-Current components implement wire version 1, command submission schema 1, and input carrier version 2.
+The default profile implements wire version 1, command submission schema 1, and input carrier version 2.
+An explicit [admission reply profile](macos-command-admission-replies.md) supports input carrier 3 and its private reply right. It does not negotiate retry authority.
 The frontend advertises explicit sets. Root selects the highest common implemented version in each set.
 There is no fallback to a carrier without the original input fileport.
 An authenticated incompatibility reply creates no retained session.
@@ -77,6 +78,7 @@ Closing the session prevents further assembly. Existing command requests retain 
 The public server initializer and assembly API use Swift `sending` parameters.
 The private reply right is released after its one reply, on rejection, or when an unused hello closes.
 The client retains its owned reply port through the complete exchange and closes it on every return path.
+A successful handshake also retains a reference to the negotiated authority destination until closure.
 Recoverable send failure destroys pseudo-received Mach rights while preserving the caller's borrowed port rights.
 The client uses one timeout budget across sending, receipt, and final validation. That budget does not shorten an admitted approval request.
 
