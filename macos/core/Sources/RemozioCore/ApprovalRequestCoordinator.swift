@@ -186,7 +186,14 @@ public final class ApprovalRequestCoordinator {
         } catch { command.close(); throw error }
     }
 
+    /// Admits a non-command adapter draft. Commands require the retained-object transfer in `admitCommand`.
     public func admit(_ draft: ApprovalRequestDraft, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
+        guard draft.contract.requestKind != .command else { throw ApprovalCoordinatorError.invalidDraft }
+        return try admit(draft, command: nil, now: now, receiptTimeMs: receiptTimeMs)
+    }
+
+    /// Synthetic lifecycle fixture only. This method does not authenticate or retain command OS objects.
+    func admitFixture(_ draft: ApprovalRequestDraft, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
         try admit(draft, command: nil, now: now, receiptTimeMs: receiptTimeMs)
     }
 

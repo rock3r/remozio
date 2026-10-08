@@ -111,7 +111,7 @@ final class SyntheticAuthority {
         }
         let owner = try Self.makeOwner(journal, epoch: epoch, limits: limits)
         self.owner = owner
-        let payload = try owner.admit(ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: capture,
+        let payload = try owner.admitFixture(ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: capture,
             actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
             firstObservedAt: .init(epoch: epoch, milliseconds: 90), deadlineMilliseconds: 200,
             createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100),

@@ -470,7 +470,7 @@ final class CheckpointedJournalTests: XCTestCase {
         let draft = try ApprovalRequestDraft(contract: RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1),
             requiredFeatures: [], capture: Data([0xa0]), actions: [CapturedAction(choice: .execute, scope: .currentRequest)],
             firstObservedAt: now, deadlineMilliseconds: now.milliseconds + 10000, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 11000)
-        _ = try owner.withRequests { try $0.admit(draft, now: now, receiptTimeMs: nil) }
+        _ = try owner.withRequests { try $0.admitFixture(draft, now: now, receiptTimeMs: nil) }
         XCTAssertThrowsError(try fixture.openJournal())
         XCTAssertThrowsError(try fixture.openStore())
         try owner.close()
@@ -513,8 +513,8 @@ final class CheckpointedJournalTests: XCTestCase {
                 createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 11000)
         }
         let oversized = try draft(tooLarge), fitting = try draft(accepted)
-        XCTAssertThrowsError(try owner.withRequests { try $0.admit(oversized, now: now, receiptTimeMs: nil) })
-        let payload = try owner.withRequests { try $0.admit(fitting, now: now, receiptTimeMs: nil) }
+        XCTAssertThrowsError(try owner.withRequests { try $0.admitFixture(oversized, now: now, receiptTimeMs: nil) })
+        let payload = try owner.withRequests { try $0.admitFixture(fitting, now: now, receiptTimeMs: nil) }
         let body = try payload.encode(limits: limits)
         XCTAssertEqual(body.count, bodyMaximum)
         let carrier = try ApprovalMessage(wireVersion: 1, type: .request, purpose: .issuedRequest,
