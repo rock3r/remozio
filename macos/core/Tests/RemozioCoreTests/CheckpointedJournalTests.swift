@@ -40,6 +40,27 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().committed, after)
     }
 
+    func testCommandReplayMalformedSubmissionFieldsAreRejectedBeforeCheckpointWork() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+        let before = try fixture.store.read()
+        for (field, expected) in [(0, 16), (1, 32), (2, 16)] {
+            for length in [0, expected - 1, expected + 1] {
+                let wrong = Data(repeating: 7, count: length)
+                let binding = CapturedSubmission(id: field == 0 ? wrong : value.submission.id,
+                    nonce: field == 1 ? wrong : value.submission.nonce,
+                    callerBinding: field == 2 ? wrong : value.submission.callerBinding)
+                XCTAssertThrowsError(try CommandSubmissionReservation(macID: value.macID, accountID: value.accountID,
+                    submission: binding, captureDigest: value.captureDigest)) {
+                    XCTAssertEqual($0 as? CommandSubmissionReplayError, .invalidConfiguration)
+                }
+            }
+        }
+        XCTAssertFalse(commits.retired)
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertEqual(try commits.read { try $0.continuityDigests().authority }, before.committed.authorityDigest)
+        XCTAssertEqual(try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }, value)
+    }
+
     func testCommandReplayCommitFailuresNeverReleaseAResultAndReconcileTheReservation() throws {
         for finalize in [false, true] {
             let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()

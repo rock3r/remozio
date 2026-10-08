@@ -15,7 +15,8 @@ public struct CommandSubmissionReservation: Equatable, Sendable {
 
     /// The host supplies the scope and digest after authenticating and assembling the original capture.
     public init(macID: Data, accountID: Data, submission: CapturedSubmission, captureDigest: Data) throws {
-        guard macID.count == 16, accountID.count == 16, captureDigest.count == 32 else {
+        guard macID.count == 16, accountID.count == 16, captureDigest.count == 32,
+              submission.id.count == 16, submission.nonce.count == 32, submission.callerBinding.count == 16 else {
             throw CommandSubmissionReplayError.invalidConfiguration
         }
         self.macID = macID; self.accountID = accountID; self.submission = submission; self.captureDigest = captureDigest

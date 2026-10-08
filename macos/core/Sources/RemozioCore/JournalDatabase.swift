@@ -44,7 +44,7 @@ public final class JournalDatabase {
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
          maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
-                            maximumCommandSubmissions: Int = 1_000_000) throws {
+         maximumCommandSubmissions: Int = 1_000_000) throws {
         self.lease = lease
         self.recordLimits = recordLimits
         do {
