@@ -10,24 +10,28 @@ sequenceDiagram
     participant R as Serialized Root owner
     participant J as Protected journal
     F->>R: Negotiated submission, original input, private reply right
-    R->>R: Recheck sender and assemble capture
-    R->>J: Reserve submission and create request atomically
-    alt Admission completes
-        J->>R: Durable completion
-        R->>F: Admitted request ID, digest, challenge
-        Note over R: Reply loss preserves the admitted request
-    else Known refusal or verified rollback
+    R->>R: Own input and detach private reply
+    R->>J: Read current protected policy and checkpoint
+    R->>R: Recheck actual caller and resolve current host state
+    alt Known refusal before capture
         R->>J: Check scope, checkpoint, and ID-or-nonce absence
-        alt Storage intact and both identifiers absent
-            R->>F: Not admitted, exact reason and retry class
-        else Reservation exists or proof fails
+        R->>F: Not admitted only if proof succeeds; otherwise uncertain
+    else Capture proceeds
+        R->>R: Assemble immutable capture
+        alt Capture and admission succeed
+            R->>J: Reserve submission and create request atomically
+            J->>R: Durable completion
+            R->>F: Admitted request ID, digest, challenge
+            Note over R: Reply loss preserves the admitted request
+        else Known capture refusal or verified admission rollback
+            R->>J: Check scope, checkpoint, and ID-or-nonce absence
+            R->>F: Not admitted only if proof succeeds; otherwise uncertain
+        else Duplicate, callback failure, or unclassified failure
             R->>F: Uncertain result
         end
-    else Duplicate or unclassified rejection
-        R->>F: Uncertain result, if the reply is still available
-        Note over F: No automatic resubmission
     end
     F->>F: Match scope, binding, original bytes, and deadline
+    Note over F: No automatic resubmission after uncertainty or reply loss
 ```
 
 ## Exact contract
@@ -73,13 +77,29 @@ Before sending any refusal, the owner checks retained commands and reads protect
 
 Checkpointed storage must validate the independent committed boundary. A rejected transaction can remain usable only after verified rollback. Retired storage, failed reads, ambiguous commits, and failed checkpoint preparation or finalization remain uncertain. A successful journal commit with failed checkpoint finalization cannot permit automatic resubmission.
 
-Duplicates remain uncertain. A claimed alias cannot close or reply through the earlier owner. Failures before capture ownership or during authority preflight still lack this result integration; the client observes uncertainty.
+Duplicates remain uncertain. A claimed receipt alias cannot close or reply through the earlier owner.
+
+## Ownership before capture
+
+`prepareAdmission` authenticates the current handshake, full kernel sender binding, profile, and original canonical submission. The attempt owns input and reply before filesystem capture starts. Public transfers use Swift `sending`; object and alias reuse fail compiler probes.
+
+The journal serializes the complete attempt. It checks the actual Root identity, current frontend policy, Mac/account scope, and protected storage again. An unprepared request owner reports authority starting only after an absence proof. Trusted host resolution can report a policy refusal or one of the four busy states before capture.
+
+The host resolver supplies current target credentials, environment, and capture limits. Incoming claims cannot choose an elevation policy. Throwing from the resolver, draft, or cancellation callback always remains uncertain. A callback cannot mimic a filesystem error to authorize a retry.
+
+Capture failure closes the original caller, input, and filesystem. The detached reply remains available to the journal owner. A known filesystem capture failure permits a permanent refusal only after a fresh absence proof. Storage or identity validation failure remains uncertain.
+
+Successful capture transfers the reply to the existing request coordinator. Successful admission preserves its input even if acknowledgment delivery fails. Every refused attempt closes its original objects and private reply.
+
+`pollAdmission` connects the serial receive queue, session registry, attempt, and journal owner. Its result callback observes local request failures. Those exceptions are not retry proofs. A handled refusal leaves a healthy queue available for another request. An unreadable host policy requests stop before more traffic is handled.
 
 ## Compatibility and remaining integration
 
 Version selection chooses the highest supported common wire/carrier pair. Wire 2 requires carrier 3. Mixed-version peers can still select wire 1 with a common legacy carrier. An older raw reply cannot acquire new meanings through its payload.
 
-The default registry and serial host continue to advertise wire 1 and input carrier 2. They must integrate complete admission-result handling before enabling wire 2. The explicit handshake and result APIs are exercised by disposable fixtures, without registering a production listener.
+The default registry and serial host continue to advertise wire 1 and input carrier 2. An integrated host can explicitly select `admissionResults` and use `pollAdmission`. This opt-in does not install a service or activate command execution.
+
+Disposable fixtures exercise actual Mach receipt through the host, registry, and serialized journal. Tests cover pre-capture refusals, startup, missing executables, callback spoofing, historical ID/nonce collisions, and lost acknowledgments. The production entry rejects an unprivileged host before policy callbacks.
 
 The bounded fresh-submission controller remains required. It must preserve unconsumed input, create fresh identifiers and capture for each permitted attempt, and use one sleep-inclusive caller deadline across all waits and reason changes. Lost replies, duplicate reservations, or uncertain commits cannot trigger automatic replay. No fallback through sudo is allowed.
 

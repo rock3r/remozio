@@ -462,6 +462,189 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         return try CommandAdmissionResultPayload.decode(raw.payload, profile: profile, original: submission).outcome
     }
 
+    private func admissionAttempt(reply: Endpoint, executable: String = "/usr/bin/true", binding: CapturedSubmission? = nil,
+                                  descriptor: Int32? = nil) throws -> (RetainedCommandAdmissionAttempt, CommandSubmission, CommandHandshakeProfile) {
+        let endpoint = try Endpoint(), helloReply = try Endpoint()
+        let session = try RetainedCommandHandshake(hello: hello(endpoint, reply: helloReply, capabilities: .admissionResults),
+            capabilities: .admissionResults, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        defer { session.close() }
+        let fresh = binding ?? CapturedSubmission(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
+            callerBinding: session.profile.callerBinding)
+        let submission = try commandSubmission(executablePath: executable, binding: .init(id: fresh.id, nonce: fresh.nonce,
+            callerBinding: session.profile.callerBinding))
+        let fd = descriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { if descriptor == nil { _ = Darwin.close(fd) } }
+        let received = try admissionInput(endpoint, reply: reply, descriptor: fd, payload: submission.canonicalBytes)
+        return (try session.prepareAdmission(received: TestInputInspection(received: received).received, expression: selfExpression(), userID: geteuid(),
+            auditSessionID: nil, submissionLimits: assemblyLimits), submission, session.profile)
+    }
+    private func admissionContext() throws -> CommandAdmissionCaptureContext {
+        .init(schemaVersion: 1, target: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 0xe4, count: 16), limits: try assemblyLimits, maximumAncestryEntries: 1)
+    }
+    private func admissionDraft(_ capture: CommandCapture, fixture: CommandRequestFixture) -> ApprovalRequestDraft {
+        .init(contract: fixture.contract, requiredFeatures: [], capture: capture.canonicalBytes,
+            actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+            firstObservedAt: fixture.now(100), deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+    }
+    private func admitAttempt(_ attempt: RetainedCommandAdmissionAttempt, fixture: CommandRequestFixture,
+                              resolution: CommandAdmissionResolution? = nil,
+                              checkCancellation: @escaping @Sendable () throws -> Void = {}) throws -> IssuedRequestPayload {
+        let resolved = try resolution ?? .capture(admissionContext())
+        return try XCTUnwrap(fixture.authority).admitCommandAttempt(attempt, expression: selfExpression(), resolve: { _ in resolved },
+            draft: { self.admissionDraft($0, fixture: fixture) }, now: { fixture.now() }, receiptTimeMs: nil,
+            checkCancellation: checkCancellation)
+    }
+
+    func testAdmissionAttemptAuthenticatesBeforeCaptureAndPreservesUnreadInputOnAdmission() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            var fds: [Int32] = [-1, -1]
+            XCTAssertEqual(pipe(&fds), 0); defer { for fd in fds { _ = Darwin.close(fd) } }
+            XCTAssertEqual(Darwin.write(fds[1], "unread", 6), 6)
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply, descriptor: fds[0])
+            let request = try admitAttempt(attempt, fixture: fixture)
+            guard case .admitted(let identity) = try typedOutcome(reply, submission: submission, profile: profile) else {
+                return XCTFail("Attempt was not admitted")
+            }
+            XCTAssertEqual(identity.requestID, request.requestID)
+            XCTAssertNotNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try sendReferences(reply.port), 1)
+            var bytes = [UInt8](repeating: 0, count: 6)
+            XCTAssertEqual(Darwin.read(fds[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("unread".utf8))
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandAdmissionAttemptError, .closed)
+            }
+            XCTAssertEqual(try XCTUnwrap(fixture.authority).withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+        }
+    }
+
+    func testAdmissionAttemptReportsAllTrustedBusyAndPermanentRefusalsOnlyAfterFreshAbsenceRead() throws {
+        for checkpointed in [false, true] {
+            for reason in [CommandAdmissionRejectionReason.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable,
+                           .policyRejected, .invalidRequest, .unsupported, .capacityExceeded] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+                let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: "/missing-before-capture")
+                let before = try fixture.auditRecordCount
+                XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture, resolution: .refuse(reason))) {
+                    XCTAssertEqual($0 as? CommandAdmissionControllerError, .refused(reason))
+                }
+                let retry = CommandAdmissionRetryClass(rawValue: reason.rawValue) ?? .never
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(reason, retry))
+                XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
+                XCTAssertEqual(try sendReferences(reply.port), 1)
+            }
+        }
+    }
+
+    func testAdmissionAttemptUsesActualUnpreparedJournalStateWithoutCallingResolverOrDraft() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, ready: false), reply = try Endpoint()
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            XCTAssertThrowsError(try XCTUnwrap(fixture.authority).admitCommandAttempt(attempt, expression: selfExpression(),
+                resolve: { _ in XCTFail("Startup must refuse before policy resolution"); return .refuse(.policyRejected) },
+                draft: { _ in XCTFail("Startup must refuse before capture"); throw ApprovalCoordinatorError.invalidDraft },
+                now: { fixture.now() }, receiptTimeMs: nil))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.authorityStarting, .authorityStarting))
+            XCTAssertNil(try fixture.reservation(submission.binding.id))
+        }
+    }
+
+    func testAdmissionAttemptCaptureFailureKeepsPrivateReplyAfterInputCleanup() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: "/missing-before-capture")
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture)) { XCTAssertTrue($0 is CommandFilesystemCaptureError) }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.invalidRequest, .never))
+            XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
+    }
+
+    func testAdmissionAttemptCallbackErrorsCannotSpoofCaptureRefusalAndCannotReenterJournal() throws {
+        for stage in 0..<3 {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            let authority = try XCTUnwrap(fixture.authority), context = try admissionContext()
+            let count = OSAllocatedUnfairLock(initialState: 0)
+            XCTAssertThrowsError(try authority.admitCommandAttempt(attempt, expression: selfExpression(), resolve: { _ in
+                XCTAssertThrowsError(try authority.read { _ in 0 }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive) }
+                if stage == 0 { throw CommandFilesystemCaptureError.invalidPath }
+                return .capture(context)
+            }, draft: {
+                if stage == 1 { throw IssuedRequestError.unsupportedContract }
+                return self.admissionDraft($0, fixture: fixture)
+            }, now: { fixture.now() }, receiptTimeMs: nil, checkCancellation: {
+                let checks = count.withLock { $0 += 1; return $0 }
+                if stage == 2 && checks >= 2 { throw CommandFilesystemCaptureError.invalidPath }
+            }))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+            XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
+    }
+
+    func testAdmissionAttemptBusyRefusalCannotContradictHistoricalIdentifierOrNonce() throws {
+        for checkpointed in [false, true] {
+            for nonce in [false, true] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+                let (first, original, _) = try admissionAttempt(reply: reply), request = try admitAttempt(first, fixture: fixture)
+                let retiredAt = fixture.now(120)
+                _ = try XCTUnwrap(fixture.authority).withRequests { try $0.retirePending(requestID: request.requestID,
+                    reason: .cancelled, now: retiredAt, receiptTimeMs: nil) }
+                let binding = CapturedSubmission(id: nonce ? Data(repeating: 88, count: 16) : original.binding.id,
+                    nonce: nonce ? original.binding.nonce : Data(repeating: 89, count: 32), callerBinding: original.binding.callerBinding)
+                let secondReply = try Endpoint(), (second, submission, profile) = try admissionAttempt(reply: secondReply, binding: binding)
+                XCTAssertThrowsError(try admitAttempt(second, fixture: fixture, resolution: .refuse(.updateWaiting)))
+                XCTAssertEqual(try typedOutcome(secondReply, submission: submission, profile: profile), .uncertain(.duplicateSubmission))
+            }
+        }
+    }
+
+    func testAdmissionAttemptProtectedReadFailureCannotGrantAutomaticRetry() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            if checkpointed { try fixture.sql("UPDATE audit_epochs_v1 SET head=X'0000000000000002'") }
+            else { try XCTUnwrap(fixture.authority).close() }
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture, resolution: .refuse(.updateWaiting)))
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.storageFailure))
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
+    }
+
+    func testAdmissionAttemptRefusalRevalidatesCheckpointAfterTrustedResolution() throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
+        let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+        XCTAssertThrowsError(try XCTUnwrap(fixture.authority).admitCommandAttempt(attempt, expression: selfExpression(), resolve: { _ in
+            try fixture.sql("UPDATE audit_epochs_v1 SET head=X'0000000000000002'")
+            return .refuse(.updateWaiting)
+        }, draft: { _ in throw ApprovalCoordinatorError.invalidDraft }, now: { fixture.now() }, receiptTimeMs: nil))
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.storageFailure))
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+    }
+
+    func testAdmissionAttemptLostAcknowledgmentPreservesCommittedRequest() throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
+        let (attempt, submission, _) = try admissionAttempt(reply: reply)
+        let port = reply.transferReceiveRight()
+        XCTAssertEqual(mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1), KERN_SUCCESS)
+        let request = try admitAttempt(attempt, fixture: fixture)
+        XCTAssertNotNil(try fixture.reservation(submission.binding.id))
+        XCTAssertEqual(try XCTUnwrap(fixture.authority).withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+    }
+
+    func testAdmissionAttemptPublicJournalRequiresRootIdentityBeforePolicyCallbacks() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Normal-user fixture") }
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
+        let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+        XCTAssertThrowsError(try XCTUnwrap(fixture.authority).admitCommandAttempt(TestAttemptInspection(attempt: attempt).attempt, resolve: { _ in
+            XCTFail("Unprivileged host must not resolve elevation policy"); return .refuse(.policyRejected)
+        }, draft: { _ in throw ApprovalCoordinatorError.invalidDraft }, now: { fixture.now() }, receiptTimeMs: nil)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.storageFailure))
+    }
+
     func testTypedDraftRejectionProvesBothIdentifiersAbsent() throws {
         for checkpointed in [false, true] {
             let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
@@ -2756,6 +2939,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
 
 
     // Serialized test inspection deliberately retains aliases. Product callers must use the sending APIs.
+    private struct TestAttemptInspection: @unchecked Sendable { let attempt: RetainedCommandAdmissionAttempt }
     private struct TestInputInspection: @unchecked Sendable { let received: ReceivedMachCommandInputSubmission }
     // Callbacks execute synchronously in these fixtures. The wrapper permits deliberate reentry and alias inspection.
     private struct TestRegistryInspection: @unchecked Sendable {
@@ -3045,15 +3229,17 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
 
     private func host(_ endpoint: Endpoint, maximum: Int = 4, wait: UInt32 = 20,
+                      capabilities: CommandHandshakeCapabilities = .current, mac: Data? = nil, account: Data? = nil,
                       context: (() throws -> CommandSessionRegistry.Context)? = nil) throws -> CommandReceiveHost {
         let initial = try registryContext()
-        return try CommandReceiveHost(takingReceiveRight: endpoint.transferReceiveRight(), macID: handshakeMac,
-            accountID: handshakeAccount, userID: geteuid(), auditSessionID: nil, maximumSessions: maximum,
-            maximumPayloadBytes: 8192, receiveWaitMilliseconds: wait, replyTimeoutMilliseconds: 20,
+        return try CommandReceiveHost(takingReceiveRight: endpoint.transferReceiveRight(), macID: mac ?? handshakeMac,
+            accountID: account ?? handshakeAccount, userID: geteuid(), auditSessionID: nil, maximumSessions: maximum,
+            maximumPayloadBytes: 8192, receiveWaitMilliseconds: wait, replyTimeoutMilliseconds: 20, capabilities: capabilities,
             context: { _ in try context?() ?? initial })
     }
-    private func hostSession(_ host: CommandReceiveHost, endpoint: Endpoint) throws -> CommandHandshakeProfile {
-        let reply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32))
+    private func hostSession(_ host: CommandReceiveHost, endpoint: Endpoint,
+                             capabilities: CommandHandshakeCapabilities = .current) throws -> CommandHandshakeProfile {
+        let reply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: capabilities)
         try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
             identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
         guard case .hello(let profile) = try host.poll(handleInput: { $0.closeIfUnclaimed(); XCTFail("unexpected input") }) else {
@@ -3061,7 +3247,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
         let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
         defer { response.caller.close() }
-        XCTAssertEqual(try CommandHandshakeReply.decode(response.payload, offer: offer, macID: handshakeMac, accountID: handshakeAccount), profile)
+        XCTAssertEqual(try CommandHandshakeReply.decode(response.payload, offer: offer, macID: profile.macID, accountID: profile.accountID), profile)
         return profile
     }
     private func enqueueHostInput(_ endpoint: Endpoint, binding: Data, descriptor: Int32? = nil) throws {
@@ -3089,6 +3275,54 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         var count: mach_port_urefs_t = 0
         _ = mach_port_get_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, &count)
         return count
+    }
+
+    func testHostTransfersTypedAttemptToJournalAndKeepsQueueAfterPermanentRefusal() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint, capabilities: .admissionResults, mac: Data(repeating: 1, count: 16), account: Data(repeating: 2, count: 16))
+        defer { host.close() }
+        let profile = try hostSession(host, endpoint: endpoint, capabilities: .admissionResults)
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
+        let original = try commandSubmission(binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
+            callerBinding: profile.callerBinding))
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        try MachCommandAdmissionWire.send(original.canonicalBytes, inputDescriptor: fd, destination: endpoint.port,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        XCTAssertEqual(try host.poll { received in
+            let attempt = try host.prepareAdmission(received: received, submissionLimits: self.assemblyLimits)
+            XCTAssertThrowsError(try self.admitAttempt(attempt, fixture: fixture, resolution: .refuse(.policyRejected)))
+        }, .inputHandled)
+        XCTAssertEqual(try typedOutcome(reply, submission: original, profile: profile), .notAdmitted(.policyRejected, .never))
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("Unexpected input") }, .idle)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+    }
+
+    func testHostAdmissionControllerReportsRequestFailureWithoutRetiringHealthyQueue() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Normal-user fixture") }
+        let endpoint = try Endpoint(), host = try host(endpoint, capabilities: .admissionResults,
+            mac: Data(repeating: 1, count: 16), account: Data(repeating: 2, count: 16))
+        defer { host.close() }
+        let profile = try hostSession(host, endpoint: endpoint, capabilities: .admissionResults)
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()
+        let original = try commandSubmission(binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
+            callerBinding: profile.callerBinding))
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        try MachCommandAdmissionWire.send(original.canonicalBytes, inputDescriptor: fd, destination: endpoint.port,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        var reported = false
+        XCTAssertEqual(try host.pollAdmission(journal: XCTUnwrap(fixture.authority), submissionLimits: assemblyLimits,
+            resolve: { _ in XCTFail("Unprivileged fixture must fail first"); return .refuse(.policyRejected) },
+            draft: { _ in throw ApprovalCoordinatorError.invalidDraft }, now: { fixture.now() }, receiptTimeMs: nil,
+            onResult: { result in
+                reported = true
+                guard case .failure(let error) = result else { return XCTFail("Unexpected success") }
+                XCTAssertEqual(error as? JournalLeaseError, .rootRequired)
+            }), .inputHandled)
+        XCTAssertTrue(reported)
+        XCTAssertEqual(try typedOutcome(reply, submission: original, profile: profile), .uncertain(.storageFailure))
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("Unexpected input") }, .idle)
+        XCTAssertEqual(host.retainedSessionCount, 1)
     }
 
     func testHostOwnsQueueAndTransfersCaptureWithoutReadingOrClosingItsInput() throws {

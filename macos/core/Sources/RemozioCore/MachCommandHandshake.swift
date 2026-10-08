@@ -217,6 +217,29 @@ public final class RetainedCommandHandshake {
             minimalEnvironment: minimalEnvironment, streamBinding: streamBinding, submissionLimits: submissionLimits,
             captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation, admissionProfile: profile)
     }
+    /// Own the original input and reply before filesystem capture. This authenticates no elevation policy.
+    public func prepareAdmission(received: sending ReceivedMachCommandInputSubmission, currentPolicy: XPCPeerPolicy,
+                                 submissionLimits: CBORLimits) throws -> sending RetainedCommandAdmissionAttempt {
+        try prepareAdmission(received: received, expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
+            auditSessionID: currentPolicy.expectedAuditSessionID, submissionLimits: submissionLimits)
+    }
+
+    func prepareAdmission(received: sending ReceivedMachCommandInputSubmission, expression: String, userID: uid_t,
+                          auditSessionID: au_asid_t?, submissionLimits: CBORLimits) throws -> sending RetainedCommandAdmissionAttempt {
+        do {
+            guard !closed else { throw MachCommandHandshakeError.retired }
+            guard profile.supportsAdmissionResults, UInt64(received.carrierVersion) == profile.inputCarrierVersion else {
+                throw MachCommandHandshakeError.incompatible
+            }
+            try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            guard let expected = caller.retainedAuditBinding, let actual = received.caller.retainedAuditBinding,
+                  expected == actual else { throw MachCommandHandshakeError.wrongBinding }
+        } catch { received.closeIfUnclaimed(); throw error }
+        return try RetainedCommandAdmissionAttempt(received: received, profile: profile, userID: userID,
+            auditSessionID: auditSessionID, submissionLimits: submissionLimits)
+    }
+
     /// The registry uses current protected policy and retires a failed retained identity.
     func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
         guard !closed else { throw MachCommandHandshakeError.retired }

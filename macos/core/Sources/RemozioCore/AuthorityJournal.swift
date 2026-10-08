@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Security
 import SQLite3
@@ -183,6 +184,140 @@ public final class AuthorityJournal: @unchecked Sendable {
         return requests
     }
 
+    /// Handles the original authenticated packet under the journal lock, before any filesystem capture.
+    /// Both callbacks are trusted host code. Resolve current elevation policy and lifecycle state without external actions or reentry.
+    /// The draft callback receives immutable capture values. Incoming claims cannot select an elevation policy.
+    public func admitCommandAttempt(_ attempt: sending RetainedCommandAdmissionAttempt,
+                                    resolve: (CommandSubmission) throws -> CommandAdmissionResolution,
+                                    draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                                    now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                                    checkCancellation: @escaping @Sendable () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try handleCommandAttempt(attempt, resolve: resolve, draft: draft, now: now, receiptTimeMs: receiptTimeMs,
+            checkCancellation: checkCancellation, validateSelf: { tx in
+                guard geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+                try AuthoritySelfValidation.validate(transaction: tx)
+            }) { snapshot, userID, auditSessionID in
+                guard let entry = snapshot.policy.entries.first(where: { $0.role == .commandFrontend }), entry.active,
+                      entry.installedGeneration >= entry.minimumGeneration else { throw CommandSessionRegistryError.invalidCodePolicy }
+                let policy = try XPCPeerPolicy(teamID: entry.teamID, componentIdentifier: entry.identifier,
+                    approvedCodeDirectoryHashes: [entry.codeDirectoryHash], expectedUserID: userID, expectedAuditSessionID: auditSessionID)
+                return policy.requirement
+            }
+    }
+
+    /// Internal fixture identity seam. Production validates the actual Root role and current release frontend policy.
+    func admitCommandAttempt(_ attempt: RetainedCommandAdmissionAttempt, expression: String,
+                             resolve: (CommandSubmission) throws -> CommandAdmissionResolution,
+                             draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                             now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                             checkCancellation: @escaping @Sendable () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try handleCommandAttempt(attempt, resolve: resolve, draft: draft, now: now, receiptTimeMs: receiptTimeMs,
+            checkCancellation: checkCancellation, validateSelf: { _ in }) { _, _, _ in expression }
+    }
+
+    private func handleCommandAttempt(_ attempt: RetainedCommandAdmissionAttempt,
+                                      resolve: (CommandSubmission) throws -> CommandAdmissionResolution,
+                                      draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                                      now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                                      checkCancellation: @escaping @Sendable () throws -> Void,
+                                      validateSelf: @Sendable (JournalTransaction) throws -> Void,
+                                      expression: (AuthorityCodePolicySnapshot, uid_t, au_asid_t?) throws -> String) throws -> IssuedRequestPayload {
+        lock.lock(); defer { lock.unlock() }
+        do { try requireNoRequestOperation() }
+        catch { attempt.closeIfUnclaimed(); throw error }
+        try attempt.claimForOwner()
+        let profile = attempt.profile, submission = attempt.submission.binding
+        let userID = attempt.userID, auditSessionID = attempt.auditSessionID
+        let peerExpression: String
+        do {
+            let policy = try validatedRead { tx in
+                try validateSelf(tx)
+                let trust = try tx.approvalTrustSnapshot()
+                guard trust.macID == profile.macID, trust.accountID == profile.accountID else { throw JournalDatabaseError.wrongScope }
+                guard let policy = try tx.codePolicy() else { throw CommandSessionRegistryError.invalidCodePolicy }
+                return policy
+            }
+            peerExpression = try expression(policy, userID, auditSessionID)
+            try attempt.recheck(expression: peerExpression)
+        } catch {
+            try? attempt.send(.uncertain(.storageFailure)); attempt.close(); throw error
+        }
+        requestOperationActive = true
+        defer { requestOperationActive = false }
+        do { try checkCancellation() }
+        catch { try? attempt.send(.uncertain(.admissionRejected)); attempt.close(); throw error }
+        guard requests != nil else {
+            try? attempt.send(commandRefusal(profile: profile, submission: submission, reason: .authorityStarting))
+            attempt.close(); throw CommandAdmissionControllerError.refused(.authorityStarting)
+        }
+        let resolution: CommandAdmissionResolution
+        do { resolution = try resolve(attempt.submission) }
+        catch { try? attempt.send(.uncertain(.admissionRejected)); attempt.close(); throw error }
+        let context: CommandAdmissionCaptureContext
+        switch resolution {
+        case .capture(let value): context = value
+        case .refuse(let reason):
+            try? attempt.send(commandRefusal(profile: profile, submission: submission, reason: reason))
+            attempt.close(); throw CommandAdmissionControllerError.refused(reason)
+        }
+        let command: RetainedCommandCapture
+        do {
+            command = try attempt.assemble(context: context, expression: peerExpression, userID: userID,
+                auditSessionID: auditSessionID, checkCancellation: {
+                    do { try checkCancellation() }
+                    catch { throw CommandAdmissionCallbackFailure(underlying: error) }
+                })
+        } catch {
+            let callback = error as? CommandAdmissionCallbackFailure
+            let rejection: CommandAdmissionRejectionReason? = callback == nil && error is CommandFilesystemCaptureError ? .invalidRequest : nil
+            let outcome = commandRefusal(profile: profile, submission: submission, reason: rejection)
+            try? attempt.send(outcome); attempt.close()
+            throw callback?.underlying ?? error
+        }
+        attempt.close()
+        let requestDraft: ApprovalRequestDraft
+        do { requestDraft = try draft(command.capture) }
+        catch {
+            let payload = CommandAdmissionResultPayload(profile: profile, submission: submission,
+                submissionDigest: command.submissionDigest, outcome: .uncertain(.admissionRejected))
+            try? command.sendAdmissionReply(payload.canonicalBytes); command.close(); throw error
+        }
+        guard let requests else { command.close(); throw ApprovalCoordinatorError.unavailable }
+        do {
+            return try requests.admitCommand(command, draft: requestDraft, expression: peerExpression,
+                userID: userID, auditSessionID: auditSessionID, now: now,
+                receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+        } catch {
+            if database.retired { retireRequests() }
+            throw error
+        }
+    }
+
+    private func commandRefusal(profile: CommandHandshakeProfile, submission: CapturedSubmission,
+                                reason: CommandAdmissionRejectionReason?) -> CommandAdmissionOutcome {
+        guard let reason else { return .uncertain(.admissionRejected) }
+        guard requests?.retainsCommandSubmission(submission) != true else { return .uncertain(.duplicateSubmission) }
+        let requestEpoch = requests?.commandAdmissionEpoch
+        do {
+            let reserved = try validatedRead { tx in
+                let trust = try tx.approvalTrustSnapshot()
+                guard trust.macID == profile.macID, trust.accountID == profile.accountID else { throw JournalDatabaseError.wrongScope }
+                if let requestEpoch, try tx.epoch(requestEpoch) == nil { throw AuditJournalError.unavailableEpoch }
+                return try tx.commandSubmissionReserved(submission)
+            }
+            guard !reserved else { return .uncertain(.duplicateSubmission) }
+            let retry: CommandAdmissionRetryClass
+            switch reason {
+            case .updateInstalling: retry = .updateInstalling
+            case .authorityStarting: retry = .authorityStarting
+            case .updateWaiting: retry = .updateWaiting
+            case .storageUnavailable: retry = .storageUnavailable
+            default: retry = .never
+            }
+            return .notAdmitted(reason, retry)
+        } catch { return .uncertain(.storageFailure) }
+    }
+
     /// Keeps policy and recipient validation under the same lock as request work.
     func withValidatedRequests<Value: Sendable>(validate: @Sendable (JournalTransaction) throws -> Void,
                                                body: @Sendable (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
@@ -199,33 +334,39 @@ public final class AuthorityJournal: @unchecked Sendable {
     public func read<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {
             try requireNoRequestOperation()
-            return try withStorageFailureCleanup {
-                if let storage {
-                    let checkpoint: ContinuityState
+            return try validatedRead(body)
+        }
+    }
+
+    /// Internal reads remain under the journal lock. They do not clear the request reentry guard.
+    private func validatedRead<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
+        return try withStorageFailureCleanup {
+            if let storage {
+                let checkpoint: ContinuityState
+                do {
+                    checkpoint = try storage.continuity.read()
+                    guard !checkpoint.recoveryRequired, checkpoint.pending == nil else { throw JournalDatabaseError.unavailable }
+                } catch {
+                    retireAfterValidationFailure(error, continuity: storage.continuity)
+                    throw error
+                }
+                return try database.read { transaction in
                     do {
-                        checkpoint = try storage.continuity.read()
-                        guard !checkpoint.recoveryRequired, checkpoint.pending == nil else { throw JournalDatabaseError.unavailable }
+                        let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
+                            epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation,
+                            authorityGeneration: checkpoint.committed.authorityGeneration)
+                        guard actual == checkpoint.committed else { throw JournalDatabaseError.unavailable }
                     } catch {
                         retireAfterValidationFailure(error, continuity: storage.continuity)
                         throw error
                     }
-                    return try database.read { transaction in
-                        do {
-                            let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
-                                epoch: checkpoint.committed.journalEpoch, generation: checkpoint.committed.generation,
-                                authorityGeneration: checkpoint.committed.authorityGeneration)
-                            guard actual == checkpoint.committed else { throw JournalDatabaseError.unavailable }
-                        } catch {
-                            retireAfterValidationFailure(error, continuity: storage.continuity)
-                            throw error
-                        }
-                        return try body(transaction)
-                    }
+                    return try body(transaction)
                 }
-                return try database.read(body)
             }
+            return try database.read(body)
         }
     }
+
     public func write<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {
             try requireNoRequestOperation()
@@ -284,3 +425,6 @@ public final class AuthorityJournal: @unchecked Sendable {
           catch EnrollmentJournalError.unavailableEnrollment { return false }
     }
 }
+
+public enum CommandAdmissionControllerError: Error, Equatable { case refused(CommandAdmissionRejectionReason) }
+private struct CommandAdmissionCallbackFailure: Error { let underlying: Error }
