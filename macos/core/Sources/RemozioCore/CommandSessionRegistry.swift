@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 import RemozioProtocol
 
 public enum CommandSessionRegistryError: Error, Equatable {
@@ -17,9 +18,10 @@ public final class CommandSessionRegistry {
     private let auditSessionID: au_asid_t?
     private var sessions: [Data: RetainedCommandHandshake] = [:]
     private var roleRevision: UUID?
-    private var activeInput: RetainedCommandInputDescriptor?
+    private var activeInput: ObjectIdentifier?
     private var busy = false
-    private var closed = false
+    private let closedState = OSAllocatedUnfairLock(initialState: false)
+    private var closed: Bool { closedState.withLock { $0 } }
     public var retainedSessionCount: Int { sessions.count }
 
     public init(macID: Data, accountID: Data, userID: uid_t, auditSessionID: au_asid_t? = nil, maximumSessions: Int) throws {
@@ -57,22 +59,26 @@ public final class CommandSessionRegistry {
     public func assemble(received: sending ReceivedMachCommandInputSubmission, currentCodePolicy: AuthorityCodePolicySnapshot,
                          captureSchemaVersion: UInt64, resolvedTarget: CommandTarget, minimalEnvironment: [CapturedEnvironmentEntry],
                          streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
-                         maximumAncestryEntries: Int = 16, checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
+                         maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {}) throws -> sending RetainedCommandCapture {
         try assemble(received: received, context: { try self.context(currentCodePolicy) }, captureSchemaVersion: captureSchemaVersion,
             resolvedTarget: resolvedTarget, minimalEnvironment: minimalEnvironment, streamBinding: streamBinding,
             submissionLimits: submissionLimits, captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
             checkCancellation: checkCancellation)
     }
 
-    func assemble(received: ReceivedMachCommandInputSubmission, context: () throws -> Context,
+    func assemble(received: sending ReceivedMachCommandInputSubmission, context: () throws -> Context,
                   captureSchemaVersion: UInt64, resolvedTarget: CommandTarget, minimalEnvironment: [CapturedEnvironmentEntry],
                   streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
-                  maximumAncestryEntries: Int = 16, checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
-        if busy, activeInput === received.input { throw CommandSessionRegistryError.operationActive }
+                  maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {}) throws -> sending RetainedCommandCapture {
+        if busy, activeInput == ObjectIdentifier(received.input) { throw CommandSessionRegistryError.operationActive }
+        do { try begin() }
+        catch { received.closeIfUnclaimed(); throw error }
+        activeInput = ObjectIdentifier(received.input)
+        defer { activeInput = nil; end() }
+        let current: Context
+        let session: RetainedCommandHandshake
         do {
-            try begin(); activeInput = received.input
-            defer { activeInput = nil; end() }
-            let current = try resolve(context)
+            current = try resolve(context)
             _ = synchronize(current)
             try checkCancellation()
             guard !closed else { throw CommandSessionRegistryError.closed }
@@ -82,15 +88,17 @@ public final class CommandSessionRegistry {
             }
             let submission = try CommandSubmission(canonicalBytes: received.payload, limits: submissionLimits,
                 expectedSchemaVersion: schema)
-            guard let session = sessions[submission.binding.callerBinding] else { throw CommandSessionRegistryError.unknownSession }
-            return try session.assemble(received: received, expression: current.expression, userID: userID, auditSessionID: auditSessionID,
-                captureSchemaVersion: captureSchemaVersion, resolvedTarget: resolvedTarget, minimalEnvironment: minimalEnvironment,
-                streamBinding: streamBinding, submissionLimits: submissionLimits, captureLimits: captureLimits,
-                maximumAncestryEntries: maximumAncestryEntries, checkCancellation: {
-                    try checkCancellation()
-                    guard !self.closed else { throw CommandSessionRegistryError.closed }
-                })
+            guard let selected = sessions[submission.binding.callerBinding] else { throw CommandSessionRegistryError.unknownSession }
+            session = selected
         } catch { received.closeIfUnclaimed(); throw error }
+        // The session owns cleanup after this transfer, including failure. The registry must not use the receipt again.
+        return try session.assemble(received: received, expression: current.expression, userID: userID, auditSessionID: auditSessionID,
+            captureSchemaVersion: captureSchemaVersion, resolvedTarget: resolvedTarget, minimalEnvironment: minimalEnvironment,
+            streamBinding: streamBinding, submissionLimits: submissionLimits, captureLimits: captureLimits,
+            maximumAncestryEntries: maximumAncestryEntries, checkCancellation: { [closedState] in
+                try checkCancellation()
+                guard !closedState.withLock({ $0 }) else { throw CommandSessionRegistryError.closed }
+            })
     }
 
     /// Run from the serial host loop even when no messages arrive. No deadline is imposed on admitted requests.
@@ -111,12 +119,12 @@ public final class CommandSessionRegistry {
     }
 
     public func close() {
-        closed = true
+        closedState.withLock { $0 = true }
         if !busy { clear() }
     }
     deinit { close() }
 
-    struct Context { let expression: String; let roleRevision: UUID }
+    struct Context: Sendable { let expression: String; let roleRevision: UUID }
     func context(_ snapshot: AuthorityCodePolicySnapshot) throws -> Context {
         guard let entry = snapshot.policy.entries.first(where: { $0.role == .commandFrontend }), entry.active,
               entry.installedGeneration >= entry.minimumGeneration,

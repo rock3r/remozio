@@ -172,29 +172,31 @@ public final class RetainedCommandHandshake {
     public func assemble(received: sending ReceivedMachCommandInputSubmission, currentPolicy: XPCPeerPolicy,
                          captureSchemaVersion: UInt64, resolvedTarget: CommandTarget, minimalEnvironment: [CapturedEnvironmentEntry],
                          streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
-                         maximumAncestryEntries: Int = 16, checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
+                         maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {}) throws -> sending RetainedCommandCapture {
         try assemble(received: received, expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
             auditSessionID: currentPolicy.expectedAuditSessionID, captureSchemaVersion: captureSchemaVersion,
             resolvedTarget: resolvedTarget, minimalEnvironment: minimalEnvironment, streamBinding: streamBinding,
             submissionLimits: submissionLimits, captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
             checkCancellation: checkCancellation)
     }
-    func assemble(received: ReceivedMachCommandInputSubmission, expression: String, userID: uid_t, auditSessionID: au_asid_t?,
+    func assemble(received: sending ReceivedMachCommandInputSubmission, expression: String, userID: uid_t, auditSessionID: au_asid_t?,
                   captureSchemaVersion: UInt64, resolvedTarget: CommandTarget, minimalEnvironment: [CapturedEnvironmentEntry],
                   streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits, maximumAncestryEntries: Int = 16,
-                  checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
+                  checkCancellation: @Sendable () throws -> Void = {}) throws -> sending RetainedCommandCapture {
         do {
             guard !closed else { throw MachCommandHandshakeError.retired }
             try checkCancellation()
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
             try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
-            guard caller.hasSameAuditBinding(as: received.caller) else { throw MachCommandHandshakeError.wrongBinding }
-            return try RetainedCommandCapture(received: received, expectedCallerBinding: profile.callerBinding,
-                submissionSchemaVersion: profile.submissionSchemaVersion, captureSchemaVersion: captureSchemaVersion,
-                expression: expression, userID: userID, auditSessionID: auditSessionID, resolvedTarget: resolvedTarget,
-                minimalEnvironment: minimalEnvironment, streamBinding: streamBinding, submissionLimits: submissionLimits,
-                captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
+            guard let expected = caller.retainedAuditBinding, let actual = received.caller.retainedAuditBinding,
+                  expected == actual else { throw MachCommandHandshakeError.wrongBinding }
         } catch { received.closeIfUnclaimed(); throw error }
+        // Capture construction owns cleanup after this transfer, including failure.
+        return try RetainedCommandCapture(received: received, expectedCallerBinding: profile.callerBinding,
+            submissionSchemaVersion: profile.submissionSchemaVersion, captureSchemaVersion: captureSchemaVersion,
+            expression: expression, userID: userID, auditSessionID: auditSessionID, resolvedTarget: resolvedTarget,
+            minimalEnvironment: minimalEnvironment, streamBinding: streamBinding, submissionLimits: submissionLimits,
+            captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
     }
     /// The registry uses current protected policy and retires a failed retained identity.
     func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {

@@ -44,7 +44,10 @@ The retained session rechecks both actual process identities before accepting th
 Submission schema support remains explicit. An unsupported schema cannot select an automatic downgrade.
 Neither routing nor assembly reads stdin.
 
-The public hello and input APIs use Swift `sending` parameters.
+The receiver returns freshly owned receipts with Swift `sending` return types.
+The public hello and input APIs consume them with `sending` parameters, and assembly returns an independently owned capture.
+The host can transfer that capture to journal admission and continue using its receiver and registry.
+Cancellation callbacks use `@Sendable`; the registry shares only a protected close signal with capture construction.
 Copies of an input receipt share one capture-ownership claim. A repeated transfer cannot close an earlier capture's objects.
 Callback reentry rejects the same active input without closing it. A separate rejected receipt releases only its own objects.
 Closing the registry during an assembly callback cancels that assembly and retires its sessions.
@@ -72,7 +75,8 @@ The registry imposes no approval deadline. Its checked session limit is a host s
 Real Mach tests route interleaved hello and input messages on one queue and reject other carriers, oversized controls, malformed descriptors, and wrong senders.
 They inspect right cleanup, full-capacity behavior, unread pipe bytes, copied-binding rejection, repeated ownership transfer, and callback reentry.
 Disposable signed processes prove retirement after exec and exit while another session stays usable.
-Compiler probes accept valid public registry transfers and reject direct and alias reuse afterward.
+Compiler probes accept valid public producer and registry transfers and reject direct and alias reuse afterward.
+They also compile the complete receive-to-registry-to-journal path while the receiver and registry remain usable.
 
 These fixtures use disposable ports and explicit test policies under the test user's UID.
 They do not prove a protected Developer ID Root deployment or physical-device end-to-end behavior.

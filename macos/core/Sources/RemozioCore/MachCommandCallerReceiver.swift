@@ -28,7 +28,7 @@ public final class MachCommandCallerReceiver {
     public static let handshakeCarrierVersion: UInt32 = 1
     private let port: mach_port_t
     private let maxPayloadBytes: Int
-    private let requirement: SecRequirement
+    private let expression: String
     private let userID: uid_t
     private let auditSessionID: au_asid_t?
 
@@ -42,18 +42,19 @@ public final class MachCommandCallerReceiver {
         guard receivePort != MACH_PORT_NULL, receivePort != UInt32.max, maxPayloadBytes > 0,
               maxPayloadBytes <= Int(UInt32.max) - 1024 else { throw MachCommandCallerError.configuration }
         self.port = receivePort; self.maxPayloadBytes = maxPayloadBytes
-        self.requirement = try Self.compile(expression)
+        _ = try Self.compile(expression)
+        self.expression = expression
         self.userID = userID; self.auditSessionID = auditSessionID
     }
 
     /// A finite timeout keeps receive loops cancellable. Oversized and malformed packets fail without truncation.
-    public func receive(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandSubmission {
+    public func receive(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandSubmission {
         let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .submission)
         return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
     }
 
     /// Imports one actual input fileport from the verified sender without reading its input.
-    public func receiveInput(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandInputSubmission {
+    public func receiveInput(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandInputSubmission {
         let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .input)
         guard let input = packet.input else { throw MachCommandCallerError.malformed }
         return ReceivedMachCommandInputSubmission(payload: packet.payload, caller: packet.caller, input: input)
@@ -61,20 +62,20 @@ public final class MachCommandCallerReceiver {
 
     /// Receives protocol metadata and a private reply right from the actual frontend process.
     /// The listener must still reserve capacity and validate its current protected role before retaining a session.
-    public func receiveHello(timeoutMilliseconds: UInt32) throws -> MachCommandHello {
+    public func receiveHello(timeoutMilliseconds: UInt32) throws -> sending MachCommandHello {
         let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .hello)
         guard let reply = packet.reply else { packet.caller.close(); throw MachCommandCallerError.malformed }
         return MachCommandHello(payload: packet.payload, caller: packet.caller, reply: reply)
     }
 
-    func receiveHelloReply(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandSubmission {
+    func receiveHelloReply(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandSubmission {
         let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .helloReply)
         return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
     }
 
     /// Select from the actual queue preview, then authenticate and receive through the same parser.
     /// Only hello and original-input submission carriers belong on a command listener.
-    public func receiveNext(timeoutMilliseconds: UInt32) throws -> ReceivedMachCommandMessage {
+    public func receiveNext(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandMessage {
         let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil)
         switch packet.kind {
         case .hello:
@@ -99,7 +100,7 @@ public final class MachCommandCallerReceiver {
         let reply: MachCommandReplyRight?
     }
 
-    private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?) throws -> Packet {
+    private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?) throws -> sending Packet {
         guard timeoutMilliseconds > 0 else { throw MachCommandCallerError.configuration }
         let started = DispatchTime.now().uptimeNanoseconds
         var preview = remozio_mach_preview_t()
@@ -135,8 +136,11 @@ public final class MachCommandCallerReceiver {
             try discardQueueHead()
             throw MachCommandCallerError.malformed
         }
+        // Keep each packet's Security references in its own ownership region.
+        let requirement: SecRequirement
         let caller: RetainedCommandCaller
         do {
+            requirement = try Self.compile(expression)
             caller = try RetainedCommandCaller(token: preview.token, requirement: requirement,
                 userID: userID, auditSessionID: auditSessionID)
         } catch {
@@ -409,11 +413,15 @@ public final class RetainedCommandCaller {
         } catch let failure as MachCommandCallerError { close(); throw failure }
     }
 
-    /// Compare the complete kernel audit binding, including process incarnation and credentials.
+    /// Read-only kernel binding values do not connect the ownership regions of two retained callers.
+    var retainedAuditBinding: Data? {
+        guard code != nil else { return nil }
+        var value = token
+        return withUnsafeBytes(of: &value) { Data($0) }
+    }
     func hasSameAuditBinding(as other: RetainedCommandCaller) -> Bool {
-        guard code != nil, other.code != nil else { return false }
-        var first = token, second = other.token
-        return withUnsafeBytes(of: &first) { a in withUnsafeBytes(of: &second) { b in a.elementsEqual(b) } }
+        guard let first = retainedAuditBinding, let second = other.retainedAuditBinding else { return false }
+        return first == second
     }
 
     public func close() { code = nil }

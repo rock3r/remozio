@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 import RemozioMach
 import RemozioProtocol
 import Security
@@ -752,8 +753,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
     private func assemble(_ received: ReceivedMachCommandInputSubmission, binding: Data? = nil, schema: UInt64 = 1,
                           submissionSchema: UInt64 = 1, target: CommandTarget? = nil, minimal: [CapturedEnvironmentEntry]? = nil,
-                          limits: CBORLimits? = nil, checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
-        try RetainedCommandCapture(received: received, expectedCallerBinding: binding ?? assemblyBinding,
+                          limits: CBORLimits? = nil, checkCancellation: @Sendable () throws -> Void = {}) throws -> RetainedCommandCapture {
+        try RetainedCommandCapture(received: TestInputInspection(received: received).received, expectedCallerBinding: binding ?? assemblyBinding,
             submissionSchemaVersion: submissionSchema, captureSchemaVersion: schema, expression: selfExpression(),
             userID: geteuid(), auditSessionID: nil, resolvedTarget: target ?? assemblyTarget,
             minimalEnvironment: minimal ?? assemblyEnvironment, streamBinding: Data(repeating: 0xb4, count: 16),
@@ -875,8 +876,10 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
         try expectAssemblyResourcesRetired(oversized)
         let cancelled = try inputSubmission(fd, payload: claims.canonicalBytes)
-        var checks = 0
-        XCTAssertThrowsError(try assemble(cancelled, checkCancellation: { checks += 1; if checks == 2 { throw Cancelled.test } })) {
+        let checks = OSAllocatedUnfairLock(initialState: 0)
+        XCTAssertThrowsError(try assemble(cancelled, checkCancellation: {
+            if checks.withLock({ $0 += 1; return $0 }) == 2 { throw Cancelled.test }
+        })) {
             XCTAssertTrue($0 is Cancelled)
         }
         try expectAssemblyResourcesRetired(cancelled)
@@ -1554,7 +1557,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
     private var handshakeMac: Data { Data(repeating: 0xd1, count: 16) }
     private var handshakeAccount: Data { Data(repeating: 0xd2, count: 16) }
-    private func hello(_ endpoint: Endpoint, reply: Endpoint, capabilities: CommandHandshakeCapabilities = .current) throws -> MachCommandHello {
+    private func hello(_ endpoint: Endpoint, reply: Endpoint, capabilities: CommandHandshakeCapabilities = .current) throws -> sending MachCommandHello {
         let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: capabilities)
         try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
             identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
@@ -1711,7 +1714,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             ioMode: original.ioMode, disconnectBehavior: original.disconnectBehavior, unverifiedRationale: original.unverifiedRationale,
             binding: .init(id: original.binding.id, nonce: original.binding.nonce, callerBinding: session.profile.callerBinding), limits: assemblyLimits)
         let received = try inputSubmission(pipeFDs[0], payload: claims.canonicalBytes)
-        let command = try session.assemble(received: received, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+        let command = try session.assemble(received: TestInputInspection(received: received).received, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
             captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
             streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)
         defer { command.close() }
@@ -1723,14 +1726,14 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             XCTAssertEqual(Data(bytes), pending)
         }
         let wrong = try inputSubmission(pipeFDs[0], payload: original.canonicalBytes)
-        XCTAssertThrowsError(try session.assemble(received: wrong, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+        XCTAssertThrowsError(try session.assemble(received: TestInputInspection(received: wrong).received, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
             captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
             streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits))
         try expectAssemblyResourcesRetired(wrong)
         try command.withBorrowedDirectoryDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
         session.close()
         let afterClose = try inputSubmission(pipeFDs[0], payload: claims.canonicalBytes)
-        XCTAssertThrowsError(try session.assemble(received: afterClose, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+        XCTAssertThrowsError(try session.assemble(received: TestInputInspection(received: afterClose).received, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
             captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
             streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)) {
             XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
@@ -1775,7 +1778,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(fd, 0)
         defer { _ = Darwin.close(fd) }
         let incoming = try inputSubmission(fd, payload: claims.canonicalBytes)
-        XCTAssertThrowsError(try session.assemble(received: incoming, expression: "true", userID: geteuid(), auditSessionID: nil,
+        XCTAssertThrowsError(try session.assemble(received: TestInputInspection(received: incoming).received, expression: "true", userID: geteuid(), auditSessionID: nil,
             captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
             streamBinding: Data(repeating: 0xd4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)) {
             XCTAssertEqual($0 as? MachCommandHandshakeError, .wrongBinding)
@@ -1809,6 +1812,14 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     }
 
 
+    // Serialized test inspection deliberately retains aliases. Product callers must use the sending APIs.
+    private struct TestInputInspection: @unchecked Sendable { let received: ReceivedMachCommandInputSubmission }
+    // Callbacks execute synchronously in these fixtures. The wrapper permits deliberate reentry and alias inspection.
+    private struct TestRegistryInspection: @unchecked Sendable {
+        let tests: MachCommandCallerReceiverTests
+        let owner: CommandSessionRegistry
+        let received: ReceivedMachCommandInputSubmission
+    }
     private let registryRevision = UUID()
     private func registry(_ maximum: Int = 4) throws -> CommandSessionRegistry {
         try CommandSessionRegistry(macID: handshakeMac, accountID: handshakeAccount, userID: geteuid(), maximumSessions: maximum)
@@ -1837,9 +1848,9 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         return try inputSubmission(fd, payload: claims.canonicalBytes)
     }
     private func registryCapture(_ owner: CommandSessionRegistry, received: ReceivedMachCommandInputSubmission,
-                                 context: CommandSessionRegistry.Context? = nil, checkCancellation: () throws -> Void = {}) throws -> RetainedCommandCapture {
+                                 context: CommandSessionRegistry.Context? = nil, checkCancellation: @Sendable () throws -> Void = {}) throws -> RetainedCommandCapture {
         let context = try context ?? registryContext()
-        return try owner.assemble(received: received, context: { context }, captureSchemaVersion: 2, resolvedTarget: assemblyTarget,
+        return try owner.assemble(received: TestInputInspection(received: received).received, context: { context }, captureSchemaVersion: 2, resolvedTarget: assemblyTarget,
             minimalEnvironment: assemblyEnvironment, streamBinding: Data(repeating: 0xe4, count: 16),
             submissionLimits: assemblyLimits, captureLimits: assemblyLimits, checkCancellation: checkCancellation)
     }
@@ -1973,19 +1984,20 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     func testRegistryReentryClosesOnlyASeparateIncomingTransferAndCloseCancelsAssembly() throws {
         let owner = try registry(), profile = try registrySession(owner), original = try registrySubmission(profile.callerBinding)
         defer { owner.close() }
+        let inspection = TestRegistryInspection(tests: self, owner: owner, received: original)
         let capture = try registryCapture(owner, received: original, checkCancellation: {
-            XCTAssertThrowsError(try self.registryCapture(owner, received: original)) {
+            XCTAssertThrowsError(try inspection.tests.registryCapture(inspection.owner, received: inspection.received)) {
                 XCTAssertEqual($0 as? CommandSessionRegistryError, .operationActive)
             }
-            let other = try self.registrySubmission(profile.callerBinding)
-            XCTAssertThrowsError(try self.registryCapture(owner, received: other)) {
+            let other = try inspection.tests.registrySubmission(profile.callerBinding)
+            XCTAssertThrowsError(try inspection.tests.registryCapture(inspection.owner, received: other)) {
                 XCTAssertEqual($0 as? CommandSessionRegistryError, .operationActive)
             }
-            try self.expectAssemblyResourcesRetired(other)
+            try inspection.tests.expectAssemblyResourcesRetired(other)
         })
         defer { capture.close() }
         let incoming = try registrySubmission(profile.callerBinding)
-        XCTAssertThrowsError(try registryCapture(owner, received: incoming, checkCancellation: { owner.close() })) {
+        XCTAssertThrowsError(try registryCapture(owner, received: incoming, checkCancellation: { inspection.owner.close() })) {
             XCTAssertEqual($0 as? CommandSessionRegistryError, .closed)
         }
         try expectAssemblyResourcesRetired(incoming)
@@ -2078,7 +2090,10 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let packet = try hello(endpoint, reply: reply)
         let snapshot = AuthorityCodePolicySnapshot(revision: UUID(), policy: policy, roleRevisions: [.commandFrontend: role])
         // The fixture has ad-hoc code. A protected release policy must reject it before replying.
-        XCTAssertThrowsError(try owner.accept(hello: packet, currentCodePolicy: snapshot))
+        do {
+            _ = try owner.accept(hello: packet, currentCodePolicy: snapshot)
+            XCTFail("release policy accepted ad-hoc fixture")
+        } catch {}
         XCTAssertEqual(owner.retainedSessionCount, 0)
         XCTAssertEqual(try sendReferences(reply.port), baseline)
         XCTAssertThrowsError(try receiver(reply).receiveHelloReply(timeoutMilliseconds: 10)) {

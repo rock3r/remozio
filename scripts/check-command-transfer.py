@@ -71,6 +71,37 @@ func transfer(owner: RetainedCommandHandshake, received: sending ReceivedMachCom
             "registry-input-reuse": (registry_input_prefix + registry_input_transfer + "    received.input.close()\n}\n", False),
             "registry-input-alias-reuse": (registry_input_prefix + "    let alias = received\n" + registry_input_transfer + "    alias.input.close()\n}\n", False),
         })
+        producer_hello_prefix = registry_hello_prefix.replace("hello: sending MachCommandHello", "receiver: MachCommandCallerReceiver")
+        producer_hello = "    let hello = try receiver.receiveHello(timeoutMilliseconds: 1)\n"
+        producer_input_prefix = registry_input_prefix.replace("received: sending ReceivedMachCommandInputSubmission", "receiver: MachCommandCallerReceiver")
+        producer_input = "    let received = try receiver.receiveInput(timeoutMilliseconds: 1)\n"
+        next_receive = "    _ = try receiver.receiveNext(timeoutMilliseconds: 1)\n"
+        probes.update({
+            "producer-hello-valid": (producer_hello_prefix + producer_hello + registry_hello_transfer + next_receive + "}\n", True),
+            "producer-hello-reuse": (producer_hello_prefix + producer_hello + registry_hello_transfer + "    hello.close()\n}\n", False),
+            "producer-hello-alias-reuse": (producer_hello_prefix + producer_hello + "    let alias = hello\n" + registry_hello_transfer + "    alias.close()\n}\n", False),
+            "producer-input-valid": (producer_input_prefix + producer_input + registry_input_transfer + next_receive + "}\n", True),
+            "producer-input-reuse": (producer_input_prefix + producer_input + registry_input_transfer + "    received.input.close()\n}\n", False),
+            "producer-input-alias-reuse": (producer_input_prefix + producer_input + "    let alias = received\n" + registry_input_transfer + "    alias.input.close()\n}\n", False),
+        })
+        pipeline_prefix = """import Foundation
+import RemozioCore
+import RemozioProtocol
+func transfer(receiver: MachCommandCallerReceiver, registry: CommandSessionRegistry, journal: AuthorityJournal,
+              policy: AuthorityCodePolicySnapshot, peer: XPCPeerPolicy, target: CommandTarget, limits: CBORLimits,
+              stream: Data, draft: ApprovalRequestDraft, now: () throws -> AuthorityMoment) throws {
+"""
+        pipeline = """    let received = try receiver.receiveInput(timeoutMilliseconds: 1)
+    let command = try registry.assemble(received: received, currentCodePolicy: policy, captureSchemaVersion: 2,
+        resolvedTarget: target, minimalEnvironment: [], streamBinding: stream, submissionLimits: limits, captureLimits: limits)
+    _ = try journal.admitCommand(command, draft: draft, currentPolicy: peer, now: now, receiptTimeMs: nil)
+    _ = try receiver.receiveNext(timeoutMilliseconds: 1)
+    _ = try registry.prune(currentCodePolicy: policy)
+"""
+        probes["pipeline-valid"] = (pipeline_prefix + pipeline + "}\n", True)
+        probes["pipeline-command-reuse"] = (pipeline_prefix + pipeline + "    command.close()\n}\n", False)
+        alias_pipeline = pipeline.replace("    _ = try journal.admitCommand", "    let alias = command\n    _ = try journal.admitCommand")
+        probes["pipeline-alias-reuse"] = (pipeline_prefix + alias_pipeline + "    alias.close()\n}\n", False)
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
