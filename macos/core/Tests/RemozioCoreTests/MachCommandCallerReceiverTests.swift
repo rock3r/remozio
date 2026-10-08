@@ -80,7 +80,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
 
         func sendInput(_ payload: Data, fileport: mach_port_t, version: UInt32 = 2, descriptorCount: Int = 1,
-                       identifier: mach_msg_id_t = MachCommandCallerReceiver.inputMessageID) throws {
+                       identifier: mach_msg_id_t = MachCommandCallerReceiver.inputMessageID, replyPort: mach_port_t? = nil, badPadding: Bool = false) throws {
             let headerBytes = MemoryLayout<mach_msg_header_t>.size
             let bodyBytes = MemoryLayout<mach_msg_body_t>.size
             let descriptorBytes = MemoryLayout<mach_msg_port_descriptor_t>.size
@@ -98,7 +98,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 toByteOffset: headerBytes, as: mach_msg_body_t.self)
             for index in 0..<descriptorCount {
                 var descriptor = mach_msg_port_descriptor_t()
-                descriptor.name = fileport
+                descriptor.name = index == 1 ? (replyPort ?? fileport) : fileport
                 descriptor.disposition = UInt32(MACH_MSG_TYPE_COPY_SEND)
                 descriptor.type = UInt32(MACH_MSG_PORT_DESCRIPTOR)
                 storage.storeBytes(of: descriptor, toByteOffset: headerBytes + bodyBytes + index * descriptorBytes,
@@ -109,6 +109,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             payload.withUnsafeBytes { bytes in
                 if let base = bytes.baseAddress { storage.advanced(by: metadata + 8).copyMemory(from: base, byteCount: bytes.count) }
             }
+            if badPadding { storage.storeBytes(of: UInt8(1), toByteOffset: size - 1, as: UInt8.self) }
             let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, UInt32(size), 0, 0, 1000, 0)
             guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         }
@@ -149,6 +150,368 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             let result = mach_msg(&header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, header.msgh_size, 0, 0, 1000, 0)
             guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
         }
+    }
+
+    private func admissionInput(_ endpoint: Endpoint, reply: Endpoint, descriptor: Int32, payload: Data) throws -> ReceivedMachCommandInputSubmission {
+        try MachCommandAdmissionWire.send(payload, inputDescriptor: descriptor, destination: endpoint.port,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        return try receiver(endpoint, maximum: 8192).receiveAdmissionInput(timeoutMilliseconds: 1000)
+    }
+    private func admissionClientFixture(_ destination: mach_port_t, input: UInt64 = 3) throws -> VerifiedCommandHandshake {
+        let endpoint = try Endpoint()
+        try endpoint.send(Data([1]))
+        let sender = try receiver(endpoint).receive(timeoutMilliseconds: 1000)
+        return VerifiedCommandHandshake(profile: .init(wireVersion: 1, submissionSchemaVersion: 1, inputCarrierVersion: input,
+            callerBinding: assemblyBinding, macID: handshakeMac, accountID: handshakeAccount), authority: sender.caller,
+            destination: try MachCommandAuthorityPort(copying: destination))
+    }
+
+    func testAdmissionReplyCarrierPreservesOriginalInputAndRepliesOnce() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint()
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(pipeFDs[1], "queued", 6), 6)
+        let flags = fcntl(pipeFDs[0], F_GETFL), baseline = try sendReferences(reply.port)
+        let input = try admissionInput(endpoint, reply: reply, descriptor: pipeFDs[0], payload: Data([0xa0]))
+        defer { input.closeIfUnclaimed() }
+        XCTAssertEqual(input.carrierVersion, 3); XCTAssertEqual(input.payload, Data([0xa0]))
+        XCTAssertEqual(try sendReferences(reply.port), baseline + 1)
+        try input.sendAdmissionReply(Data([0xa0]))
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        XCTAssertThrowsError(try input.sendAdmissionReply(Data([0xa0])))
+        let response = try receiver(reply).receiveAdmissionReply(timeoutMilliseconds: 1000)
+        defer { response.caller.close() }
+        XCTAssertEqual(response.payload, Data([0xa0])); XCTAssertEqual(response.caller.requester.pid, UInt32(getpid()))
+        XCTAssertEqual(fcntl(pipeFDs[0], F_GETFL), flags)
+        var bytes = [UInt8](repeating: 0, count: 6)
+        XCTAssertEqual(Darwin.read(pipeFDs[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("queued".utf8))
+    }
+
+    func testAdmissionReplyCarrierKeepsLegacyMeaningAndMixedReceiveQueue() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        let baseline = try sendReferences(reply.port)
+        try MachCommandAdmissionWire.send(Data([1]), inputDescriptor: fd, destination: endpoint.port,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        XCTAssertThrowsError(try receiver(endpoint).receiveInput(timeoutMilliseconds: 1000))
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        var fileport: mach_port_t = 0
+        XCTAssertEqual(fileport_makeport(fd, &fileport), 0); defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        try endpoint.sendInput(Data([2]), fileport: fileport)
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 1000))
+        try endpoint.sendInput(Data([3]), fileport: fileport)
+        try MachCommandAdmissionWire.send(Data([4]), inputDescriptor: fd, destination: endpoint.port,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        for (payload, version) in [(UInt8(3), UInt32(2)), (4, 3)] {
+            guard case .input(let input) = try receiver(endpoint).receiveNext(timeoutMilliseconds: 1000) else { return XCTFail("Input missing") }
+            XCTAssertEqual(input.payload, Data([payload])); XCTAssertEqual(input.carrierVersion, version)
+            input.closeIfUnclaimed()
+        }
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+    }
+
+    func testAdmissionReplyCarrierRejectsWrongSenderAndMalformedRightsWithoutLeaks() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        var fileport: mach_port_t = 0
+        XCTAssertEqual(fileport_makeport(fd, &fileport), 0); defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        let baseline = try sendReferences(reply.port), inputBaseline = try sendReferences(fileport)
+        try endpoint.sendInput(Data([1]), fileport: fileport, version: 3, descriptorCount: 2,
+            identifier: MachCommandCallerReceiver.admissionInputMessageID, replyPort: reply.port)
+        XCTAssertThrowsError(try receiver(endpoint, user: geteuid() ^ 1).receiveAdmissionInput(timeoutMilliseconds: 1000))
+        for (count, version, padding) in [(0, UInt32(3), false), (1, 3, false), (3, 3, false), (2, 2, false), (2, 3, true)] {
+            try endpoint.sendInput(Data([1]), fileport: fileport, version: version, descriptorCount: count,
+                identifier: MachCommandCallerReceiver.admissionInputMessageID, replyPort: reply.port, badPadding: padding)
+            XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 1000))
+            XCTAssertEqual(try sendReferences(reply.port), baseline); XCTAssertEqual(try sendReferences(fileport), inputBaseline)
+        }
+        try endpoint.sendInput(Data([1]), fileport: reply.port, version: 3, descriptorCount: 2,
+            identifier: MachCommandCallerReceiver.admissionInputMessageID, replyPort: reply.port)
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? RetainedCommandInputError, .system(EINVAL))
+        }
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        let next = try admissionInput(endpoint, reply: reply, descriptor: fd, payload: Data([2]))
+        next.closeIfUnclaimed(); XCTAssertEqual(try sendReferences(reply.port), baseline)
+    }
+
+    func testAdmissionReplyControlCarrierRejectsWrongVersionOversizeAndWrongKind() throws {
+        let endpoint = try Endpoint()
+        let control = try receiver(endpoint, maximum: 8192)
+        for (version, identifier, bytes) in [(UInt32(2), MachCommandCallerReceiver.admissionReplyMessageID, Data([1])),
+            (1, MachCommandCallerReceiver.helloReplyMessageID, Data([1])),
+            (1, MachCommandCallerReceiver.admissionReplyMessageID, Data(repeating: 1, count: 4097))] {
+            try endpoint.send(bytes, version: version, identifier: identifier)
+            XCTAssertThrowsError(try control.receiveAdmissionReply(timeoutMilliseconds: 1000))
+        }
+        try endpoint.send(Data([2]), identifier: MachCommandCallerReceiver.admissionReplyMessageID, badPadding: true)
+        XCTAssertThrowsError(try control.receiveAdmissionReply(timeoutMilliseconds: 1000))
+        try endpoint.send(Data([3]), identifier: MachCommandCallerReceiver.admissionReplyMessageID)
+        let reply = try control.receiveAdmissionReply(timeoutMilliseconds: 1000)
+        reply.caller.close(); XCTAssertEqual(reply.payload, Data([3]))
+    }
+
+    func testCaptureRetainsAdmissionReplyAcrossOwnershipAndClosesItOnRetirement() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        let baseline = try sendReferences(reply.port), payload = try commandSubmission().canonicalBytes
+        let received = try admissionInput(endpoint, reply: reply, descriptor: fd, payload: payload)
+        let command = try assemble(received)
+        defer { command.close() }
+        XCTAssertThrowsError(try received.sendAdmissionReply(Data([0xa0])))
+        XCTAssertThrowsError(try assemble(received)) { XCTAssertEqual($0 as? RetainedCommandCaptureError, .alreadyOwned) }
+        received.closeIfUnclaimed()
+        XCTAssertEqual(try sendReferences(reply.port), baseline + 1)
+        try command.sendAdmissionReply(Data([0xa0]))
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        let response = try receiver(reply).receiveAdmissionReply(timeoutMilliseconds: 1000)
+        response.caller.close(); XCTAssertEqual(response.payload, Data([0xa0]))
+        let secondReply = try Endpoint(), second = try admissionInput(endpoint, reply: secondReply, descriptor: fd, payload: payload)
+        let owned = try assemble(second)
+        XCTAssertEqual(try sendReferences(secondReply.port), 2)
+        owned.close(); XCTAssertEqual(try sendReferences(secondReply.port), 1)
+        XCTAssertThrowsError(try owned.sendAdmissionReply(Data([0xa0])))
+        let failed = try admissionInput(endpoint, reply: reply, descriptor: fd, payload: Data([0]))
+        XCTAssertThrowsError(try assemble(failed))
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        try expectAssemblyResourcesRetired(failed)
+    }
+
+    func testNegotiatedAdmissionCarrierCannotUseLegacyInputAndPreservesReplyOnCapture() throws {
+        let endpoint = try Endpoint(), helloReply = try Endpoint(), reply = try Endpoint()
+        let session = try RetainedCommandHandshake(hello: hello(endpoint, reply: helloReply, capabilities: .admissionReplies),
+            capabilities: .admissionReplies, macID: handshakeMac, accountID: handshakeAccount,
+            expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        defer { session.close() }
+        XCTAssertEqual(session.profile.inputCarrierVersion, 3)
+        let payload = try commandSubmission(binding: .init(id: Data(repeating: 2, count: 16), nonce: Data(repeating: 3, count: 32),
+            callerBinding: session.profile.callerBinding)).canonicalBytes
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        let legacy = try inputSubmission(fd, payload: payload)
+        XCTAssertThrowsError(try session.assemble(received: TestInputInspection(received: legacy).received,
+            expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+        }
+        try expectAssemblyResourcesRetired(legacy)
+        let incoming = try admissionInput(endpoint, reply: reply, descriptor: fd, payload: payload)
+        let command = try session.assemble(received: TestInputInspection(received: incoming).received,
+            expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            captureSchemaVersion: 2, resolvedTarget: assemblyTarget, minimalEnvironment: assemblyEnvironment,
+            streamBinding: Data(repeating: 4, count: 16), submissionLimits: assemblyLimits, captureLimits: assemblyLimits)
+        defer { command.close() }
+        try command.sendAdmissionReply(Data([0xa0]))
+        let response = try receiver(reply).receiveAdmissionReply(timeoutMilliseconds: 1000)
+        response.caller.close(); XCTAssertEqual(response.payload, Data([0xa0]))
+    }
+
+    func testAdmissionClientNegotiatesAndAuthenticatesReplyWithoutReadingInput() throws {
+        let endpoint = try Endpoint(), port = endpoint.port, expression = try selfExpression(), user = geteuid()
+        let mac = handshakeMac, account = handshakeAccount
+        let completed = DispatchSemaphore(value: 0), result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { output in output = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user,
+                    auditSessionID: nil, maxPayloadBytes: 8192)
+                let session = try RetainedCommandHandshake(hello: receiver.receiveHello(timeoutMilliseconds: 5000),
+                    capabilities: .admissionReplies, macID: mac, accountID: account, expression: expression, userID: user, auditSessionID: nil)
+                defer { session.close() }
+                let input = try receiver.receiveAdmissionInput(timeoutMilliseconds: 5000)
+                defer { input.closeIfUnclaimed() }
+                _ = try CommandSubmission(canonicalBytes: input.payload,
+                    limits: CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024), expectedSchemaVersion: 1)
+                try input.sendAdmissionReply(Data([0xa0]))
+            } }
+        }
+        let handshake = try MachCommandHandshakeClient.negotiate(authorityPort: port, expression: expression, userID: user,
+            auditSessionID: nil, macID: mac, accountID: account, capabilities: .admissionReplies)
+        defer { handshake.close() }
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0); defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(pipeFDs[1], "queued", 6), 6)
+        let submission = try commandSubmission(binding: .init(id: Data(repeating: 2, count: 16), nonce: Data(repeating: 3, count: 32),
+            callerBinding: handshake.profile.callerBinding))
+        let response = try MachCommandAdmissionClient.submit(submission, inputDescriptor: pipeFDs[0],
+            handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+        XCTAssertEqual(response.payload, Data([0xa0])); XCTAssertEqual(response.profile, handshake.profile)
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try $0?.get() }
+        var bytes = [UInt8](repeating: 0, count: 6)
+        XCTAssertEqual(Darwin.read(pipeFDs[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("queued".utf8))
+    }
+
+    func testAdmissionClientRejectsLegacyBindingAndCurrentAuthorityFailureBeforeExposure() throws {
+        let endpoint = try Endpoint(), fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        let old = try admissionClientFixture(endpoint.port, input: 2), current = try admissionClientFixture(endpoint.port)
+        defer { old.close(); current.close() }
+        for handshake in [old, current] {
+            let submission = try commandSubmission(binding: .init(id: Data(repeating: 2, count: 16), nonce: Data(repeating: 3, count: 32),
+                callerBinding: Data(repeating: 9, count: 16)))
+            XCTAssertThrowsError(try MachCommandAdmissionClient.submit(submission, inputDescriptor: fd,
+                handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192))
+        }
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: fd,
+            handshake: current, expression: selfExpression(), userID: geteuid() ^ 1, auditSessionID: nil, maximumPayloadBytes: 8192))
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testAdmissionReplyMustMatchTheRetainedAuthorityIncarnation() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port), peer = try Peer(endpoint: endpoint)
+        defer { handshake.close() }
+        let reply = try receiver(endpoint, expression: "true").receive(timeoutMilliseconds: 5000)
+        defer { reply.caller.close() }
+        XCTAssertThrowsError(try handshake.authenticateReply(reply.caller, expression: "true", userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .wrongBinding)
+        }
+        try peer.advance()
+        let replacement = try receiver(endpoint, expression: "true").receive(timeoutMilliseconds: 5000)
+        replacement.caller.close()
+        try peer.stop()
+    }
+
+    private func serveAdmission(_ port: mach_port_t, response: Data?) throws -> (DispatchSemaphore, OSAllocatedUnfairLock<Result<Void, Error>?>) {
+        let expression = try selfExpression(), user = geteuid(), completed = DispatchSemaphore(value: 0)
+        let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { output in output = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user,
+                    auditSessionID: nil, maxPayloadBytes: 8192)
+                let input = try receiver.receiveAdmissionInput(timeoutMilliseconds: 5000)
+                defer { input.closeIfUnclaimed() }
+                if let response { try input.sendAdmissionReply(response) }
+            } }
+        }
+        return (completed, result)
+    }
+
+    func testAdmissionClientLostReplyKeepsInputAndBorrowedAuthorityRight() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port)
+        defer { handshake.close() }
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0); defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(pipeFDs[1], "queued", 6), 6)
+        let baseline = try sendReferences(endpoint.port), server = try serveAdmission(endpoint.port, response: nil)
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: pipeFDs[0],
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+        XCTAssertEqual(try sendReferences(endpoint.port), baseline)
+        var bytes = [UInt8](repeating: 0, count: 6)
+        XCTAssertEqual(Darwin.read(pipeFDs[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("queued".utf8))
+    }
+
+    func testAdmissionClientContinuousDeadlineAndCancellationDoNotExposeInputEarly() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port), fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { handshake.close(); _ = Darwin.close(fd) }
+        var tick: UInt64 = 0
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: fd,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            maximumPayloadBytes: 8192, timeoutMilliseconds: 10, clock: { defer { tick += 10 }; return tick })) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: fd,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192,
+            checkCancellation: { throw MachCommandHandshakeError.retired }))
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testAdmissionClientCancellationDuringReplyWaitPreservesTheSingleSubmission() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port)
+        defer { handshake.close() }
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        let server = try serveAdmission(endpoint.port, response: nil)
+        var checks = 0
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: fd,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            maximumPayloadBytes: 8192, timeoutMilliseconds: 5000, checkCancellation: {
+                checks += 1
+                if checks == 4 { throw MachCommandHandshakeError.retired }
+            })) { XCTAssertEqual($0 as? MachCommandHandshakeError, .retired) }
+        XCTAssertEqual(checks, 4)
+        XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testAdmissionClientRejectsAnAuthenticatedReplyAtTheFinalDeadline() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port)
+        defer { handshake.close() }
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        let server = try serveAdmission(endpoint.port, response: Data([0xa0]))
+        var samples = 0
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: fd,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+            maximumPayloadBytes: 8192, timeoutMilliseconds: 1000, clock: {
+                samples += 1
+                return samples < 5 ? 0 : 1000
+            })) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        XCTAssertEqual(samples, 5)
+        XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+    }
+
+    func testAdmissionClientRetainsNegotiatedDestinationAndClosurePreventsSubmission() throws {
+        let endpoint = try Endpoint(), baseline = try sendReferences(endpoint.port)
+        let handshake = try admissionClientFixture(endpoint.port)
+        XCTAssertEqual(try sendReferences(endpoint.port), baseline + 1)
+        XCTAssertEqual(try handshake.borrowedAuthorityPort(), endpoint.port)
+        handshake.close(); handshake.close()
+        XCTAssertEqual(try sendReferences(endpoint.port), baseline)
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: fd,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192))
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testPublicAdmissionClientRequiresRootReleasePolicyBeforeSubmission() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port)
+        defer { handshake.close() }
+        let policy = try XPCPeerPolicy(teamID: "TEAMID1234", componentIdentifier: "dev.remozio.fixture",
+            approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: 1)
+        XCTAssertThrowsError(try MachCommandAdmissionClient.submit(commandSubmission(), inputDescriptor: -1,
+            handshake: handshake, authorityPolicy: policy, maximumPayloadBytes: 8192)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try receiver(endpoint).receiveAdmissionInput(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testAdmissionWireFullQueueCleanupPreservesBorrowedRightsAndInput() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        var attributes = mach_port_limits_t(mpl_qlimit: 1)
+        XCTAssertEqual(withUnsafeMutablePointer(to: &attributes) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                mach_port_set_attributes(mach_task_self_, endpoint.port, MACH_PORT_LIMITS_INFO, $0, mach_msg_type_number_t(MemoryLayout<mach_port_limits_t>.size / MemoryLayout<natural_t>.size))
+            }
+        }, KERN_SUCCESS)
+        try endpoint.send(Data([1]))
+        let baseline = try sendReferences(reply.port), authorityBaseline = try sendReferences(endpoint.port), flags = fcntl(fd, F_GETFL)
+        XCTAssertThrowsError(try MachCommandAdmissionWire.send(Data([1]), inputDescriptor: fd, destination: endpoint.port,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 10)) {
+            guard case .mach(let result) = $0 as? MachCommandCallerError else { return XCTFail("Wrong failure") }
+            XCTAssertEqual(result & ~MACH_MSG_MASK, MACH_SEND_TIMED_OUT)
+        }
+        XCTAssertEqual(try sendReferences(reply.port), baseline); XCTAssertEqual(try sendReferences(endpoint.port), authorityBaseline)
+        XCTAssertEqual(fcntl(fd, F_GETFL), flags)
+        let filler = try receiver(endpoint).receive(timeoutMilliseconds: 1000); filler.caller.close()
+        let input = try admissionInput(endpoint, reply: reply, descriptor: fd, payload: Data([2])); input.closeIfUnclaimed()
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
     }
 
     func testRejectedComplexPacketReleasesImportedSendRight() throws {

@@ -71,4 +71,15 @@ final class CommandHandshakeCodecTests: XCTestCase {
             XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
         }
     }
+    func testAdmissionReplyCarrierRequiresExplicitOfferAndLegacySelectionStaysUnchanged() throws {
+        let offer = try CommandHandshakeOffer(nonce: nonce, capabilities: .admissionReplies), selected = profile(input: 3)
+        let reply = try CommandHandshakeReply(nonce: nonce, profile: selected).bytes
+        XCTAssertEqual(try CommandHandshakeReply.decode(reply, offer: offer, macID: mac, accountID: account), selected)
+        XCTAssertThrowsError(try CommandHandshakeReply.decode(reply, offer: CommandHandshakeOffer(nonce: nonce), macID: mac, accountID: account))
+        XCTAssertThrowsError(try CommandHandshakeReply.decode(CommandHandshakeReply(nonce: nonce, profile: profile()).bytes,
+            offer: offer, macID: mac, accountID: account))
+        XCTAssertEqual(CommandHandshakeCapabilities.current.inputCarrierVersions, [2])
+        XCTAssertEqual(CommandHandshakeCapabilities.admissionReplies.inputCarrierVersions, [3])
+    }
+
 }

@@ -102,6 +102,11 @@ func transfer(receiver: MachCommandCallerReceiver, registry: CommandSessionRegis
         probes["pipeline-command-reuse"] = (pipeline_prefix + pipeline + "    command.close()\n}\n", False)
         alias_pipeline = pipeline.replace("    _ = try journal.admitCommand", "    let alias = command\n    _ = try journal.admitCommand")
         probes["pipeline-alias-reuse"] = (pipeline_prefix + alias_pipeline + "    alias.close()\n}\n", False)
+        admission_pipeline = pipeline.replace("receiveInput", "receiveAdmissionInput")
+        probes["admission-pipeline-valid"] = (pipeline_prefix + admission_pipeline + "}\n", True)
+        probes["admission-reply-reuse"] = (pipeline_prefix + admission_pipeline + "    try received.sendAdmissionReply(Data([0xa0]))\n}\n", False)
+        aliased_admission = admission_pipeline.replace("    let command", "    let alias = received\n    let command")
+        probes["admission-reply-alias-reuse"] = (pipeline_prefix + aliased_admission + "    try alias.sendAdmissionReply(Data([0xa0]))\n}\n", False)
         host_prefix = """import Foundation
 import RemozioCore
 import RemozioProtocol
