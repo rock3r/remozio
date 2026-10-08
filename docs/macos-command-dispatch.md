@@ -29,7 +29,8 @@ sequenceDiagram
 ## Current trust
 
 The controller retains the winner's enrollment epoch and biometric public key from the consumption transaction.
-A current enrollment read must match both. Revocation, replacement keys, new enrollment epochs and gateway restrictions prevent release.
+A current enrollment read must match the active row's phone ID and exact epoch, regardless of retained history order.
+Revocation, replacement keys, new enrollment epochs and gateway restrictions prevent release.
 Current contract and feature support remain required.
 
 Production construction requires actual Root identity and current authority self-validation.

@@ -1883,7 +1883,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let contract: RequestContract
         var continuity: ContinuityStore?
         init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true, commandSchema: UInt64 = 1,
-             installReplay: Bool = true, maximumSubmissions: Int = 30) throws {
+             installReplay: Bool = true, maximumSubmissions: Int = 30, retiredEnrollmentEpoch: UInt8? = nil) throws {
             limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
             contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: commandSchema)
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
@@ -1923,8 +1923,28 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     EnrolledApprovalKey(id: Data(repeating: 6, count: 16), keyClass: .biometric, publicKey: biometric.publicKey.x963Representation),
                     EnrolledApprovalKey(id: Data(repeating: 7, count: 16), keyClass: .decision, publicKey: decision.publicKey.x963Representation),
                 ]))
-            _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
-                eventID: Data(repeating: 30, count: 16), receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
+            var enrollmentRevision = revision
+            var enrollmentHead: UInt64 = 0
+            if let retiredEnrollmentEpoch {
+                let historical = try StoredApprovalEnrollment(epoch: Data(repeating: retiredEnrollmentEpoch, count: 16),
+                    notificationTag: Data(repeating: 11, count: 32),
+                    identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                    approval: ApprovalEnrollment(phoneID: enrollment.approval.phoneID, active: true,
+                        capabilities: capabilities, keys: [
+                            EnrolledApprovalKey(id: Data(repeating: 12, count: 16), keyClass: .biometric,
+                                publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                            EnrolledApprovalKey(id: Data(repeating: 13, count: 16), keyClass: .decision,
+                                publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                        ]))
+                enrollmentRevision = try db.write { try $0.addApprovalEnrollment(historical, expectedTrustRevision: enrollmentRevision,
+                    eventID: Data(repeating: 28, count: 16), receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
+                enrollmentRevision = try db.write { try $0.revokeApprovalEnrollment(phoneID: historical.approval.phoneID,
+                    epoch: historical.epoch, expectedTrustRevision: enrollmentRevision, eventID: Data(repeating: 29, count: 16),
+                    receiptTimeMs: nil, writer: writer, expectedAuditHead: 1).revision }
+                enrollmentHead = 2
+            }
+            _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: enrollmentRevision,
+                eventID: Data(repeating: 30, count: 16), receiptTimeMs: nil, writer: writer, expectedAuditHead: enrollmentHead) }
             if checkpointed {
                 let directory = root.appendingPathComponent("continuity")
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -4349,8 +4369,8 @@ extension MachCommandCallerReceiverTests {
         return path.path
     }
     private func nativeDispatchFixture(checkpointed: Bool = false, path: String = "/usr/bin/true",
-                                       arguments: [Data]? = nil) throws -> NativeDispatchFixture {
-        let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+                                       arguments: [Data]? = nil, retiredEnrollmentEpoch: UInt8? = nil) throws -> NativeDispatchFixture {
+        let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, retiredEnrollmentEpoch: retiredEnrollmentEpoch)
         let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
         let admissionPort = try Endpoint(), terminal = try Endpoint()
         let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
@@ -4399,6 +4419,23 @@ extension MachCommandCallerReceiverTests {
             XCTAssertEqual(outcome?.phase, .succeeded); XCTAssertEqual(outcome?.revision, 2)
             XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher))
             XCTAssertThrowsError(try receiver(test.terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+        }
+    }
+    func testNativeDispatchAcceptsCurrentEnrollmentWithRetiredHistoryInEitherEpochOrder() throws {
+        for checkpointed in [false, true] {
+            for retiredEpoch: UInt8 in [8, 10] {
+                let test = try nativeDispatchFixture(checkpointed: checkpointed, retiredEnrollmentEpoch: retiredEpoch)
+                let rows = try test.authority.read { try $0.requestDeliveryTrust().enrollments }
+                XCTAssertEqual(rows.count, 2)
+                XCTAssertEqual(rows.first?.approval.active, retiredEpoch > 9)
+                XCTAssertEqual(rows.filter { $0.approval.active }.map(\.epoch), [Data(repeating: 9, count: 16)])
+                try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
+                try awaitDispatchCleanup(test.authority)
+                XCTAssertEqual(try nativeDispatchOutcome(test), .exited(0))
+                let id = test.request.requestID
+                let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+                XCTAssertEqual(outcome?.phase, .succeeded); XCTAssertEqual(outcome?.revision, 2)
+            }
         }
     }
     private final class DispatchFailureCounter {

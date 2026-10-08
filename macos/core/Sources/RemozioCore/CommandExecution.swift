@@ -115,8 +115,9 @@ struct CommandExecutionApproval: Sendable {
               let localFeatures = current.approval.authorityCapabilities.contracts[payload.contract],
               payload.requiredFeatures.isSubset(of: localFeatures),
               current.approval.enrollments.contains(where: { $0.phoneID == decision.phoneID && $0.active }),
-              let phone = current.enrollments.first(where: { $0.approval.phoneID == decision.phoneID }),
-              phone.approval.active, phone.epoch == enrollment.epoch,
+              let phone = current.enrollments.first(where: {
+                  $0.approval.phoneID == decision.phoneID && $0.epoch == enrollment.epoch && $0.approval.active
+              }),
               let peerFeatures = phone.approval.capabilities.contracts[payload.contract],
               payload.requiredFeatures.isSubset(of: peerFeatures),
               let key = phone.approval.keys.first(where: { $0.id == decision.keyID }),
