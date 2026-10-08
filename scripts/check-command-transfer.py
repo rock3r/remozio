@@ -102,6 +102,25 @@ func transfer(receiver: MachCommandCallerReceiver, registry: CommandSessionRegis
         probes["pipeline-command-reuse"] = (pipeline_prefix + pipeline + "    command.close()\n}\n", False)
         alias_pipeline = pipeline.replace("    _ = try journal.admitCommand", "    let alias = command\n    _ = try journal.admitCommand")
         probes["pipeline-alias-reuse"] = (pipeline_prefix + alias_pipeline + "    alias.close()\n}\n", False)
+        host_prefix = """import Foundation
+import RemozioCore
+import RemozioProtocol
+func transfer(host: CommandReceiveHost, journal: AuthorityJournal, peer: XPCPeerPolicy, target: CommandTarget,
+              limits: CBORLimits, stream: Data, draft: ApprovalRequestDraft, now: () throws -> AuthorityMoment) throws {
+"""
+        host_body = """    _ = try host.poll { received in
+        let command = try host.assemble(received: received, captureSchemaVersion: 2, resolvedTarget: target,
+            minimalEnvironment: [], streamBinding: stream, submissionLimits: limits, captureLimits: limits)
+        _ = try journal.admitCommand(command, draft: draft, currentPolicy: peer, now: now, receiptTimeMs: nil)
+    }
+    host.close()
+"""
+        probes["host-poll-valid"] = (host_prefix + host_body + "}\n", True)
+        probes["host-input-reuse"] = (host_prefix + host_body.replace("        _ = try journal.admitCommand", "        received.input.close()\n        _ = try journal.admitCommand") + "}\n", False)
+        probes["host-input-alias-reuse"] = (host_prefix + host_body.replace("        let command", "        let alias = received\n        let command").replace("        _ = try journal.admitCommand", "        alias.input.close()\n        _ = try journal.admitCommand") + "}\n", False)
+        probes["host-command-reuse"] = (host_prefix + host_body.replace("receiptTimeMs: nil)", "receiptTimeMs: nil)\n        command.close()") + "}\n", False)
+        probes["host-command-alias-reuse"] = (host_prefix + host_body.replace("        _ = try journal.admitCommand", "        let alias = command\n        _ = try journal.admitCommand").replace("receiptTimeMs: nil)", "receiptTimeMs: nil)\n        alias.close()") + "}\n", False)
+        probes["host-run-valid"] = (host_prefix + host_body.replace("_ = try host.poll", "try host.run") + "}\n", True)
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
@@ -117,7 +136,7 @@ func transfer(receiver: MachCommandCallerReceiver, registry: CommandSessionRegis
                 passed = result.returncode != 0 and "SendingRisksDataRace" in result.stderr
             if not passed:
                 raise SystemExit("Command ownership probe failed: " + name + "\n" + result.stderr[:4096])
-    print("Command ownership: coordinator, journal, handshake, and registry transfers accepted; object and alias reuse rejected.")
+    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected.")
 
 
 if __name__ == "__main__":

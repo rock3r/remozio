@@ -80,6 +80,7 @@ They also compile the complete receive-to-registry-to-journal path while the rec
 
 These fixtures use disposable ports and explicit test policies under the test user's UID.
 They do not prove a protected Developer ID Root deployment or physical-device end-to-end behavior.
-The host still must install and register the listener, supply fresh protected policy, enforce its serial lifetime, and call pruning while idle.
+The [receive host](macos-command-receive-host.md) now supplies fresh protected policy and drives a serial receive lifetime with idle pruning.
+Protected installation and listener registration remain required.
 Durable submission replay reservation, authenticated no-admission results, elevation policy, resource budgets, dispatch, and process I/O remain required.
 This registry creates no phone request and executes no approved command.
