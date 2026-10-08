@@ -25,6 +25,7 @@ final class RetainedCommandExecutionResources {
         self.submissionDigest = submissionDigest; self.request = request
     }
     deinit { close() }
+    var requesterExitObserved: Bool { caller.requesterExitObserved }
 
     func recheck(currentPolicy: XPCPeerPolicy, checkCancellation: () throws -> Void = {}) throws {
         try recheck(expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,

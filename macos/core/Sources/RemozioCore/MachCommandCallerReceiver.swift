@@ -433,6 +433,8 @@ public final class RetainedCommandCaller {
     public let auditSessionID: au_asid_t
     private var token: audit_token_t
     private var code: SecCode?
+    private var lifetimeObserver: OpaquePointer?
+    private(set) var requesterExitObserved = false
 
     fileprivate init(token: audit_token_t, requirement: SecRequirement, userID: uid_t, auditSessionID: au_asid_t?) throws {
         try Self.credentials(token, userID: userID, auditSessionID: auditSessionID)
@@ -455,7 +457,10 @@ public final class RetainedCommandCaller {
             signing: CapturedSigningIdentity(status: remozio_code_is_adhoc(flags.uint32Value) ? .adHoc : .validated,
                 identifier: identifier, team: values[kSecCodeInfoTeamIdentifier as String] as? String, cdHash: hash),
             sessionID: session > 0 ? UInt32(session) : nil, ttyPath: nil)
+        // Missing observation support leaves the existing dynamic code validation in force.
+        _ = remozio_command_caller_observer_create(&self.token, &lifetimeObserver)
     }
+    deinit { close() }
 
     /// Rechecking a failed or closed record never recaptures a replacement process.
     public func recheck(currentPolicy: XPCPeerPolicy) throws {
@@ -474,6 +479,8 @@ public final class RetainedCommandCaller {
     fileprivate func recheck(requirement: SecRequirement, userID: uid_t, auditSessionID: au_asid_t?) throws {
         guard let code else { throw MachCommandCallerError.retired }
         do {
+            observeLifetime()
+            if requesterExitObserved { throw MachCommandCallerError.unavailable }
             try Self.credentials(token, userID: userID, auditSessionID: auditSessionID)
             try Self.valid(code, requirement: requirement)
             guard try Self.path(token) == requester.executablePath else { throw MachCommandCallerError.wrongPeer }
@@ -510,7 +517,17 @@ public final class RetainedCommandCaller {
         return first == second
     }
 
-    public func close() { code = nil }
+    private func observeLifetime() {
+        guard let lifetimeObserver else { return }
+        var observation = REMOZIO_CALLER_UNAVAILABLE
+        _ = remozio_command_caller_observer_poll(lifetimeObserver, &observation)
+        if observation == REMOZIO_CALLER_EXITED { requesterExitObserved = true }
+    }
+
+    public func close() {
+        code = nil
+        remozio_command_caller_observer_close(lifetimeObserver); lifetimeObserver = nil
+    }
 
     private static func credentials(_ token: audit_token_t, userID: uid_t, auditSessionID: au_asid_t?) throws {
         guard audit_token_to_pid(token) > 0, audit_token_to_euid(token) == userID,

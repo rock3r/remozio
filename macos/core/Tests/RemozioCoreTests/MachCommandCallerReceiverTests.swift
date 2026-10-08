@@ -1513,7 +1513,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         private var control: Int32 = -1
         var pid: pid_t { child }
 
-        init(endpoint: Endpoint) throws {
+        init(endpoint: Endpoint, submission: Data? = nil) throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
             do {
@@ -1546,7 +1546,13 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                       posix_spawn_file_actions_addclose(&actions, pipeFDs[0]) == 0 else {
                     throw MachCommandCallerError.unavailable
                 }
-                let words = [strdup(binary.path), strdup("first")]
+                var launchArguments = [binary.path, "first"]
+                if let submission {
+                    let payload = directory.appendingPathComponent("submission")
+                    try submission.write(to: payload)
+                    launchArguments.append(payload.path)
+                }
+                let words = launchArguments.map { strdup($0) }
                 defer { words.forEach { free($0) } }
                 var arguments = words + [nil], environment: [UnsafeMutablePointer<CChar>?] = [nil]
                 let result = arguments.withUnsafeMutableBufferPointer { arguments in
@@ -1697,22 +1703,23 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         [.init(name: Data("PATH".utf8), value: Data("/synthetic/baseline".utf8), source: .minimal),
          .init(name: Data("HOME".utf8), value: Data("/synthetic/home".utf8), source: .minimal)]
     }
-    private func commandSubmission(executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, binding: CapturedSubmission? = nil) throws -> CommandSubmission {
+    private func commandSubmission(executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, binding: CapturedSubmission? = nil,
+                                   disconnect: StartedCommandDisconnect = .terminate) throws -> CommandSubmission {
         try CommandSubmission(schemaVersion: 1, executablePath: Data(executablePath.utf8),
             arguments: arguments ?? [Data("custom argv0".utf8), Data(), Data([0xff, 0x0a, 0x22])],
             directoryPath: Data(FileManager.default.temporaryDirectory.path.utf8), requestedTargetUID: geteuid(),
             environmentAdditions: [.init(name: Data("HOME".utf8), value: Data("/synthetic/requested".utf8)),
                 .init(name: Data("RAW".utf8), value: Data([0xfe, 0x0a]))],
-            ioMode: .pipes, disconnectBehavior: .terminate, unverifiedRationale: "pid=123, caller claim",
+            ioMode: .pipes, disconnectBehavior: disconnect, unverifiedRationale: "pid=123, caller claim",
             binding: binding ?? .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32), callerBinding: assemblyBinding),
             limits: assemblyLimits)
     }
     private func assemble(_ received: ReceivedMachCommandInputSubmission, binding: Data? = nil, schema: UInt64 = 1,
                           submissionSchema: UInt64 = 1, target: CommandTarget? = nil, minimal: [CapturedEnvironmentEntry]? = nil,
                           limits: CBORLimits? = nil, checkCancellation: @Sendable () throws -> Void = {},
-                           admissionProfile: CommandHandshakeProfile? = nil) throws -> RetainedCommandCapture {
+                           admissionProfile: CommandHandshakeProfile? = nil, callerExpression: String? = nil) throws -> RetainedCommandCapture {
         try RetainedCommandCapture(received: TestInputInspection(received: received).received, expectedCallerBinding: binding ?? assemblyBinding,
-            submissionSchemaVersion: submissionSchema, captureSchemaVersion: schema, expression: selfExpression(),
+            submissionSchemaVersion: submissionSchema, captureSchemaVersion: schema, expression: callerExpression ?? selfExpression(),
             userID: geteuid(), auditSessionID: nil, resolvedTarget: target ?? assemblyTarget,
             minimalEnvironment: minimal ?? assemblyEnvironment, streamBinding: Data(repeating: 0xb4, count: 16),
             submissionLimits: assemblyLimits, captureLimits: limits ?? assemblyLimits, maximumAncestryEntries: 1,
@@ -2394,9 +2401,9 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     private struct TestCommandInspection: @unchecked Sendable { let command: RetainedCommandCapture }
     private func admitOwnedCommand(_ command: RetainedCommandCapture, fixture: CommandRequestFixture,
                                    draft: ApprovalRequestDraft? = nil, now: (() throws -> AuthorityMoment)? = nil,
-                                   checkCancellation: () throws -> Void = {}) throws -> IssuedRequestPayload {
+                                   checkCancellation: () throws -> Void = {}, callerExpression: String? = nil) throws -> IssuedRequestPayload {
         let authority = try XCTUnwrap(fixture.authority)
-        return try authority.admitCommand(command, draft: draft ?? fixture.draft(command), expression: selfExpression(), userID: geteuid(),
+        return try authority.admitCommand(command, draft: draft ?? fixture.draft(command), expression: callerExpression ?? selfExpression(), userID: geteuid(),
             auditSessionID: nil, now: now ?? { fixture.now() }, receiptTimeMs: nil, checkCancellation: checkCancellation)
     }
 
@@ -4385,8 +4392,8 @@ extension MachCommandCallerReceiverTests {
     private func beginDispatch(_ fixture: CommandRequestFixture, request: IssuedRequestPayload, launcher: String,
                                elevation: @escaping (CommandCapture) throws -> Void = { _ in },
                                clock: (() throws -> AuthorityMoment)? = nil,
-                               runtimeFailure: Bool = false, launcherFailure: Bool = false) throws {
-        let authority = try XCTUnwrap(fixture.authority), expression = try selfExpression(), now = fixture.now(130)
+                               runtimeFailure: Bool = false, launcherFailure: Bool = false, callerExpression: String? = nil) throws {
+        let authority = try XCTUnwrap(fixture.authority), expression = try callerExpression ?? selfExpression(), now = fixture.now(130)
         try authority.beginCommandExecution(requestID: request.requestID, childPath: launcher,
             preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: elevation, clock: clock ?? { now },
             runtime: { tx, approval, capture in
@@ -4685,5 +4692,208 @@ extension MachCommandCallerReceiverTests {
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         mutate(&object)
         return try JSONSerialization.data(withJSONObject: object, options: .sortedKeys)
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testCallerLifetimeObservesActualExitWithoutRecapturingAPID() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint)
+        let received = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        let original = received.caller.requester
+        XCTAssertFalse(received.caller.requesterExitObserved)
+        try peer.stop()
+        XCTAssertThrowsError(try received.caller.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil))
+        XCTAssertTrue(received.caller.requesterExitObserved)
+        received.caller.close()
+        XCTAssertTrue(received.caller.requesterExitObserved)
+        XCTAssertEqual(received.caller.requester, original)
+    }
+
+    func testCallerLifetimeExecThenExitNeverBecomesOriginalRequesterExit() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint)
+        let receive = try receiver(endpoint, expression: peer.expression)
+        let first = try receive.receive(timeoutMilliseconds: 5000)
+        try peer.advance()
+        let second = try receive.receive(timeoutMilliseconds: 5000)
+        try peer.stop()
+        XCTAssertThrowsError(try first.caller.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil))
+        XCTAssertFalse(first.caller.requesterExitObserved)
+        XCTAssertThrowsError(try second.caller.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil))
+        XCTAssertTrue(second.caller.requesterExitObserved)
+    }
+
+    private func lifetimeCommand(_ fixture: CommandRequestFixture, path: String, arguments: [Data],
+                                 disconnect: StartedCommandDisconnect = .terminate) throws -> (Peer, IssuedRequestPayload, String) {
+        let endpoint = try Endpoint(), submission = try commandSubmission(executablePath: path, arguments: arguments, disconnect: disconnect)
+        let peer = try Peer(endpoint: endpoint, submission: submission.canonicalBytes)
+        let profile = CommandHandshakeProfile(wireVersion: 3, submissionSchemaVersion: 1, inputCarrierVersion: 4,
+            callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+        let received = try receiver(endpoint, expression: peer.expression, maximum: 8192).receiveIOInput(timeoutMilliseconds: 5000)
+        let command = try assemble(received, admissionProfile: profile, callerExpression: peer.expression)
+        let request: IssuedRequestPayload
+        if fixture.authority != nil {
+            request = try admitOwnedCommand(command, fixture: fixture, callerExpression: peer.expression)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+        } else {
+            request = try fixture.requests.admitCommand(command, draft: fixture.draft(command), expression: peer.expression,
+                userID: geteuid(), auditSessionID: nil, now: { fixture.now() }, receiptTimeMs: nil)
+            _ = try fixture.consume(request)
+        }
+        return (peer, request, try dispatchLauncher(fixture))
+    }
+
+    func testCallerLifetimePreSpawnExitCommitsKnownNoDispatchForOriginalRequest() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), authority = try XCTUnwrap(fixture.authority)
+            let marker = fixture.root.appendingPathComponent("must-not-run")
+            let (peer, request, launcher) = try lifetimeCommand(fixture, path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
+            try peer.stop()
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher, callerExpression: peer.expression))
+            try awaitDispatchCleanup(authority)
+            let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+            XCTAssertEqual(outcome?.phase, .cancelled); XCTAssertEqual(outcome?.revision, 1)
+            XCTAssertEqual(outcome?.event.outcome, .noDispatch)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher, callerExpression: peer.expression))
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testCallerLifetimeUnspawnedOwnerUsesObservedExitRatherThanErrorType() throws {
+        for callerExits in [false, true] {
+            let fixture = try CommandRequestFixture()
+            let (peer, request, launcher) = try lifetimeCommand(fixture, path: "/usr/bin/true", arguments: [Data("true".utf8)])
+            let approval = try fixture.requests.authorizedCommandApproval(requestID: request.requestID, now: fixture.now(130))
+            let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+            let execution = CommandExecution(resources: resources, approval: approval, clock: { fixture.now(130) }, receiptTime: { nil },
+                callerExpression: peer.expression, callerUserID: geteuid(), callerSessionID: nil,
+                validateLauncher: {}, validateElevation: { _ in
+                    if !callerExits { throw MachCommandCallerError.unavailable }
+                })
+            defer { XCTAssertTrue(execution.dispose()) }
+            if callerExits { try peer.stop() }
+            XCTAssertThrowsError(try execution.prepare(path: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022))
+            guard case .terminal(let outcome) = execution.poll() else { return XCTFail("Unspawned owner must retire") }
+            XCTAssertEqual(outcome, callerExits ? .requesterExitedBeforeStart : .failedBeforeStart)
+            XCTAssertEqual(resources.requesterExitObserved, callerExits)
+            XCTAssertThrowsError(try execution.release())
+            if !callerExits { try peer.stop() }
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testCallerLifetimeChangedPolicyRetiresRecordWithoutClaimingRequesterExit() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint)
+        let received = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        XCTAssertThrowsError(try received.caller.recheck(expression: "false", userID: geteuid(), auditSessionID: nil))
+        XCTAssertFalse(received.caller.requesterExitObserved)
+        try peer.advance()
+        let next = try receiver(endpoint, expression: peer.expression).receive(timeoutMilliseconds: 5000)
+        next.caller.close(); try peer.stop()
+        XCTAssertFalse(received.caller.requesterExitObserved)
+    }
+
+    func testCallerLifetimeObserverBindsOriginalAuditTokenAndKeepsExecStateAfterExit() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint), receive = try receiver(endpoint, expression: peer.expression)
+        let first = try receive.receive(timeoutMilliseconds: 5000)
+        defer { first.caller.close() }
+        var original = audit_token_t(), missing = false
+        XCTAssertEqual(remozio_pid_audit_token(peer.pid, &original, &missing), KERN_SUCCESS)
+        var observer: OpaquePointer?
+        XCTAssertEqual(remozio_command_caller_observer_create(&original, &observer), 0)
+        let bound = try XCTUnwrap(observer)
+        defer { remozio_command_caller_observer_close(bound) }
+        try peer.advance()
+        let next = try receive.receive(timeoutMilliseconds: 5000)
+        next.caller.close()
+        var replacement: OpaquePointer?
+        XCTAssertEqual(remozio_command_caller_observer_create(&original, &replacement), EAGAIN)
+        XCTAssertNil(replacement)
+        var state = REMOZIO_CALLER_UNCHANGED
+        XCTAssertEqual(remozio_command_caller_observer_poll(bound, &state), 0)
+        XCTAssertEqual(state, REMOZIO_CALLER_CHANGED)
+        try peer.stop()
+        XCTAssertEqual(remozio_command_caller_observer_poll(bound, &state), 0)
+        XCTAssertEqual(state, REMOZIO_CALLER_CHANGED)
+    }
+
+    func testCallerLifetimeClosingObserverDoesNotSignalOrReapPeer() throws {
+        let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint), receive = try receiver(endpoint, expression: peer.expression)
+        let first = try receive.receive(timeoutMilliseconds: 5000)
+        var token = audit_token_t(), missing = false, observer: OpaquePointer?
+        XCTAssertEqual(remozio_pid_audit_token(peer.pid, &token, &missing), KERN_SUCCESS)
+        XCTAssertEqual(remozio_command_caller_observer_create(&token, &observer), 0)
+        remozio_command_caller_observer_close(observer)
+        first.caller.close()
+        XCTAssertEqual(kill(peer.pid, 0), 0)
+        try peer.advance()
+        let next = try receive.receive(timeoutMilliseconds: 5000)
+        next.caller.close(); try peer.stop()
+    }
+
+    func testCallerLifetimeObserverFailureIsUnavailableAndNeverExitEvidence() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "caller-observer-fault", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach"), binary = directory.appendingPathComponent("probe")
+        let compile = Process(); compile.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compile.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror",
+            "-I", native.path, "-I", native.appendingPathComponent("include").path, source.path,
+            native.appendingPathComponent("Receive.c").path, "-framework", "Security", "-lbsm", "-o", binary.path]
+        try compile.run(); compile.waitUntilExit()
+        XCTAssertEqual(compile.terminationStatus, 0)
+        guard compile.terminationStatus == 0 else { throw MachCommandCallerError.unavailable }
+        let probe = Process(); probe.executableURL = binary
+        try probe.run(); probe.waitUntilExit(); XCTAssertEqual(probe.terminationStatus, 0)
+    }
+
+    func testCallerLifetimeStartedCommandUsesOriginalVisibleDisconnectChoice() throws {
+        for checkpointed in [false, true] {
+            for disconnect: StartedCommandDisconnect in [.terminate, .continueRunning] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), authority = try XCTUnwrap(fixture.authority)
+                let started = fixture.root.appendingPathComponent("started"), completed = fixture.root.appendingPathComponent("completed")
+                let script = "printf started > '" + started.path + "'; /bin/sleep 0.3; printf completed > '" + completed.path + "'"
+                let (peer, request, launcher) = try lifetimeCommand(fixture, path: "/bin/sh",
+                    arguments: [Data("sh".utf8), Data("-c".utf8), Data(script.utf8)], disconnect: disconnect)
+                try beginDispatch(fixture, request: request, launcher: launcher, callerExpression: peer.expression)
+                let deadline = Date().addingTimeInterval(5)
+                while !FileManager.default.fileExists(atPath: started.path) && Date() < deadline { usleep(1000) }
+                XCTAssertTrue(FileManager.default.fileExists(atPath: started.path))
+                try peer.stop(); try awaitDispatchCleanup(authority)
+                let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+                XCTAssertEqual(outcome?.revision, 2)
+                XCTAssertEqual(outcome?.phase, disconnect == .terminate ? .failed : .succeeded)
+                XCTAssertEqual(FileManager.default.fileExists(atPath: completed.path), disconnect != .terminate)
+                XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher, callerExpression: peer.expression))
+            }
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testCallerLifetimeExitAfterHelperStartsPreventsReleaseWithoutPreSpawnClaim() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let marker = fixture.root.appendingPathComponent("unreleased")
+        let (peer, request, launcher) = try lifetimeCommand(fixture, path: "/usr/bin/touch",
+            arguments: [Data("touch".utf8), Data(marker.path.utf8)])
+        let checks = OSAllocatedUnfairLock(initialState: 0)
+        try beginDispatch(fixture, request: request, launcher: launcher, elevation: { _ in
+            let next = checks.withLock { count in count += 1; return count }
+            if next == 2 { try peer.stop() }
+        }, callerExpression: peer.expression)
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(checks.withLock { $0 }, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+        XCTAssertEqual(outcome?.phase, .cancelled); XCTAssertEqual(outcome?.revision, 1)
+        XCTAssertEqual(outcome?.event.outcome, .noDispatch)
     }
 }

@@ -84,4 +84,4 @@ It retained no kernel exec or exit observation. That fallback therefore cannot e
 
 The complete local gate passed with 1,148 core tests, 97 Swift protocol tests and 532 Kotlin/Android tests.
 The debug APK build and Android lint passed.
-Distinct requester-exited-before-start classification remains part of the host integration gate.
+Caller lifetime observation and pre-spawn classification are described in [Caller lifetime](macos-command-caller-lifetime.md).

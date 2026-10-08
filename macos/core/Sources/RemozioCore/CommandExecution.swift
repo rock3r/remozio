@@ -91,7 +91,9 @@ final class CommandExecution {
     }
     func poll() -> Progress {
         guard !disposed else { return .terminal(.unknown) }
-        guard let process else { return .terminal(.failedBeforeStart) }
+        guard let process else {
+            return .terminal(resources.requesterExitObserved ? .requesterExitedBeforeStart : .failedBeforeStart)
+        }
         var observation = remozio_command_process_observation_t()
         let status = remozio_command_process_poll(process, &observation)
         if status != 0 {
