@@ -168,6 +168,10 @@ public final class CommandReceiveHost {
             case .wrongPeer, .retired, .unavailable, .security: return .rejected(.wrongPeer)
             case .configuration, .mach: stop.requestStop(); throw error
             }
+        } catch let error as RetainedCommandInputError {
+            guard error == .system(EINVAL) else { stop.requestStop(); throw error }
+            _ = try currentContext()
+            return .rejected(.malformed)
         }
         let current: CommandSessionRegistry.Context
         do { current = try currentContext() }

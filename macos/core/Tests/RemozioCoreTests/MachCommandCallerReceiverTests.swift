@@ -2265,6 +2265,50 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertEqual(receiveReferences(endpoint.port), 0)
     }
 
+    func testHostRejectsNonFileportInputAndRunStillAssemblesTheNextSubmission() throws {
+        let endpoint = try Endpoint(), carried = try Endpoint(), current = try registryContext()
+        var reads = 0
+        let host = try host(endpoint, context: { reads += 1; return current })
+        let profile = try hostSession(host, endpoint: endpoint)
+        let baseline = try sendReferences(carried.port), before = reads
+        try endpoint.sendInput(Data([1]), fileport: carried.port)
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("malformed input reached handler") }, .rejected(.malformed))
+        XCTAssertEqual(reads, before + 2)
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        XCTAssertEqual(receiveReferences(endpoint.port), 1)
+        try endpoint.sendInput(Data([2]), fileport: carried.port)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        var command: RetainedCommandCapture?
+        XCTAssertThrowsError(try host.run { received in
+            XCTAssertEqual(host.retainedSessionCount, 1)
+            command = try self.hostCapture(host, received: received)
+            host.stop.requestStop()
+        }) { XCTAssertEqual($0 as? CommandReceiveHostError, .stopped) }
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+        try XCTUnwrap(command).withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        command?.close()
+    }
+
+    func testHostNonFileportRejectionStillObservesPolicyReadFailure() throws {
+        enum Failure: Error { case policy }
+        let endpoint = try Endpoint(), carried = try Endpoint(), current = try registryContext()
+        var reads = 0, failAt = Int.max
+        let host = try host(endpoint, context: { reads += 1; if reads == failAt { throw Failure.policy }; return current })
+        _ = try hostSession(host, endpoint: endpoint)
+        let baseline = try sendReferences(carried.port)
+        failAt = reads + 2
+        try endpoint.sendInput(Data([1]), fileport: carried.port)
+        XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed(); XCTFail("malformed input reached handler") }) {
+            guard case Failure.policy = $0 else { return XCTFail("expected current policy failure: \($0)") }
+        }
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+    }
+
     func testHostRunOwnsTheLoopAndHandlerCanAssembleWithoutReceiveReentry() throws {
         let endpoint = try Endpoint(), host = try host(endpoint), profile = try hostSession(host, endpoint: endpoint)
         try enqueueHostInput(endpoint, binding: profile.callerBinding)

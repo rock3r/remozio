@@ -58,7 +58,8 @@ The handler must own cleanup and catch request-local rejection that should leave
 An escaping handler error retires this lifetime. No ambiguous failure grants permission to retry a command.
 
 Malformed packets, wrong senders, unsupported negotiation, capacity rejection, and reply send failure leave unrelated sessions usable.
-An invalid protected policy or fatal receive error retires the host.
+An ordinary Mach right in place of an input fileport is malformed. It still drives a fresh policy read.
+Other descriptor import failures remain fatal. An invalid protected policy or fatal receive error retires the host.
 A refused duplicate or reentrant assembly cannot close input already owned by another capture.
 Closing the host does not close captures transferred to the journal or another request owner.
 
@@ -78,6 +79,7 @@ Closing and deinitialization are idempotent. A stopped host cannot reopen; recov
 
 Disposable Mach fixtures cover mixed receipt handling, capacity, incompatible and malformed hellos, full reply queues,
 policy failure before and after receipt, idle and invalid-traffic pruning, unread input, reentry, cancellation, and receive-right disposal.
+A non-fileport input leaves existing sessions and the run loop usable. Its carried right is released without leaking a reference.
 A fixture transfers a captured command into the journal and proves that host retirement preserves the queued request's objects.
 Committed cancellation then releases those objects.
 External compiler probes cover public poll/run, capture assembly, and journal transfer. Receipt and capture reuse are rejected.
