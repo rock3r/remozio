@@ -93,7 +93,8 @@ They do not prove a live Developer ID frontend-to-Root deployment or a pre-login
 The public client requires a release `XPCPeerPolicy` with expected UID zero. Product callers cannot select the ad-hoc test seam.
 
 The Root host must validate current component roles and floors, reserve session capacity, own the registered receive port, and serialize its sole consumer.
-It must register and retire retained sessions, clear them on restart, and recheck current protocol support before admission.
+The [session registry](macos-command-session-registry.md) now owns bounded retained sessions and their retirement.
+The host must drive its serial receive loop and idle pruning, then recheck current protocol support before admission.
 Submission replay reservation, authenticated no-admission replies, elevation policy, resource budgets, dispatch permits, and process I/O remain required.
 A hello or profile is not an admission acknowledgment, execution permit, or proof that a command can be retried.
 This change registers no service, selects no sudoers policy, and executes no approved command.

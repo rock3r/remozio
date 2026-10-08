@@ -16,11 +16,11 @@ public final class RetainedCommandCapture {
 
     /// Supply target credentials and the minimal environment from protected policy and OS resolution.
     /// The expected caller binding comes from the authenticated channel; the authority creates the stream binding.
-    public convenience init(received: ReceivedMachCommandInputSubmission, expectedCallerBinding: Data,
+    public convenience init(received: sending ReceivedMachCommandInputSubmission, expectedCallerBinding: Data,
                             submissionSchemaVersion: UInt64, captureSchemaVersion: UInt64, currentPolicy: XPCPeerPolicy,
                             resolvedTarget: CommandTarget, minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data,
                             submissionLimits: CBORLimits, captureLimits: CBORLimits, maximumAncestryEntries: Int = 16,
-                            checkCancellation: () throws -> Void = {}) throws {
+                            checkCancellation: @Sendable () throws -> Void = {}) throws {
         try self.init(received: received, expectedCallerBinding: expectedCallerBinding, submissionSchemaVersion: submissionSchemaVersion,
             captureSchemaVersion: captureSchemaVersion, expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
             auditSessionID: currentPolicy.expectedAuditSessionID, resolvedTarget: resolvedTarget, minimalEnvironment: minimalEnvironment,
@@ -28,10 +28,11 @@ public final class RetainedCommandCapture {
             maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
     }
 
-    init(received: ReceivedMachCommandInputSubmission, expectedCallerBinding: Data, submissionSchemaVersion: UInt64,
+    init(received: sending ReceivedMachCommandInputSubmission, expectedCallerBinding: Data, submissionSchemaVersion: UInt64,
          captureSchemaVersion: UInt64, expression: String, userID: uid_t, auditSessionID: au_asid_t?, resolvedTarget: CommandTarget,
          minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
-         maximumAncestryEntries: Int = 16, checkCancellation: () throws -> Void = {}) throws {
+         maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {}) throws {
+        try received.claimForCaptureOwner()
         var heldFilesystem: CommandFilesystemCapture?
         do {
             try checkCancellation()
