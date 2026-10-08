@@ -83,5 +83,7 @@ Cancellation, executable replacement, and a changed caller policy retire all tra
 Socket tests require schema 2 without a downgrade.
 
 This library creates no admission record, signs no request by itself, installs no Root endpoint, and executes no command.
-Mutual frontend/Root negotiation, target-policy resolution, admission/replay handling, permit dispatch, and process I/O remain integration work.
+The [local Mach handshake](macos-command-handshake.md) now binds capture assembly to the original verified hello sender.
+Its Root listener and session registry still need host integration.
+Target-policy resolution, admission/replay handling, permit dispatch, and process I/O remain integration work.
 Protected deployment and physical-device end-to-end tests remain unperformed.
