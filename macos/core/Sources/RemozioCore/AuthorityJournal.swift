@@ -574,6 +574,7 @@ extension AuthorityJournal {
                 case .exited(0): event = .verifySuccess
                 case .exited, .signalled: event = .verifyFailure
                 case .failedBeforeStart: event = execution.dispatchRevision == 0 ? .proveNoDispatch : .verifyFailure
+                case .requesterExitedBeforeStart: event = execution.dispatchRevision == 0 ? .proveNoDispatch : .loseOutcome
                 default: event = .loseOutcome
                 }
                 _ = try requests.recordOutcome(requestID: id, expectedRevision: execution.dispatchRevision,
