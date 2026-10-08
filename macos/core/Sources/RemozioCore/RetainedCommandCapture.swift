@@ -32,7 +32,21 @@ public final class RetainedCommandCapture {
             maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
     }
 
-    init(received: sending ReceivedMachCommandInputSubmission, expectedCallerBinding: Data, submissionSchemaVersion: UInt64,
+    convenience init(received: sending ReceivedMachCommandInputSubmission, expectedCallerBinding: Data, submissionSchemaVersion: UInt64,
+         captureSchemaVersion: UInt64, expression: String, userID: uid_t, auditSessionID: au_asid_t?, resolvedTarget: CommandTarget,
+         minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
+         maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {},
+         admissionProfile: CommandHandshakeProfile? = nil) throws {
+        try self.init(ownedReceived: received, expectedCallerBinding: expectedCallerBinding,
+            submissionSchemaVersion: submissionSchemaVersion, captureSchemaVersion: captureSchemaVersion,
+            expression: expression, userID: userID, auditSessionID: auditSessionID, resolvedTarget: resolvedTarget,
+            minimalEnvironment: minimalEnvironment, streamBinding: streamBinding, submissionLimits: submissionLimits,
+            captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
+            checkCancellation: checkCancellation, admissionProfile: admissionProfile)
+    }
+
+    /// Internal capture from an exclusively owned attempt. Public entry points retain their sending transfer.
+    init(ownedReceived received: ReceivedMachCommandInputSubmission, expectedCallerBinding: Data, submissionSchemaVersion: UInt64,
          captureSchemaVersion: UInt64, expression: String, userID: uid_t, auditSessionID: au_asid_t?, resolvedTarget: CommandTarget,
          minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
          maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {},
@@ -125,6 +139,14 @@ public final class RetainedCommandCapture {
     func sendAdmissionReply(_ bytes: Data, timeoutMilliseconds: UInt32 = 5000) throws {
         guard !closed, let admissionReply else { throw MachCommandHandshakeError.retired }
         try admissionReply.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
+    /// Only the exclusive attempt owner supplies the original detached right after successful capture.
+    func installAdmissionReply(_ reply: MachCommandReplyRight) throws {
+        guard !closed, !requestOwned, admissionReply == nil, admissionProfile?.supportsAdmissionResults == true else {
+            throw RetainedCommandCaptureError.alreadyOwned
+        }
+        admissionReply = reply
     }
 
     /// Detach only after the first request transfer. Recheck cleanup cannot close the attempt owner's reply.

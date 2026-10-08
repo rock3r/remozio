@@ -45,11 +45,12 @@ public final class CommandReceiveHost {
     public convenience init(takingReceiveRight: mach_port_t, journal: AuthorityJournal, macID: Data, accountID: Data,
                             userID: uid_t, auditSessionID: au_asid_t? = nil, maximumSessions: Int,
                             maximumPayloadBytes: Int, receiveWaitMilliseconds: UInt32 = 250,
-                            replyTimeoutMilliseconds: UInt32 = 5000) throws {
+                            replyTimeoutMilliseconds: UInt32 = 5000,
+                            capabilities: CommandHandshakeCapabilities = .current) throws {
         try self.init(takingReceiveRight: takingReceiveRight, macID: macID, accountID: accountID,
             userID: userID, auditSessionID: auditSessionID, maximumSessions: maximumSessions,
             maximumPayloadBytes: maximumPayloadBytes, receiveWaitMilliseconds: receiveWaitMilliseconds,
-            replyTimeoutMilliseconds: replyTimeoutMilliseconds, context: { registry in
+            replyTimeoutMilliseconds: replyTimeoutMilliseconds, capabilities: capabilities, context: { registry in
                 guard geteuid() == 0 else { throw JournalLeaseError.rootRequired }
                 let snapshot = try journal.read { transaction in
                     try AuthoritySelfValidation.validate(transaction: transaction)
@@ -65,7 +66,7 @@ public final class CommandReceiveHost {
     /// Fixture policy seam. Product construction always reads the current protected journal.
     init(takingReceiveRight: mach_port_t, macID: Data, accountID: Data, userID: uid_t, auditSessionID: au_asid_t?,
          maximumSessions: Int, maximumPayloadBytes: Int, receiveWaitMilliseconds: UInt32 = 250,
-         replyTimeoutMilliseconds: UInt32 = 5000,
+         replyTimeoutMilliseconds: UInt32 = 5000, capabilities: CommandHandshakeCapabilities = .current,
          context: @escaping (CommandSessionRegistry) throws -> CommandSessionRegistry.Context) throws {
         var references: mach_port_urefs_t = 0
         guard takingReceiveRight != MACH_PORT_NULL, takingReceiveRight != UInt32.max,
@@ -78,7 +79,7 @@ public final class CommandReceiveHost {
             throw CommandReceiveHostError.invalidConfiguration
         }
         let registry = try CommandSessionRegistry(macID: macID, accountID: accountID, userID: userID,
-            auditSessionID: auditSessionID, maximumSessions: maximumSessions)
+            auditSessionID: auditSessionID, maximumSessions: maximumSessions, capabilities: capabilities)
         self.registry = registry; self.loadContext = { try context(registry) }
         self.port = takingReceiveRight; self.userID = userID; self.auditSessionID = auditSessionID
         self.maximumPayloadBytes = maximumPayloadBytes; self.receiveWaitMilliseconds = receiveWaitMilliseconds
@@ -120,6 +121,40 @@ public final class CommandReceiveHost {
             resolvedTarget: resolvedTarget, minimalEnvironment: minimalEnvironment, streamBinding: streamBinding,
             submissionLimits: submissionLimits, captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
             checkCancellation: { [stop] in try stop.check(); try checkCancellation(); try stop.check() })
+    }
+
+    /// Transfer the original input and private reply before capture. Every operation reads current protected policy again.
+    public func prepareAdmission(received: sending ReceivedMachCommandInputSubmission,
+                                 submissionLimits: CBORLimits) throws -> sending RetainedCommandAdmissionAttempt {
+        if busy, activeInput == ObjectIdentifier(received.input) { throw CommandReceiveHostError.operationActive }
+        do { try begin() } catch { received.closeIfUnclaimed(); throw error }
+        activeInput = ObjectIdentifier(received.input)
+        defer { activeInput = nil; end() }
+        let context: CommandSessionRegistry.Context
+        do { context = try currentContext() }
+        catch { received.closeIfUnclaimed(); throw error }
+        return try registry.prepareAdmission(received: received, context: { context }, submissionLimits: submissionLimits)
+    }
+
+    /// One typed admission turn. The host callback observes request-local failures without retiring a healthy receive queue.
+    /// A failed protected policy read requests stop. No service, elevation policy, or execution dispatcher is activated here.
+    public func pollAdmission(journal: AuthorityJournal, submissionLimits: CBORLimits,
+                              resolve: (CommandSubmission) throws -> CommandAdmissionResolution,
+                              draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                              checkCancellation: @escaping @Sendable () throws -> Void = {},
+                              onResult: (Result<IssuedRequestPayload, Error>) throws -> Void) throws -> CommandReceiveEvent {
+        try poll { received in
+            let result: Result<IssuedRequestPayload, Error>
+            do {
+                let attempt = try prepareAdmission(received: received, submissionLimits: submissionLimits)
+                result = .success(try journal.admitCommandAttempt(attempt, resolve: resolve, draft: draft, now: now,
+                    receiptTimeMs: receiptTimeMs, checkCancellation: { [stop] in
+                        try stop.check(); try checkCancellation(); try stop.check()
+                    }))
+            } catch { result = .failure(error) }
+            try onResult(result)
+        }
     }
 
     /// Signal first. A reentrant close defers disposal until the active receive or capture has returned.

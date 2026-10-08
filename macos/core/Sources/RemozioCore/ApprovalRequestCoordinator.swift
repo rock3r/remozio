@@ -220,6 +220,14 @@ public final class ApprovalRequestCoordinator {
         }
     }
 
+    var commandAdmissionEpoch: Data { writer.epoch }
+    func retainsCommandSubmission(_ submission: CapturedSubmission) -> Bool {
+        entries.values.contains { entry in
+            guard let prior = entry.command?.capture.submission else { return false }
+            return prior.id == submission.id || prior.nonce == submission.nonce
+        }
+    }
+
     private func rejectionOutcome(_ command: RetainedCommandCapture, rejection: CommandAdmissionRejectionReason?,
                                   error: Error) -> CommandAdmissionOutcome {
         if error as? CommandSubmissionReplayError == .alreadyReserved { return .uncertain(.duplicateSubmission) }
@@ -228,10 +236,7 @@ public final class ApprovalRequestCoordinator {
         }
         let submission = command.capture.submission
         // Check retained requests as well as historical reservations. A refusal cannot contradict either owner.
-        guard !entries.values.contains(where: { entry in
-            guard let prior = entry.command?.capture.submission else { return false }
-            return prior.id == submission.id || prior.nonce == submission.nonce
-        }) else { return .uncertain(.duplicateSubmission) }
+        guard !retainsCommandSubmission(submission) else { return .uncertain(.duplicateSubmission) }
         do {
             let reserved = try read { tx in
                 let trust = try tx.approvalTrustSnapshot()

@@ -297,6 +297,16 @@ public struct ReceivedMachCommandInputSubmission {
         guard !ownership.claimed else { throw RetainedCommandCaptureError.alreadyOwned }
         ownership.claimed = true
     }
+    /// The original claim protects aliases. The new receipt owns the same kernel objects but no reply right.
+    func takeForAdmissionAttempt() throws -> (ReceivedMachCommandInputSubmission, MachCommandReplyRight) {
+        guard !ownership.claimed else { throw RetainedCommandCaptureError.alreadyOwned }
+        guard carrierVersion == MachCommandCallerReceiver.admissionInputCarrierVersion, let reply else {
+            closeIfUnclaimed(); throw MachCommandHandshakeError.incompatible
+        }
+        ownership.claimed = true
+        return (ReceivedMachCommandInputSubmission(payload: payload, caller: caller, input: input,
+            carrierVersion: carrierVersion, reply: nil), reply)
+    }
     func closeIfUnclaimed() {
         if !ownership.claimed { ownership.claimed = true; caller.close(); input.close(); reply?.close() }
     }

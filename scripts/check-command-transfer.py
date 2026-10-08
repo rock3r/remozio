@@ -128,6 +128,41 @@ func transfer(host: CommandReceiveHost, journal: AuthorityJournal, peer: XPCPeer
         probes["host-run-valid"] = (host_prefix + host_body.replace("_ = try host.poll", "try host.run") + "}\n", True)
         probes["proof-observe-valid"] = ("import RemozioCore\nfunc observe(_ result: VerifiedCommandAdmissionResult) -> CommandAdmissionRetryClass { result.retryClass }\n", True)
         probes["proof-forge"] = ("import RemozioCore\nfunc forge() -> VerifiedCommandAdmissionResult { VerifiedCommandAdmissionResult() }\n", False)
+        attempt_prepare = "    _ = try owner.prepareAdmission(received: received, currentPolicy: policy, submissionLimits: limits)\n"
+        registry_prepare = attempt_prepare.replace("currentPolicy: policy", "currentCodePolicy: policy")
+        for name, probe_prefix, prepare in [
+            ("attempt-handshake", input_prefix, attempt_prepare),
+            ("attempt-registry", registry_input_prefix, registry_prepare),
+        ]:
+            probes[name + "-valid"] = (probe_prefix + prepare + "}\n", True)
+            probes[name + "-reuse"] = (probe_prefix + prepare + "    received.input.close()\n}\n", False)
+            probes[name + "-alias-reuse"] = (probe_prefix + "    let alias = received\n" + prepare + "    alias.input.close()\n}\n", False)
+        attempt_prefix = """import RemozioCore
+import RemozioProtocol
+func transfer(journal: AuthorityJournal, attempt: sending RetainedCommandAdmissionAttempt,
+              draft: ApprovalRequestDraft, now: () throws -> AuthorityMoment) throws {
+"""
+        attempt_admit = "    _ = try journal.admitCommandAttempt(attempt, resolve: { _ in .refuse(.updateWaiting) }, draft: { _ in draft }, now: now, receiptTimeMs: nil)\n"
+        probes["attempt-journal-valid"] = (attempt_prefix + attempt_admit + "}\n", True)
+        probes["attempt-journal-reuse"] = (attempt_prefix + attempt_admit + "    attempt.close()\n}\n", False)
+        probes["attempt-journal-alias-reuse"] = (attempt_prefix + "    let alias = attempt\n" + attempt_admit + "    alias.close()\n}\n", False)
+        attempt_host = """    _ = try host.poll { received in
+        let attempt = try host.prepareAdmission(received: received, submissionLimits: limits)
+        _ = try journal.admitCommandAttempt(attempt, resolve: { _ in .refuse(.updateWaiting) },
+            draft: { _ in draft }, now: now, receiptTimeMs: nil)
+    }
+    host.close()
+"""
+        probes["attempt-host-valid"] = (host_prefix + attempt_host + "}\n", True)
+        probes["attempt-host-input-reuse"] = (host_prefix + attempt_host.replace("        _ = try journal", "        received.input.close()\n        _ = try journal") + "}\n", False)
+        probes["attempt-host-reuse"] = (host_prefix + attempt_host.replace("receiptTimeMs: nil)", "receiptTimeMs: nil)\n        attempt.close()") + "}\n", False)
+        probes["attempt-host-alias-reuse"] = (host_prefix + attempt_host.replace("        _ = try journal", "        let alias = attempt\n        _ = try journal").replace("receiptTimeMs: nil)", "receiptTimeMs: nil)\n        alias.close()") + "}\n", False)
+        controller = """    _ = try host.pollAdmission(journal: journal, submissionLimits: limits,
+        resolve: { _ in .refuse(.updateWaiting) }, draft: { _ in draft }, now: now,
+        receiptTimeMs: nil, onResult: { _ in })
+    host.close()
+"""
+        probes["attempt-controller-valid"] = (host_prefix + controller + "}\n", True)
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)

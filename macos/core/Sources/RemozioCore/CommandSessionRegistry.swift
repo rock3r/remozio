@@ -12,6 +12,7 @@ public enum CommandSessionRegistryError: Error, Equatable {
 /// This registry grants no command admission, replay exemption, retry authority, or execution permit.
 public final class CommandSessionRegistry {
     public let maximumSessions: Int
+    private let capabilities: CommandHandshakeCapabilities
     private let macID: Data
     private let accountID: Data
     private let userID: uid_t
@@ -24,10 +25,12 @@ public final class CommandSessionRegistry {
     private var closed: Bool { closedState.withLock { $0 } }
     public var retainedSessionCount: Int { sessions.count }
 
-    public init(macID: Data, accountID: Data, userID: uid_t, auditSessionID: au_asid_t? = nil, maximumSessions: Int) throws {
+    public init(macID: Data, accountID: Data, userID: uid_t, auditSessionID: au_asid_t? = nil, maximumSessions: Int,
+                capabilities: CommandHandshakeCapabilities = .current) throws {
         guard macID.count == 16, accountID.count == 16, maximumSessions > 0 else {
             throw CommandSessionRegistryError.invalidConfiguration
         }
+        self.capabilities = capabilities
         self.macID = macID; self.accountID = accountID; self.userID = userID
         self.auditSessionID = auditSessionID; self.maximumSessions = maximumSessions
     }
@@ -45,7 +48,7 @@ public final class CommandSessionRegistry {
         let current = try resolve(context)
         _ = synchronize(current)
         guard sessions.count < maximumSessions else { throw CommandSessionRegistryError.capacity }
-        let session = try RetainedCommandHandshake(hello: hello, macID: macID, accountID: accountID,
+        let session = try RetainedCommandHandshake(hello: hello, capabilities: capabilities, macID: macID, accountID: accountID,
             expression: current.expression, userID: userID, auditSessionID: auditSessionID,
             timeoutMilliseconds: timeoutMilliseconds)
         guard sessions[session.profile.callerBinding] == nil else {
@@ -99,6 +102,36 @@ public final class CommandSessionRegistry {
                 try checkCancellation()
                 guard !closedState.withLock({ $0 }) else { throw CommandSessionRegistryError.closed }
             })
+    }
+
+    /// Own the authenticated packet before capture. The host still resolves current elevation policy in the journal owner.
+    public func prepareAdmission(received: sending ReceivedMachCommandInputSubmission,
+                                 currentCodePolicy: AuthorityCodePolicySnapshot,
+                                 submissionLimits: CBORLimits) throws -> sending RetainedCommandAdmissionAttempt {
+        try prepareAdmission(received: received, context: { try self.context(currentCodePolicy) }, submissionLimits: submissionLimits)
+    }
+
+    func prepareAdmission(received: sending ReceivedMachCommandInputSubmission, context: () throws -> Context,
+                          submissionLimits: CBORLimits) throws -> sending RetainedCommandAdmissionAttempt {
+        if busy, activeInput == ObjectIdentifier(received.input) { throw CommandSessionRegistryError.operationActive }
+        do { try begin() } catch { received.closeIfUnclaimed(); throw error }
+        activeInput = ObjectIdentifier(received.input)
+        defer { activeInput = nil; end() }
+        let current: Context
+        let selected: RetainedCommandHandshake
+        do {
+            current = try resolve(context)
+            _ = synchronize(current)
+            guard case .map(let fields) = try DeterministicCBOR.decode(received.payload, limits: submissionLimits),
+                  case .unsigned(let schema) = fields[0], CommandSubmission.supportedSchemaVersions.contains(schema) else {
+                throw CommandCaptureError.version
+            }
+            let submission = try CommandSubmission(canonicalBytes: received.payload, limits: submissionLimits, expectedSchemaVersion: schema)
+            guard let session = sessions[submission.binding.callerBinding] else { throw CommandSessionRegistryError.unknownSession }
+            selected = session
+        } catch { received.closeIfUnclaimed(); throw error }
+        return try selected.prepareAdmission(received: received, expression: current.expression,
+            userID: userID, auditSessionID: auditSessionID, submissionLimits: submissionLimits)
     }
 
     /// Run from the serial host loop even when no messages arrive. No deadline is imposed on admitted requests.
