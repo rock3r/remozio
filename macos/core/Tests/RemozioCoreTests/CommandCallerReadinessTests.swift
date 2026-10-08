@@ -60,7 +60,7 @@ final class CommandCallerReadinessTests: XCTestCase {
     private func busy(_ reason: CommandAdmissionRejectionReason) -> Reply {
         .result(.notAdmitted(reason, CommandAdmissionRetryClass(rawValue: reason.rawValue)!))
     }
-    private func serve(_ endpoint: Endpoint, replies: [Reply]) throws -> Server {
+    private func serve(_ endpoint: Endpoint, replies: [Reply], io: Bool = false) throws -> Server {
         let port = endpoint.port, expression = try expression(), user = geteuid(), mac = mac, account = account
         let completed = DispatchSemaphore(value: 0), results = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
         let submissions = OSAllocatedUnfairLock(initialState: [CommandSubmission]())
@@ -71,10 +71,10 @@ final class CommandCallerReadinessTests: XCTestCase {
                     auditSessionID: nil, maxPayloadBytes: 8192)
                 for reply in replies {
                     let session = try RetainedCommandHandshake(hello: receiver.receiveHello(timeoutMilliseconds: 5000),
-                        capabilities: .admissionResults, macID: mac, accountID: account, expression: expression,
+                        capabilities: io ? .executionChannels : .admissionResults, macID: mac, accountID: account, expression: expression,
                         userID: user, auditSessionID: nil)
                     defer { session.close() }
-                    let input = try receiver.receiveAdmissionInput(timeoutMilliseconds: 5000)
+                    let input = try io ? receiver.receiveIOInput(timeoutMilliseconds: 5000) : receiver.receiveAdmissionInput(timeoutMilliseconds: 5000)
                     defer { input.closeIfUnclaimed() }
                     let submission = try CommandSubmission(canonicalBytes: input.payload,
                         limits: CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024), expectedSchemaVersion: 1)
@@ -91,6 +91,10 @@ final class CommandCallerReadinessTests: XCTestCase {
                     let payload = CommandAdmissionResultPayload(profile: session.profile, submission: submission.binding,
                         submissionDigest: replyDigest, outcome: outcome)
                     try input.sendAdmissionReply(payload.canonicalBytes)
+                    if io, case .admitted(let request) = outcome {
+                        try XCTUnwrap(input.outputs).sendTerminalResult(CommandTerminalResultPayload(profile: session.profile,
+                            original: submission, request: request, outcome: .exited(13)).canonicalBytes, timeoutMilliseconds: 1000)
+                    }
                 }
             }
             results.withLock { $0 = result }
@@ -280,5 +284,99 @@ final class CommandCallerReadinessTests: XCTestCase {
             authorityPort: { XCTFail("Must not look up an authority"); return 0 }, authorityPolicy: policy,
             macID: mac, accountID: account, submissionLimits: limits(),
             configuration: .init(timeoutMilliseconds: 5000))) { XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration) }
+    }
+}
+
+
+extension CommandCallerReadinessTests {
+    private func submitIO(_ endpoint: Endpoint, input: Int32, output: Int32,
+                          configuration: CommandCallerReadinessConfiguration? = nil,
+                          cancellation: () throws -> Void = {}, status: (CommandCallerReadinessStatus) -> Void = { _ in },
+                          clock: (() throws -> UInt64)? = nil,
+                          wait: ((UInt32, () throws -> Void) throws -> Void)? = nil) throws -> sending CommandIOAdmission {
+        try CommandCallerReadiness.submitIO(template(), inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            authorityPort: { endpoint.port }, expression: expression(), userID: geteuid(), auditSessionID: nil,
+            macID: mac, accountID: account, submissionLimits: limits(),
+            configuration: configuration ?? .init(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1,
+                maximumBackoffMilliseconds: 4, controlTimeoutMilliseconds: 1000),
+            checkCancellation: cancellation, onStatus: status, clock: clock, wait: wait)
+    }
+    func testIOReadinessRetriesFourBoundBusyClassesAndRetainsActualTerminalSession() throws {
+        let endpoint = try Endpoint(), request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
+            requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+        let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
+        let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.admitted(request))], io: true)
+        var input: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&input), 0)
+        let output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { for fd in input + [output] { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(input[1], "queued", 6), 6)
+        let inputFlags = fcntl(input[0], F_GETFL), outputFlags = fcntl(output, F_GETFL)
+        var statuses: [CommandCallerReadinessStatus] = [], delays: [UInt32] = []
+        let result = try submitIO(endpoint, input: input[0], output: output, status: { statuses.append($0) }, wait: { delay, check in
+            delays.append(delay); try check()
+        })
+        guard case .admitted(let session) = result else { return XCTFail("Admission must keep its terminal session") }
+        defer { session.close() }
+        let submissions = try server.finish(), original = try template()
+        XCTAssertEqual(submissions.count, 5)
+        XCTAssertEqual(Set(submissions.map(\.binding.id)).count, 5); XCTAssertEqual(Set(submissions.map(\.binding.nonce)).count, 5)
+        XCTAssertEqual(Set(submissions.map(\.binding.callerBinding)).count, 5)
+        for submission in submissions {
+            XCTAssertEqual(submission.arguments, original.arguments); XCTAssertEqual(submission.environmentAdditions, original.environmentAdditions)
+            XCTAssertEqual(submission.executablePath, original.executablePath); XCTAssertEqual(submission.directoryPath, original.directoryPath)
+            XCTAssertEqual(submission.requestedTargetUID, original.requestedTargetUID); XCTAssertEqual(submission.ioMode, original.ioMode)
+            XCTAssertEqual(submission.disconnectBehavior, original.disconnectBehavior); XCTAssertEqual(submission.unverifiedRationale, original.unverifiedRationale)
+            XCTAssertNotEqual(submission.binding.id, original.binding.id); XCTAssertNotEqual(submission.binding.nonce, original.binding.nonce)
+        }
+        let terminal = try XCTUnwrap(session.pollTerminalResult(timeoutMilliseconds: 1000))
+        XCTAssertEqual(terminal.outcome, .exited(13)); XCTAssertEqual(terminal.request, request)
+        XCTAssertEqual(terminal.submission, submissions.last?.binding)
+        XCTAssertEqual(statuses, reasons.map(CommandCallerReadinessStatus.waiting)); XCTAssertEqual(delays, [1, 2, 4, 4])
+        XCTAssertEqual(fcntl(input[0], F_GETFL), inputFlags); XCTAssertEqual(fcntl(output, F_GETFL), outputFlags)
+        var bytes = [UInt8](repeating: 0, count: 6)
+        XCTAssertEqual(Darwin.read(input[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("queued".utf8))
+        try assertNoNextAttempt(endpoint)
+    }
+    func testIOReadinessNeverRetriesPermanentOrUncertainOrInvalidReplies() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        for reply: Reply in [.result(.notAdmitted(.policyRejected, .never)), .result(.uncertain(.storageFailure)), .malformed, .wrongDigest, .lost] {
+            let endpoint = try Endpoint(), server = try serve(endpoint, replies: [reply], io: true)
+            let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1,
+                maximumBackoffMilliseconds: 4, controlTimeoutMilliseconds: 100)
+            switch reply {
+            case .result(let expected):
+                guard case .result(let result) = try submitIO(endpoint, input: input, output: output, configuration: configuration) else {
+                    return XCTFail("Only admission can retain a session")
+                }
+                XCTAssertEqual(result.outcome, expected)
+            default: XCTAssertThrowsError(try submitIO(endpoint, input: input, output: output, configuration: configuration))
+            }
+            XCTAssertEqual(try server.finish().count, 1); try assertNoNextAttempt(endpoint)
+        }
+    }
+    func testIOReadinessKeepsOneDeadlineAcrossReasonChangesAndCancellation() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        do {
+            let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateInstalling), busy(.storageUnavailable)], io: true)
+            var now: UInt64 = 1000
+            let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 30, initialBackoffMilliseconds: 10,
+                maximumBackoffMilliseconds: 20, controlTimeoutMilliseconds: 1000)
+            XCTAssertThrowsError(try submitIO(endpoint, input: input, output: output, configuration: configuration,
+                clock: { now }, wait: { delay, check in now += UInt64(delay); try check() })) {
+                XCTAssertEqual($0 as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: .storageUnavailable))
+            }
+            XCTAssertEqual(try server.finish().count, 2); try assertNoNextAttempt(endpoint)
+        }
+        do {
+            let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateWaiting)], io: true)
+            var cancelled = false
+            XCTAssertThrowsError(try submitIO(endpoint, input: input, output: output,
+                cancellation: { if cancelled { throw Cancelled.stopped } }, status: { _ in cancelled = true })) {
+                XCTAssertTrue($0 is Cancelled)
+            }
+            XCTAssertEqual(try server.finish().count, 1); try assertNoNextAttempt(endpoint)
+        }
     }
 }

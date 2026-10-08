@@ -175,6 +175,22 @@ func transfer(journal: AuthorityJournal, attempt: sending RetainedCommandAdmissi
     host.close()
 """
         probes["attempt-controller-valid"] = (host_prefix + controller + "}\n", True)
+        io_prefix = """import Foundation
+import RemozioCore
+import RemozioProtocol
+func transfer(submission: CommandSubmission, handshake: sending VerifiedCommandHandshake,
+              policy: XPCPeerPolicy) throws {
+"""
+        io_transfer = """    _ = try MachCommandIOClient.submit(submission, inputDescriptor: 0, outputDescriptor: 1, errorDescriptor: 2,
+        handshake: handshake, authorityPolicy: policy, maximumPayloadBytes: 8192)
+"""
+        probes["io-valid"] = (io_prefix + io_transfer + "}\n", True)
+        probes["io-handshake-reuse"] = (io_prefix + io_transfer + "    handshake.close()\n}\n", False)
+        probes["io-handshake-alias-reuse"] = (io_prefix + "    let alias = handshake\n" + io_transfer + "    alias.close()\n}\n", False)
+        io_readiness = readiness_probe.replace("-> VerifiedCommandAdmissionResult", "-> sending CommandIOAdmission").replace(
+            "CommandCallerReadiness.submit(template, inputDescriptor: 0", "CommandCallerReadiness.submitIO(template, inputDescriptor: 0, outputDescriptor: 1, errorDescriptor: 2")
+        probes["io-readiness-valid"] = (io_readiness, True)
+        probes["terminal-proof-forge"] = ("import RemozioCore\nfunc forge() -> VerifiedCommandTerminalResult { VerifiedCommandTerminalResult() }\n", False)
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
@@ -186,13 +202,13 @@ func transfer(journal: AuthorityJournal, attempt: sending RetainedCommandAdmissi
             ], capture_output=True, text=True, timeout=60)
             if accepted:
                 passed = result.returncode == 0
-            elif name == "proof-forge":
+            elif name in {"proof-forge", "terminal-proof-forge"}:
                 passed = result.returncode != 0 and "fileprivate" in result.stderr
             else:
                 passed = result.returncode != 0 and "SendingRisksDataRace" in result.stderr
             if not passed:
                 raise SystemExit("Command ownership probe failed: " + name + "\n" + result.stderr[:4096])
-    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected; verified result construction remains private.")
+    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected; I/O handshake reuse rejected; verified admission and terminal result construction remains private.")
 
 
 if __name__ == "__main__":

@@ -157,7 +157,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
         return try receiver(endpoint, maximum: 8192).receiveAdmissionInput(timeoutMilliseconds: 1000)
     }
-    private func admissionClientFixture(_ destination: mach_port_t, input: UInt64 = 3, wire: UInt64 = 1) throws -> VerifiedCommandHandshake {
+    private func admissionClientFixture(_ destination: mach_port_t, input: UInt64 = 3, wire: UInt64 = 1) throws -> sending VerifiedCommandHandshake {
         let endpoint = try Endpoint()
         try endpoint.send(Data([1]))
         let sender = try receiver(endpoint).receive(timeoutMilliseconds: 1000)
@@ -2611,6 +2611,54 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testIOCarrierRetainsOriginalOutputPipesAndClosesOnlyImportedDescriptors() throws {
+        let endpoint = try Endpoint(), admission = try Endpoint(), terminal = try Endpoint()
+        var input: [Int32] = [-1, -1], output: [Int32] = [-1, -1], error: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&input), 0); XCTAssertEqual(pipe(&output), 0); XCTAssertEqual(pipe(&error), 0)
+        defer { for fd in input + output + error { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(input[1], "unread", 6), 6)
+        let flags = [input[0], output[1], error[1]].map { fcntl($0, F_GETFL) }
+        try MachCommandIOWire.send(Data([0xa0]), inputDescriptor: input[0], outputDescriptor: output[1], errorDescriptor: error[1],
+            destination: endpoint.port, admissionReply: admission.port, terminalReply: terminal.port,
+            maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        let received = try receiver(endpoint, maximum: 8192).receiveIOInput(timeoutMilliseconds: 1000)
+        let channels = try XCTUnwrap(received.outputs)
+        XCTAssertEqual([input[0], output[1], error[1]].map { fcntl($0, F_GETFL) }, flags)
+        XCTAssertEqual(received.carrierVersion, 4); XCTAssertEqual(received.payload, Data([0xa0]))
+        try channels.recheck()
+        try channels.output.withBorrowedDescriptor { XCTAssertEqual(Darwin.write($0, "out", 3), 3) }
+        try channels.error.withBorrowedDescriptor { XCTAssertEqual(Darwin.write($0, "err", 3), 3) }
+        received.closeIfUnclaimed()
+        XCTAssertThrowsError(try channels.recheck())
+        var control: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&control), 0)
+        defer { for fd in control { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(control[1], "out", 3), 3)
+        XCTAssertEqual(fcntl(input[0], F_GETFL), flags[0])
+        XCTAssertEqual(fcntl(output[1], F_GETFL), fcntl(control[1], F_GETFL))
+        XCTAssertEqual(fcntl(error[1], F_GETFL), fcntl(control[1], F_GETFL))
+        for (fd, expected) in [(input[0], "unread"), (output[0], "out"), (error[0], "err")] {
+            var bytes = [UInt8](repeating: 0, count: expected.utf8.count)
+            XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count); XCTAssertEqual(Data(bytes), Data(expected.utf8))
+        }
+        XCTAssertEqual(try sendReferences(admission.port), 1); XCTAssertEqual(try sendReferences(terminal.port), 1)
+    }
+
+    func testIOCarrierRejectsReadOnlyOutputsWithoutSendingOrChangingInput() throws {
+        let endpoint = try Endpoint(), admission = try Endpoint(), terminal = try Endpoint()
+        let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        for descriptor in [input, -1] {
+            XCTAssertThrowsError(try MachCommandIOWire.send(Data([0xa0]), inputDescriptor: input, outputDescriptor: output,
+                errorDescriptor: descriptor, destination: endpoint.port, admissionReply: admission.port,
+                terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000))
+            XCTAssertThrowsError(try receiver(endpoint).receiveNext(timeoutMilliseconds: 10)) {
+                XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+            }
+        }
+        XCTAssertEqual(fcntl(input, F_GETFL) & O_ACCMODE, O_RDONLY)
+        XCTAssertEqual(fcntl(output, F_GETFL) & O_ACCMODE, O_WRONLY)
+    }
+
     private func selfExpression() throws -> String {
         var code: SecCode?, information: CFDictionary?
         XCTAssertEqual(SecCodeCopySelf([], &code), errSecSuccess)
@@ -3656,4 +3704,216 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+}
+
+extension MachCommandCallerReceiverTests {
+    // Same-process fixtures exercise actual kernel carriers. They do not prove privileged child execution.
+    private func serveIO(_ port: mach_port_t, admission: Data?, terminal: Data?, release: DispatchSemaphore,
+                         writeOutput: Bool = false, expectClosed: Bool = false) throws -> (DispatchSemaphore, OSAllocatedUnfairLock<Result<Void, Error>?>) {
+        let expression = try selfExpression(), user = geteuid(), completed = DispatchSemaphore(value: 0)
+        let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { output in output = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
+                    userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
+                let input = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                defer { input.closeIfUnclaimed() }
+                let channels = try XCTUnwrap(input.outputs)
+                try channels.recheck()
+                if let admission { try input.sendAdmissionReply(admission) }
+                guard release.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                if expectClosed { XCTAssertThrowsError(try channels.recheck()); return }
+                if writeOutput {
+                    try channels.output.withBorrowedDescriptor { XCTAssertEqual(Darwin.write($0, "stdout", 6), 6) }
+                    try channels.error.withBorrowedDescriptor { XCTAssertEqual(Darwin.write($0, "stderr", 6), 6) }
+                }
+                if let terminal { try channels.sendTerminalResult(terminal, timeoutMilliseconds: 1000) }
+            } }
+        }
+        return (completed, result)
+    }
+    private func ioPayloads(profile: CommandHandshakeProfile, submission: CommandSubmission,
+                            outcome: CommandAdmissionOutcome? = nil, terminal: CommandTerminalOutcome = .exited(7)) throws -> (Data, Data) {
+        let request = CommandAdmittedRequest(requestID: Data(repeating: 6, count: 16),
+            requestDigest: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
+        let admission = CommandAdmissionResultPayload(profile: profile, submission: submission.binding,
+            submissionDigest: Data(SHA256.hash(data: submission.canonicalBytes)), outcome: outcome ?? .admitted(request))
+        return (try admission.canonicalBytes, try CommandTerminalResultPayload(profile: profile, original: submission,
+            request: request, outcome: terminal).canonicalBytes)
+    }
+    func testIOClientKeepsSessionAfterEmptyPollAndReceivesBoundTerminalAndOriginalStreams() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3)
+        let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission)
+        var input: [Int32] = [-1, -1], output: [Int32] = [-1, -1], error: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&input), 0); XCTAssertEqual(pipe(&output), 0); XCTAssertEqual(pipe(&error), 0)
+        defer { for fd in input + output + error { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(input[1], "unread", 6), 6)
+        let inputFlags = fcntl(input[0], F_GETFL), references = try sendReferences(endpoint.port)
+        let release = DispatchSemaphore(value: 0)
+        let server = try serveIO(endpoint.port, admission: payloads.0, terminal: payloads.1, release: release, writeOutput: true)
+        defer { release.signal() }
+        let result = try MachCommandIOClient.submit(submission, inputDescriptor: input[0], outputDescriptor: output[1], errorDescriptor: error[1],
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = result else { return XCTFail("An admitted request must retain its terminal channel") }
+        defer { session.close() }
+        XCTAssertEqual(try sendReferences(endpoint.port), references)
+        XCTAssertNil(try session.pollTerminalResult(timeoutMilliseconds: 250))
+        release.signal()
+        XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+        let terminal = try XCTUnwrap(session.pollTerminalResult(timeoutMilliseconds: 1000))
+        XCTAssertEqual(terminal.outcome, .exited(7)); XCTAssertEqual(terminal.submission, submission.binding)
+        XCTAssertEqual(try session.pollTerminalResult()?.outcome, .exited(7))
+        var bytes = [UInt8](repeating: 0, count: 6)
+        for (fd, expected) in [(input[0], "unread"), (output[0], "stdout"), (error[0], "stderr")] {
+            XCTAssertEqual(Darwin.read(fd, &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data(expected.utf8))
+        }
+        XCTAssertEqual(fcntl(input[0], F_GETFL), inputFlags)
+        XCTAssertEqual(try sendReferences(endpoint.port), references - 1)
+    }
+    func testIOClientRefusalAndUncertaintyCloseTheTerminalRightWithoutResubmission() throws {
+        for outcome: CommandAdmissionOutcome in [.notAdmitted(.updateWaiting, .updateWaiting), .uncertain(.storageFailure)] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3)
+            let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission, outcome: outcome)
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let release = DispatchSemaphore(value: 0), server = try serveIO(endpoint.port, admission: payloads.0,
+                terminal: nil, release: release, expectClosed: true)
+            defer { release.signal() }
+            let result = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)
+            guard case .result(let verified) = result else { return XCTFail("A refusal must not retain an execution session") }
+            XCTAssertEqual(verified.outcome, outcome)
+            release.signal(); XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+            XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+            XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0); XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+        }
+    }
+    func testIOClientMalformedTerminalRetiresSessionWithoutResubmission() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3)
+        let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission)
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let release = DispatchSemaphore(value: 0), server = try serveIO(endpoint.port, admission: payloads.0, terminal: Data([0xa0]), release: release)
+        defer { release.signal() }
+        let result = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = result else { return XCTFail("An admitted request must retain its terminal channel") }
+        release.signal(); XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+        XCTAssertThrowsError(try session.pollTerminalResult(timeoutMilliseconds: 1000))
+        XCTAssertThrowsError(try session.pollTerminalResult()) { XCTAssertEqual($0 as? MachCommandHandshakeError, .retired) }
+        XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+    }
+    func testIOClientCancellationClosesAdmittedTerminalBeforeAnyDispatch() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3)
+        let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission)
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let release = DispatchSemaphore(value: 0), server = try serveIO(endpoint.port, admission: payloads.0, terminal: nil, release: release, expectClosed: true)
+        defer { release.signal() }
+        let result = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = result else { return XCTFail("An admitted request must retain its terminal channel") }
+        XCTAssertThrowsError(try session.pollTerminalResult(checkCancellation: { throw CancellationError() })) { XCTAssertTrue($0 is CancellationError) }
+        release.signal(); XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+    }
+    func testIOClientRejectsPublicNonRootPolicyAndLegacyProfileBeforeExposingStreams() throws {
+        let endpoint = try Endpoint()
+        let policy = try XPCPeerPolicy(teamID: "TEAMID1234", componentIdentifier: "dev.remozio.fixture",
+            approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: 1)
+        XCTAssertThrowsError(try MachCommandIOClient.submit(commandSubmission(), inputDescriptor: -1, outputDescriptor: -1, errorDescriptor: -1,
+            handshake: admissionClientFixture(endpoint.port, input: 4, wire: 3), authorityPolicy: policy, maximumPayloadBytes: 8192)) { XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration) }
+        XCTAssertThrowsError(try MachCommandIOClient.submit(commandSubmission(), inputDescriptor: -1, outputDescriptor: -1, errorDescriptor: -1,
+            handshake: admissionClientFixture(endpoint.port, wire: 2), expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+        }
+        XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        XCTAssertEqual(try sendReferences(endpoint.port), 1)
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testIOAdmissionAttemptRetainsAllStreamsThroughJournalAdmissionAndRetiresOnlyCopies() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let endpoint = try Endpoint(), helloReply = try Endpoint(), admissionReply = try Endpoint(), terminalReply = try Endpoint()
+            let session = try RetainedCommandHandshake(hello: hello(endpoint, reply: helloReply, capabilities: .executionChannels),
+                capabilities: .executionChannels, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+                expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+            defer { session.close() }
+            let submission = try commandSubmission(binding: .init(id: Data(repeating: 4, count: 16), nonce: Data(repeating: 5, count: 32),
+                callerBinding: session.profile.callerBinding))
+            var input: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&input), 0)
+            let output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { for fd in input + [output] { _ = Darwin.close(fd) } }
+            XCTAssertEqual(Darwin.write(input[1], "unread", 6), 6)
+            try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input[0], outputDescriptor: output, errorDescriptor: output,
+                destination: endpoint.port, admissionReply: admissionReply.port, terminalReply: terminalReply.port,
+                maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            let received = try receiver(endpoint, maximum: 8192).receiveIOInput(timeoutMilliseconds: 1000)
+            let channels = try XCTUnwrap(received.outputs)
+            let attempt = try session.prepareAdmission(received: TestInputInspection(received: received).received,
+                expression: selfExpression(), userID: geteuid(), auditSessionID: nil, submissionLimits: assemblyLimits)
+            received.closeIfUnclaimed()
+            try channels.recheck()
+            let request = try admitAttempt(attempt, fixture: fixture)
+            guard case .admitted(let identity) = try typedOutcome(admissionReply, submission: submission, profile: session.profile) else {
+                return XCTFail("The journal must acknowledge the exact admitted request")
+            }
+            XCTAssertEqual(identity.requestID, request.requestID)
+            XCTAssertEqual(try sendReferences(admissionReply.port), 1); XCTAssertEqual(try sendReferences(terminalReply.port), 2)
+            try channels.recheck()
+            let retiredAt = fixture.now(110)
+            try XCTUnwrap(fixture.authority).withRequests { _ = try $0.retirePending(requestID: request.requestID, reason: .cancelled,
+                now: retiredAt, receiptTimeMs: nil) }
+            XCTAssertThrowsError(try channels.recheck())
+            XCTAssertEqual(try sendReferences(terminalReply.port), 1)
+            var bytes = [UInt8](repeating: 0, count: 6)
+            XCTAssertEqual(Darwin.read(input[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("unread".utf8))
+            XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+        }
+    }
+    func testIOCaptureFailureClosesAllImportedChannelsAndPreservesBorrowedDescriptors() throws {
+        let endpoint = try Endpoint(), admission = try Endpoint(), terminal = try Endpoint()
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        try MachCommandIOWire.send(commandSubmission(executablePath: "/not/a/remozio/program").canonicalBytes,
+            inputDescriptor: input, outputDescriptor: output, errorDescriptor: output, destination: endpoint.port,
+            admissionReply: admission.port, terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        let received = try receiver(endpoint, maximum: 8192).receiveIOInput(timeoutMilliseconds: 1000)
+        let channels = try XCTUnwrap(received.outputs)
+        XCTAssertThrowsError(try assemble(received))
+        try expectAssemblyResourcesRetired(received); XCTAssertThrowsError(try channels.recheck())
+        XCTAssertEqual(try sendReferences(admission.port), 1); XCTAssertEqual(try sendReferences(terminal.port), 1)
+        XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0); XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testIOClientLateTerminalOrCancellationAfterReceiptRetiresRatherThanReturningEmptyPoll() throws {
+        for late in [false, true] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3)
+            let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission)
+            let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let release = DispatchSemaphore(value: 0), server = try serveIO(endpoint.port, admission: payloads.0, terminal: payloads.1, release: release)
+            defer { release.signal() }
+            let result = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)
+            guard case .admitted(let session) = result else { return XCTFail("Admission must retain the terminal channel") }
+            release.signal(); XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
+            var samples = 0, cancellations = 0
+            XCTAssertThrowsError(try session.pollTerminalResult(timeoutMilliseconds: 1000, checkCancellation: {
+                cancellations += 1
+                if !late, cancellations >= 2 { throw CancellationError() }
+            }, clock: { samples += 1; return late && samples >= 4 ? 1000 : 0 })) {
+                if late { XCTAssertEqual($0 as? CommandTerminalResultError, .deadlineExceeded) }
+                else { XCTAssertTrue($0 is CancellationError) }
+            }
+            XCTAssertThrowsError(try session.pollTerminalResult()) { XCTAssertEqual($0 as? MachCommandHandshakeError, .retired) }
+            XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        }
+    }
 }
