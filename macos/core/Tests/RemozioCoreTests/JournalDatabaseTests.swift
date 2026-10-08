@@ -22,9 +22,198 @@ final class JournalDatabaseTests: XCTestCase {
             reason: .none, droppedEventCount: nil, peerDeviceID: nil).encode(limits: bounds)
     }
     private func open(_ fixture: Fixture, initialize: Bool = false, mac: UInt8 = 1, account: UInt8 = 2,
-                      busy: UInt32 = 100) throws -> JournalDatabase {
+                      busy: UInt32 = 100, maximumSubmissions: Int = 1_000_000) throws -> JournalDatabase {
         try JournalDatabase(lease: fixture.lease(), macID: id(mac), accountID: id(account),
-                            recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize)
+                            recordLimits: bounds, descriptorLimits: bounds, decisionLimits: bounds, maximumConsumptions: 10, busyMilliseconds: busy, initialize: initialize, maximumCommandSubmissions: maximumSubmissions)
+    }
+
+    private func submissionReservation(_ value: UInt8 = 7, nonce: UInt8? = nil, mac: UInt8 = 1, account: UInt8 = 2) throws -> CommandSubmissionReservation {
+        try CommandSubmissionReservation(macID: id(mac), accountID: id(account),
+            submission: CapturedSubmission(id: id(value), nonce: Data(repeating: nonce ?? value, count: 32), callerBinding: id(8)),
+            captureDigest: Data(repeating: 9, count: 32))
+    }
+
+    func testCommandReplayMigrationAndReservationSurviveReopenWithoutChangingCodePolicy() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        let policy = try installRecoveryPolicy(database), before = try database.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try database.read { try $0.commandSubmissionReservation(submissionID: id(7)) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .unavailable)
+        }
+        try database.write { try $0.installCommandSubmissionReplay() }
+        let installed = try database.read { try $0.continuityDigests() }
+        XCTAssertNotEqual(before.authority, installed.authority)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "15")
+        XCTAssertEqual(try database.read { try $0.codePolicy() }, policy)
+        XCTAssertNil(try database.read { try $0.historyRecovery(epoch: id(9)) })
+        let value = try submissionReservation()
+        XCTAssertEqual(try database.write { try $0.reserveCommandSubmission(value) }, value)
+        let reserved = try database.read { try $0.continuityDigests() }
+        XCTAssertNotEqual(installed.authority, reserved.authority)
+        XCTAssertEqual(installed.ledger, reserved.ledger)
+        try database.close()
+        let reopened = try open(fixture)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, value)
+        XCTAssertEqual(try reopened.read { try $0.codePolicy() }, policy)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, reserved)
+        XCTAssertNil(try reopened.read { try $0.commandSubmissionReservation(submissionID: id(10)) })
+        for duplicate in [try submissionReservation(7, nonce: 10), try submissionReservation(10, nonce: 7), value] {
+            XCTAssertThrowsError(try reopened.write { try $0.reserveCommandSubmission(duplicate) }) {
+                XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+            }
+        }
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, reserved)
+    }
+
+    func testCommandReplayMigrationPreservesExistingHistoryRecoveryEvidence() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        let policy = try installRecoveryPolicy(database)
+        let intent = try recoveryIntent(database.read { try $0.continuityDigests() })
+        try database.write { try $0.recordHistoryRecovery(intent) }
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "14")
+        let before = try database.read { try $0.continuityDigests() }
+        try database.write { try $0.installCommandSubmissionReplay() }
+        let after = try database.read { try $0.continuityDigests() }
+        XCTAssertNotEqual(before.authority, after.authority)
+        XCTAssertEqual(before.ledger, after.ledger)
+        XCTAssertEqual(try database.read { try $0.historyRecovery(epoch: intent.recoveryEpoch) }, intent)
+        XCTAssertEqual(try database.write { try $0.installCodePolicy(policy.policy, expectedRevision: policy.revision) }, policy)
+        try database.write { try $0.installCommandSubmissionReplay() }
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, after)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "15")
+    }
+
+    func testCommandReplayInstallationRequiresPolicyAndRollsBackItsEntireCatalog() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        let empty = try database.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try database.write { try $0.installCommandSubmissionReplay() }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .unavailable)
+        }
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, empty)
+        _ = try installRecoveryPolicy(database)
+        let before = try database.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try database.write { tx in
+            try tx.installCommandSubmissionReplay()
+            _ = try tx.reserveCommandSubmission(submissionReservation())
+            throw Failure.injected
+        })
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "13")
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, before)
+        XCTAssertNil(try database.read { try $0.historyRecovery(epoch: id(9)) })
+        try database.write { try $0.installCommandSubmissionReplay() }
+        XCTAssertNil(try database.read { try $0.commandSubmissionReservation(submissionID: id(7)) })
+    }
+
+    func testCommandReplayCaughtFailureCannotCommitEarlierTentativeReservations() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        _ = try installRecoveryPolicy(database)
+        try database.write { try $0.installCommandSubmissionReplay() }
+        let before = try database.read { try $0.continuityDigests() }, value = try submissionReservation()
+        XCTAssertThrowsError(try database.write { tx in
+            _ = try tx.reserveCommandSubmission(value)
+            do { _ = try tx.reserveCommandSubmission(value); XCTFail("duplicate accepted") }
+            catch { XCTAssertEqual(error as? CommandSubmissionReplayError, .alreadyReserved) }
+        }) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionFailed) }
+        XCTAssertNil(try database.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) })
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, before)
+        XCTAssertEqual(try database.write { try $0.reserveCommandSubmission(value) }, value)
+    }
+
+    func testCommandReplayCapacityDoesNotEvictAndCanBeRaisedAfterReopen() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true, maximumSubmissions: 1)
+        _ = try installRecoveryPolicy(database)
+        try database.write { try $0.installCommandSubmissionReplay() }
+        let first = try submissionReservation(), second = try submissionReservation(10)
+        _ = try database.write { try $0.reserveCommandSubmission(first) }
+        let before = try database.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try database.write { try $0.reserveCommandSubmission(second) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .capacityExceeded)
+        }
+        XCTAssertThrowsError(try database.write { try $0.reserveCommandSubmission(first) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+        }
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, before)
+        try database.close()
+        let reopened = try open(fixture, maximumSubmissions: 2)
+        defer { try? reopened.close() }
+        _ = try reopened.write { try $0.reserveCommandSubmission(second) }
+        for value in [first, second] {
+            XCTAssertEqual(try reopened.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, value)
+        }
+    }
+
+    func testCommandReplayRejectsWrongScopeReadOnlyAndEscapedTransactions() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        _ = try installRecoveryPolicy(database)
+        try database.write { try $0.installCommandSubmissionReplay() }
+        let before = try database.read { try $0.continuityDigests() }, value = try submissionReservation()
+        for wrong in [try submissionReservation(mac: 3), try submissionReservation(account: 3)] {
+            XCTAssertThrowsError(try database.write { try $0.reserveCommandSubmission(wrong) }) {
+                XCTAssertEqual($0 as? CommandSubmissionReplayError, .wrongScope)
+            }
+        }
+        XCTAssertThrowsError(try database.read { try $0.reserveCommandSubmission(value) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        XCTAssertThrowsError(try database.read { try $0.installCommandSubmissionReplay() }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        let escaped = try database.write { $0 }
+        XCTAssertThrowsError(try escaped.reserveCommandSubmission(value)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction)
+        }
+        XCTAssertThrowsError(try escaped.commandSubmissionReservation(submissionID: value.submission.id)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction)
+        }
+        XCTAssertThrowsError(try escaped.installCommandSubmissionReplay()) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction)
+        }
+        XCTAssertThrowsError(try database.read { try $0.commandSubmissionReservation(submissionID: Data([1])) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .invalidConfiguration)
+        }
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, before)
+    }
+
+    func testCommandReplayCorruptStoredBindingRetiresTheJournal() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        _ = try installRecoveryPolicy(database)
+        try database.write { try $0.installCommandSubmissionReplay() }
+        let value = try submissionReservation()
+        _ = try database.write { try $0.reserveCommandSubmission(value) }
+        // A disposable malformed table models corruption that bypassed write-time CHECK constraints.
+        try fixture.sql("ALTER TABLE command_submissions_v1 RENAME TO saved_replay")
+        try fixture.sql("CREATE TABLE command_submissions_v1 AS SELECT mac,account,submission,x'00' AS nonce,caller,capture FROM saved_replay")
+        XCTAssertThrowsError(try database.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .corruptData)
+        }
+        XCTAssertTrue(database.retired)
+        XCTAssertThrowsError(try database.read { _ in XCTFail("corrupt storage remained usable") }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+        }
+    }
+
+    func testCommandReplayRejectsInvalidConfigurationAndRecordSizes() throws {
+        for maximum in [0, -1, Int(Int32.max) + 1] {
+            let fixture = try Fixture()
+            XCTAssertThrowsError(try open(fixture, initialize: true, maximumSubmissions: maximum)) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .invalidConfiguration)
+            }
+            let database = try open(fixture, initialize: true)
+            try database.close()
+        }
+        let binding = try submissionReservation().submission
+        for invalid in [(Data([1]), id(2), Data(repeating: 9, count: 32)),
+                        (id(1), Data([2]), Data(repeating: 9, count: 32)), (id(1), id(2), Data([9]))] {
+            XCTAssertThrowsError(try CommandSubmissionReservation(macID: invalid.0, accountID: invalid.1,
+                submission: binding, captureDigest: invalid.2)) {
+                XCTAssertEqual($0 as? CommandSubmissionReplayError, .invalidConfiguration)
+            }
+        }
     }
 
     private func installRecoveryPolicy(_ database: JournalDatabase) throws -> AuthorityCodePolicySnapshot {

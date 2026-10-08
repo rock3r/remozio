@@ -9,7 +9,7 @@ final class HistoryRecoveryJournal {
     func read(epoch: Data) throws -> HistoryRecoveryIntent? {
         guard epoch.count == 16 else { throw ContinuityStoreError.invalidCheckpoint }
         let version = try schemaVersion()
-        guard (12...14).contains(version) else { throw JournalDatabaseError.incompatibleStore }
+        guard (12...15).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         if version < 14 { return nil }
         return try statement("SELECT evidence FROM main.history_recoveries_v1 WHERE epoch=?", values: [epoch]) { row in
             let result = sqlite3_step(row)
@@ -24,9 +24,9 @@ final class HistoryRecoveryJournal {
         }
     }
 
-    func insert(_ intent: HistoryRecoveryIntent) throws {
+    func prepareSchema() throws {
         let version = try schemaVersion()
-        guard version == 13 || version == 14 else { throw JournalDatabaseError.incompatibleStore }
+        guard (13...15).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         if version == 13 {
             try exec("""
@@ -37,6 +37,10 @@ final class HistoryRecoveryJournal {
                 PRAGMA main.user_version=14;
                 """)
         }
+    }
+
+    func insert(_ intent: HistoryRecoveryIntent) throws {
+        try prepareSchema()
         try statement("INSERT INTO main.history_recoveries_v1 VALUES(?,?)",
             values: [intent.recoveryEpoch, try intent.bytes]) { row in
             let result = sqlite3_step(row)
