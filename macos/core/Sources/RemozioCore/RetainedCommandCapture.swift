@@ -32,6 +32,7 @@ public final class RetainedCommandCapture {
          captureSchemaVersion: UInt64, expression: String, userID: uid_t, auditSessionID: au_asid_t?, resolvedTarget: CommandTarget,
          minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
          maximumAncestryEntries: Int = 16, checkCancellation: () throws -> Void = {}) throws {
+        try received.claimForCaptureOwner()
         var heldFilesystem: CommandFilesystemCapture?
         do {
             try checkCancellation()

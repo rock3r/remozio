@@ -194,7 +194,13 @@ public final class RetainedCommandHandshake {
                 expression: expression, userID: userID, auditSessionID: auditSessionID, resolvedTarget: resolvedTarget,
                 minimalEnvironment: minimalEnvironment, streamBinding: streamBinding, submissionLimits: submissionLimits,
                 captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
-        } catch { received.caller.close(); received.input.close(); throw error }
+        } catch { received.closeIfUnclaimed(); throw error }
+    }
+    /// The registry uses current protected policy and retires a failed retained identity.
+    func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
+        guard !closed else { throw MachCommandHandshakeError.retired }
+        do { try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID) }
+        catch { close(); throw error }
     }
     public func close() { if !closed { closed = true; caller.close() } }
     deinit { close() }
