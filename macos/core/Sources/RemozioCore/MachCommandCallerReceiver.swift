@@ -85,8 +85,8 @@ public final class MachCommandCallerReceiver {
         return MachCommandHello(payload: packet.payload, caller: packet.caller, reply: reply)
     }
 
-    func receiveHelloReply(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandSubmission {
-        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .helloReply)
+    func receiveHelloReply(timeoutMilliseconds: UInt32, previewTimeoutMilliseconds: UInt32? = nil) throws -> sending ReceivedMachCommandSubmission {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .helloReply, previewTimeoutMilliseconds: previewTimeoutMilliseconds)
         return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
     }
 

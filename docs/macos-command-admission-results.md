@@ -101,7 +101,37 @@ The default registry and serial host continue to advertise wire 1 and input carr
 
 Disposable fixtures exercise actual Mach receipt through the host, registry, and serialized journal. Tests cover pre-capture refusals, startup, missing executables, callback spoofing, historical ID/nonce collisions, and lost acknowledgments. The production entry rejects an unprivileged host before policy callbacks.
 
-The bounded fresh-submission controller remains required. It must preserve unconsumed input, create fresh identifiers and capture for each permitted attempt, and use one sleep-inclusive caller deadline across all waits and reason changes. Lost replies, duplicate reservations, or uncertain commits cannot trigger automatic replay. No fallback through sudo is allowed.
+## Bounded caller integration
+
+`CommandCallerReadiness.submit` uses the real handshake and admission client. Its immutable submission template preserves raw arguments, environment additions, working directory, target, rationale and I/O options. It discards the template's old identifiers.
+
+Each permitted submission negotiates wire 2/carrier 3, creates random identifiers and uses a fresh private reply endpoint. The endpoint provider looks up the current registered service again. Authentication still requires the configured release Root policy and actual kernel sender before invocation bytes or input are exposed.
+
+```mermaid
+flowchart TD
+    A[Original invocation and borrowed input] --> B[Current endpoint and harmless handshake]
+    B -->|Authenticated compatible Root| C[Fresh ID, nonce and private reply]
+    C --> D[Submit once and verify exact result]
+    D -->|Admitted, permanent refusal or uncertain| E[Return result without replay]
+    D -->|One of four verified busy refusals| F[Show specific state and bounded backoff]
+    F -->|Same deadline still open| B
+    F -->|Deadline exhausted| G[Return latest busy reason]
+    D -->|Lost or malformed reply, cancellation or deadline| H[Stop with uncertainty; no resubmission]
+    B -->|Endpoint unavailable before command exposure| I[Bounded connection wait]
+    I --> B
+```
+
+One continuous caller deadline covers lookup, negotiation, encoding, submission, validation, backoff and reason changes. Handshake receive previews keep cancellation checks active. Readiness, backoff and control durations are explicit caller settings. No wait changes an admitted request's approval lifetime.
+
+An unavailable endpoint or metadata-only timeout can wait before command exposure. This is separate from retrying a submitted command. Signature failure, wrong scope, incompatible protocol and callback cancellation stop immediately.
+
+Only an authenticated, exactly bound busy result permits another submission. Every new capture needs a new decision. After a send, timeout, cancellation, malformed reply and unknown outcome stop without replay. An earlier busy proof cannot classify a later in-flight timeout as a definite refusal.
+
+Deadline exhaustion before submission carries the latest verified busy reason, or no reason while initial connection is unavailable. The later CLI must map these distinct states to nonzero statuses and show available status controls. The caller preserves the borrowed descriptor's bytes and flags. It never closes the original input or falls back through sudo.
+
+Real Mach tests cover all four busy states, fresh identities, unchanged raw invocation data, unread pipe input, endpoint replacement, reason changes, continuous deadline jumps, cancellation, permanent refusals, uncertainty and reply loss. These fixtures do not run an elevated command.
+
+The installed service endpoint provider, settings UI, CLI status mapping and command execution remain separate integration work.
 
 Tests establish codec validation, exact binding, real Mach negotiation and receipt, final deadline checks, and acknowledgments from the serialized journal owner. Refusal tests cover both identifiers, retired resources, protected-read failures, rollback, capacity, unsupported contracts, and both checkpoint failure phases. Lost-delivery tests cover both checkpointed and ordinary fixture storage. Compiler probes reject public verified-result construction.
 

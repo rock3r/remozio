@@ -296,28 +296,37 @@ public enum MachCommandHandshakeClient {
         let destination = try MachCommandAuthorityPort(copying: authorityPort)
         var destinationTransferred = false
         defer { if !destinationTransferred { destination.close() } }
-        let started = DispatchTime.now().uptimeNanoseconds
+        let clock = try AuthorityClock(), started = try clock.now().milliseconds
+        func remaining() throws -> UInt32 {
+            let current = try clock.now().milliseconds
+            guard current >= started, current - started < UInt64(timeoutMilliseconds) else { throw MachCommandCallerError.timeout }
+            return UInt32(UInt64(timeoutMilliseconds) - (current - started))
+        }
         let endpoint = try MachCommandPrivateReplyPort()
         defer { endpoint.close() }
         let offer = try CommandHandshakeOffer(nonce: MachCommandWire.random(32), capabilities: capabilities)
         let receiver = try MachCommandCallerReceiver(receivePort: endpoint.port, expression: expression,
             userID: userID, auditSessionID: auditSessionID, maxPayloadBytes: CommandHandshakeOffer.maximumBytes)
         try MachCommandWire.send(offer.canonicalBytes, destination: authorityPort, replyPort: endpoint.port,
-            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: timeoutMilliseconds)
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: remaining())
         try checkCancellation()
-        let elapsed = DispatchTime.now().uptimeNanoseconds - started
-        let budget = UInt64(timeoutMilliseconds) * 1_000_000
-        guard elapsed < budget else { throw MachCommandCallerError.timeout }
-        let remaining = UInt32((budget - elapsed + 999_999) / 1_000_000)
-        let response = try receiver.receiveHelloReply(timeoutMilliseconds: remaining)
+        func receiveReply() throws -> sending ReceivedMachCommandSubmission {
+            while true {
+                try checkCancellation()
+                let budget = try remaining()
+                do { return try receiver.receiveHelloReply(timeoutMilliseconds: budget, previewTimeoutMilliseconds: min(budget, 250)) }
+                catch MachCommandCallerError.timeout { _ = try remaining() }
+            }
+        }
+        let response = try receiveReply()
         var completed = false
         defer { if !completed { response.caller.close() } }
         try checkCancellation()
-        guard DispatchTime.now().uptimeNanoseconds - started < budget else { throw MachCommandCallerError.timeout }
+        _ = try remaining()
         let profile = try CommandHandshakeReply.decode(response.payload, offer: offer, macID: macID, accountID: accountID)
         try response.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         try checkCancellation()
-        guard DispatchTime.now().uptimeNanoseconds - started < budget else { throw MachCommandCallerError.timeout }
+        _ = try remaining()
         completed = true; destinationTransferred = true
         return VerifiedCommandHandshake(profile: profile, authority: response.caller, destination: destination)
     }
