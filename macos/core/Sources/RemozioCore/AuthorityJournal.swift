@@ -137,7 +137,8 @@ public final class AuthorityJournal: @unchecked Sendable {
 
     /// Transfers a command into the serialized request owner, without a Sendable capture wrapper.
     /// A failed first transfer closes its objects. Rejected reentry leaves previously owned objects intact.
-    /// The host completes negotiation, replay checks, and current elevation-policy validation before this call.
+    /// The host completes negotiation and current elevation-policy validation before this call.
+    /// The request owner commits the submission replay reservation with request creation.
     /// The synchronous callbacks must not await or reenter this journal.
     public func admitCommand(_ command: sending RetainedCommandCapture, draft: ApprovalRequestDraft, currentPolicy: XPCPeerPolicy,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,

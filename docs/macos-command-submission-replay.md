@@ -63,8 +63,9 @@ Checkpoint fixtures inject preparation and finalization failures for migration a
 They also prove that reservation loss requires repair while audit-history loss preserves replay protection.
 No request or command is recreated by these tests.
 
-This PR adds the storage boundary. The production command endpoint is still disabled.
-The request owner must integrate reservations with serialized admission and update quiescence.
+The production command endpoint is still disabled.
+The [command admission transaction](macos-command-admission-replay.md) reserves this evidence with request creation on the retained-object path.
+Update quiescence remains a separate integration gate.
 Current elevation policy, resource reservations, authenticated no-admission replies, dispatch permits, and process I/O remain separate gates.
 A storage error alone is not an authenticated no-admission result and never authorizes automatic resubmission.
 Physical-device testing and protected Root installation remain unproven here.
