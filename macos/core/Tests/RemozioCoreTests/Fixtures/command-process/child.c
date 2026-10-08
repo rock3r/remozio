@@ -51,6 +51,22 @@ int main(int argc, char **argv) {
     for(int fd=3;fd<256;fd++)if(fcntl(fd,F_GETFD)>=0)return 93;
     if(getpgrp()!=getpid())return 94;
     if(!strcmp(argv[3],"pty")) {if(!isatty(0)||getsid(0)!=getpid()||tcgetpgrp(0)!=getpgrp())return 99;return write(1,"PTY",3)==3?7:98;}
+    if(!strcmp(argv[3],"pty-bulk") || !strcmp(argv[3],"pty-infinite")) {
+        if(!isatty(0)||getsid(0)!=getpid()||tcgetpgrp(0)!=getpgrp())return 99;
+        size_t offset=0;unsigned char block[4096];
+        do {
+            for(size_t i=0;i<sizeof(block);i++)block[i]=(unsigned char)((offset+i)%251);
+            size_t used=0;
+            while(used<sizeof(block)) {
+                ssize_t n=write(1,block+used,sizeof(block)-used);
+                if(n<0&&errno==EINTR)continue;
+                if(n<=0)return 98;
+                used+=(size_t)n;
+            }
+            offset+=sizeof(block);
+        } while(!strcmp(argv[3],"pty-infinite")||offset<1048576);
+        return 7;
+    }
     if(!strcmp(argv[3],"signal")) {raise(SIGTERM);return 95;}
     if(!strcmp(argv[3],"short-wait")) {usleep(300000);return 0;}
     if(!strcmp(argv[3],"wait")) {for(;;)pause();}
