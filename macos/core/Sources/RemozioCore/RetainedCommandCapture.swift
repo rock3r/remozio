@@ -162,6 +162,15 @@ public final class RetainedCommandCapture {
         return reply
     }
 
+    /// Only the serialized owner supplies an outcome and identity from its retained request state.
+    func sendTerminalOutcome(_ outcome: CommandTerminalOutcome, request: CommandAdmittedRequest) throws {
+        guard !closed else { throw RetainedCommandCaptureError.closed }
+        guard let outputs, let profile = admissionProfile, profile.supportsExecutionChannels else { return }
+        let payload = CommandTerminalResultPayload(profile: profile, submission: capture.submission,
+            submissionDigest: submissionDigest, request: request, outcome: outcome)
+        try outputs.sendTerminalNonblocking(payload.canonicalBytes)
+    }
+
     public func close() {
         if !closed { filesystem.close(); outputs?.close(); caller.close(); input.close(); admissionReply?.close(); closed = true }
     }

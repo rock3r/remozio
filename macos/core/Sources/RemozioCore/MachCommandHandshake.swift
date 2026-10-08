@@ -356,6 +356,12 @@ final class MachCommandReplyRight {
         try MachCommandWire.send(bytes, destination: port, replyPort: nil,
             identifier: identifier, timeoutMilliseconds: timeoutMilliseconds)
     }
+    func sendTerminalNonblocking(_ bytes: Data) throws {
+        guard port != MACH_PORT_NULL else { throw MachCommandHandshakeError.retired }
+        guard identifier == MachCommandCallerReceiver.terminalReplyMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
+        defer { close() }
+        try MachCommandWire.sendTerminalNonblocking(bytes, destination: port)
+    }
     func close() { if port != MACH_PORT_NULL { _ = mach_port_deallocate(mach_task_self_, port); port = 0 } }
     deinit { close() }
 }
@@ -408,9 +414,16 @@ enum MachCommandWire {
     }
     static func send(_ bytes: Data, destination: mach_port_t, replyPort: mach_port_t?, identifier: mach_msg_id_t,
                      timeoutMilliseconds: UInt32) throws {
-        guard !bytes.isEmpty, bytes.count <= CommandHandshakeOffer.maximumBytes, (1...60_000).contains(timeoutMilliseconds) else {
-            throw MachCommandHandshakeError.invalidConfiguration
-        }
+        guard (1...60_000).contains(timeoutMilliseconds) else { throw MachCommandHandshakeError.invalidConfiguration }
+        try sendPacket(bytes, destination: destination, replyPort: replyPort, identifier: identifier, timeoutMilliseconds: timeoutMilliseconds)
+    }
+    static func sendTerminalNonblocking(_ bytes: Data, destination: mach_port_t) throws {
+        try sendPacket(bytes, destination: destination, replyPort: nil,
+            identifier: MachCommandCallerReceiver.terminalReplyMessageID, timeoutMilliseconds: 0)
+    }
+    private static func sendPacket(_ bytes: Data, destination: mach_port_t, replyPort: mach_port_t?, identifier: mach_msg_id_t,
+                                   timeoutMilliseconds: UInt32) throws {
+        guard !bytes.isEmpty, bytes.count <= CommandHandshakeOffer.maximumBytes else { throw MachCommandHandshakeError.invalidConfiguration }
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
         let metadata = headerBytes + (replyPort == nil ? 0 : MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size)
         let size = (metadata + 8 + bytes.count + 3) & ~3

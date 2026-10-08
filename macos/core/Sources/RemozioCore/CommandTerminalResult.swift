@@ -24,14 +24,26 @@ public struct VerifiedCommandTerminalResult: Sendable {
 /// Only the serialized Root controller can establish an actual terminal observation. Encoding alone proves nothing.
 struct CommandTerminalResultPayload {
     let profile: CommandHandshakeProfile
-    let original: CommandSubmission
+    let submission: CapturedSubmission
+    let submissionDigest: Data
+    private let submissionSchemaVersion: UInt64
     let request: CommandAdmittedRequest
     let outcome: CommandTerminalOutcome
+    init(profile: CommandHandshakeProfile, original: CommandSubmission, request: CommandAdmittedRequest, outcome: CommandTerminalOutcome) {
+        self.profile = profile; submission = original.binding; submissionDigest = Data(SHA256.hash(data: original.canonicalBytes))
+        submissionSchemaVersion = original.schemaVersion; self.request = request; self.outcome = outcome
+    }
+    init(profile: CommandHandshakeProfile, submission: CapturedSubmission, submissionDigest: Data,
+         request: CommandAdmittedRequest, outcome: CommandTerminalOutcome) {
+        self.profile = profile; self.submission = submission; self.submissionDigest = submissionDigest
+        submissionSchemaVersion = profile.submissionSchemaVersion; self.request = request; self.outcome = outcome
+    }
     static func limits() throws -> CBORLimits { try .init(maxBytes: 4096, maxDepth: 6, maxItems: 128) }
     var canonicalBytes: Data { get throws {
-        guard profile.supportsExecutionChannels, original.schemaVersion == profile.submissionSchemaVersion,
-              original.binding.callerBinding == profile.callerBinding else { throw CommandTerminalResultError.incompatible }
-        guard request.requestID.count == 16, request.requestDigest.count == 32, request.challenge.count == 32 else {
+        guard profile.supportsExecutionChannels, submissionSchemaVersion == profile.submissionSchemaVersion,
+              submission.callerBinding == profile.callerBinding else { throw CommandTerminalResultError.incompatible }
+        guard submission.id.count == 16, submission.nonce.count == 32, submissionDigest.count == 32,
+              request.requestID.count == 16, request.requestDigest.count == 32, request.challenge.count == 32 else {
             throw CommandTerminalResultError.malformed
         }
         let tag: UInt64, body: CBORValue
@@ -47,10 +59,10 @@ struct CommandTerminalResultPayload {
         case .failedBeforeStart: tag = 7; body = .null
         case .unknown: tag = 8; body = .null
         }
-        let binding = original.binding
+        let binding = submission
         return try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: profile.fields,
             2: .map([0: .bytes(binding.id), 1: .bytes(binding.nonce), 2: .bytes(binding.callerBinding)]),
-            3: .bytes(Data(SHA256.hash(data: original.canonicalBytes))),
+            3: .bytes(submissionDigest),
             4: .map([0: .bytes(request.requestID), 1: .bytes(request.requestDigest), 2: .bytes(request.challenge)]),
             5: .unsigned(tag), 6: body]), limits: Self.limits())
     } }

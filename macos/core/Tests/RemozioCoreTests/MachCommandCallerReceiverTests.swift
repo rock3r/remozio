@@ -157,12 +157,12 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
         return try receiver(endpoint, maximum: 8192).receiveAdmissionInput(timeoutMilliseconds: 1000)
     }
-    private func admissionClientFixture(_ destination: mach_port_t, input: UInt64 = 3, wire: UInt64 = 1) throws -> sending VerifiedCommandHandshake {
+    private func admissionClientFixture(_ destination: mach_port_t, input: UInt64 = 3, wire: UInt64 = 1, mac: Data? = nil, account: Data? = nil) throws -> sending VerifiedCommandHandshake {
         let endpoint = try Endpoint()
         try endpoint.send(Data([1]))
         let sender = try receiver(endpoint).receive(timeoutMilliseconds: 1000)
         return VerifiedCommandHandshake(profile: .init(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: input,
-            callerBinding: assemblyBinding, macID: handshakeMac, accountID: handshakeAccount), authority: sender.caller,
+            callerBinding: assemblyBinding, macID: mac ?? handshakeMac, accountID: account ?? handshakeAccount), authority: sender.caller,
             destination: try MachCommandAuthorityPort(copying: destination))
     }
 
@@ -3914,6 +3914,248 @@ extension MachCommandCallerReceiverTests {
             }
             XCTAssertThrowsError(try session.pollTerminalResult()) { XCTAssertEqual($0 as? MachCommandHandshakeError, .retired) }
             XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    private func ownerIOCommand(admission: Endpoint, terminal: Endpoint) throws ->
+        (ReceivedMachCommandInputSubmission, RetainedCommandCapture, CommandSubmission, CommandHandshakeProfile) {
+        let endpoint = try Endpoint(), input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        guard input >= 0, output >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let submission = try commandSubmission()
+        let profile = CommandHandshakeProfile(wireVersion: 3, submissionSchemaVersion: 1, inputCarrierVersion: 4,
+            callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+        try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            destination: endpoint.port, admissionReply: admission.port, terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        let received = try receiver(endpoint, maximum: 8192).receiveIOInput(timeoutMilliseconds: 1000)
+        return (received, try assemble(received, admissionProfile: profile), submission, profile)
+    }
+    private func ownerAdmission(_ endpoint: Endpoint, submission: CommandSubmission, profile: CommandHandshakeProfile) throws -> VerifiedCommandAdmissionResult {
+        let raw = try receiver(endpoint, maximum: 4096).receiveAdmissionReply(timeoutMilliseconds: 1000)
+        defer { raw.caller.close() }
+        return try CommandAdmissionResultPayload.decode(raw.payload, profile: profile, original: submission)
+    }
+    private func ownerTerminal(_ endpoint: Endpoint, submission: CommandSubmission, admission: VerifiedCommandAdmissionResult) throws -> VerifiedCommandTerminalResult {
+        let raw = try receiver(endpoint, maximum: 4096).receiveTerminalReply(timeoutMilliseconds: 1000)
+        defer { raw.caller.close() }
+        return try CommandTerminalResultPayload.decode(raw.payload, profile: admission.profile, original: submission, admission: admission)
+    }
+    private func ownerDecision(_ request: IssuedRequestPayload, fixture: CommandRequestFixture, decline: Bool) throws -> ConsumptionReceipt {
+        let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
+            requestDigest: request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits), challenge: request.challenge,
+            phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: decline ? 7 : 6, count: 16),
+            action: request.permittedActions.first { $0.choice == (decline ? .decline : .execute) }!).encode(limits: fixture.limits)
+        let input = try SigningInput.make(wireVersion: 1, messageType: .decision, purpose: decline ? .cancellation : .biometricAuthorization,
+            canonicalPayload: body, payloadLimits: fixture.limits, inputLimits: fixture.limits)
+        let signature = try (decline ? fixture.decision : fixture.biometric).signature(for: input).rawRepresentation
+        let now = fixture.now(120)
+        return try XCTUnwrap(fixture.authority).withRequests {
+            try $0.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: Data(repeating: 5, count: 16),
+                authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16), now: now, receiptTimeMs: nil)
+        }
+    }
+    func testIOOwnerCommittedPendingRetirementSendsExactTerminalOnce() throws {
+        let cases: [(PendingRequestRetirement, UInt64, CommandTerminalOutcome)] = [(.cancelled, 120, .cancelledBeforeStart),
+            (.deadlineElapsed, 200, .expired), (.targetTimedOut, 120, .expired), (.targetDisappeared, 120, .unknown), (.authorityRestart, 120, .cancelledBeforeStart)]
+        for checkpointed in [false, true] {
+            for (reason, time, expected) in cases {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+                let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+                let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+                let request = try admitOwnedCommand(command, fixture: fixture)
+                let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile), now = fixture.now(time)
+                let state = try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: reason, now: now, receiptTimeMs: nil) }
+                let terminal = try ownerTerminal(terminalPort, submission: submission, admission: admission)
+                XCTAssertEqual(terminal.outcome, expected); XCTAssertEqual(terminal.request.requestID, request.requestID)
+                XCTAssertEqual(terminal.request.requestDigest, state.requestDigest); XCTAssertEqual(terminal.request.challenge, state.challenge)
+                XCTAssertEqual(terminal.submission, submission.binding); XCTAssertTrue(state.phase.isTerminal)
+                try expectAssemblyResourcesRetired(received); XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+                XCTAssertThrowsError(try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: reason, now: now, receiptTimeMs: nil) })
+                XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+                XCTAssertNotNil(try fixture.reservation(submission.binding.id))
+            }
+        }
+    }
+    func testIOOwnerSignedDeclineSendsDeniedAfterDurableConsumption() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            let receipt = try ownerDecision(request, fixture: fixture, decline: true)
+            XCTAssertEqual(receipt.event.outcome, .noDispatch)
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .denied)
+            XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID)?.phase }, .declined)
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertThrowsError(try ownerDecision(request, fixture: fixture, decline: true))
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        }
+    }
+    func testIOOwnerExpirySweepDeliversCommittedExpiryOnce() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            let now = fixture.now(200)
+            XCTAssertEqual(try authority.withRequests { try $0.expirePending(now: now, receiptTimeMs: nil).map(\.requestID) }, [request.requestID])
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .expired)
+            XCTAssertTrue(try authority.withRequests { try $0.expirePending(now: now, receiptTimeMs: nil).isEmpty })
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        }
+    }
+    func testIOOwnerRejectedRetirementCommitCannotSendKnownNoEffect() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            try fixture.sql("CREATE TRIGGER reject_terminal_audit BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
+            let now = fixture.now(120)
+            XCTAssertThrowsError(try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: now, receiptTimeMs: nil) })
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .queued)
+            try fixture.sql("DROP TRIGGER reject_terminal_audit")
+            _ = try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: now, receiptTimeMs: nil) }
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .cancelledBeforeStart)
+        }
+    }
+    func testIOOwnerCheckpointPrepareOrFinalizeFailureCannotClaimKnownNoEffect() throws {
+        for finalize in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
+            try fixture.sql("CREATE TRIGGER fail_terminal_checkpoint BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END", continuity: true)
+            let now = fixture.now(120)
+            XCTAssertThrowsError(try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: now, receiptTimeMs: nil) })
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .unknown)
+            try expectAssemblyResourcesRetired(received); XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+            XCTAssertThrowsError(try authority.withRequests { try $0.state(requestID: request.requestID) })
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        }
+    }
+    func testIOOwnerFatalStorageFailureReportsOnlyUnknownAndReleasesChannels() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            _ = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            XCTAssertEqual(chmod(fixture.root.appendingPathComponent("store/journal.sqlite").path, 0o644), 0)
+            XCTAssertThrowsError(try authority.withRequests { _ in XCTFail("Untrusted storage must not enter the request owner") })
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .unknown)
+            try expectAssemblyResourcesRetired(received); XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+        }
+    }
+    func testIOOwnerFullTerminalQueueDoesNotDelayOrRollbackCommittedCancellation() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            _ = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            for _ in 0..<5 { try terminalPort.send(Data([1]), identifier: MachCommandCallerReceiver.terminalReplyMessageID) }
+            let now = fixture.now(120), started = DispatchTime.now().uptimeNanoseconds
+            let state = try authority.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: now, receiptTimeMs: nil) }
+            XCTAssertLessThan(DispatchTime.now().uptimeNanoseconds - started, 2_000_000_000)
+            XCTAssertEqual(state.phase, .cancelled); XCTAssertEqual(try sendReferences(terminalPort.port), 1)
+            try expectAssemblyResourcesRetired(received); XCTAssertNotNil(try fixture.reservation(submission.binding.id))
+            for _ in 0..<5 {
+                let raw = try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 1000)
+                raw.caller.close(); XCTAssertEqual(raw.payload, Data([1]))
+            }
+            XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .cancelled)
+        }
+    }
+    func testIOOwnerClosureReportsUnknownOnceWithoutClaimingDurableNoEffect() throws {
+        let fixture = try CommandRequestFixture(owned: true)
+        let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+        let (received, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+        _ = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        try authority.close()
+        XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .unknown)
+        try expectAssemblyResourcesRetired(received)
+        XCTAssertThrowsError(try receiver(terminalPort).receiveTerminalReply(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+    }
+    func testIOOwnerGenericVerifiedResultDoesNotInventAChildExitStatus() throws {
+        for event: RequestEvent in [.verifySuccess, .verifyFailure] {
+            let fixture = try CommandRequestFixture(owned: true)
+            let authority = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminalPort = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminalPort)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            let now = fixture.now(130)
+            _ = try authority.withRequests { try $0.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch, now: now, receiptTimeMs: nil) }
+            _ = try authority.withRequests { try $0.recordOutcome(requestID: request.requestID, expectedRevision: 1, event: event, now: now, receiptTimeMs: nil) }
+            XCTAssertEqual(try ownerTerminal(terminalPort, submission: submission, admission: admission).outcome, .unknown)
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    func testIOOwnerClientReceivesCommittedCancellationAndExpiry() throws {
+        for checkpointed in [false, true] {
+            for expire in [false, true] {
+                let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3,
+                    mac: Data(repeating: 1, count: 16), account: Data(repeating: 2, count: 16))
+                let profile = handshake.profile, submission = try commandSubmission(), expression = try selfExpression()
+                let user = geteuid(), limits = try assemblyLimits, target = assemblyTarget, environment = assemblyEnvironment
+                let port = endpoint.port, release = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+                let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+                DispatchQueue.global().async {
+                    defer { completed.signal() }
+                    result.withLock { output in output = Result {
+                        let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+                        let authority = try XCTUnwrap(fixture.authority)
+                        let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
+                            userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
+                        let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                        let command = try RetainedCommandCapture(received: received, expectedCallerBinding: profile.callerBinding,
+                            submissionSchemaVersion: 1, captureSchemaVersion: 1, expression: expression, userID: user,
+                            auditSessionID: nil, resolvedTarget: target, minimalEnvironment: environment,
+                            streamBinding: Data(repeating: 0xb4, count: 16), submissionLimits: limits, captureLimits: limits,
+                            maximumAncestryEntries: 1, admissionProfile: profile)
+                        let draft = fixture.draft(command)
+                        let request = try authority.admitCommand(command, draft: draft, expression: expression,
+                            userID: user, auditSessionID: nil, now: { fixture.now() }, receiptTimeMs: nil)
+                        guard release.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                        let now = fixture.now(expire ? 200 : 120)
+                        _ = try authority.withRequests { try $0.retirePending(requestID: request.requestID,
+                            reason: expire ? .deadlineElapsed : .cancelled, now: now, receiptTimeMs: nil) }
+                    } }
+                }
+                defer { release.signal() }
+                let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
+                defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+                let admission: CommandIOAdmission
+                do {
+                    admission = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output,
+                        errorDescriptor: output, handshake: handshake, expression: expression, userID: user,
+                        auditSessionID: nil, maximumPayloadBytes: 8192)
+                } catch {
+                    release.signal(); XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+                    try result.withLock { try $0?.get() }
+                    throw error
+                }
+                guard case .admitted(let session) = admission else { return XCTFail("The command owner must admit the original submission") }
+                XCTAssertNil(try session.pollTerminalResult(timeoutMilliseconds: 10))
+                release.signal(); XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+                try result.withLock { try $0?.get() }
+                let terminal = try XCTUnwrap(session.pollTerminalResult(timeoutMilliseconds: 1000))
+                XCTAssertEqual(terminal.outcome, expire ? .expired : .cancelledBeforeStart)
+                guard case .admitted(let expected) = session.admission.outcome else { return XCTFail("The session must retain its admission") }
+                XCTAssertEqual(terminal.request, expected); XCTAssertEqual(terminal.submission, submission.binding)
+                XCTAssertEqual(try session.pollTerminalResult()?.outcome, terminal.outcome)
+                session.close()
+                XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+            }
         }
     }
 }

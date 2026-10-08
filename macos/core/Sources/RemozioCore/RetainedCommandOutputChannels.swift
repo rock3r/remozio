@@ -52,6 +52,10 @@ final class RetainedCommandOutputChannels {
         guard !closed else { throw RetainedCommandOutputError.closed }
         try result.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
     }
+    func sendTerminalNonblocking(_ bytes: Data) throws {
+        guard !closed else { throw RetainedCommandOutputError.closed }
+        try result.sendTerminalNonblocking(bytes)
+    }
     func close() {
         if !closed { closed = true; output.close(); error.close(); result.close() }
     }

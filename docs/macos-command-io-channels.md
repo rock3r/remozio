@@ -96,6 +96,42 @@ Product callers cannot construct `VerifiedCommandTerminalResult` or reuse a cons
 External Swift compiler probes check both restrictions.
 The encoder remains internal. Encoding a value does not prove that a child produced that outcome.
 
+## Committed owner results
+
+The serialized request owner sends a terminal result after the audit transaction and its independent checkpoint succeed.
+It uses the retained original submission digest and the admitted request ID, digest and challenge.
+A successful send closes the private reply right. Retirement then closes the imported descriptors.
+
+```mermaid
+flowchart TD
+    A[Signed decline or Mac-observed retirement] --> B[Serialized request owner]
+    B --> C[Commit audit and independent checkpoint]
+    C -->|Success| D[Select established terminal outcome]
+    D --> E[Send once through private terminal channel]
+    E --> F[Release retained descriptors and reply right]
+    C -->|Clean transaction rejection| G[Keep pending request and channels]
+    C -->|Fatal or ambiguous storage failure| H[Retire owner and report unknown]
+    H --> F
+```
+
+| Established owner state | Terminal result |
+| --- | --- |
+| Committed signed decline | Denied |
+| Committed expiry or target timeout | Expired |
+| Committed cancellation before dispatch | Cancelled before start |
+| Pending authority restart committed as cancellation | Cancelled before start |
+| Disappeared target or unavailable outcome | Unknown |
+| Owner closure or fatal storage failure | Unknown |
+
+A clean transaction rejection keeps the pending request alive and sends no terminal result.
+Prepare or finalize failures retire the owner and report only unknown.
+They cannot claim that cancellation committed or that execution had no effect.
+Generic success or failure phases do not establish a child's exit status or signal. They therefore report unknown here.
+
+Terminal sends do not wait for queue capacity while holding the authority lock.
+A full or dead private queue can lose the result, but cannot undo the committed transition or authorize another invocation.
+The caller must treat result loss as uncertainty. These channels do not provide durable result retrieval after a process restart.
+
 ## Evidence and remaining integration
 
 Native tests use actual Mach messages, copied fileports, pipes and serialized journal fixtures.
@@ -106,6 +142,6 @@ The existing default profile and wire 1/2 meanings remain unchanged.
 The public Root policy guard still requires UID zero and the configured release code policy.
 This transport requires explicit opt-in and does not install or activate a command service.
 
-The guarded child supervisor, terminal emission from durable owner state, CLI exit handling, signal forwarding and PTY controls remain required.
+The guarded child supervisor, observed child exit results, CLI exit handling, signal forwarding and PTY controls remain required.
 Target credentials and elevation-policy enforcement remain separate gates.
 Developer ID deployment and physical device tests also remain unproven.
