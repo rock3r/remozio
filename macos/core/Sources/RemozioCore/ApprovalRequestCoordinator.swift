@@ -212,9 +212,9 @@ public final class ApprovalRequestCoordinator {
 
     private static func admissionRejection(_ error: Error) -> CommandAdmissionRejectionReason? {
         switch error {
-        case ApprovalCoordinatorError.invalidDraft: .invalidRequest
+        case ApprovalCoordinatorError.invalidDraft, IssuedRequestError.invalidTimes: .invalidRequest
         case ApprovalCoordinatorError.capacityExceeded, CommandSubmissionReplayError.capacityExceeded: .capacityExceeded
-        case DecisionVerificationError.unsupportedContract: .unsupported
+        case DecisionVerificationError.unsupportedContract, IssuedRequestError.unsupportedContract: .unsupported
         case JournalDatabaseError.storage, AuditJournalError.storage, ContinuityStoreError.storage: .storageUnavailable
         default: nil
         }

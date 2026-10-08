@@ -546,6 +546,43 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testTypedProtocolDraftRefusalsRequireAbsenceBeforeReportingTheirExactReason() throws {
+        for checkpointed in [false, true] {
+            for kind in 0..<3 {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+                let (command, submission, profile) = try typedRequestCommand(reply: reply), base = fixture.draft(command)
+                let contract = try kind == 0 ? RequestContract(requestKind: .command, wireVersion: 2, schemaVersion: base.contract.schemaVersion) : base.contract
+                let draft = ApprovalRequestDraft(contract: contract, requiredFeatures: base.requiredFeatures, capture: base.capture, actions: base.actions,
+                    firstObservedAt: base.firstObservedAt, deadlineMilliseconds: base.deadlineMilliseconds,
+                    createdUnixMilliseconds: kind == 0 ? base.createdUnixMilliseconds : base.expiresUnixMilliseconds + UInt64(kind - 1),
+                    expiresUnixMilliseconds: base.expiresUnixMilliseconds)
+                let before = try fixture.auditRecordCount
+                XCTAssertThrowsError(try admitCommand(command, fixture: fixture, draft: draft)) {
+                    XCTAssertEqual($0 as? IssuedRequestError, kind == 0 ? .unsupportedContract : .invalidTimes)
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile),
+                    .notAdmitted(kind == 0 ? .unsupported : .invalidRequest, .never))
+                XCTAssertEqual(try fixture.auditRecordCount, before)
+                XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+                XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+            }
+        }
+    }
+
+    func testTypedProtocolErrorsFromCallbacksStillCannotClaimNoAdmission() throws {
+        for checkpointed in [false, true] {
+            for failure: IssuedRequestError in [.unsupportedContract, .invalidTimes] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
+                let (command, submission, profile) = try typedRequestCommand(reply: reply)
+                XCTAssertThrowsError(try admitCommand(command, fixture: fixture, checkCancellation: { throw failure })) {
+                    XCTAssertEqual($0 as? IssuedRequestError, failure)
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+                XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+            }
+        }
+    }
+
     func testTypedUnsupportedContractRefusalUsesVerifiedRollback() throws {
         for checkpointed in [false, true] {
             let fixture = try CommandRequestFixture(checkpointed: checkpointed), reply = try Endpoint()
