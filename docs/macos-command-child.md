@@ -15,7 +15,7 @@ sequenceDiagram
     C->>C: Validate frame; set and verify target credentials
     C->>C: Enter retained directory; prepare selected I/O
     C-->>R: Prepared status on private pipe
-    Note over R: Parent supervision and dispatch checks remain to implement
+    Note over R: Native supervision is available; authority dispatch integration remains pending
     R->>R: Consume durable permit; enforce current policy; final recheck
     R->>C: One private release byte
     C->>P: execve captured pathname, raw argv and environment
@@ -43,7 +43,8 @@ It validates private pipe direction, closes other descriptors, and marks control
 It changes nonblocking flags only on private pipes. It does not read stdin or write stdout/stderr during preparation.
 The directory is entered after dropping credentials, so possession of its descriptor does not bypass target access checks.
 The parent must normalize borrowed sources before mapping descriptors to avoid source/destination collisions.
-No parent spawner or installed service satisfies that contract yet.
+The [native process owner](macos-command-process.md) implements these descriptor mechanics.
+Protected installation and an installed dispatch service remain pending.
 
 ## Private frame
 
@@ -92,7 +93,8 @@ Only release byte 1 permits `execve`. EOF, another value or deadline exhaustion 
 There is no extra shell, interpreter substitution, inherited service environment or automatic retry.
 
 The status descriptor closes on successful exec. EOF alone cannot distinguish exec from a process death.
-The parent supervisor must establish actual exec/exit evidence before reporting a command exit status or signal.
+The native supervisor establishes kernel exec/exit evidence and the owned child result.
+The authority must bind those observations to the retained request before reporting a command exit status or signal.
 It must retain the original request, handle caller lifetime, forward signals, cancel the process group and support terminal resize.
 Those integrations remain required, along with durable permit ownership and current elevation policy.
 Pathname execution retains the user-approved replacement race after the final identity/content check.
