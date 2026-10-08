@@ -45,6 +45,29 @@ final class CommandTerminalResultTests: XCTestCase {
             XCTAssertEqual(result.submission, try original().binding)
         }
     }
+    func testRetainedCaptureBindingProducesTheOriginalTerminalEnvelope() throws {
+        let original = try original(), digest = Data(SHA256.hash(data: original.canonicalBytes))
+        for outcome: CommandTerminalOutcome in [.denied, .expired, .cancelledBeforeStart, .unknown] {
+            let retained = CommandTerminalResultPayload(profile: profile, submission: original.binding,
+                submissionDigest: digest, request: request, outcome: outcome)
+            XCTAssertEqual(try retained.canonicalBytes, try payload(outcome).canonicalBytes)
+            XCTAssertEqual(try CommandTerminalResultPayload.decode(retained.canonicalBytes, profile: profile,
+                original: original, admission: admission()).outcome, outcome)
+        }
+    }
+    func testRetainedCaptureRejectsMalformedOriginalBindingsAndDigest() throws {
+        let original = try original(), digest = Data(SHA256.hash(data: original.canonicalBytes))
+        let invalid: [(CapturedSubmission, Data)] = [
+            (.init(id: Data(count: 15), nonce: original.binding.nonce, callerBinding: profile.callerBinding), digest),
+            (.init(id: original.binding.id, nonce: Data(count: 31), callerBinding: profile.callerBinding), digest),
+            (.init(id: original.binding.id, nonce: original.binding.nonce, callerBinding: Data(count: 16)), digest),
+            (original.binding, Data(count: 31)),
+        ]
+        for (binding, digest) in invalid {
+            XCTAssertThrowsError(try CommandTerminalResultPayload(profile: profile, submission: binding,
+                submissionDigest: digest, request: request, outcome: .unknown).canonicalBytes)
+        }
+    }
     func testEveryScopeAndSubmissionAndRequestFieldMustMatch() throws {
         for key: UInt64 in 0...5 {
             try reject(mutated { fields in

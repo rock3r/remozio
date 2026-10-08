@@ -144,7 +144,10 @@ public final class ApprovalRequestCoordinator {
     /// This does not overwrite durable decisions or claim an execution outcome.
     public func close() {
         stopped = true
-        for entry in entries.values { entry.command?.close() }
+        for entry in entries.values {
+            notifyCommandTerminal(entry, outcome: .unknown)
+            entry.command?.close()
+        }
         entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
     }
 
@@ -724,6 +727,15 @@ public final class ApprovalRequestCoordinator {
             guard let old = entry.retained else { throw ApprovalCoordinatorError.notPending }
             entry.retained = try .init(payload: old.payload, phase: phase, admittedAt: old.admittedAt, deadlineMilliseconds: old.deadlineMilliseconds)
         } else {
+            let terminal: CommandTerminalOutcome
+            switch phase {
+            case .declined: terminal = .denied
+            case .expired: terminal = .expired
+            case .cancelled: terminal = .cancelledBeforeStart
+            // Generic lifecycle state does not establish a child's exit status or signal.
+            default: terminal = .unknown
+            }
+            notifyCommandTerminal(entry, outcome: terminal)
             entry.command?.close(); entry.command = nil
             entry.retained = nil
             retainedBytes -= entry.byteCount
@@ -732,6 +744,14 @@ public final class ApprovalRequestCoordinator {
         entries[id] = entry
         if phase == .expired { expiryNotifications[id] = entry.state }
         return entry.state
+    }
+
+    /// A lost private reply cannot undo the committed transition or authorize another invocation.
+    private func notifyCommandTerminal(_ entry: Entry, outcome: CommandTerminalOutcome) {
+        guard let command = entry.command else { return }
+        let identity = CommandAdmittedRequest(requestID: entry.state.requestID,
+            requestDigest: entry.state.requestDigest, challenge: entry.state.challenge)
+        try? command.sendTerminalOutcome(outcome, request: identity)
     }
 
     private func append(_ tx: JournalTransaction, requestID: Data, category: AuditCategory, kind: AuditEventKind,
