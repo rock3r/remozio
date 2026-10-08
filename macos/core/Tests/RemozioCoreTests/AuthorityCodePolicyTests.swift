@@ -20,7 +20,7 @@ final class AuthorityCodePolicyTests: XCTestCase {
         let policy = try AuthorityCodePolicy(entries: [entry(role: .authority), entry(role: .transport)])
         guard case .map(let fields) = try DeterministicCBOR.decode(policy.bytes, limits: limits),
               case .array(let entries) = fields[1], case .map(let entry) = entries[0] else { return XCTFail("bad fixture") }
-        var invalid = [CBORValue.map([0: .unsigned(2), 1: .array(entries)]),
+        var invalid = [CBORValue.map([0: .unsigned(3), 1: .array(entries)]),
             .map([0: .unsigned(1), 1: .array(entries.reversed())]),
             .map([0: .unsigned(1), 1: .array([entries[0], entries[0]])]),
             .map([0: .unsigned(1), 1: .array([])]),
@@ -74,11 +74,16 @@ final class AuthorityCodePolicyTests: XCTestCase {
     func testStoredPolicyVersionsPreserveRoleTokensAndRejectIncompleteTokens() throws {
         let policy = try AuthorityCodePolicy(entries: AuthorityCodeRole.allCases.map { try entry(role: $0) })
         let revision = UUID()
-        let legacy = try AuthorityCodePolicySnapshot.decodeStored(policy.bytes, revision: revision)
-        XCTAssertEqual(Set(legacy.roleRevisions.keys), Set(AuthorityCodeRole.allCases))
+        let oldPolicy = try AuthorityCodePolicy(entries: policy.entries.filter { $0.role != .commandChild })
+        let legacy = try AuthorityCodePolicySnapshot.decodeStored(legacyBytes(oldPolicy), revision: revision)
+        XCTAssertEqual(Set(legacy.roleRevisions.keys), Set(oldPolicy.entries.map(\.role)))
         XCTAssertTrue(legacy.roleRevisions.values.allSatisfy { $0 == revision })
         XCTAssertEqual(try AuthorityCodePolicySnapshot.decodeStored(legacy.storedBytes, revision: revision), legacy)
-        guard case .map(let fields) = try DeterministicCBOR.decode(legacy.storedBytes, limits: limits),
+        let current = AuthorityCodePolicySnapshot(revision: revision, policy: policy,
+            roleRevisions: Dictionary(uniqueKeysWithValues: policy.entries.map { ($0.role, UUID()) }))
+        XCTAssertEqual(try AuthorityCodePolicySnapshot.decodeStored(current.storedBytes, revision: revision), current)
+        XCTAssertThrowsError(try AuthorityCodePolicySnapshot.decodeStored(policy.bytes, revision: revision))
+        guard case .map(let fields) = try DeterministicCBOR.decode(current.storedBytes, limits: limits),
               case .map(let roles) = fields[2] else { return XCTFail("bad fixture") }
         var missing = roles; missing.removeValue(forKey: AuthorityCodeRole.transport.rawValue)
         var extra = roles; extra[99] = .bytes(Data(repeating: 1, count: 16))
@@ -91,6 +96,40 @@ final class AuthorityCodePolicyTests: XCTestCase {
         }
         var unknown = fields; unknown[0] = .unsigned(3)
         XCTAssertThrowsError(try AuthorityCodePolicySnapshot.decodeStored(DeterministicCBOR.encode(.map(unknown), limits: limits), revision: revision))
+    }
+
+    func testLegacyCatalogRetainsItsCanonicalBytesAndCannotContainTheNewChild() throws {
+        let current = try AuthorityCodePolicy(entries: [entry(role: .authority), entry(role: .transport, active: false)])
+        let bytes = try legacyBytes(current)
+        let legacy = try AuthorityCodePolicy.decode(bytes)
+        XCTAssertEqual(legacy.formatVersion, 1)
+        XCTAssertEqual(try legacy.bytes, bytes)
+        XCTAssertEqual(legacy.entries, current.entries)
+        XCTAssertEqual(current.formatVersion, 2)
+        let child = try AuthorityCodePolicy(entries: [entry(role: .commandChild)])
+        XCTAssertThrowsError(try AuthorityCodePolicy.decode(legacyBytes(child)))
+    }
+
+    func testCatalogUpgradePreservesInactiveFloorsAndRejectsFormatRollback() throws {
+        let current = try AuthorityCodePolicy(entries: [entry(installed: 4, minimum: 3, active: false)])
+        let legacy = try AuthorityCodePolicy.decode(legacyBytes(current))
+        let upgraded = try AuthorityCodePolicy(entries: legacy.entries + [entry(role: .commandChild)])
+        XCTAssertNoThrow(try upgraded.requireSuccessor(of: legacy))
+        XCTAssertEqual(upgraded.entries.first { $0.role == .authority }, legacy.entries.first)
+        XCTAssertThrowsError(try legacy.requireSuccessor(of: current)) {
+            XCTAssertEqual($0 as? AuthorityCodePolicyError, .rollback)
+        }
+        XCTAssertThrowsError(try current.requireSuccessor(of: upgraded)) {
+            XCTAssertEqual($0 as? AuthorityCodePolicyError, .removedRole)
+        }
+    }
+
+    private func legacyBytes(_ policy: AuthorityCodePolicy) throws -> Data {
+        guard case .map(var fields) = try DeterministicCBOR.decode(policy.bytes, limits: limits) else {
+            throw AuthorityCodePolicyError.corruptData
+        }
+        fields[0] = .unsigned(1)
+        return try DeterministicCBOR.encode(.map(fields), limits: limits)
     }
 
     private func entry(role: AuthorityCodeRole = .authority, team: String = "ABCDEF1234", identifier: String = "dev.remozio.authority",

@@ -8,7 +8,7 @@ public enum AuthorityCodePolicyError: Error, Equatable {
 /// Stable storage identifiers. Extending this catalog requires a new policy format.
 public enum AuthorityCodeRole: UInt64, CaseIterable, Sendable {
     case app = 1, authority, guiAgent, transport, commandFrontend, notificationGateway
-    case tunnelClient, setupController, bridgeEndpoint, bridgeCommand
+    case tunnelClient, setupController, bridgeEndpoint, bridgeCommand, commandChild
 }
 
 /// Retained installation metadata. Construction does not verify a binary or authorize its activation.
@@ -37,14 +37,24 @@ public struct AuthorityCodeEntry: Equatable, Sendable {
 
 /// Includes inactive roles so disabling a component cannot erase its security floor.
 public struct AuthorityCodePolicy: Equatable, Sendable {
+    public let formatVersion: UInt64
     public let entries: [AuthorityCodeEntry]
     public init(entries: [AuthorityCodeEntry]) throws {
-        guard !entries.isEmpty, entries.count <= AuthorityCodeRole.allCases.count,
+        try self.init(entries: entries, formatVersion: 2)
+    }
+
+    private init(entries: [AuthorityCodeEntry], formatVersion: UInt64) throws {
+        guard formatVersion == 1 || formatVersion == 2 else { throw AuthorityCodePolicyError.invalidPolicy }
+        let maximumRole: UInt64 = formatVersion == 1 ? 10 : 11
+        guard !entries.isEmpty, entries.count <= Int(maximumRole),
+              entries.allSatisfy({ $0.role.rawValue <= maximumRole }),
               Set(entries.map(\.role)).count == entries.count else { throw AuthorityCodePolicyError.invalidPolicy }
+        self.formatVersion = formatVersion
         self.entries = entries.sorted { $0.role.rawValue < $1.role.rawValue }
     }
 
     func requireSuccessor(of previous: Self) throws {
+        guard formatVersion >= previous.formatVersion else { throw AuthorityCodePolicyError.rollback }
         for old in previous.entries {
             guard let next = entries.first(where: { $0.role == old.role }) else { throw AuthorityCodePolicyError.removedRole }
             guard next.teamID == old.teamID, next.identifier == old.identifier else { throw AuthorityCodePolicyError.identityChanged }
@@ -56,7 +66,7 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
 
     var bytes: Data {
         get throws {
-            try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .array(entries.map { entry in
+            try DeterministicCBOR.encode(.map([0: .unsigned(formatVersion), 1: .array(entries.map { entry in
                 .map([0: .unsigned(entry.role.rawValue), 1: .text(entry.teamID), 2: .text(entry.identifier),
                       3: .unsigned(entry.installedGeneration), 4: .unsigned(entry.minimumGeneration),
                       5: .bytes(entry.codeDirectoryHash), 6: .unsigned(entry.active ? 1 : 0)])
@@ -69,7 +79,7 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
-                  fields.count == 2, fields[0] == .unsigned(1), case .array(let entries) = fields[1] else {
+                  fields.count == 2, case .unsigned(let version) = fields[0], case .array(let entries) = fields[1] else {
                 throw AuthorityCodePolicyError.corruptData
             }
             let value = try Self(entries: entries.map { item in
@@ -82,7 +92,7 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
                 }
                 return try AuthorityCodeEntry(role: role, teamID: team, identifier: identifier, installedGeneration: installed,
                     minimumGeneration: minimum, codeDirectoryHash: hash, active: active == 1)
-            })
+            }, formatVersion: version)
             guard try value.bytes == bytes else { throw AuthorityCodePolicyError.corruptData }
             return value
         } catch { throw AuthorityCodePolicyError.corruptData }
