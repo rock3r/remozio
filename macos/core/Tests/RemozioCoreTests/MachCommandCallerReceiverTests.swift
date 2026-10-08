@@ -12,6 +12,8 @@ import XCTest
 final class MachCommandCallerReceiverTests: XCTestCase {
     private final class Endpoint {
         var port: mach_port_t = 0
+        private var ownsReceive = true
+        func transferReceiveRight() -> mach_port_t { precondition(ownsReceive); ownsReceive = false; return port }
         init() throws {
             guard mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS,
                   mach_port_insert_right(mach_task_self_, port, port, UInt32(MACH_MSG_TYPE_MAKE_SEND)) == KERN_SUCCESS else {
@@ -19,7 +21,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             }
         }
         deinit {
-            _ = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1)
+            if ownsReceive { _ = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1) }
             _ = mach_port_deallocate(mach_task_self_, port)
         }
         func send(_ payload: Data, version: UInt32 = 1, claimedLength: UInt32? = nil,
@@ -925,9 +927,9 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         let limits: CBORLimits
         let contract: RequestContract
         var continuity: ContinuityStore?
-        init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true) throws {
+        init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true, commandSchema: UInt64 = 1) throws {
             limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
-            contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+            contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: commandSchema)
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
             defer { free(canonical) }
             root = URL(fileURLWithPath: String(cString: canonical)).appendingPathComponent(UUID().uuidString)
@@ -2098,6 +2100,350 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertEqual(try sendReferences(reply.port), baseline)
         XCTAssertThrowsError(try receiver(reply).receiveHelloReply(timeoutMilliseconds: 10)) {
             XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    private func host(_ endpoint: Endpoint, maximum: Int = 4, wait: UInt32 = 20,
+                      context: (() throws -> CommandSessionRegistry.Context)? = nil) throws -> CommandReceiveHost {
+        let initial = try registryContext()
+        return try CommandReceiveHost(takingReceiveRight: endpoint.transferReceiveRight(), macID: handshakeMac,
+            accountID: handshakeAccount, userID: geteuid(), auditSessionID: nil, maximumSessions: maximum,
+            maximumPayloadBytes: 8192, receiveWaitMilliseconds: wait, replyTimeoutMilliseconds: 20,
+            context: { _ in try context?() ?? initial })
+    }
+    private func hostSession(_ host: CommandReceiveHost, endpoint: Endpoint) throws -> CommandHandshakeProfile {
+        let reply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32))
+        try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        guard case .hello(let profile) = try host.poll(handleInput: { $0.closeIfUnclaimed(); XCTFail("unexpected input") }) else {
+            throw MachCommandHandshakeError.invalidMessage
+        }
+        let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+        defer { response.caller.close() }
+        XCTAssertEqual(try CommandHandshakeReply.decode(response.payload, offer: offer, macID: handshakeMac, accountID: handshakeAccount), profile)
+        return profile
+    }
+    private func enqueueHostInput(_ endpoint: Endpoint, binding: Data, descriptor: Int32? = nil) throws {
+        let original = try commandSubmission()
+        let claim = try CommandSubmission(schemaVersion: 1, executablePath: original.executablePath, arguments: original.arguments,
+            directoryPath: original.directoryPath, requestedTargetUID: original.requestedTargetUID,
+            environmentAdditions: original.environmentAdditions, ioMode: original.ioMode,
+            disconnectBehavior: original.disconnectBehavior, unverifiedRationale: original.unverifiedRationale,
+            binding: .init(id: original.binding.id, nonce: original.binding.nonce, callerBinding: binding), limits: assemblyLimits)
+        let fd = descriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { if descriptor == nil { _ = Darwin.close(fd) } }
+        var carried: mach_port_t = 0
+        guard fileport_makeport(fd, &carried) == 0 else { throw RetainedCommandInputError.system(errno) }
+        defer { _ = mach_port_deallocate(mach_task_self_, carried) }
+        try endpoint.sendInput(claim.canonicalBytes, fileport: carried)
+    }
+    private func hostCapture(_ host: CommandReceiveHost, received: sending ReceivedMachCommandInputSubmission,
+                             checkCancellation: @Sendable () throws -> Void = {}) throws -> sending RetainedCommandCapture {
+        try host.assemble(received: received, captureSchemaVersion: 2, resolvedTarget: assemblyTarget,
+            minimalEnvironment: assemblyEnvironment, streamBinding: Data(repeating: 0xe4, count: 16),
+            submissionLimits: assemblyLimits, captureLimits: assemblyLimits, checkCancellation: checkCancellation)
+    }
+    private func receiveReferences(_ port: mach_port_t) -> mach_port_urefs_t {
+        var count: mach_port_urefs_t = 0
+        _ = mach_port_get_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, &count)
+        return count
+    }
+
+    func testHostOwnsQueueAndTransfersCaptureWithoutReadingOrClosingItsInput() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint), profile = try hostSession(host, endpoint: endpoint)
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { for fd in pipeFDs { _ = Darwin.close(fd) } }
+        let bytes = Data("still unread".utf8)
+        XCTAssertEqual(bytes.withUnsafeBytes { Darwin.write(pipeFDs[1], $0.baseAddress, $0.count) }, bytes.count)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding, descriptor: pipeFDs[0])
+        var command: RetainedCommandCapture?
+        XCTAssertEqual(try host.poll { command = try self.hostCapture(host, received: $0) }, .inputHandled)
+        XCTAssertEqual(command?.capture.submission.callerBinding, profile.callerBinding)
+        host.close(); host.close()
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+        try XCTUnwrap(command).withBorrowedInputDescriptor { fd in
+            var actual = [UInt8](repeating: 0, count: bytes.count)
+            XCTAssertEqual(Darwin.read(fd, &actual, actual.count), bytes.count)
+            XCTAssertEqual(Data(actual), bytes)
+        }
+        command?.close()
+    }
+
+    func testHostPrunesOnIdleAndInvalidTrafficWhileKeepingTheReceiveLifetimeUsable() throws {
+        let endpoint = try Endpoint()
+        var current = try registryContext()
+        let host = try host(endpoint, context: { current })
+        _ = try hostSession(host, endpoint: endpoint)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        current = try registryContext(revision: UUID())
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("unexpected input") }, .idle)
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        _ = try hostSession(host, endpoint: endpoint)
+        current = try registryContext(revision: UUID())
+        for _ in 0..<4 {
+            try endpoint.send(Data([1]))
+            XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("unexpected input") }, .rejected(.malformed))
+            XCTAssertEqual(host.retainedSessionCount, 0)
+        }
+        _ = try hostSession(host, endpoint: endpoint)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        host.close()
+    }
+
+    func testHostReloadsAfterReceiptAndClosesImportedReplyWhenPolicyReadFails() throws {
+        enum Failure: Error { case policy }
+        let endpoint = try Endpoint(), reply = try Endpoint(), baseline = try sendReferences(reply.port)
+        let current = try registryContext()
+        var reads = 0
+        let host = try host(endpoint, context: { reads += 1; if reads == 2 { throw Failure.policy }; return current })
+        try MachCommandWire.send(CommandHandshakeOffer(nonce: Data(repeating: 1, count: 32)).canonicalBytes,
+            destination: endpoint.port, replyPort: reply.port, identifier: MachCommandCallerReceiver.helloMessageID,
+            timeoutMilliseconds: 1000)
+        XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed(); XCTFail("unexpected input") }) {
+            XCTAssertEqual($0 as? Failure, .policy)
+        }
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+        XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed() }) {
+            XCTAssertEqual($0 as? CommandReceiveHostError, .stopped)
+        }
+    }
+
+    func testHostPolicyFailureRetiresExistingSessionsAndQueuedRightsWithoutFallback() throws {
+        enum Failure: Error { case policy }
+        let endpoint = try Endpoint(), reply = try Endpoint(), current = try registryContext()
+        var fail = false
+        let host = try host(endpoint, context: { if fail { throw Failure.policy }; return current })
+        _ = try hostSession(host, endpoint: endpoint)
+        let baseline = try sendReferences(reply.port)
+        try endpoint.sendInput(Data([1]), fileport: reply.port)
+        fail = true
+        XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed(); XCTFail("unexpected input") })
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+    }
+
+    func testHostCapacityIncompatibilityAndMalformedHelloDoNotRetireOtherSessions() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint, maximum: 1), reply = try Endpoint()
+        _ = try hostSession(host, endpoint: endpoint)
+        let baseline = try sendReferences(reply.port)
+        try MachCommandWire.send(CommandHandshakeOffer(nonce: Data(repeating: 1, count: 32)).canonicalBytes,
+            destination: endpoint.port, replyPort: reply.port, identifier: MachCommandCallerReceiver.helloMessageID,
+            timeoutMilliseconds: 1000)
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed() }, .rejected(.capacity))
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        host.close()
+        let next = try Endpoint(), available = try self.host(next)
+        let old = try CommandHandshakeCapabilities(wireVersions: [1], submissionSchemaVersions: [1], inputCarrierVersions: [1])
+        try MachCommandWire.send(CommandHandshakeOffer(nonce: Data(repeating: 1, count: 32), capabilities: old).canonicalBytes,
+            destination: next.port, replyPort: reply.port, identifier: MachCommandCallerReceiver.helloMessageID,
+            timeoutMilliseconds: 1000)
+        XCTAssertEqual(try available.poll { $0.closeIfUnclaimed() }, .rejected(.incompatible))
+        let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+        response.caller.close()
+        try MachCommandWire.send(Data([0xa0]), destination: next.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        XCTAssertEqual(try available.poll { $0.closeIfUnclaimed() }, .rejected(.malformed))
+        _ = try hostSession(available, endpoint: next)
+        available.close()
+    }
+
+    func testHostStopDuringBoundedReceiveReleasesTheRightOnItsOwnerThread() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint, wait: 100), stop = host.stop
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(10)) { stop.requestStop(); finished.signal() }
+        XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed(); XCTFail("unexpected input") }) {
+            XCTAssertEqual($0 as? CommandReceiveHostError, .stopped)
+        }
+        XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+    }
+
+    func testHostRejectsNonFileportInputAndRunStillAssemblesTheNextSubmission() throws {
+        let endpoint = try Endpoint(), carried = try Endpoint(), current = try registryContext()
+        var reads = 0
+        let host = try host(endpoint, context: { reads += 1; return current })
+        let profile = try hostSession(host, endpoint: endpoint)
+        let baseline = try sendReferences(carried.port), before = reads
+        try endpoint.sendInput(Data([1]), fileport: carried.port)
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("malformed input reached handler") }, .rejected(.malformed))
+        XCTAssertEqual(reads, before + 2)
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        XCTAssertEqual(receiveReferences(endpoint.port), 1)
+        try endpoint.sendInput(Data([2]), fileport: carried.port)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        var command: RetainedCommandCapture?
+        XCTAssertThrowsError(try host.run { received in
+            XCTAssertEqual(host.retainedSessionCount, 1)
+            command = try self.hostCapture(host, received: received)
+            host.stop.requestStop()
+        }) { XCTAssertEqual($0 as? CommandReceiveHostError, .stopped) }
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+        try XCTUnwrap(command).withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        command?.close()
+    }
+
+    func testHostNonFileportRejectionStillObservesPolicyReadFailure() throws {
+        enum Failure: Error { case policy }
+        let endpoint = try Endpoint(), carried = try Endpoint(), current = try registryContext()
+        var reads = 0, failAt = Int.max
+        let host = try host(endpoint, context: { reads += 1; if reads == failAt { throw Failure.policy }; return current })
+        _ = try hostSession(host, endpoint: endpoint)
+        let baseline = try sendReferences(carried.port)
+        failAt = reads + 2
+        try endpoint.sendInput(Data([1]), fileport: carried.port)
+        XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed(); XCTFail("malformed input reached handler") }) {
+            guard case Failure.policy = $0 else { return XCTFail("expected current policy failure: \($0)") }
+        }
+        XCTAssertEqual(try sendReferences(carried.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 0)
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+    }
+
+    func testHostRunOwnsTheLoopAndHandlerCanAssembleWithoutReceiveReentry() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint), profile = try hostSession(host, endpoint: endpoint)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        var command: RetainedCommandCapture?
+        XCTAssertThrowsError(try host.run { received in
+            XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed() }) { XCTAssertEqual($0 as? CommandReceiveHostError, .operationActive) }
+            XCTAssertThrowsError(try host.run { $0.closeIfUnclaimed() }) { XCTAssertEqual($0 as? CommandReceiveHostError, .operationActive) }
+            command = try self.hostCapture(host, received: received)
+            host.stop.requestStop()
+        }) { XCTAssertEqual($0 as? CommandReceiveHostError, .stopped) }
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+        try XCTUnwrap(command).withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        command?.close()
+    }
+
+    func testHostStopDuringAssemblyCancelsAndClosesOnlyTheIncomingObjects() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint), profile = try hostSession(host, endpoint: endpoint)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        var earlier: RetainedCommandCapture?
+        _ = try host.poll { earlier = try self.hostCapture(host, received: $0) }
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        let stop = host.stop
+        var inspection: TestInputInspection?
+        XCTAssertThrowsError(try host.poll { received in
+            inspection = TestInputInspection(received: received)
+            _ = try self.hostCapture(host, received: TestInputInspection(received: received).received,
+                checkCancellation: { stop.requestStop() })
+        }) { XCTAssertEqual($0 as? CommandReceiveHostError, .stopped) }
+        try expectAssemblyResourcesRetired(XCTUnwrap(inspection).received)
+        try XCTUnwrap(earlier).withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+        earlier?.close()
+    }
+
+    func testHostInvalidConfigurationAndDeinitReleaseOnlyTransferredReceiveRights() throws {
+        for wait: UInt32 in [0, 60_001] {
+            let endpoint = try Endpoint(), reply = try Endpoint(), baseline = try sendReferences(reply.port)
+            try endpoint.sendInput(Data([1]), fileport: reply.port)
+            XCTAssertThrowsError(try host(endpoint, wait: wait))
+            XCTAssertEqual(receiveReferences(endpoint.port), 0)
+            XCTAssertEqual(try sendReferences(reply.port), baseline)
+        }
+        let endpoint = try Endpoint()
+        var owner: CommandReceiveHost? = try host(endpoint)
+        XCTAssertNotNil(owner)
+        owner = nil
+        XCTAssertEqual(receiveReferences(endpoint.port), 0)
+    }
+
+    func testHostCaptureTransfersToJournalAndHostRetirementPreservesTheQueuedRequest() throws {
+        let fixture = try CommandRequestFixture(owned: true, commandSchema: 2), journal = try XCTUnwrap(fixture.authority)
+        let endpoint = try Endpoint(), host = try host(endpoint), profile = try hostSession(host, endpoint: endpoint)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        var request: IssuedRequestPayload?, inspection: TestInputInspection?
+        _ = try host.poll { received in
+            inspection = TestInputInspection(received: received)
+            let command = try self.hostCapture(host, received: TestInputInspection(received: received).received)
+            request = try journal.admitCommand(command, draft: fixture.draft(command), expression: self.selfExpression(),
+                userID: geteuid(), auditSessionID: nil, now: { fixture.now() }, receiptTimeMs: nil)
+        }
+        let id = try XCTUnwrap(request).requestID
+        host.close()
+        XCTAssertEqual(try journal.withRequests { try $0.state(requestID: id).phase }, .queued)
+        try XCTUnwrap(inspection).received.input.withBorrowedDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        let now = fixture.now(120)
+        _ = try journal.withRequests { try $0.retirePending(requestID: id, reason: .cancelled, now: now, receiptTimeMs: nil) }
+        try expectAssemblyResourcesRetired(XCTUnwrap(inspection).received)
+    }
+
+    func testHostAssemblyPreflightReentryDoesNotCloseItsActiveInput() throws {
+        let endpoint = try Endpoint(), context = try registryContext()
+        var reenter: (() throws -> Void)?
+        let host = try host(endpoint, context: { try reenter?(); return context })
+        let profile = try hostSession(host, endpoint: endpoint)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        var command: RetainedCommandCapture?
+        _ = try host.poll { received in
+            let alias = TestInputInspection(received: received)
+            reenter = {
+                XCTAssertThrowsError(try self.hostCapture(host, received: alias.received)) {
+                    XCTAssertEqual($0 as? CommandReceiveHostError, .operationActive)
+                }
+            }
+            defer { reenter = nil }
+            command = try self.hostCapture(host, received: alias.received)
+        }
+        try XCTUnwrap(command).withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
+        host.close(); command?.close()
+    }
+
+    func testHostReplyQueueTimeoutPreservesItsReceiveQueueAndOtherSessions() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint), reply = try Endpoint()
+        _ = try hostSession(host, endpoint: endpoint)
+        var status = mach_port_status_t(), count = mach_msg_type_number_t(MemoryLayout<mach_port_status_t>.size / MemoryLayout<integer_t>.size)
+        XCTAssertEqual(withUnsafeMutablePointer(to: &status) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                mach_port_get_attributes(mach_task_self_, reply.port, Int32(MACH_PORT_RECEIVE_STATUS), $0, &count)
+            }
+        }, KERN_SUCCESS)
+        for _ in 0..<status.mps_qlimit { try reply.send(Data([1])) }
+        let baseline = try sendReferences(reply.port)
+        try MachCommandWire.send(CommandHandshakeOffer(nonce: Data(repeating: 1, count: 32)).canonicalBytes,
+            destination: endpoint.port, replyPort: reply.port, identifier: MachCommandCallerReceiver.helloMessageID,
+            timeoutMilliseconds: 1000)
+        XCTAssertEqual(try host.poll { $0.closeIfUnclaimed() }, .rejected(.replyFailure))
+        XCTAssertEqual(try sendReferences(reply.port), baseline)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        _ = try hostSession(host, endpoint: endpoint)
+        host.close()
+    }
+
+    func testHostRejectedAssemblyCanKeepItsOriginalSessionAndReceiveLoopUsable() throws {
+        let endpoint = try Endpoint(), host = try host(endpoint), profile = try hostSession(host, endpoint: endpoint)
+        try enqueueHostInput(endpoint, binding: Data(repeating: 0, count: 16))
+        var inspected: TestInputInspection?
+        XCTAssertEqual(try host.poll { received in
+            inspected = TestInputInspection(received: received)
+            XCTAssertThrowsError(try self.hostCapture(host, received: TestInputInspection(received: received).received)) {
+                XCTAssertEqual($0 as? CommandSessionRegistryError, .unknownSession)
+            }
+        }, .inputHandled)
+        try expectAssemblyResourcesRetired(XCTUnwrap(inspected).received)
+        XCTAssertEqual(host.retainedSessionCount, 1)
+        try enqueueHostInput(endpoint, binding: profile.callerBinding)
+        _ = try host.poll { try self.hostCapture(host, received: $0).close() }
+        host.close()
+    }
+
+    func testHostStopBeforeFirstWorkDisposesWithoutWaitingForDeinit() throws {
+        for run in [false, true] {
+            let endpoint = try Endpoint(), host = try host(endpoint)
+            host.stop.requestStop()
+            if run { XCTAssertThrowsError(try host.run { $0.closeIfUnclaimed() }) }
+            else { XCTAssertThrowsError(try host.poll { $0.closeIfUnclaimed() }) }
+            XCTAssertEqual(receiveReferences(endpoint.port), 0)
         }
     }
 
