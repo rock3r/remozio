@@ -87,7 +87,7 @@ The journal serializes the complete attempt. It checks the actual Root identity,
 
 The host resolver supplies current target credentials, environment, and capture limits. Incoming claims cannot choose an elevation policy. Throwing from the resolver, draft, or cancellation callback always remains uncertain. A callback cannot mimic a filesystem error to authorize a retry.
 
-Capture failure closes the original caller, input, and filesystem. The detached reply remains available to the journal owner. A known filesystem capture failure permits a permanent refusal only after a fresh absence proof. Storage or identity validation failure remains uncertain.
+Capture failure closes the original caller, input, and filesystem. The detached reply remains available to the journal owner. Only request-related path or file-kind failures permit a permanent refusal after a fresh absence proof. Resource, I/O, permission, unknown system errors, and changed captures remain uncertain. Storage or identity validation failure remains uncertain.
 
 Successful capture transfers the reply to the existing request coordinator. Successful admission preserves its input even if acknowledgment delivery fails. Every refused attempt closes its original objects and private reply.
 

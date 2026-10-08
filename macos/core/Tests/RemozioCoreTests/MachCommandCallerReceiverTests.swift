@@ -561,6 +561,40 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testAdmissionCaptureClassifierNeverTreatsHostResourceOrUnknownFailuresAsInvalidCommands() {
+        for code in [EMFILE, ENFILE, EIO, ENOMEM, ENOSPC, EAGAIN, EINTR, EACCES, EPERM, ESTALE, Int32.max] {
+            XCTAssertNil(AuthorityJournal.commandCaptureRefusal(CommandFilesystemCaptureError.system(code)))
+        }
+        for error in [CommandFilesystemCaptureError.changed, .closed] {
+            XCTAssertNil(AuthorityJournal.commandCaptureRefusal(error))
+        }
+        for code in [ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG] {
+            XCTAssertEqual(AuthorityJournal.commandCaptureRefusal(CommandFilesystemCaptureError.system(code)), .invalidRequest)
+        }
+        XCTAssertNil(AuthorityJournal.commandCaptureRefusal(ApprovalCoordinatorError.capacityExceeded))
+    }
+
+    func testAdmissionAttemptChangedExecutableDuringCaptureRemainsUncertainAndKeepsItsReply() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            let executable = fixture.root.appendingPathComponent("capture-tool")
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: executable)
+            let writer = Darwin.open(executable.path, O_WRONLY | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(writer, 0); defer { _ = Darwin.close(writer) }
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: executable.path)
+            let checks = OSAllocatedUnfairLock(initialState: 0)
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: fixture, checkCancellation: {
+                let count = checks.withLock { $0 += 1; return $0 }
+                if count == 4 {
+                    var byte: UInt8 = 0
+                    XCTAssertEqual(pwrite(writer, &byte, 1, 0), 1)
+                }
+            })) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed) }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+            XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
+    }
+
     func testAdmissionAttemptCallbackErrorsCannotSpoofCaptureRefusalAndCannotReenterJournal() throws {
         for stage in 0..<3 {
             let fixture = try CommandRequestFixture(checkpointed: true, owned: true), reply = try Endpoint()

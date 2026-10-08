@@ -269,7 +269,7 @@ public final class AuthorityJournal: @unchecked Sendable {
                 })
         } catch {
             let callback = error as? CommandAdmissionCallbackFailure
-            let rejection: CommandAdmissionRejectionReason? = callback == nil && error is CommandFilesystemCaptureError ? .invalidRequest : nil
+            let rejection = callback == nil ? Self.commandCaptureRefusal(error) : nil
             let outcome = commandRefusal(profile: profile, submission: submission, reason: rejection)
             try? attempt.send(outcome); attempt.close()
             throw callback?.underlying ?? error
@@ -290,6 +290,17 @@ public final class AuthorityJournal: @unchecked Sendable {
         } catch {
             if database.retired { retireRequests() }
             throw error
+        }
+    }
+
+    /// Apply only to actual capture failures. Callback failures never enter this classifier.
+    static func commandCaptureRefusal(_ error: Error) -> CommandAdmissionRejectionReason? {
+        switch error {
+        case CommandFilesystemCaptureError.invalidPath, CommandFilesystemCaptureError.invalidExecutable,
+             CommandFilesystemCaptureError.invalidDirectory: return .invalidRequest
+        case CommandFilesystemCaptureError.system(let code) where [ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG].contains(code):
+            return .invalidRequest
+        default: return nil
         }
     }
 
