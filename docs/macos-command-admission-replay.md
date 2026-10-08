@@ -35,10 +35,22 @@ A checkpoint failure returns no issued payload and retires the writer. Restart r
 
 The protected installer must complete the [explicit replay-store migration](macos-command-submission-replay.md) before command admission. Admission never creates a code policy or migrates the store lazily. An uninstalled store rejects the command before request publication.
 
-This applies to the retained-object `admitCommand` path. The existing generic draft API does not authenticate or retain command OS objects. It must not become a production command frontend or dispatcher. Closing that generic command-draft path remains part of listener activation.
+The public generic draft API rejects commands before it changes the clock or storage. Commands must use `admitCommand`, which transfers the retained OS objects. Non-command adapter drafts keep their existing admission and action policy.
+
+```mermaid
+flowchart LR
+    D[Public draft API] --> K{Request kind}
+    K -->|Command| X[Reject before clock and storage changes]
+    K -->|1Password or Little Snitch| N[Existing draft admission]
+    C[Retained command transfer] --> R[OS recheck and replay transaction]
+```
+
+Synthetic lifecycle tests and the approval-flow experiment use an internal fixture method. It does not authenticate a caller or retain command OS objects. It is unavailable to ordinary module clients and grants no execution permission.
 
 Production activation still requires protected target policy, current code checks, resource limits, authenticated no-admission replies, permit consumption, and process I/O. The endpoint remains disabled. These tests do not prove protected Root installation or device E2E.
 
 ## Evidence
 
 Seven new tests exercise standalone and checkpointed request ownership, including serialized `AuthorityJournal` ownership. They cover original capture metadata, independent ID/nonce reuse, unread input, capacity, explicit installation, audit rollback, cancellation/decline, ordinary restart, and checkpoint prepare/finalize failures. Existing capture-rejection, expiry, close, and completion tests also check the replay record.
+
+Two additional tests verify early public command rejection with standalone and checkpointed owners. They also verify unchanged public admission for 1Password access, 1Password unlock, and Little Snitch.

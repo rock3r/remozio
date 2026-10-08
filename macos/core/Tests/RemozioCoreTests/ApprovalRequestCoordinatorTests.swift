@@ -67,10 +67,50 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             decisionLimits: limits, signingLimits: limits, auditLimits: limits)
         return AuthorityJournal(requests: requests)
     }
+    func testPublicGenericCommandAdmissionRejectsBeforeClockAndStorageChanges() throws {
+        for checkpointed in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture)
+            let requests: ApprovalRequestCoordinator, store: ContinuityStore?
+            if checkpointed {
+                let owned = try checkpointedOwner(fixture, db, writer)
+                requests = owned.0; store = owned.1
+            } else { requests = try owner(db, writer); store = nil }
+            defer { try? db.close(); store?.close() }
+            let before = try events(db, writer), boundary = try store?.read()
+            XCTAssertThrowsError(try requests.admit(draft(), now: now(150), receiptTimeMs: nil)) {
+                XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidDraft)
+            }
+            XCTAssertEqual(try events(db, writer), before)
+            if let boundary { XCTAssertEqual(try store?.read(), boundary) }
+            // The rejected call must not advance the owner's clock or prevent later fixture work.
+            let request = try requests.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+            XCTAssertEqual(try requests.state(requestID: request.requestID).phase, .queued)
+        }
+    }
+
+    func testPublicGenericNonCommandAdmissionPreservesExistingActions() throws {
+        for (kind, choice) in [(RequestKind.onePasswordAccess, ActionChoice.approveAccess),
+                               (.onePasswordUnlock, .unlockVault), (.littleSnitch, .allowOnce)] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true)
+            defer { try? db.close() }
+            let contract = try RequestContract(requestKind: kind, wireVersion: 1, schemaVersion: 1)
+            let capabilities = ContractCapabilities(contracts: [contract: []])
+            _ = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+            let writer = try db.write { try $0.createEpoch(descriptor(3)) }, requests = try owner(db, writer)
+            let actions = [CapturedAction(choice: choice, scope: .currentRequest), CapturedAction(choice: .decline, scope: .currentRequest)]
+            let observed = ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]), actions: actions,
+                firstObservedAt: now(100), deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+            let request = try requests.admit(observed, now: now(), receiptTimeMs: nil)
+            XCTAssertEqual(request.contract, contract); XCTAssertEqual(request.permittedActions, actions)
+            XCTAssertEqual(try requests.state(requestID: request.requestID).phase, .queued)
+            XCTAssertEqual(try events(db, writer).last?.kind, .requestCreated)
+        }
+    }
+
     func testSharedJournalOwnsRequestStateAndRejectsReentry() throws {
         let fixture = try Fixture(), journal = try journalOwner(fixture)
         let draft = try draft(), time = now()
-        let request = try journal.withRequests { try $0.admit(draft, now: time, receiptTimeMs: 1001) }
+        let request = try journal.withRequests { try $0.admitFixture(draft, now: time, receiptTimeMs: 1001) }
         let state = try journal.withRequests { owner in
             XCTAssertThrowsError(try journal.read { try $0.approvalTrustSnapshot().revision })
             XCTAssertThrowsError(try journal.close())
@@ -118,11 +158,11 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExpirySweepHandlesOnlyElapsedPendingRequestsOnce() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let queued = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
-        let presented = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        let queued = try owner.admitFixture(draft(), now: now(), receiptTimeMs: 1001)
+        let presented = try owner.admitFixture(draft(), now: now(), receiptTimeMs: 1001)
         _ = try owner.markPresented(requestID: presented.requestID, now: now(), receiptTimeMs: 1001)
-        let later = try owner.admit(draft(deadline: 300), now: now(), receiptTimeMs: 1001)
-        let authorized = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        let later = try owner.admitFixture(draft(deadline: 300), now: now(), receiptTimeMs: 1001)
+        let authorized = try owner.admitFixture(draft(), now: now(), receiptTimeMs: 1001)
         _ = try consume(owner, authorized)
         XCTAssertTrue(try owner.expirePending(now: now(199), receiptTimeMs: 1099).isEmpty)
         let expired = try owner.expirePending(now: now(200), receiptTimeMs: 1100)
@@ -137,8 +177,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExpirySweepRollsBackEveryRequestWhenLaterAuditInsertFails() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let first = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
-        let second = try owner.admit(draft(), now: now(), receiptTimeMs: 1001)
+        let first = try owner.admitFixture(draft(), now: now(), receiptTimeMs: 1001)
+        let second = try owner.admitFixture(draft(), now: now(), receiptTimeMs: 1001)
         let count = try events(db, writer).count
         try fixture.sql("CREATE TRIGGER fail_sweep BEFORE INSERT ON audit_records_v1 WHEN (SELECT COUNT(*) FROM audit_records_v1) > \(count) BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try owner.expirePending(now: now(200), receiptTimeMs: 1100))
@@ -201,7 +241,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testPairedStartupMarksInterruptedConsumptionUnknownWithoutRestoringRequest() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (requests, store) = try checkpointedOwner(fixture, db, writer)
-        let request = try requests.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try requests.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         _ = try consume(requests, request)
         try db.close(); store.close()
         let limits = try limits, anchor = fixture.root.path
@@ -227,7 +267,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (owner, store) = try checkpointedOwner(fixture, db, writer)
         defer { store.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         try assertCheckpoint(db, store, writer)
         XCTAssertEqual(try store.read().committed.generation, 2)
         _ = try consume(owner, request)
@@ -246,7 +286,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (owner, store) = try checkpointedOwner(fixture, db, writer)
         defer { store.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let (body, _) = try decision(request), before = try store.read()
         XCTAssertThrowsError(try owner.consume(canonicalDecision: body, signature: Data(repeating: 0, count: 64),
             authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil))
@@ -263,7 +303,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                 let fixture = try Fixture(), (db, writer) = try setup(fixture)
                 let (owner, store) = try checkpointedOwner(fixture, db, writer)
                 defer { store.close() }
-                let request = try consumption ? owner.admit(draft(), now: now(), receiptTimeMs: nil) : nil
+                let request = try consumption ? owner.admitFixture(draft(), now: now(), receiptTimeMs: nil) : nil
                 let before = try store.read()
                 let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
                 try fixture.sql("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON continuity_v1 WHEN \(condition) BEGIN SELECT RAISE(ABORT,'injected'); END", continuity: true)
@@ -272,9 +312,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                     XCTAssertThrowsError(try owner.consumedRequest(requestID: request.requestID, now: now()))
                     XCTAssertEqual(try db.read { try $0.consumption(requestID: request.requestID) != nil }, finalize)
                 } else {
-                    XCTAssertThrowsError(try owner.admit(draft(), now: now(), receiptTimeMs: nil))
+                    XCTAssertThrowsError(try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil))
                 }
-                XCTAssertThrowsError(try owner.admit(draft(), now: now(), receiptTimeMs: nil))
+                XCTAssertThrowsError(try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil))
                 let after = try store.read()
                 XCTAssertEqual(after.committed, before.committed)
                 XCTAssertEqual(after.pending != nil, finalize)
@@ -287,7 +327,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             let fixture = try Fixture(), (db, writer) = try setup(fixture)
             let (owner, store) = try checkpointedOwner(fixture, db, writer)
             defer { store.close() }
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
             if expire { _ = try owner.expirePending(now: now(200), receiptTimeMs: nil) }
             else { _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(), receiptTimeMs: nil) }
             XCTAssertEqual(try owner.state(requestID: request.requestID).phase, expire ? .expired : .cancelled)
@@ -299,8 +339,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testAdmissionCreatesFreshBindingsAndAuditsMetadataBeforeReturning() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         let secret = try DeterministicCBOR.encode(.map([0: .text("synthetic-sensitive-capture")]), limits: limits)
-        let a = try owner.admit(draft(capture: secret), now: now(), receiptTimeMs: 1000)
-        let b = try owner.admit(draft(capture: secret), now: now(), receiptTimeMs: 1000)
+        let a = try owner.admitFixture(draft(capture: secret), now: now(), receiptTimeMs: 1000)
+        let b = try owner.admitFixture(draft(capture: secret), now: now(), receiptTimeMs: 1000)
         XCTAssertNotEqual(a.requestID, b.requestID)
         XCTAssertNotEqual(a.challenge, b.challenge)
         XCTAssertEqual(a.macID, id(1)); XCTAssertEqual(a.accountID, id(2))
@@ -315,7 +355,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testPresentationIsIdempotentAndFirstDecisionOwnsStateAndLedger() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let presented = try owner.markPresented(requestID: request.requestID, now: now(), receiptTimeMs: nil)
         XCTAssertEqual(presented.phase, .presented)
         XCTAssertEqual(try owner.markPresented(requestID: request.requestID, now: now(), receiptTimeMs: nil), presented)
@@ -331,7 +371,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testRetiringPendingRequestPreventsEvenValidSignedDecisions() throws {
         for (reason, expected, statusReason) in [(PendingRequestRetirement.cancelled, RequestPhase.cancelled, RequestStatusReason.userCancelled), (.targetTimedOut, .expired, .targetTimedOut), (.targetDisappeared, .unknown, .targetDisappeared), (.authorityRestart, .cancelled, .authorityRestarted)] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
             XCTAssertEqual(try owner.retirePending(requestID: request.requestID, reason: reason, now: now(), receiptTimeMs: nil).phase, expected)
             XCTAssertThrowsError(try consume(owner, request))
             XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
@@ -346,7 +386,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testDeadlineIsEnforcedBeforeConsumptionAndExpiresExactlyOnce() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         XCTAssertThrowsError(try consume(owner, request, time: 200)) { XCTAssertEqual($0 as? ApprovalCoordinatorError, .expired) }
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
         XCTAssertEqual(try owner.state(requestID: request.requestID).reason, .authorizationExpired)
@@ -358,7 +398,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testChannelEpochRevocationAndSignatureUseCurrentStoredTrust() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), (body, signature) = try decision(request)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), (body, signature) = try decision(request)
         for (phone, epoch, sig) in [(id(8), id(9), signature), (id(5), id(8), signature), (id(5), id(9), Data(repeating: 0, count: 64))] {
             XCTAssertThrowsError(try owner.consume(canonicalDecision: body, signature: sig, authenticatedPhoneID: phone,
                 authenticatedEnrollmentEpoch: epoch, now: now(), receiptTimeMs: nil))
@@ -374,9 +414,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testJournalFailuresNeverPublishProvisionalAdmissionConsumptionOrRetirement() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, maximum: 1)
         try fixture.sql("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
-        XCTAssertThrowsError(try owner.admit(draft(), now: now(), receiptTimeMs: nil))
+        XCTAssertThrowsError(try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil))
         try fixture.sql("DROP TRIGGER fail_audit")
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         try fixture.sql("CREATE TRIGGER fail_audit BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try consume(owner, request))
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
@@ -389,7 +429,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testOutcomesRetainBindingUntilTerminalAndNeverRetryUnknown() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         _ = try consume(owner, request)
         let dispatched = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch, now: now(210), receiptTimeMs: nil)
         XCTAssertEqual(dispatched.phase, .executing)
@@ -409,15 +449,15 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testCapacityCannotDiscardLiveOrConsumedRequestsAndClearsAfterTerminal() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, maximum: 1)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
-        XCTAssertThrowsError(try owner.admit(draft(), now: now(), receiptTimeMs: nil))
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        XCTAssertThrowsError(try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil))
         XCTAssertThrowsError(try owner.forgetTerminal(requestID: request.requestID))
         _ = try consume(owner, request)
         XCTAssertThrowsError(try owner.forgetTerminal(requestID: request.requestID))
         _ = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .proveNoDispatch, now: now(), receiptTimeMs: nil)
         XCTAssertEqual(try owner.state(requestID: request.requestID).reason, .noDispatchProved)
         try owner.forgetTerminal(requestID: request.requestID)
-        let replacement = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let replacement = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         XCTAssertNotEqual(replacement.requestID, request.requestID)
         XCTAssertEqual(try owner.historicalOutcome(requestID: request.requestID)?.phase, .cancelled)
     }
@@ -425,14 +465,14 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testClockDiscontinuityRetiresTheOwnerAndStorageClosureBlocksSnapshots() throws {
         for changedEpoch in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
             let bad = changedEpoch ? AuthorityMoment(epoch: UUID(), milliseconds: 111) : now(109)
             XCTAssertThrowsError(try owner.pendingRequest(requestID: request.requestID, now: bad, receiptTimeMs: nil))
             XCTAssertThrowsError(try owner.state(requestID: request.requestID)) { XCTAssertEqual($0 as? ApprovalCoordinatorError, .unavailable) }
-            XCTAssertThrowsError(try owner.admit(draft(), now: now(111), receiptTimeMs: nil))
+            XCTAssertThrowsError(try owner.admitFixture(draft(), now: now(111), receiptTimeMs: nil))
         }
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         try db.close()
         XCTAssertThrowsError(try owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil))
         XCTAssertThrowsError(try owner.state(requestID: request.requestID))
@@ -440,8 +480,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testRestartDoesNotRestorePendingOrConsumedExecutionBindings() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), first = try owner(db, writer)
-        let pending = try first.admit(draft(), now: now(), receiptTimeMs: nil)
-        let consumed = try first.admit(draft(), now: now(), receiptTimeMs: nil)
+        let pending = try first.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let consumed = try first.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let receipt = try consume(first, consumed)
         try db.close()
         let reopened = try open(fixture, initialize: false), nextWriter = try reopened.write { try $0.createEpoch(descriptor(4)) }
@@ -453,7 +493,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testDeclineUsesDecisionKeyAndReleasesCaptureWithoutExecution() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), (body, signature) = try decision(request, decline: true)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), (body, signature) = try decision(request, decline: true)
         let receipt = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: id(5),
             authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil)
         XCTAssertEqual(receipt.event.outcome, .noDispatch)
@@ -466,20 +506,20 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testByteBudgetReleasesOnlyAtTerminalAndInvalidDraftsDoNotConsumeCapacity() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, bytes: 4096)
-        XCTAssertThrowsError(try owner.admit(draft(capture: Data([0xff])), now: now(), receiptTimeMs: nil))
-        XCTAssertThrowsError(try owner.admit(draft(deadline: 110), now: now(), receiptTimeMs: nil))
+        XCTAssertThrowsError(try owner.admitFixture(draft(capture: Data([0xff])), now: now(), receiptTimeMs: nil))
+        XCTAssertThrowsError(try owner.admitFixture(draft(deadline: 110), now: now(), receiptTimeMs: nil))
         let capture = try DeterministicCBOR.encode(.map([0: .bytes(id(42, 2800))]), limits: limits)
-        let request = try owner.admit(draft(capture: capture), now: now(), receiptTimeMs: nil)
-        XCTAssertThrowsError(try owner.admit(draft(capture: capture), now: now(), receiptTimeMs: nil))
+        let request = try owner.admitFixture(draft(capture: capture), now: now(), receiptTimeMs: nil)
+        XCTAssertThrowsError(try owner.admitFixture(draft(capture: capture), now: now(), receiptTimeMs: nil))
         _ = try consume(owner, request)
-        XCTAssertThrowsError(try owner.admit(draft(capture: capture), now: now(), receiptTimeMs: nil))
+        XCTAssertThrowsError(try owner.admitFixture(draft(capture: capture), now: now(), receiptTimeMs: nil))
         _ = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .proveNoDispatch, now: now(), receiptTimeMs: nil)
-        _ = try owner.admit(draft(capture: capture), now: now(), receiptTimeMs: nil)
+        _ = try owner.admitFixture(draft(capture: capture), now: now(), receiptTimeMs: nil)
     }
 
     func testTargetTimeoutIsDistinctFromAnUnelapsedDeadline() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         XCTAssertThrowsError(try owner.retirePending(requestID: request.requestID, reason: .deadlineElapsed, now: now(), receiptTimeMs: nil))
         XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
         _ = try owner.retirePending(requestID: request.requestID, reason: .targetTimedOut, now: now(), receiptTimeMs: nil)
@@ -488,7 +528,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testOwnedQueuedAndDisappearedStatesRoundTripThroughStatusCodec() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         for disappeared in [false, true] {
             if disappeared { _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(), receiptTimeMs: nil) }
             let state = try owner.state(requestID: request.requestID)
@@ -514,7 +554,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         for exit in Exit.allCases {
             for started in [false, true] {
                 let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-                let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+                let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
                 let retained = try owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil)
                 let delivery = try PendingRequestDelivery(request: retained)
                 var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
@@ -560,7 +600,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testFailedExpiryCannotPublishDeliveryWithdrawalBeforeCommit() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let delivery = try PendingRequestDelivery(request: owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil))
         var router = PresenceRouter(configuration: try .init(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 0))
         let routing = router.evaluate(mode: .away, snapshot: .init(), now: .init(epoch: clock, milliseconds: 110))
@@ -583,7 +623,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     private func queuedDelivery(_ owner: ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, PendingRequestDelivery, PhoneRequestDelivery) {
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let delivery = try PendingRequestDelivery(request: owner.pendingRequest(requestID: request.requestID, now: now(), receiptTimeMs: nil))
         let queued = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
             routing: routing(), now: now(), receiptTimeMs: nil) { _ in true }
@@ -667,7 +707,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let unknown = try owner.handoffDelivery(requestID: request.requestID, delivery: delivery, deliveryID: UUID(),
             routing: routing(), now: now(120), receiptTimeMs: nil) { _ in XCTFail("Unknown identity"); return true }
         XCTAssertNil(unknown.delivery); XCTAssertEqual(unknown.update.active, [queued])
-        let other = try owner.admit(draft(), now: now(120), receiptTimeMs: nil)
+        let other = try owner.admitFixture(draft(), now: now(120), receiptTimeMs: nil)
         let mismatched = try owner.handoffDelivery(requestID: other.requestID, delivery: delivery, deliveryID: queued.id,
             routing: routing(), now: now(130), receiptTimeMs: nil) { _ in XCTFail("Wrong request controller"); return true }
         XCTAssertNil(mismatched.delivery); XCTAssertEqual(mismatched.update.withdrawn, [queued])
@@ -687,20 +727,20 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testPendingDiscoveryIsStableBoundedAndDoesNotMarkHandoff() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, maximum: 2)
-        let first = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
-        let second = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let first = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let second = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let binding = try frameBinding(db)
         let expected = [first.requestID, second.requestID].sorted { $0.lexicographicallyPrecedes($1) }
         XCTAssertEqual(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(120)), expected)
         XCTAssertEqual(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(130)), expected)
         XCTAssertTrue(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(.present), now: now(140)).isEmpty)
-        XCTAssertThrowsError(try owner.admit(draft(), now: now(140), receiptTimeMs: nil))
+        XCTAssertThrowsError(try owner.admitFixture(draft(), now: now(140), receiptTimeMs: nil))
         XCTAssertEqual(try owner.state(requestID: first.requestID).phase, .queued)
         XCTAssertEqual(try events(db, writer).map(\.kind), [.enrollmentAdded, .requestCreated, .requestCreated])
     }
     func testPendingDiscoveryKeepsHandedOffRequestAndLeavesExpiryForMaintenance() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         _ = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
             now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
@@ -719,7 +759,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testPendingDiscoveryRejectsStaleEnrollmentAndOmitsRetiredRequests() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(120), receiptTimeMs: nil)
         XCTAssertTrue(try owner.pendingDeliveryRequestIDs(binding: binding, routing: routing(), now: now(130)).isEmpty)
         let stale = AuthorityPeerBinding(peer: try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096).peers.first }), revision: UUID())
@@ -731,7 +771,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testRetainedFrameRetriesWithoutSigningOrConsumingAndSurvivesLocalPresence() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         var signatures = 0
         let first = try XCTUnwrap(owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
@@ -749,7 +789,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testRetainedFrameSuppressesNewLocalDeliveryAndRechecksAfterSigner() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let local = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
             now: { self.now(120) }, routing: { try self.routing(.present) }, receiptTimeMs: nil,
@@ -770,7 +810,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testRetainedFrameCannotSurviveExpiryOrTargetRetirement() throws {
         for expires in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
             XCTAssertNotNil(try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
                 authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
                 now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
@@ -794,7 +834,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             ]))
         _ = try db.write { try $0.addApprovalEnrollment(other, expectedTrustRevision: revision,
             eventID: id(32), receiptTimeMs: nil, writer: writer, expectedAuditHead: 1) }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
         let first = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(5) }), revision: trust.revision)
         let second = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(15) }), revision: trust.revision)
@@ -828,7 +868,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testForgottenAndUnknownFrameRequestsReturnAbsenceWithoutHidingStorageFailure() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(120), receiptTimeMs: nil)
         try owner.forgetTerminal(requestID: request.requestID)
         for requestID in [request.requestID, id(99)] {
@@ -837,7 +877,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                 now: { self.now(130) }, routing: { try self.routing() }, receiptTimeMs: nil,
                 signer: { _ in XCTFail("Unknown request signed"); throw Failure.fixture }))
         }
-        let next = try owner.admit(draft(), now: now(140), receiptTimeMs: nil)
+        let next = try owner.admitFixture(draft(), now: now(140), receiptTimeMs: nil)
         XCTAssertNotNil(try owner.retainedDeliveryFrame(binding: binding, requestID: next.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
             now: { self.now(150) }, routing: { try self.routing() }, receiptTimeMs: nil,
@@ -853,7 +893,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let binding = try frameBinding(db)
         let capture = try DeterministicCBOR.encode(.map([0: .bytes(id(77, 2800))]), limits: limits)
         for _ in 0..<3 {
-            let request = try owner.admit(draft(capture: capture), now: now(120), receiptTimeMs: nil)
+            let request = try owner.admitFixture(draft(capture: capture), now: now(120), receiptTimeMs: nil)
             XCTAssertNotNil(try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
                 authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
                 now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
@@ -864,7 +904,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testRetainedFrameRechecksBindingAndKeyBeforeRetry() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         _ = try owner.retainedDeliveryFrame(binding: binding, requestID: request.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
             now: { self.now(120) }, routing: { try self.routing() }, receiptTimeMs: nil,
@@ -913,7 +953,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             deadlineMilliseconds: original.deadlineMilliseconds, createdUnixMilliseconds: original.createdUnixMilliseconds,
             expiresUnixMilliseconds: original.expiresUnixMilliseconds, observationID: id(40),
             estimatedLifetimeMilliseconds: 60_000, lateObservation: true)
-        let request = try owner.admit(observed, now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(observed, now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let first = try exchangeStatus(exchange(owner, binding, request.requestID))
         let later = try exchangeStatus(exchange(owner, binding, request.requestID, time: 140))
         XCTAssertEqual(first.phase, .queued); XCTAssertEqual(later.phase, .queued)
@@ -928,7 +968,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeConsumesBiometricDecisionAndRetainsWinnerOnRetry() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let decision = try exchangeDecision(request)
         let winner = try exchangeStatus(exchange(owner, binding, request.requestID, decision: decision))
         XCTAssertEqual(winner.phase, .authorized); XCTAssertEqual(winner.decisionPhoneID, id(5))
@@ -941,7 +981,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeDeclineUsesDecisionKeyAndTerminalStatusReleasesCapture() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let first = try exchangeStatus(exchange(owner, binding, request.requestID,
             decision: exchangeDecision(request, keyID: 7, decline: true)))
         XCTAssertEqual(first.phase, .declined); XCTAssertEqual(first.reason, .declined)
@@ -961,7 +1001,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                 EnrolledApprovalKey(id: id(17), keyClass: .decision, publicKey: otherKey.publicKey.x963Representation)]))
         _ = try db.write { try $0.addApprovalEnrollment(second, expectedTrustRevision: revision,
             eventID: id(31), receiptTimeMs: nil, writer: writer, expectedAuditHead: head($0, writer)) }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
         let first = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(5) }), revision: trust.revision)
         let other = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(15) }), revision: trust.revision)
@@ -974,8 +1014,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeRejectsForgedDecisionBindingsPurposeAndSignatureBeforeConsumption() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
-        let other = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let other = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         for bytes in [try exchangeDecision(request, phone: 15), try exchangeDecision(other),
                       try exchangeDecision(request, purpose: .cancellation),
                       try exchangeDecision(request, keyID: 7, signer: decisionKey),
@@ -990,7 +1030,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeDiscardsPendingStatusWhenSigningCrossesDeadline() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         var signs = 0
         let bytes = try owner.exchangeRequest(binding: binding, requestID: request.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
@@ -1004,7 +1044,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeDecisionCrossingDeadlineReturnsExpiryWithoutConsumption() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         var samples = 0
         let bytes = try owner.exchangeRequest(binding: binding, requestID: request.requestID,
             decisionFrame: exchangeDecision(request), authorityPublicKey: key.publicKey.x963Representation,
@@ -1017,7 +1057,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (owner, store) = try checkpointedOwner(fixture, db, writer)
         defer { store.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let status = try exchangeStatus(exchange(owner, binding, request.requestID, decision: exchangeDecision(request)))
         XCTAssertEqual(status.phase, .authorized)
         try assertCheckpoint(db, store, writer)
@@ -1025,7 +1065,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeLostSignedReplyPreservesCommittedConsumption() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID,
             decisionFrame: exchangeDecision(request), authorityPublicKey: key.publicKey.x963Representation,
             maximumBodyBytes: 3968, now: { self.now(120) }, receiptTimeMs: nil, signer: { _ in throw Failure.fixture }))
@@ -1036,7 +1076,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testExchangeUnknownAndForgottenRequestAreAbsenceNotTerminalClaims() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer), binding = try frameBinding(db)
         XCTAssertNil(try exchange(owner, binding, id(99)))
-        let request = try owner.admit(draft(), now: now(120), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(120), receiptTimeMs: nil)
         _ = try owner.retirePending(requestID: request.requestID, reason: .targetDisappeared, now: now(120), receiptTimeMs: nil)
         let disappeared = try exchangeStatus(exchange(owner, binding, request.requestID, time: 130))
         XCTAssertEqual(disappeared.phase, .cancelled); XCTAssertEqual(disappeared.reason, .targetDisappeared)
@@ -1047,7 +1087,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     func testExchangeRejectsStaleBindingBeforeSignerAndChecksOutputBudget() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let stale = AuthorityPeerBinding(peer: try XCTUnwrap(db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096).peers.first }), revision: UUID())
         XCTAssertThrowsError(try owner.exchangeRequest(binding: stale, requestID: request.requestID,
             authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
@@ -1059,7 +1099,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testExchangeRejectsWrongAuthoritySignatureAndRegressingFinalClock() throws {
         for regression in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
             var signed = false
             XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID,
                 authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
@@ -1190,7 +1230,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: true)
         let installed = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
         let draft = try draft(), time = now()
-        let payload = try journal.withRequests { try $0.admit(draft, now: time, receiptTimeMs: nil) }
+        let payload = try journal.withRequests { try $0.admitFixture(draft, now: time, receiptTimeMs: nil) }
         let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
             approvedCodeDirectoryHashes: [id(3, 20)], expectedUserID: 501)
         let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peer, macID: id(1), accountID: id(2),
@@ -1309,7 +1349,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testComposedProvidersUseOneAuthorityForDiscoveryRequestsAndDecisions() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let environment = ProviderEnvironment(epoch: clock), providers = try providers(providerConfiguration(fixture), environment)
         let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
         XCTAssertEqual(try providers.pendingRequestIDs(owner, binding, clock), [request.requestID])
@@ -1348,7 +1388,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             XCTAssertEqual($0 as? AuthorityRequestSignerError, .wrongIdentity)
         }
         let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let frame = try XCTUnwrap(bundle.requestFrame(owner, binding, request.requestID, clock))
         let status = try XCTUnwrap(bundle.exchangeRequest(owner, binding, request.requestID, nil, clock))
         for (bytes, type): (Data, ApprovalMessageType) in [(frame, .request), (status, .status)] {
@@ -1363,7 +1403,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testProviderPresenceKeepsReviewedRequestAndReadOnlyStateAvailable() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let first = try owner.admit(draft(), now: now(), receiptTimeMs: nil), second = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let first = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), second = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let binding = try frameBinding(db), environment = ProviderEnvironment(epoch: clock)
         let providers = try providers(providerConfiguration(fixture), environment), clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
         let frame = try XCTUnwrap(providers.requestFrame(owner, binding, first.requestID, clock))
@@ -1378,7 +1418,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         for expire in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
             defer { try? db.close() }
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
             let environment = ProviderEnvironment(epoch: clock)
             environment.afterSign = { [weak environment] in environment?.set(time: expire ? 200 : 130, mode: expire ? .away : .present) }
             let providers = try providers(providerConfiguration(fixture), environment), clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
@@ -1391,7 +1431,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testComposedExpiryUsesSameEpochAndReturnsSignedTerminalState() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let environment = ProviderEnvironment(epoch: clock), providers = try providers(providerConfiguration(fixture), environment)
         let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
         environment.set(time: 200)
@@ -1409,7 +1449,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testFrameExpiryReachesComposedCleanupOnce() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let environment = ProviderEnvironment(epoch: clock), bundle = try providers(providerConfiguration(fixture), environment)
         let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
         XCTAssertNotNil(try bundle.requestFrame(owner, binding, request.requestID, clock))
@@ -1428,7 +1468,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         for signingFails in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
             defer { try? db.close() }
-            let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
             let environment = ProviderEnvironment(epoch: clock)
             let bundle = try AuthorityRequestProviders(configuration: providerConfiguration(fixture),
                 publicKey: environment.authorityKey.publicKey.x963Representation,
@@ -1458,7 +1498,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testRejectedDecisionAfterExpiryStillReachesCleanup() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let environment = ProviderEnvironment(epoch: clock), bundle = try providers(providerConfiguration(fixture), environment)
         let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
         let (body, originalSignature) = try decision(request)
@@ -1477,7 +1517,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testForgottenExpiryPreservesCleanupAndConsumesCapacityUntilDrained() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, maximum: 1)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         XCTAssertThrowsError(try owner.pendingRequest(requestID: request.requestID, now: now(200), receiptTimeMs: nil)) {
             XCTAssertEqual($0 as? ApprovalCoordinatorError, .expired)
         }
@@ -1486,18 +1526,18 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try owner.state(requestID: request.requestID)) {
             XCTAssertEqual($0 as? ApprovalCoordinatorError, .unknownRequest)
         }
-        XCTAssertThrowsError(try owner.admit(draft(deadline: 300), now: now(200), receiptTimeMs: nil)) {
+        XCTAssertThrowsError(try owner.admitFixture(draft(deadline: 300), now: now(200), receiptTimeMs: nil)) {
             XCTAssertEqual($0 as? ApprovalCoordinatorError, .capacityExceeded)
         }
         XCTAssertEqual(try owner.expirePending(now: now(200), receiptTimeMs: nil), [committed])
-        let replacement = try owner.admit(draft(deadline: 300), now: now(200), receiptTimeMs: nil)
+        let replacement = try owner.admitFixture(draft(deadline: 300), now: now(200), receiptTimeMs: nil)
         XCTAssertNotEqual(replacement.requestID, request.requestID)
         XCTAssertTrue(try owner.expirePending(now: now(200), receiptTimeMs: nil).isEmpty)
     }
     func testAuditFailureDoesNotDiscardEarlierHandlerExpiry() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let requests = try (0..<3).map { _ in try owner.admit(draft(), now: now(), receiptTimeMs: nil) }
+        let requests = try (0..<3).map { _ in try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil) }
         XCTAssertThrowsError(try owner.pendingRequest(requestID: requests[0].requestID, now: now(200), receiptTimeMs: nil))
         let committed = try owner.state(requestID: requests[0].requestID), count = try events(db, writer).count
         try fixture.sql("CREATE TRIGGER fail_sweep BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
@@ -1513,7 +1553,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testExplicitTargetExpiryIsReportedWithoutNewAuditOnDrain() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
         let committed = try owner.retirePending(requestID: request.requestID, reason: .targetTimedOut, now: now(120), receiptTimeMs: nil)
         let count = try events(db, writer).count
         XCTAssertEqual(try owner.expirePending(now: now(130), receiptTimeMs: nil), [committed])
@@ -1534,7 +1574,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             let fixture = try Fixture(), journal = try journalOwner(fixture)
             defer { try? journal.close() }
             let draft = try draft(), admissionTime = now(), expiryTime = now(200)
-            let requestID = try journal.withRequests { try $0.admit(draft, now: admissionTime, receiptTimeMs: nil).requestID }
+            let requestID = try journal.withRequests { try $0.admitFixture(draft, now: admissionTime, receiptTimeMs: nil).requestID }
             let observations = ExpiryObservations(), group = DispatchGroup()
             group.enter()
             DispatchQueue.global().async {
@@ -1568,7 +1608,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     func testProviderScopeRejectsBeforeSignerAndPresenceCallbacks() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
-        let request = try owner.admit(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let environment = ProviderEnvironment(epoch: clock)
         let providers = try AuthorityRequestProviders(configuration: providerConfiguration(fixture, account: 8),
             publicKey: environment.authorityKey.publicKey.x963Representation, signing: { _ in XCTFail("Wrong-scope signer"); return Data() },
@@ -1583,7 +1623,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
         defer { try? db.close() }
         let capture = try DeterministicCBOR.encode(.map([0: .bytes(Data(count: 800))]), limits: limits)
-        let retained = try owner.admit(draft(capture: capture), now: now(), receiptTimeMs: nil)
+        let retained = try owner.admitFixture(draft(capture: capture), now: now(), receiptTimeMs: nil)
         let size = try retained.encode(limits: limits).count
         XCTAssertGreaterThan(size, 896); XCTAssertLessThanOrEqual(size, 1024)
         let binding = try frameBinding(db), environment = ProviderEnvironment(epoch: clock)
