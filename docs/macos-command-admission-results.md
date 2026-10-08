@@ -95,7 +95,7 @@ Successful capture transfers the reply to the existing request coordinator. Succ
 
 ## Compatibility and remaining integration
 
-Version selection chooses the highest supported common wire/carrier pair. Wire 2 requires carrier 3. Mixed-version peers can still select wire 1 with a common legacy carrier. An older raw reply cannot acquire new meanings through its payload.
+Version selection chooses the highest supported common wire/carrier pair. Wire 2 requires carrier 3. The explicit [I/O channel profile](macos-command-io-channels.md) requires wire 3/carrier 4 and retains these exact admission meanings. Mixed-version peers can still select wire 1 with a common legacy carrier. An older raw reply cannot acquire new meanings through its payload.
 
 The default registry and serial host continue to advertise wire 1 and input carrier 2. An integrated host can explicitly select `admissionResults` and use `pollAdmission`. This opt-in does not install a service or activate command execution.
 
@@ -136,3 +136,6 @@ The installed service endpoint provider, settings UI, CLI status mapping and com
 Tests establish codec validation, exact binding, real Mach negotiation and receipt, final deadline checks, and acknowledgments from the serialized journal owner. Refusal tests cover both identifiers, retired resources, protected-read failures, rollback, capacity, unsupported contracts, and both checkpoint failure phases. Lost-delivery tests cover both checkpointed and ordinary fixture storage. Compiler probes reject public verified-result construction.
 
 These tests run under a normal user with explicit test identities on macOS 27.0.1 and a macOS 26 deployment target. They do not prove protected Root deployment, macOS 26 runtime behavior, elevation policy, execution, or device end-to-end approval.
+
+The I/O caller uses `CommandCallerReadiness.submitIO` and retains the admitted terminal session.
+Its readiness deadline ends at admission, while each later terminal poll has its own finite control budget.

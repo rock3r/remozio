@@ -12,6 +12,7 @@ public final class RetainedCommandCapture {
     private let caller: RetainedCommandCaller
     private let input: RetainedCommandInputDescriptor
     private let filesystem: CommandFilesystemCapture
+    let outputs: RetainedCommandOutputChannels?
     let admissionProfile: CommandHandshakeProfile?
     let submissionDigest: Data
     private var admissionReply: MachCommandReplyRight?
@@ -76,6 +77,8 @@ public final class RetainedCommandCapture {
                 submission: submission.binding, limits: captureLimits)
             try filesystem.recheck(checkCancellation: checkCancellation)
             try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            self.outputs = received.outputs
+            try received.outputs?.recheck()
             self.capture = capture; self.caller = received.caller; self.input = received.input; self.filesystem = filesystem
             if let admissionProfile {
                 guard admissionProfile.callerBinding == submission.binding.callerBinding,
@@ -87,7 +90,7 @@ public final class RetainedCommandCapture {
             self.admissionProfile = admissionProfile; self.submissionDigest = Data(SHA256.hash(data: received.payload))
             self.admissionReply = received.reply
         } catch {
-            heldFilesystem?.close(); received.caller.close(); received.input.close(); received.reply?.close()
+            heldFilesystem?.close(); received.caller.close(); received.input.close(); received.reply?.close(); received.outputs?.close()
             throw error
         }
     }
@@ -119,6 +122,7 @@ public final class RetainedCommandCapture {
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
             try filesystem.recheck(checkCancellation: checkCancellation)
             try input.withBorrowedDescriptor { _ in () }
+            try outputs?.recheck()
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         } catch { close(); throw error }
     }
@@ -159,7 +163,7 @@ public final class RetainedCommandCapture {
     }
 
     public func close() {
-        if !closed { filesystem.close(); caller.close(); input.close(); admissionReply?.close(); closed = true }
+        if !closed { filesystem.close(); outputs?.close(); caller.close(); input.close(); admissionReply?.close(); closed = true }
     }
 
     private static func environment(minimal: [CapturedEnvironmentEntry], additions: [CommandEnvironmentAddition]) throws -> [CapturedEnvironmentEntry] {

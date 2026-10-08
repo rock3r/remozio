@@ -95,4 +95,23 @@ final class CommandHandshakeCodecTests: XCTestCase {
         XCTAssertEqual(CommandHandshakeCapabilities.current.wireVersions, [1])
     }
 
+    func testExecutionChannelsRequireWireThreeAndCarrierFourWithoutChangingLegacyProfiles() throws {
+        let selected = profile(wire: 3, input: 4)
+        let offer = try CommandHandshakeOffer(nonce: nonce, capabilities: .executionChannels)
+        let bytes = try CommandHandshakeReply(nonce: nonce, profile: selected).bytes
+        XCTAssertEqual(try CommandHandshakeReply.decode(bytes, offer: offer, macID: mac, accountID: account), selected)
+        XCTAssertTrue(selected.supportsExecutionChannels); XCTAssertTrue(selected.supportsAdmissionResults)
+        for old in [CommandHandshakeCapabilities.current, .admissionReplies, .admissionResults] {
+            XCTAssertThrowsError(try CommandHandshakeReply.decode(bytes,
+                offer: CommandHandshakeOffer(nonce: nonce, capabilities: old), macID: mac, accountID: account))
+        }
+        for invalid in [profile(wire: 3, input: 3), profile(wire: 2, input: 4), profile(wire: 1, input: 4)] {
+            XCTAssertFalse(invalid.supported(by: .executionChannels))
+        }
+        XCTAssertEqual(CommandHandshakeCapabilities.current.wireVersions, [1])
+        XCTAssertEqual(CommandHandshakeCapabilities.current.inputCarrierVersions, [2])
+        XCTAssertEqual(CommandHandshakeCapabilities.admissionResults.wireVersions, [2])
+        XCTAssertEqual(CommandHandshakeCapabilities.admissionResults.inputCarrierVersions, [3])
+    }
+
 }
