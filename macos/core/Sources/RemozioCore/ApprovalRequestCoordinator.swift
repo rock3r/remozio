@@ -86,6 +86,7 @@ public final class ApprovalRequestCoordinator {
     private let auditLimits: CBORLimits
     private var lastTime: UInt64?
     private var stopped = false
+    var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
     private var deliveryBytes = 0

@@ -447,7 +447,7 @@ private struct CommandAdmissionCallbackFailure: Error { let underlying: Error }
 
 
 extension AuthorityJournal {
-    /// Counts live native owners, including cancelled helpers that still need reaping.
+    /// Counts retained command owners, including unreaped children and pending result commits.
     public var activeCommandCount: Int { lock.withLock { commandExecutions.count } }
 
     /// Protected host integration. The elevation callback must enforce the selected administrator policy without reentry.
@@ -558,11 +558,12 @@ extension AuthorityJournal {
                         try execution.release()
                     } catch { execution.cancelBeforeRelease() }
                 case .terminal(let nativeOutcome):
+                    let commitOutcome: CommandTerminalOutcome = execution.terminalCommitFailed ? .unknown : nativeOutcome
                     var delivered: CommandTerminalOutcome = .unknown
-                    if let requests {
+                    if let requests, !requests.retired {
                         do {
                             let event: RequestEvent
-                            switch nativeOutcome {
+                            switch commitOutcome {
                             case .exited(0): event = .verifySuccess
                             case .exited, .signalled: event = .verifyFailure
                             case .failedBeforeStart: event = execution.dispatchRevision == 0 ? .proveNoDispatch : .verifyFailure
@@ -570,8 +571,13 @@ extension AuthorityJournal {
                             }
                             _ = try requests.recordOutcome(requestID: id, expectedRevision: execution.dispatchRevision,
                                 event: event, now: execution.clock(), receiptTimeMs: execution.receiptTime())
-                            delivered = nativeOutcome
-                        } catch { }
+                            delivered = commitOutcome
+                        } catch {
+                            execution.terminalCommitFailed = true
+                            try? execution.resources.sendTerminalOutcome(.unknown)
+                            if !requests.retired { continue }
+                            retireRequests()
+                        }
                     }
                     try? execution.resources.sendTerminalOutcome(delivered)
                     if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id) }

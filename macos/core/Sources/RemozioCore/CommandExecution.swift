@@ -21,6 +21,7 @@ final class CommandExecution {
     private var observationUncertain = false
     private var disposed = false
     var dispatchRevision: UInt64 = 0
+    var terminalCommitFailed = false
 
     init(resources: RetainedCommandExecutionResources, approval: CommandExecutionApproval,
          clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64?,

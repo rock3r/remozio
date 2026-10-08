@@ -4369,12 +4369,13 @@ extension MachCommandCallerReceiverTests {
         return path.path
     }
     private func nativeDispatchFixture(checkpointed: Bool = false, path: String = "/usr/bin/true",
-                                       arguments: [Data]? = nil, retiredEnrollmentEpoch: UInt8? = nil) throws -> NativeDispatchFixture {
+                                       arguments: [Data]? = nil, retiredEnrollmentEpoch: UInt8? = nil,
+                                       inputDescriptor: Int32? = nil) throws -> NativeDispatchFixture {
         let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, retiredEnrollmentEpoch: retiredEnrollmentEpoch)
         let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
         let admissionPort = try Endpoint(), terminal = try Endpoint()
         let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
-            executablePath: path, arguments: arguments)
+            inputDescriptor: inputDescriptor, executablePath: path, arguments: arguments)
         let request = try admitOwnedCommand(command, fixture: fixture)
         let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
         _ = try ownerDecision(request, fixture: fixture, decline: false)
@@ -4382,10 +4383,11 @@ extension MachCommandCallerReceiverTests {
             request: request, admission: admission, terminal: terminal, submission: submission)
     }
     private func beginDispatch(_ fixture: CommandRequestFixture, request: IssuedRequestPayload, launcher: String,
-                               elevation: @escaping (CommandCapture) throws -> Void = { _ in }) throws {
+                               elevation: @escaping (CommandCapture) throws -> Void = { _ in },
+                               clock: (() throws -> AuthorityMoment)? = nil) throws {
         let authority = try XCTUnwrap(fixture.authority), expression = try selfExpression(), now = fixture.now(130)
         try authority.beginCommandExecution(requestID: request.requestID, childPath: launcher,
-            preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: elevation, clock: { now },
+            preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: elevation, clock: clock ?? { now },
             runtime: { tx, approval, capture in
                 try approval.requireCurrent(tx.requestDeliveryTrust())
                 let snapshot = try XCTUnwrap(tx.codePolicy())
@@ -4468,9 +4470,15 @@ extension MachCommandCallerReceiverTests {
         let test = try nativeDispatchFixture(path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
         try test.fixture.sql("CREATE TRIGGER fail_dispatch BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
         try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
-        try awaitDispatchCleanup(test.authority)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
         XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
+        XCTAssertEqual(test.authority.activeCommandCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        try test.fixture.sql("DROP TRIGGER fail_dispatch")
+        try awaitDispatchCleanup(test.authority)
+        let id = test.request.requestID
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
     func testNativeDispatchCleanupSurvivesJournalClosureWithoutKillingReleasedWork() throws {
         let test = try nativeDispatchFixture(path: "/bin/sleep", arguments: [Data("sleep".utf8), Data("0.3".utf8)])
@@ -4512,6 +4520,79 @@ extension MachCommandCallerReceiverTests {
             let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
             XCTAssertEqual(outcome?.phase, .cancelled); XCTAssertEqual(outcome?.revision, 1)
         }
+    }
+    private final class TerminalCommitClock {
+        private let lock = NSLock()
+        private var calls = 0
+        private var failTerminal = true
+        let now: AuthorityMoment
+        init(now: AuthorityMoment) { self.now = now }
+        func read() throws -> AuthorityMoment {
+            try lock.withLock {
+                calls += 1
+                if calls >= 4 && failTerminal { throw CommandExecutionError.unavailable }
+                return now
+            }
+        }
+        func recover() { lock.withLock { failTerminal = false } }
+    }
+    func testNativeDispatchTransientClockFailureRetainsOutcomeUntilDurableUnknownCommits() throws {
+        for checkpointed in [false, true] {
+            let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: marker) }
+            let test = try nativeDispatchFixture(checkpointed: checkpointed, path: "/bin/sh",
+                arguments: [Data("sh".utf8), Data("-c".utf8), Data("printf once >> \"$1\"".utf8), Data("sh".utf8), Data(marker.path.utf8)])
+            let clock = TerminalCommitClock(now: test.fixture.now(130))
+            try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, clock: clock.read)
+            XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
+            XCTAssertEqual(test.authority.activeCommandCount, 1)
+            let id = test.request.requestID
+            XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .executing)
+            XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher))
+            clock.recover()
+            try awaitDispatchCleanup(test.authority)
+            let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+            XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 2)
+            XCTAssertEqual(try Data(contentsOf: marker), Data("once".utf8))
+            XCTAssertThrowsError(try receiver(test.terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+        }
+    }
+    func testNativeDispatchClosingStorageRetiresPendingUnknownOwner() throws {
+        let test = try nativeDispatchFixture()
+        let clock = TerminalCommitClock(now: test.fixture.now(130))
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, clock: clock.read)
+        XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
+        XCTAssertEqual(test.authority.activeCommandCount, 1)
+        try test.authority.close()
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertEqual(test.authority.activeCommandCount, 0)
+        XCTAssertThrowsError(try receiver(test.terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+    }
+    func testNativeDispatchBusyResultCommitRetainsOriginalOwnerUntilStorageRecovers() throws {
+        var pipeFDs: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { for fd in pipeFDs where fd >= 0 { Darwin.close(fd) } }
+        let test = try nativeDispatchFixture(path: "/bin/cat", inputDescriptor: pipeFDs[0])
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
+        let deadline = Date().addingTimeInterval(5), id = test.request.requestID
+        while try test.authority.withRequests({ try $0.state(requestID: id).phase }) != .executing {
+            if Date() >= deadline { throw CommandExecutionError.unavailable }; usleep(1000)
+        }
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(test.fixture.root.appendingPathComponent("store/journal.sqlite").path,
+            &connection, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        let db = try XCTUnwrap(connection)
+        defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil); sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(Darwin.close(pipeFDs[1]), 0); pipeFDs[1] = -1
+        XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
+        XCTAssertEqual(test.authority.activeCommandCount, 1)
+        XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .executing)
+        XCTAssertEqual(sqlite3_exec(db, "COMMIT", nil, nil, nil), SQLITE_OK)
+        try awaitDispatchCleanup(test.authority)
+        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 2)
+        XCTAssertThrowsError(try receiver(test.terminal).receiveTerminalReply(timeoutMilliseconds: 10))
     }
     func testNativeDispatchReportsObservedProgramFailureAndSignal() throws {
         for signal in [false, true] {

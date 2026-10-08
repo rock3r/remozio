@@ -44,7 +44,10 @@ The controller assumes no default policy based on administrator membership.
 ## Failure boundaries
 
 A failed preparation or final check cancels the helper without releasing the approved program.
-A failed dispatch commit never releases it. A lost result commit produces Unknown on the original terminal channel.
+A failed dispatch commit never releases it. A failed result commit produces one Unknown on the original terminal channel.
+If the coordinator remains usable, retain the original execution owner and retry only the durable Unknown transition.
+A later commit cannot revise the caller's Unknown result or repeat execution.
+If storage retires, native cleanup still completes; startup recovery must reconcile the unresolved durable outcome.
 Known exit and signal values come only from the retained native process owner after kernel execution evidence and reaping.
 Incoming receipts, PIDs or supplied observations cannot establish these results.
 Generic lifecycle transitions still do not construct a native exit result.
@@ -62,6 +65,9 @@ A polling interval change takes effect when the existing native owners drain.
 
 The integration tests use the original Mach submissions and actual unprivileged native fixture processes.
 They exercise success, failure, signals, replay rejection, callback reentry, final policy rejection, enrollment changes and storage loss.
+Re-enrollment tests preserve retired history in either epoch order.
+Result recovery tests hold real SQLite contention or clock failure, then verify one durable Unknown without another execution or reply.
+They also close storage while that commit is pending and verify that native cleanup completes.
 The fixture launcher performs no credential change and is never embedded or installed.
 
 This change connects the pipe execution path. It does not install or expose a command service.
@@ -73,6 +79,6 @@ The previous reap condition reached the three-second failure boundary with exit 
 The corrected condition reaped the same sleep command without cancellation and returned exit 0.
 It retained no kernel exec or exit observation. That fallback therefore cannot establish a known program result.
 
-The complete local gate passed with 1,142 core tests, 97 Swift protocol tests and 532 Kotlin/Android tests.
+The complete local gate passed with 1,146 core tests, 97 Swift protocol tests and 532 Kotlin/Android tests.
 The debug APK build and Android lint passed.
 Distinct requester-exited-before-start classification remains part of the host integration gate.
