@@ -16,7 +16,10 @@ public struct CommandHandshakeCapabilities: Equatable, Sendable {
     /// Explicit carrier support. The serial host keeps its legacy default until its reply controller is integrated.
     public static let admissionReplies = CommandHandshakeCapabilities(knownWire: [1], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion)])
-    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1], submission: CommandSubmission.supportedSchemaVersions,
+    /// Explicit typed result contract. Legacy profiles cannot acquire these meanings.
+    public static let admissionResults = CommandHandshakeCapabilities(knownWire: [2], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion)])
+    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion), UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion)])
     private init(knownWire: Set<UInt64>, submission: Set<UInt64>, input: Set<UInt64>) {
         wireVersions = knownWire; submissionSchemaVersions = submission; inputCarrierVersions = input
@@ -89,8 +92,10 @@ public struct CommandHandshakeProfile: Equatable, Sendable {
         return Self(wireVersion: wire, submissionSchemaVersion: submission, inputCarrierVersion: input,
             callerBinding: binding, macID: mac, accountID: account)
     }
+    var supportsAdmissionResults: Bool { wireVersion == 2 && submissionSchemaVersion == 1 && inputCarrierVersion == 3 }
     func supported(by capabilities: CommandHandshakeCapabilities) -> Bool {
-        capabilities.wireVersions.contains(wireVersion) && capabilities.submissionSchemaVersions.contains(submissionSchemaVersion)
+        let understood = (wireVersion == 1 && submissionSchemaVersion == 1 && [2, 3].contains(inputCarrierVersion)) || supportsAdmissionResults
+        return understood && capabilities.wireVersions.contains(wireVersion) && capabilities.submissionSchemaVersions.contains(submissionSchemaVersion)
             && capabilities.inputCarrierVersions.contains(inputCarrierVersion)
     }
 }
@@ -160,14 +165,22 @@ public final class RetainedCommandHandshake {
         }
         try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         let offer = try CommandHandshakeOffer(canonicalBytes: hello.payload)
-        guard let wire = offer.capabilities.wireVersions.intersection(capabilities.wireVersions).max(),
-              let submission = offer.capabilities.submissionSchemaVersions.intersection(capabilities.submissionSchemaVersions).max(),
-              let input = offer.capabilities.inputCarrierVersions.intersection(capabilities.inputCarrierVersions).max() else {
+        let wires = offer.capabilities.wireVersions.intersection(capabilities.wireVersions).sorted(by: >)
+        let inputs = offer.capabilities.inputCarrierVersions.intersection(capabilities.inputCarrierVersions).sorted(by: >)
+        let selected = wires.flatMap { wire in inputs.compactMap { input -> (UInt64, UInt64)? in
+            (wire == 1 && [2, 3].contains(input)) || (wire == 2 && input == 3) ? (wire, input) : nil
+        } }.first
+        guard let (wire, input) = selected,
+              let submission = offer.capabilities.submissionSchemaVersions.intersection(capabilities.submissionSchemaVersions).max() else {
             try reply.send(CommandHandshakeReply(nonce: offer.nonce, profile: nil).bytes, timeoutMilliseconds: timeoutMilliseconds)
             throw MachCommandHandshakeError.incompatible
         }
         let profile = CommandHandshakeProfile(wireVersion: wire, submissionSchemaVersion: submission, inputCarrierVersion: input,
             callerBinding: try MachCommandWire.random(16), macID: macID, accountID: accountID)
+        guard profile.supported(by: .implemented) else {
+            try reply.send(CommandHandshakeReply(nonce: offer.nonce, profile: nil).bytes, timeoutMilliseconds: timeoutMilliseconds)
+            throw MachCommandHandshakeError.incompatible
+        }
         try reply.send(CommandHandshakeReply(nonce: offer.nonce, profile: profile).bytes, timeoutMilliseconds: timeoutMilliseconds)
         try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         self.profile = profile; self.caller = caller; completed = true
@@ -202,7 +215,7 @@ public final class RetainedCommandHandshake {
             submissionSchemaVersion: profile.submissionSchemaVersion, captureSchemaVersion: captureSchemaVersion,
             expression: expression, userID: userID, auditSessionID: auditSessionID, resolvedTarget: resolvedTarget,
             minimalEnvironment: minimalEnvironment, streamBinding: streamBinding, submissionLimits: submissionLimits,
-            captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
+            captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries, checkCancellation: checkCancellation, admissionProfile: profile)
     }
     /// The registry uses current protected policy and retires a failed retained identity.
     func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {

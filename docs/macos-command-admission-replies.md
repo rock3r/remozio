@@ -2,7 +2,7 @@
 
 The command frontend can transfer its original input fileport and a private reply right in one authenticated Mach message. A separate control carrier returns bounded bytes from the retained Root incarnation.
 
-These bytes are not an admission result. The channel establishes sender and transport identity. The request controller must still bind a typed result to the original submission and prove its admission state.
+The raw `submit` API returns bytes without admission semantics. The explicit [typed result contract](macos-command-admission-results.md) adds submission-bound validation under local wire version 2. These raw bytes are not an admission result. The channel establishes sender and transport identity. The request controller must still bind a typed result to the original submission and prove its admission state.
 
 ```mermaid
 sequenceDiagram

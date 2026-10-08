@@ -82,4 +82,17 @@ final class CommandHandshakeCodecTests: XCTestCase {
         XCTAssertEqual(CommandHandshakeCapabilities.admissionReplies.inputCarrierVersions, [3])
     }
 
+    func testTypedResultWireNeedsExplicitNegotiationAndTheReplyCarrier() throws {
+        let selected = profile(wire: 2, input: 3), offer = try CommandHandshakeOffer(nonce: nonce, capabilities: .admissionResults)
+        let bytes = try CommandHandshakeReply(nonce: nonce, profile: selected).bytes
+        XCTAssertEqual(try CommandHandshakeReply.decode(bytes, offer: offer, macID: mac, accountID: account), selected)
+        for old in [CommandHandshakeCapabilities.current, .admissionReplies] {
+            XCTAssertThrowsError(try CommandHandshakeReply.decode(bytes, offer: CommandHandshakeOffer(nonce: nonce, capabilities: old), macID: mac, accountID: account))
+        }
+        let incompatible = try CommandHandshakeOffer(nonce: nonce, capabilities: .init(wireVersions: [2], submissionSchemaVersions: [1], inputCarrierVersions: [2]))
+        XCTAssertThrowsError(try CommandHandshakeReply.decode(CommandHandshakeReply(nonce: nonce, profile: profile(wire: 2, input: 2)).bytes,
+            offer: incompatible, macID: mac, accountID: account))
+        XCTAssertEqual(CommandHandshakeCapabilities.current.wireVersions, [1])
+    }
+
 }

@@ -6,7 +6,10 @@ import RemozioProtocol
 public struct AuthenticatedCommandReply: Sendable {
     public let payload: Data
     public let profile: CommandHandshakeProfile
-    fileprivate init(payload: Data, profile: CommandHandshakeProfile) { self.payload = payload; self.profile = profile }
+    let verifiedResult: VerifiedCommandAdmissionResult?
+    fileprivate init(payload: Data, profile: CommandHandshakeProfile, verifiedResult: VerifiedCommandAdmissionResult? = nil) {
+        self.payload = payload; self.profile = profile; self.verifiedResult = verifiedResult
+    }
 }
 
 public enum MachCommandAdmissionClient {
@@ -22,11 +25,27 @@ public enum MachCommandAdmissionClient {
             maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: timeoutMilliseconds, checkCancellation: checkCancellation)
     }
 
+    /// Validates typed semantics before the same final control deadline. A result grants no execution permit.
+    public static func submitWithResult(_ submission: CommandSubmission, inputDescriptor: Int32,
+                                       handshake: VerifiedCommandHandshake, authorityPolicy: XPCPeerPolicy,
+                                       maximumPayloadBytes: Int, timeoutMilliseconds: UInt32 = 5000,
+                                       checkCancellation: () throws -> Void = {}) throws -> VerifiedCommandAdmissionResult {
+        guard authorityPolicy.expectedUserID == 0 else { throw MachCommandHandshakeError.invalidConfiguration }
+        let reply = try submit(submission, inputDescriptor: inputDescriptor, handshake: handshake,
+            expression: authorityPolicy.requirement, userID: 0, auditSessionID: authorityPolicy.expectedAuditSessionID,
+            maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: timeoutMilliseconds,
+            checkCancellation: checkCancellation, typedResult: true)
+        guard let result = reply.verifiedResult else { throw CommandAdmissionResultError.incompatible }
+        return result
+    }
+
     /// Fixture identity seam. Product callers always require the configured release Root policy and UID zero.
     static func submit(_ submission: CommandSubmission, inputDescriptor: Int32,
                        handshake: VerifiedCommandHandshake, expression: String, userID: uid_t, auditSessionID: au_asid_t?,
                        maximumPayloadBytes: Int, timeoutMilliseconds: UInt32 = 5000,
-                       checkCancellation: () throws -> Void = {}, clock: (() throws -> UInt64)? = nil) throws -> AuthenticatedCommandReply {
+                       checkCancellation: () throws -> Void = {}, clock: (() throws -> UInt64)? = nil,
+                       typedResult: Bool = false) throws -> AuthenticatedCommandReply {
+        guard !typedResult || handshake.profile.supportsAdmissionResults else { throw CommandAdmissionResultError.incompatible }
         guard handshake.profile.inputCarrierVersion == UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion),
               submission.schemaVersion == handshake.profile.submissionSchemaVersion,
               submission.binding.callerBinding == handshake.profile.callerBinding else { throw MachCommandHandshakeError.incompatible }
@@ -68,9 +87,10 @@ public enum MachCommandAdmissionClient {
         try checkCancellation()
         _ = try remaining()
         try handshake.authenticateReply(reply.caller, expression: expression, userID: userID, auditSessionID: auditSessionID)
+        let result = typedResult ? try CommandAdmissionResultPayload.decode(reply.payload, profile: handshake.profile, original: submission) : nil
         try checkCancellation()
         _ = try remaining()
-        return AuthenticatedCommandReply(payload: reply.payload, profile: handshake.profile)
+        return AuthenticatedCommandReply(payload: reply.payload, profile: handshake.profile, verifiedResult: result)
     }
 }
 

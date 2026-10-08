@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
@@ -11,6 +12,8 @@ public final class RetainedCommandCapture {
     private let caller: RetainedCommandCaller
     private let input: RetainedCommandInputDescriptor
     private let filesystem: CommandFilesystemCapture
+    let admissionProfile: CommandHandshakeProfile?
+    let submissionDigest: Data
     private let admissionReply: MachCommandReplyRight?
     private var closed = false
     private var requestOwned = false
@@ -32,7 +35,8 @@ public final class RetainedCommandCapture {
     init(received: sending ReceivedMachCommandInputSubmission, expectedCallerBinding: Data, submissionSchemaVersion: UInt64,
          captureSchemaVersion: UInt64, expression: String, userID: uid_t, auditSessionID: au_asid_t?, resolvedTarget: CommandTarget,
          minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data, submissionLimits: CBORLimits, captureLimits: CBORLimits,
-         maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {}) throws {
+         maximumAncestryEntries: Int = 16, checkCancellation: @Sendable () throws -> Void = {},
+         admissionProfile: CommandHandshakeProfile? = nil) throws {
         try received.claimForCaptureOwner()
         var heldFilesystem: CommandFilesystemCapture?
         do {
@@ -59,6 +63,14 @@ public final class RetainedCommandCapture {
             try filesystem.recheck(checkCancellation: checkCancellation)
             try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
             self.capture = capture; self.caller = received.caller; self.input = received.input; self.filesystem = filesystem
+            if let admissionProfile {
+                guard admissionProfile.callerBinding == submission.binding.callerBinding,
+                      admissionProfile.submissionSchemaVersion == submission.schemaVersion,
+                      admissionProfile.inputCarrierVersion == UInt64(received.carrierVersion) else {
+                    throw RetainedCommandCaptureError.binding
+                }
+            }
+            self.admissionProfile = admissionProfile; self.submissionDigest = Data(SHA256.hash(data: received.payload))
             self.admissionReply = received.reply
         } catch {
             heldFilesystem?.close(); received.caller.close(); received.input.close(); received.reply?.close()
@@ -113,6 +125,15 @@ public final class RetainedCommandCapture {
     func sendAdmissionReply(_ bytes: Data, timeoutMilliseconds: UInt32 = 5000) throws {
         guard !closed, let admissionReply else { throw MachCommandHandshakeError.retired }
         try admissionReply.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
+    /// The serialized owner supplies actual state. A failed delivery cannot change an admitted request.
+    func sendAdmissionOutcome(_ outcome: CommandAdmissionOutcome, macID: Data, accountID: Data) throws {
+        guard let profile = admissionProfile, profile.supportsAdmissionResults else { return }
+        guard profile.macID == macID, profile.accountID == accountID else { throw CommandAdmissionResultError.wrongBinding }
+        let payload = CommandAdmissionResultPayload(profile: profile, submission: capture.submission,
+            submissionDigest: submissionDigest, outcome: outcome)
+        try sendAdmissionReply(payload.canonicalBytes)
     }
 
     public func close() {
