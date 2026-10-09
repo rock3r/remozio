@@ -5452,20 +5452,44 @@ extension MachCommandCallerReceiverTests {
         var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
         var output = Data(), ended = false, inputEndSent = false, queueTimeouts = 0
         defer { control?.close() }
-        let deadline = Date().addingTimeInterval(60)
+        // Shared CI runners still make steady progress through the deliberately slow one-slot output queue.
+        let deadline = Date().addingTimeInterval(180)
+        func enqueueInput(_ control: MachCommandAuthorityPort) throws {
+            while sent < bytes.count, available > 0 {
+                let count = min(4096, available, bytes.count - sent)
+                let body = CommandStreamFrame(sequence: outgoing, body: .input(Data(bytes[sent..<(sent + count)])))
+                if try MachCommandWire.sendStream(body.encode(binding: binding), destination: control.borrowed(), toAuthority: true) {
+                    sent += count; available -= count; outgoing += 1
+                } else { queueTimeouts += 1; break }
+            }
+        }
         while !ended {
             guard Date() < deadline else {
                 XCTFail("Bulk transfer stalled: sent=\(sent), output=\(output.count), credit=\(available), sequence=\(outgoing), inputEnd=\(inputEndSent), queueTimeouts=\(queueTimeouts)")
                 throw MachCommandCallerError.timeout
             }
             if let control {
-                while sent < bytes.count, available > 0 {
-                    let count = min(4096, available, bytes.count - sent)
-                    let body = CommandStreamFrame(sequence: outgoing, body: .input(Data(bytes[sent..<(sent + count)])))
-                    if try MachCommandWire.sendStream(body.encode(binding: binding), destination: control.borrowed(), toAuthority: true) {
-                        sent += count; available -= count; outgoing += 1
-                    } else { queueTimeouts += 1; break }
-                }
+                if sent == 0 {
+                    // The worker holds only the fixture journal. The original frontend keeps its non-Sendable control right.
+                    let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
+                    let paused = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+                    DispatchQueue.global().async {
+                        defer { done.signal() }
+                        let result = Result {
+                            try authority.read { _ in
+                                entered.signal()
+                                guard resume.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                            }
+                        }
+                        paused.withLock { $0 = result }
+                    }
+                    defer { resume.signal() }
+                    XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+                    try enqueueInput(control)
+                    resume.signal()
+                    XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+                    try paused.withLock { try XCTUnwrap($0).get() }
+                } else { try enqueueInput(control) }
                 if sent == bytes.count, !inputEndSent {
                     let end = try CommandStreamFrame(sequence: outgoing, body: .inputEnd).encode(binding: binding)
                     if try MachCommandWire.sendStream(end, destination: control.borrowed(), toAuthority: true) { outgoing += 1; inputEndSent = true }
@@ -5527,7 +5551,13 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(try CommandStreamFrame.decode(ready.payload, binding: binding, direction: .toFrontend).body, .output(Data("READY".utf8)))
         control.close()
         let result: ReceivedMachCommandSubmission
-        do { result = try receive.receiveTerminalReply(timeoutMilliseconds: 60000) }
+        do {
+            let deadline = Date().addingTimeInterval(180)
+            while true {
+                do { result = try receive.receiveTerminalReply(timeoutMilliseconds: 60000); break }
+                catch MachCommandCallerError.timeout where Date() < deadline { continue }
+            }
+        }
         catch {
             XCTFail("Continue cleanup stalled: marker=\(FileManager.default.fileExists(atPath: marker.path)), owners=\(authority.activeCommandCount), phase=\(try authority.withRequests { try $0.state(requestID: request.requestID).phase })")
             throw error
