@@ -11,6 +11,7 @@
 #include "RemozioCommandMonitor.h"
 #include "RemozioCommandCaller.h"
 #include "RemozioCommandPTY.h"
+#include "RemozioFrontendTerminal.h"
 typedef struct {
     mach_port_seqno_t sequence;
     mach_msg_size_t size;
