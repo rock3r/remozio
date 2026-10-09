@@ -25,6 +25,7 @@ EXPECTED = {
     "shellExitObserved": True,
     "monitorReaped": True,
     "targetWait": 7 << 8,
+    "shellStopRecords": 0,
 }
 
 
@@ -101,7 +102,10 @@ def measure():
                                   NATIVE / "CommandProcess.c", specification, protocol])
         launcher = compile_fixture(directory, "child", [LAUNCHER, specification])
         probe = compile_fixture(directory, "probe", [FIXTURES / "probe.c",
-                                NATIVE / "CommandMonitor.c", specification, protocol])
+                                FIXTURES / "parent-fixture.c", specification, protocol])
+        regression = run_probe([str(probe), "record-regression"], directory)
+        if regression != {"stopRecords": 1, "latestContinued": True}:
+            raise RuntimeError("The observer lost a stop record before the continued snapshot")
         frame = directory / "frame.bin"
         frame.write_bytes(launch_frame(directory))
         for mode in ["signal", "typed"]:
@@ -122,6 +126,7 @@ def measure():
                  "deploymentTarget": "26.0"},
         "sources": hashes,
         "cases": observations,
+        "recordObserverRegression": regression,
         "limits": ["Disposable unprivileged Bash and sleep jobs in private terminals; no user terminal",
                    "Current monitor UID guard substituted; synthetic launcher changes no credentials",
                    "No protected installation, production elevation, actual CLI or cross-user proof",

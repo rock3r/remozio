@@ -8,6 +8,30 @@
 #include <sys/wait.h>
 #include <time.h>
 
+static unsigned shell_stop_records;
+int fixture_observe_record(remozio_monitor_stream_t *stream, const remozio_monitor_record_t *record) {
+    int error = remozio_monitor_stream_accept(stream, record);
+    if (!error && record->tag == REMOZIO_MONITOR_JOB_STATE && (record->flags & REMOZIO_MONITOR_STOPPED)) {
+        ++shell_stop_records;
+    }
+    return error;
+}
+static int verify_record_observer(void) {
+    remozio_monitor_stream_t stream;
+    remozio_monitor_stream_init(&stream);
+    remozio_monitor_record_t record = {.tag = REMOZIO_MONITOR_PREPARED, .target_pid = 123, .sequence = 1};
+    if (fixture_observe_record(&stream, &record) || remozio_monitor_stream_note_release(&stream)) return 1;
+    record = (remozio_monitor_record_t){.tag = REMOZIO_MONITOR_JOB_STATE,
+        .flags = REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED | REMOZIO_MONITOR_STOPPED,
+        .target_pid = 123, .detail = SIGTSTP, .stop_code = CLD_STOPPED, .sequence = 2, .job_revision = 1};
+    if (fixture_observe_record(&stream, &record)) return 1;
+    record.flags = REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED;
+    record.detail = record.stop_code = 0; record.sequence = 3; record.job_revision = 2;
+    if (fixture_observe_record(&stream, &record)) return 1;
+    bool latest_continued = !(stream.latest.flags & REMOZIO_MONITOR_STOPPED);
+    printf("{\"stopRecords\":%u,\"latestContinued\":%s}", shell_stop_records, latest_continued ? "true" : "false");
+    return shell_stop_records == 1 && latest_continued ? 0 : 1;
+}
 static volatile sig_atomic_t interrupted;
 static void interrupt_probe(int number) { (void)number; interrupted = 1; }
 static uint64_t now_ms(void) {
@@ -55,6 +79,7 @@ static int progress(remozio_command_monitor_t *monitor, remozio_command_monitor_
     return 0;
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "record-regression")) return verify_record_observer();
     if (argc != 5 || (strcmp(argv[4], "typed") && strcmp(argv[4], "signal"))) return 1;
     struct sigaction action = {0};
     action.sa_handler = interrupt_probe;
@@ -121,7 +146,7 @@ int main(int argc, char **argv) {
         usleep(1000);
     }
     if (phase != 7 || !nested_stop || !nested_resume || !interrupt || !state.target_exec_observed ||
-        !state.target_exit_observed || !state.status.reaped || state.status.failed ||
+        !state.target_exit_observed || !state.status.reaped || state.status.failed || shell_stop_records ||
         state.status.latest.detail != (7 << 8) || state.monitor_wait_status || !strstr(output, "DONE_MARKER:130")) {
         failure = 13;
     }
@@ -141,10 +166,10 @@ cleanup:
     remozio_command_pty_close(pty);
     if (directory >= 0) close(directory);
     printf("{\"failure\":%d,\"nestedStopped\":%s,\"nestedResumed\":%s,\"foregroundInterrupted\":%s,"
-           "\"shellExecObserved\":%s,\"shellExitObserved\":%s,\"monitorReaped\":%s,\"targetWait\":%u}",
+           "\"shellExecObserved\":%s,\"shellExitObserved\":%s,\"monitorReaped\":%s,\"targetWait\":%u,\"shellStopRecords\":%u}",
            failure, nested_stop ? "true" : "false", nested_resume ? "true" : "false", interrupt ? "true" : "false",
            state.target_exec_observed ? "true" : "false", state.target_exit_observed ? "true" : "false",
-           state.monitor_reaped ? "true" : "false", state.status.latest.detail);
+           state.monitor_reaped ? "true" : "false", state.status.latest.detail, shell_stop_records);
     if (failure) fprintf(stderr, "private terminal transcript:\n%s\n", output);
     return failure ? 1 : 0;
 }

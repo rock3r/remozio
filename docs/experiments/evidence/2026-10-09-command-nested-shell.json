@@ -1,6 +1,6 @@
 {
   "experiment": "command-nested-shell-v1",
-  "measuredAtUTC": "2026-10-09T20:22:10.068774+00:00",
+  "measuredAtUTC": "2026-10-09T20:34:34.198968+00:00",
   "host": {
     "os": "27.0.1",
     "build": "26A434",
@@ -10,7 +10,8 @@
   },
   "sources": {
     "experiments/command-nested-shell/monitor-fixture.c": "3df5eb4e196ab086c1891f74ba529450695cde0ecbf55e894eccab01bc54290a",
-    "experiments/command-nested-shell/probe.c": "bd190666215d4b760dbbcd7245a5c64c8b244664586d0422efd8e33a7ced5a66",
+    "experiments/command-nested-shell/parent-fixture.c": "8cd48d682694bf0f0c551e26be3abf9d8fb1adbbf8f1cbe7b6253c97f430c307",
+    "experiments/command-nested-shell/probe.c": "6e6a9408db71bf5763e569d51d8ab5b4377d640492d57327e1c255e3bc946197",
     "macos/app/CommandMonitor/MonitorMain.c": "8be7c8fda18e54c7152fc7185603f5a80170a48585fd6c05bd1d8b206dbd5ac3",
     "macos/core/Tests/RemozioCoreTests/Fixtures/command-process/child.c": "d72dbeed0be6f41756a5368f49595e92e0b29d633e9e3db6131b63741fc39f08",
     "macos/core/Sources/RemozioMach/CommandMonitor.c": "ebb4e09b184b491bedaa1df2ee41043dc3d4b5707234c383706a1ed126be56ea",
@@ -23,7 +24,7 @@
     "macos/core/Sources/RemozioMach/include/RemozioCommandProcess.h": "443de2eb120f1ee3857fafdbb74b9e0552b0a47619e8588446fa8f7ede64f1d4",
     "macos/core/Sources/RemozioMach/include/RemozioCommandPTY.h": "2f21aabc187008ec100b0f9efdaca4fe159b6da09e430bdc2251089aa2a85e94",
     "macos/core/Sources/RemozioMach/include/RemozioCommandChild.h": "18148fadeb459eabfe9d02f821addcce240084db0fa12868bfc3c7579b3b3d65",
-    "scripts/run-macos-nested-shell-experiment.py": "7c83df398c07a6eddb7c1f750c4bd6875a454062ff26a029b942c4e00ebdd280"
+    "scripts/run-macos-nested-shell-experiment.py": "855875cfbc7b42c4298bc46764409045b65a1aaed02341b942ef1cdf758cb84f"
   },
   "cases": {
     "signal": {
@@ -37,7 +38,8 @@
         "shellExecObserved": true,
         "shellExitObserved": true,
         "monitorReaped": true,
-        "targetWait": 1792
+        "targetWait": 1792,
+        "shellStopRecords": 0
       }
     },
     "typed": {
@@ -51,9 +53,14 @@
         "shellExecObserved": true,
         "shellExitObserved": true,
         "monitorReaped": true,
-        "targetWait": 1792
+        "targetWait": 1792,
+        "shellStopRecords": 0
       }
     }
+  },
+  "recordObserverRegression": {
+    "stopRecords": 1,
+    "latestContinued": true
   },
   "limits": [
     "Disposable unprivileged Bash and sleep jobs in private terminals; no user terminal",

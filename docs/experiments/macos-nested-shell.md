@@ -18,7 +18,8 @@ flowchart LR
 ```
 
 The fixture compiles the current monitor, native parent, process owner, PTY implementation and launch decoder.
-It substitutes only the monitor's UID guard. The kernel credentials remain those of the unprivileged test user.
+The only credential substitute is the monitor's UID guard. The kernel credentials remain those of the unprivileged test user.
+A parent fixture observes each record after the original codec accepts it. It changes no record or acceptance result.
 The synthetic launcher changes no credentials. No fixture enters the app bundle or installs a service.
 
 Bash starts with `--noprofile --norc`, a disposable HOME and an explicit environment.
@@ -32,7 +33,7 @@ The probe reads and writes only its private terminal. It never changes the user'
 | Start | The actual Bash target becomes ready |
 | Nested job | `/bin/sleep` becomes the foreground group in the monitor's session |
 | Suspend | The nested job stops; Bash returns to its foreground prompt |
-| Ownership | The monitor remains alive; the Bash target is not reported as stopped |
+| Ownership | The monitor remains alive; no accepted record reports the Bash target as stopped |
 | Resume | `fg` restores the original nested foreground group |
 | Interrupt | The private terminal interrupts that job; Bash observes status 130 |
 | Finish | Bash exits with status 7; independent exec/exit evidence and actual waits agree |
@@ -41,6 +42,11 @@ Fifteen trials use `TIOCSIG` for suspend and interrupt.
 Fifteen trials write the current terminal's `VSUSP` and `VINTR` bytes.
 The probe waits until the nested sleep job is observable before sending either control.
 That fixture check adds no product delay or command restriction.
+
+The probe counts every accepted Bash stop record, including a stop followed by a continue within one poll.
+Each real trial requires a zero count. A synthetic regression requires one stop while the retained snapshot shows continued state.
+These counts describe reported records. The monitor can coalesce observations before it emits a record.
+They do not prove the absence of every transient kernel state.
 
 A nested job's suspension does not mean that the Bash target stopped.
 Bash handles its own child and prompt. The frontend must preserve that distinction when job-state events are implemented.
