@@ -184,9 +184,7 @@ final class CommandExecution {
             else {
                 do {
                     try flushPendingSignals(validation: validation, checkPolicy: checkStreamPolicy)
-                    let job = try currentJobState(observation)
-                    if job != nil { try checkStreamPolicy() }
-                    try pump.observeJobState(job)
+                    try pump.observeJobState(currentJobState(observation))
                     if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
                         _ = try pump.open()
                     }
@@ -206,9 +204,7 @@ final class CommandExecution {
             else {
                 do {
                     try flushPendingSignals(validation: validation, checkPolicy: checkStreamPolicy)
-                    let job = try currentJobState(observation)
-                    if job != nil { try checkStreamPolicy() }
-                    try pipeControls.observeJobState(job)
+                    try pipeControls.observeJobState(currentJobState(observation))
                     if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
                         _ = try pipeControls.open()
                     }

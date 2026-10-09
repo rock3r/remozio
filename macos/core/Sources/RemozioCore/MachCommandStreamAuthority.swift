@@ -49,8 +49,9 @@ final class MachCommandStreamAuthority {
         }
         observedJob = value; pendingJob = value
     }
-    func flushJobState() throws {
+    func flushJobState(checkPolicy: () throws -> Void) throws {
         guard !closed, outgoing.next > 0, let pendingJob else { return }
+        try checkPolicy()
         if try send(.jobState(pendingJob)) { self.pendingJob = nil }
     }
     func receiveControl(currentPolicy: XPCPeerPolicy) throws -> CommandStreamFrame.Body? {

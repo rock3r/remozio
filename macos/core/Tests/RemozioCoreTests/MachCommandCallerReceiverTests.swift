@@ -6413,15 +6413,17 @@ extension MachCommandCallerReceiverTests {
                         }
                     }
                     for revision: UInt64 in 1...4 { XCTAssertTrue(try channel.send(.jobState(.init(revision: revision, state: .continued)))) }
+                    var policyChecks = 0
                     try channel.observeJobState(.init(revision: 5, state: .stopped(signal: UInt32(SIGSTOP), rawStopCode: UInt32(CLD_STOPPED), tracing: .unknown)))
-                    try channel.flushJobState()
-                    try channel.observeJobState(.init(revision: 7, state: .continued)); try channel.flushJobState()
+                    try channel.flushJobState { policyChecks += 1 }
+                    try channel.observeJobState(.init(revision: 7, state: .continued)); try channel.flushJobState { policyChecks += 1 }
                     XCTAssertThrowsError(try channel.observeJobState(.init(revision: 6, state: .continued)))
                     full.signal()
                     guard drained.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
-                    try channel.flushJobState()
-                    try channel.observeJobState(.init(revision: 7, state: .continued)); try channel.flushJobState()
-                    try channel.observeJobState(.init(revision: 8, state: .continued)); try channel.observeJobState(nil); try channel.flushJobState()
+                    try channel.flushJobState { policyChecks += 1 }
+                    try channel.observeJobState(.init(revision: 7, state: .continued)); try channel.flushJobState { throw CommandExecutionError.policyChanged }
+                    XCTAssertEqual(policyChecks, 3)
+                    try channel.observeJobState(.init(revision: 8, state: .continued)); try channel.observeJobState(nil); try channel.flushJobState { throw CommandExecutionError.policyChanged }
                     try terminal.sendTerminalNonblocking(payloads.1)
                 } }
             }

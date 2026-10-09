@@ -80,6 +80,7 @@ flowchart LR
 Root retains one unsent observation. A newer native revision replaces that pending value under queue pressure.
 Native revisions can skip. Emitted channel sequences remain consecutive.
 A full queue advances no sequence. Repeated identical native snapshots produce no additional frame.
+Policy is checked before pending delivery, not during idle polling after delivery.
 Known target exit or an uncertain observation discards the unsent snapshot.
 A frame already queued can describe an earlier state.
 These observations are not a complete history of every kernel transition.

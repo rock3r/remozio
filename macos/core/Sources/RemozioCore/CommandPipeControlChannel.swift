@@ -29,7 +29,7 @@ final class CommandPipeControlChannel {
                 default: throw CommandStreamError.malformed
                 }
             }
-            try channel.flushJobState()
+            try channel.flushJobState(checkPolicy: checkControlPolicy)
         } catch { detach(); throw error }
     }
     func detach() { connected = false; channel.close() }

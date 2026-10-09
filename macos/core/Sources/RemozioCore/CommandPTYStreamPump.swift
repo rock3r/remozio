@@ -56,7 +56,7 @@ final class CommandPTYStreamPump {
                 }
             } catch { detach(); throw error }
         }
-        if connected { try channel.flushJobState() }
+        if connected { try channel.flushJobState(checkPolicy: checkControlPolicy) }
         for _ in 0..<4 {
             if allowInput { try pumpInput() }
             if connected, !outputEndSent, pendingCredit > 0 {
