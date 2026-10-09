@@ -76,8 +76,11 @@ Zero, invalid signals and a reaped or lost leader are rejected.
 An unexpected `ECHILD` retires PID ownership and prevents later signaling or reaping through that object.
 It is an ownership failure, not a known command result.
 
-Cancellation closes the configuration and release pipes, wipes the frame and signals the owned group.
-Closing release can let a prepared launcher exit before `SIGKILL` arrives. Both paths prevent exec when no release occurred.
+Cancellation signals the owned group before closing the configuration and release pipes and wiping the frame.
+This order avoids retiring a prepared launcher before the signal reaches its group.
+If Darwin returns `EPERM`, one nonblocking poll can confirm that the owned child has exited and been reaped.
+Only that actual reap makes cancellation successful. A live child retains the permission error and its process ownership.
+Neither cancellation path releases an unapproved command.
 Disposal returns `EBUSY` while the leader remains unreaped. The caller retains ownership and polls again.
 No hidden reaper thread or blocking destructor takes that responsibility.
 
@@ -95,10 +98,13 @@ Those integrations remain required. It does not steal a real user's controlling 
 
 ## Evidence and remaining integration
 
-Eleven native tests use an unprivileged synthetic launcher and an actual executable fixture.
+Native tests use an unprivileged synthetic launcher and an actual executable fixture.
 They cover unread stdin, raw argv/environment, retained directory, descriptor isolation, private release, real exit/signal results and group forwarding.
 They also cover large frames, deadlines, malformed status, failed release writes, cancellation and unexpected external reaping.
 A disposable PTY test verifies the new session, controlling slave, foreground group, output and observed program exit.
+Three cancellation regressions cover a retired preparation helper, ordinary prepared cancellation and a live permission failure.
+They verify actual child reaping and preserve unread stdin bytes and shared descriptor flags.
+The retired-helper regression uses a real kernel exit; only the live permission failure injects `EPERM`.
 The fixture never enters a product bundle, changes credentials or installs a service.
 
 Protected launcher validation, durable dispatch ownership, bound terminal results and current elevation-policy selection remain separate gates.
