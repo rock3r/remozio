@@ -47,7 +47,9 @@ int main(int argc, char **argv) {
         unsigned char release=0;if(exact(6,&release,1)||release!=1)return 70;close(6);
         if(strstr(argv[0],"late-fault-child")) {unsigned char extra=1;write(5,&extra,1);}
         execve(spec.executable,spec.arguments,spec.environment);
-        return 70;
+        int error=errno;unsigned char failed[12]={0x52,0x4d,0x52,0x31,0,0,0,2,0,0,0,0};
+        for(unsigned i=0;i<4;i++)failed[8+i]=(unsigned char)((uint32_t)error>>((3U-i)*8));
+        (void)write(5,failed,sizeof failed);return 70;
     }
     if(argc!=4 || (unsigned char)argv[0][0]!=0xff || argv[0][1] || argv[1][0] ||
         (unsigned char)argv[2][0]!=0xfe || argv[2][1])return 91;

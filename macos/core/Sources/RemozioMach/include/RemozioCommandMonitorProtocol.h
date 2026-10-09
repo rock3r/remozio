@@ -41,4 +41,16 @@ int remozio_monitor_stream_note_release(remozio_monitor_stream_t *stream);
 /* Requires consecutive emitted sequences, one target binding and monotonic job revisions.
  * Protocol errors leave the state unchanged. A reaped report requires separate kernel and owner evidence. */
 int remozio_monitor_stream_accept(remozio_monitor_stream_t *stream, const remozio_monitor_record_t *record);
+#define REMOZIO_MONITOR_CONTROL_BYTES 32
+enum remozio_monitor_control_tag {
+    REMOZIO_MONITOR_SIGNAL = 1,
+    REMOZIO_MONITOR_CANCEL = 2
+};
+typedef struct {
+    uint32_t tag, signal;
+    uint64_t sequence;
+} remozio_monitor_control_t;
+/* Private inherited control pipe only. No PID, approval, or executable is accepted here. */
+int remozio_monitor_control_encode(const remozio_monitor_control_t *control, unsigned char bytes[REMOZIO_MONITOR_CONTROL_BYTES]);
+int remozio_monitor_control_decode(const void *bytes, size_t count, remozio_monitor_control_t *control);
 #endif

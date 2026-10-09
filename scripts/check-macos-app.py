@@ -56,6 +56,25 @@ def check(configuration):
             finally:
                 os.close(read_descriptor)
                 if write_descriptor >= 0: os.close(write_descriptor)
+    monitor = app / 'Contents/Helpers/RemozioCommandMonitor'
+    monitor_identity = 'dev.remozio.command-monitor.debug' if configuration == 'Debug' else 'dev.remozio.command-monitor'
+    require(monitor.is_file(), 'Missing embedded command monitor')
+    verify_executable(monitor, monitor_identity)
+    run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(monitor))
+    monitor_original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioCommandMonitor'
+    require(monitor.read_bytes() == monitor_original.read_bytes(), 'Embedding changed the signed command monitor')
+    require(subprocess.run([str(monitor)], timeout=5).returncode == 64, 'Command monitor must reject public command arguments')
+    if os.geteuid() != 0:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            os.write(write_descriptor, b'unread command input'); os.close(write_descriptor); write_descriptor = -1
+            denied_monitor = subprocess.run([str(monitor), '--monitor', str(child)], stdin=read_descriptor, capture_output=True, timeout=5)
+            require(denied_monitor.returncode == 77, 'Command monitor must require root before reading private data')
+            require(os.read(read_descriptor, 64) == b'unread command input', 'Refused command monitor consumed stdin')
+            require(not denied_monitor.stdout and not denied_monitor.stderr, 'Command monitor wrote to the command streams')
+        finally:
+            os.close(read_descriptor)
+            if write_descriptor >= 0: os.close(write_descriptor)
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     require(info['CFBundleIdentifier'] == identity, 'Unexpected bundle identity')
     require(info['LSMinimumSystemVersion'] == '26.0', 'Unexpected deployment target')

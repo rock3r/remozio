@@ -1,8 +1,8 @@
 # Private command monitor status
 
-The native codec defines the status stream for the planned protected command monitor.
+The native codec defines the status stream for the [embedded command monitor](macos-command-monitor.md).
 It grants no approval, authenticates no executable, and does not establish kernel process ownership.
-The product authority and monitor do not use it yet.
+The embedded monitor uses it. The product authority does not consume it yet.
 
 The monitor must own the target's final wait result. Root must own the monitor's final wait result.
 Root must register separate target exec and exit observations before releasing execution.
@@ -108,6 +108,24 @@ Focused native tests cover canonical encoding, record shapes, malformed bytes, r
 They use synthetic protocol records. They do not establish protected process behavior or cross-user execution.
 
 The native parent must add bounded framing, partial-EOF handling, independent kernel observations, verified launch and owned cleanup.
-The embedded monitor must add status backpressure, private descriptor isolation, target ownership and control handling.
+The embedded monitor implements bounded status buffering, target ownership and private control handling.
+The native Root parent and authority must connect those mechanics without granting authority from decoded records.
 Frontend job control remains subject to [issue 250](https://github.com/rock3r/remozio/issues/250), including external debugger behavior.
 Physical tests, the chosen elevation policy, and service installation remain separate gates.
+
+## Private control records
+
+Controls contain exactly 32 bytes in network byte order. They use a separate magic and the same explicit wire version.
+The Root parent must verify the original caller before emitting a control. The inherited pipe does not authenticate external caller messages.
+
+| Byte offset | Width | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic `RMK1` |
+| 4 | 4 | Private wire version, currently 1 |
+| 8 | 4 | Signal tag 1 or cancel tag 2 |
+| 12 | 4 | Valid signal number for signal; zero for cancel |
+| 16 | 8 | Consecutive control sequence starting at one |
+| 24 | 8 | Reserved; must be zero |
+
+Controls carry no target PID, command bytes, release flag, or approval. Unknown versions, tags and reserved fields are rejected.
+The monitor validates ordering on its private channel and retains the target through its exclusive native owner.

@@ -232,4 +232,54 @@ final class CommandMonitorProtocolTests: XCTestCase {
         XCTAssertEqual(remozio_monitor_record_decode(&bytes, 64, nil), EINVAL)
         XCTAssertEqual(state.latest.sequence, 1); XCTAssertEqual(decoded.sequence, 0)
     }
+
+    func testCanonicalVersionedControlRecordsCarryNoTargetPID() {
+        var control = remozio_monitor_control_t()
+        control.tag = UInt32(REMOZIO_MONITOR_CANCEL.rawValue); control.sequence = 1
+        var bytes = [UInt8](repeating: 0, count: Int(REMOZIO_MONITOR_CONTROL_BYTES))
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), 0)
+        XCTAssertEqual(bytes.map { String(format: "%02x", $0) }.joined(), "524d4b3100000001000000020000000000000000000000010000000000000000")
+        var decoded = remozio_monitor_control_t()
+        XCTAssertEqual(bytes.withUnsafeBytes { remozio_monitor_control_decode($0.baseAddress, $0.count, &decoded) }, 0)
+        XCTAssertEqual(decoded.tag, control.tag); XCTAssertEqual(decoded.sequence, 1); XCTAssertEqual(decoded.signal, 0)
+        control.tag = UInt32(REMOZIO_MONITOR_SIGNAL.rawValue); control.signal = UInt32(SIGCONT); control.sequence = 2
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), 0)
+        XCTAssertEqual(bytes.withUnsafeBytes { remozio_monitor_control_decode($0.baseAddress, $0.count, &decoded) }, 0)
+        XCTAssertEqual(decoded.signal, UInt32(SIGCONT)); XCTAssertEqual(decoded.sequence, 2)
+    }
+    func testTruncatedUnsupportedAndReservedControlBytesAreRejected() {
+        var control = remozio_monitor_control_t()
+        control.tag = UInt32(REMOZIO_MONITOR_SIGNAL.rawValue); control.signal = UInt32(SIGTERM); control.sequence = 1
+        var bytes = [UInt8](repeating: 0, count: 32), decoded = control
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), 0)
+        for count in 0..<32 {
+            decoded = control
+            XCTAssertEqual(bytes.withUnsafeBytes { remozio_monitor_control_decode($0.baseAddress, count, &decoded) }, EPROTO)
+            XCTAssertEqual(decoded.sequence, 0); XCTAssertEqual(decoded.tag, 0)
+        }
+        for offset in [0, 7, 11, 12, 24] {
+            var changed = bytes; changed[offset] ^= 0x80; decoded = control
+            XCTAssertEqual(changed.withUnsafeBytes { remozio_monitor_control_decode($0.baseAddress, $0.count, &decoded) }, EPROTO)
+            XCTAssertEqual(decoded.sequence, 0)
+        }
+        var extended = bytes + [0]
+        XCTAssertEqual(remozio_monitor_control_decode(&extended, extended.count, &decoded), EPROTO)
+    }
+    func testInvalidControlTagsSequencesAndSignalsAreRejected() {
+        var control = remozio_monitor_control_t(), bytes = [UInt8](repeating: 0, count: 32)
+        control.tag = UInt32(REMOZIO_MONITOR_SIGNAL.rawValue); control.signal = UInt32(SIGTERM)
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), EPROTO)
+        control.sequence = 1; control.signal = 0
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), EPROTO)
+        control.signal = UInt32(NSIG)
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), EPROTO)
+        control.tag = UInt32(REMOZIO_MONITOR_CANCEL.rawValue); control.signal = UInt32(SIGTERM)
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), EPROTO)
+        control.tag = 99; control.signal = 0
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), EPROTO)
+        XCTAssertEqual(remozio_monitor_control_encode(nil, &bytes), EPROTO)
+        XCTAssertEqual(remozio_monitor_control_encode(&control, nil), EINVAL)
+        XCTAssertEqual(remozio_monitor_control_decode(nil, 32, &control), EPROTO)
+        XCTAssertEqual(remozio_monitor_control_decode(&bytes, 32, nil), EINVAL)
+    }
 }

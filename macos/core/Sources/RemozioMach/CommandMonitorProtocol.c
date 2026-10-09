@@ -117,3 +117,28 @@ int remozio_monitor_stream_accept(remozio_monitor_stream_t *stream, const remozi
     *stream = next;
     return 0;
 }
+
+static int valid_control(const remozio_monitor_control_t *control) {
+    if (!control || !control->sequence) return EPROTO;
+    if (control->tag == REMOZIO_MONITOR_SIGNAL) return control->signal > 0 && control->signal < NSIG ? 0 : EPROTO;
+    if (control->tag == REMOZIO_MONITOR_CANCEL) return control->signal == 0 ? 0 : EPROTO;
+    return EPROTO;
+}
+int remozio_monitor_control_encode(const remozio_monitor_control_t *control, unsigned char bytes[REMOZIO_MONITOR_CONTROL_BYTES]) {
+    if (!bytes) return EINVAL;
+    int error = valid_control(control); if (error) return error;
+    memset(bytes, 0, REMOZIO_MONITOR_CONTROL_BYTES);
+    put_word(bytes, 0x524d4b31); put_word(bytes + 4, REMOZIO_MONITOR_WIRE_VERSION);
+    put_word(bytes + 8, control->tag); put_word(bytes + 12, control->signal); put_wide(bytes + 16, control->sequence);
+    return 0;
+}
+int remozio_monitor_control_decode(const void *input, size_t count, remozio_monitor_control_t *control) {
+    if (!control) return EINVAL;
+    memset(control, 0, sizeof(*control));
+    if (!input || count != REMOZIO_MONITOR_CONTROL_BYTES) return EPROTO;
+    const unsigned char *bytes = input;
+    if (word(bytes) != 0x524d4b31 || word(bytes + 4) != REMOZIO_MONITOR_WIRE_VERSION || wide(bytes + 24)) return EPROTO;
+    remozio_monitor_control_t candidate = {.tag = word(bytes + 8), .signal = word(bytes + 12), .sequence = wide(bytes + 16)};
+    int error = valid_control(&candidate); if (error) return error;
+    *control = candidate; return 0;
+}
