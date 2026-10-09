@@ -20,6 +20,7 @@ final class CommandExecution {
     private let validation: Validation?
     private var monitor: OpaquePointer?
     private var pump: CommandPTYStreamPump?
+    private var pipeControls: CommandPipeControlChannel?
     private var monitorOwned = false
     private var targetActive = false
     private var pendingSignals: [UInt32] = []
@@ -70,6 +71,9 @@ final class CommandExecution {
             preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask).canonicalBytes
         try validateLauncher(); try validateElevation(resources.capture)
         try recheck()
+        if resources.requiresPipeControls {
+            pipeControls = try CommandPipeControlChannel(channel: resources.makeStreamAuthority())
+        }
         let status = try resources.withBorrowedDescriptors { input, output, error, directory in
             let pty: RetainedCommandPTY?
             if resources.requiresStreamPump {
@@ -159,7 +163,7 @@ final class CommandExecution {
             guard try resources.queueTerminalOutcome(outcome, outputInterrupted: pump?.outputInterrupted ?? false) else { return }
         } catch { }
         terminalDeliveryPending = false; terminalDeliveryFinished = true
-        pump?.finishDelivery()
+        pump?.finishDelivery(); pipeControls?.close()
     }
     func poll(checkStreamPolicy: () throws -> Void = { throw CommandExecutionError.unavailable }) -> Progress {
         guard !disposed else { return .terminal(.unknown) }
@@ -179,15 +183,7 @@ final class CommandExecution {
             if observation.monitor_ownership_lost { pump.detach() }
             else {
                 do {
-                    if releaseSucceeded, !pendingSignals.isEmpty {
-                        let signals = pendingSignals; pendingSignals.removeAll()
-                        if monitorOwned {
-                            try resources.recheckCaller(expression: validation.callerExpression, userID: validation.callerUserID,
-                                auditSessionID: validation.callerSessionID)
-                            try checkStreamPolicy()
-                            for number in signals { try applyControl(.signal(number)) }
-                        }
-                    }
+                    try flushPendingSignals(validation: validation, checkPolicy: checkStreamPolicy)
                     if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
                         _ = try pump.open()
                     }
@@ -198,6 +194,25 @@ final class CommandExecution {
                         checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) })
                 } catch {
                     pump.detach()
+                    if !released || resources.capture.disconnectBehavior == .terminate { cancelOwned() }
+                }
+            }
+        }
+        if let pipeControls, let validation {
+            if observation.monitor_ownership_lost { pipeControls.detach() }
+            else {
+                do {
+                    try flushPendingSignals(validation: validation, checkPolicy: checkStreamPolicy)
+                    if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
+                        _ = try pipeControls.open()
+                    }
+                    try pipeControls.poll(expression: validation.callerExpression, userID: validation.callerUserID,
+                        auditSessionID: validation.callerSessionID,
+                        checkCaller: { try self.resources.recheckCaller(expression: validation.callerExpression,
+                            userID: validation.callerUserID, auditSessionID: validation.callerSessionID) },
+                        checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) })
+                } catch {
+                    pipeControls.detach()
                     if !released || resources.capture.disconnectBehavior == .terminate { cancelOwned() }
                 }
             }
@@ -226,14 +241,24 @@ final class CommandExecution {
             return .running
         }
         if cancelledBeforeRelease || observation.status.failed { cancelBeforeRelease(); return .preparing }
-        return observation.prepared && (pump == nil || pump?.opened == true && pump?.connected == true) ? .prepared : .preparing
+        return observation.prepared && (pump == nil || pump?.opened == true && pump?.connected == true) &&
+            (pipeControls == nil || pipeControls?.opened == true && pipeControls?.connected == true) ? .prepared : .preparing
+    }
+    private func flushPendingSignals(validation: Validation, checkPolicy: () throws -> Void) throws {
+        guard releaseSucceeded, !pendingSignals.isEmpty else { return }
+        let signals = pendingSignals; pendingSignals.removeAll()
+        guard monitorOwned else { return }
+        try resources.recheckCaller(expression: validation.callerExpression, userID: validation.callerUserID,
+            auditSessionID: validation.callerSessionID)
+        try checkPolicy()
+        for number in signals { try applyControl(.signal(number)) }
     }
     /// Poll until this succeeds. Disposal does not wait for a live monitor.
     func dispose() -> Bool {
         guard !disposed else { return true }
         guard !terminalDeliveryPending, pump?.readyForTerminal ?? true else { return false }
         if let monitor, remozio_command_monitor_dispose(monitor) != 0 { return false }
-        monitor = nil; monitorOwned = false; targetActive = false; disposed = true; pump?.close(); resources.close(); return true
+        monitor = nil; monitorOwned = false; targetActive = false; disposed = true; pump?.close(); pipeControls?.close(); resources.close(); return true
     }
 }
 

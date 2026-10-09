@@ -60,6 +60,46 @@ final class CommandStreamFrameTests: XCTestCase {
         try up.accept(.init(sequence: 1, body: .signal(UInt32(SIGINT))))
         try up.accept(.init(sequence: 2, body: .outputDrained))
     }
+    func testPipeControlsRequireTheirOwnOfferWithoutChangingLegacyProfiles() throws {
+        let selected = binding(wire: 5).profile, nonce = Data(repeating: 10, count: 32)
+        let bytes = try CommandHandshakeReply(nonce: nonce, profile: selected).bytes
+        XCTAssertEqual(try CommandHandshakeReply.decode(bytes, offer: CommandHandshakeOffer(nonce: nonce, capabilities: .pipeExecutionControls),
+            macID: selected.macID, accountID: selected.accountID), selected)
+        for capabilities: CommandHandshakeCapabilities in [.executionChannels, .streamingExecution, .admissionResults, .current] {
+            XCTAssertThrowsError(try CommandHandshakeReply.decode(bytes, offer: CommandHandshakeOffer(nonce: nonce, capabilities: capabilities),
+                macID: selected.macID, accountID: selected.accountID))
+        }
+        XCTAssertEqual(CommandHandshakeCapabilities.pipeExecutionControls.wireVersions, [5])
+        XCTAssertEqual(CommandHandshakeCapabilities.streamingExecution.wireVersions, [4])
+        XCTAssertTrue(selected.supportsExecutionControls); XCTAssertFalse(selected.supportsStreamingExecution)
+    }
+    func testPipeOpenedGrantsNoInputCreditAndOnlySignalsAndCancellationRoundTrip() throws {
+        for (wire, value): (UInt64, CBORValue) in [(4, .unsigned(32768)), (5, .null)] {
+            let bytes = try CommandStreamFrame(sequence: 0, body: .opened).encode(binding: binding(wire: wire))
+            XCTAssertEqual(try DeterministicCBOR.decode(bytes, limits: CommandStreamFrame.limits()).mapValue?[4], value)
+            XCTAssertEqual(try CommandStreamFrame.decode(bytes, binding: binding(wire: wire), direction: .toFrontend).body, .opened)
+        }
+        for body: CommandStreamFrame.Body in [.signal(UInt32(SIGTERM)), .cancel] {
+            let frame = CommandStreamFrame(sequence: 3, body: body), bytes = try frame.encode(binding: binding(wire: 5))
+            XCTAssertEqual(try CommandStreamFrame.decode(bytes, binding: binding(wire: 5), direction: .toAuthority), frame)
+        }
+        for body: CommandStreamFrame.Body in [.input(Data([1])), .inputEnd, .output(Data([2])), .outputEnd,
+                                             .inputCredit(1), .resize(24, 80, 0, 0), .outputDrained] {
+            XCTAssertThrowsError(try CommandStreamFrame(sequence: 1, body: body).encode(binding: binding(wire: 5)))
+        }
+    }
+    func testPipeProfileCannotAcquirePTYFramesByChangingOnlyTheBinding() throws {
+        for body: CommandStreamFrame.Body in [.opened, .input(Data([1])), .inputEnd, .output(Data([2])), .outputEnd,
+                                             .inputCredit(1), .resize(24, 80, 0, 0), .outputDrained] {
+            let bytes = try CommandStreamFrame(sequence: 0, body: body).encode(binding: binding())
+            var fields = try XCTUnwrap(try DeterministicCBOR.decode(bytes, limits: CommandStreamFrame.limits()).mapValue)
+            fields[1] = binding(wire: 5).fields
+            XCTAssertThrowsError(try CommandStreamFrame.decode(DeterministicCBOR.encode(.map(fields), limits: CommandStreamFrame.limits()),
+                binding: binding(wire: 5), direction: CommandStreamFrame(sequence: 0, body: body).direction))
+        }
+        let bytes = try CommandStreamFrame(sequence: 0, body: .opened).encode(binding: binding(wire: 5))
+        XCTAssertThrowsError(try CommandStreamFrame.decode(bytes, binding: binding(), direction: .toFrontend))
+    }
     func testWireFourRequiresAnExplicitOfferAndLeavesLegacyDeclarationsUnchanged() throws {
         let nonce = Data(repeating: 10, count: 32), selected = binding().profile
         let bytes = try CommandHandshakeReply(nonce: nonce, profile: selected).bytes

@@ -60,7 +60,8 @@ final class CommandCallerReadinessTests: XCTestCase {
     private func busy(_ reason: CommandAdmissionRejectionReason) -> Reply {
         .result(.notAdmitted(reason, CommandAdmissionRetryClass(rawValue: reason.rawValue)!))
     }
-    private func serve(_ endpoint: Endpoint, replies: [Reply], io: Bool = false) throws -> Server {
+    private func serve(_ endpoint: Endpoint, replies: [Reply], io: Bool = false,
+                       capabilities: CommandHandshakeCapabilities? = nil) throws -> Server {
         let port = endpoint.port, expression = try expression(), user = geteuid(), mac = mac, account = account
         let completed = DispatchSemaphore(value: 0), results = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
         let submissions = OSAllocatedUnfairLock(initialState: [CommandSubmission]())
@@ -71,7 +72,7 @@ final class CommandCallerReadinessTests: XCTestCase {
                     auditSessionID: nil, maxPayloadBytes: 8192)
                 for reply in replies {
                     let session = try RetainedCommandHandshake(hello: receiver.receiveHello(timeoutMilliseconds: 5000),
-                        capabilities: io ? .executionChannels : .admissionResults, macID: mac, accountID: account, expression: expression,
+                        capabilities: capabilities ?? (io ? .executionChannels : .admissionResults), macID: mac, accountID: account, expression: expression,
                         userID: user, auditSessionID: nil)
                     defer { session.close() }
                     let input = try io ? receiver.receiveIOInput(timeoutMilliseconds: 5000) : receiver.receiveAdmissionInput(timeoutMilliseconds: 5000)
@@ -300,6 +301,31 @@ extension CommandCallerReadinessTests {
             configuration: configuration ?? .init(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1,
                 maximumBackoffMilliseconds: 4, controlTimeoutMilliseconds: 1000),
             checkCancellation: cancellation, onStatus: status, clock: clock, wait: wait)
+    }
+    func testIOPipeControlsExplicitNegotiationKeepsBusyRetriesAndUnconsumedInput() throws {
+        let endpoint = try Endpoint()
+        let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
+        let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.notAdmitted(.policyRejected, .never))],
+                               io: true, capabilities: .pipeExecutionControls)
+        var input: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&input), 0)
+        let output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { for fd in input + [output] { _ = Darwin.close(fd) } }
+        XCTAssertEqual(Darwin.write(input[1], "queued", 6), 6)
+        let original = try template()
+        let result = try CommandCallerReadiness.submitIO(original, inputDescriptor: input[0], outputDescriptor: output, errorDescriptor: output,
+            authorityPort: { endpoint.port }, expression: expression(), userID: geteuid(), auditSessionID: nil,
+            macID: mac, accountID: account, submissionLimits: limits(),
+            configuration: .init(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1, maximumBackoffMilliseconds: 4),
+            capabilities: .pipeExecutionControls)
+        guard case .result(let verified) = result else { return XCTFail("A policy refusal admits no request") }
+        XCTAssertEqual(verified.profile.wireVersion, 5); XCTAssertEqual(verified.retryClass, .never)
+        let attempts = try server.finish()
+        XCTAssertEqual(attempts.count, 5); XCTAssertEqual(Set(attempts.map(\.binding.id)).count, 5)
+        XCTAssertEqual(Set(attempts.map(\.binding.nonce)).count, 5); XCTAssertEqual(Set(attempts.map(\.binding.callerBinding)).count, 5)
+        for attempt in attempts { XCTAssertEqual(attempt.arguments, original.arguments); XCTAssertEqual(attempt.ioMode, .pipes) }
+        var bytes = [UInt8](repeating: 0, count: 6)
+        XCTAssertEqual(Darwin.read(input[0], &bytes, 6), 6); XCTAssertEqual(Data(bytes), Data("queued".utf8))
+        try assertNoNextAttempt(endpoint)
     }
     func testIOReadinessRetriesFourBoundBusyClassesAndRetainsActualTerminalSession() throws {
         let endpoint = try Endpoint(), request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),

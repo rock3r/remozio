@@ -81,4 +81,5 @@ The [negotiated network channel](../../protocol/session-envelope.md) owns the Ma
 
 [Invocation capture](../../docs/macos-command-frontend-invocation.md) preserves C argv bytes and explicit frontend options.
 It builds untrusted submissions for the existing authenticated command transport.
+[Pipe controls](../../docs/macos-command-pipe-controls.md) preserve separate stdio with negotiated signals and cancellation.
 The installed CLI, terminal lifecycle and service wiring remain implementation gates.

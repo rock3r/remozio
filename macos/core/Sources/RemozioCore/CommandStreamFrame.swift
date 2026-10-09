@@ -14,7 +14,7 @@ struct CommandStreamBinding: Equatable, Sendable {
         2: .bytes(submissionDigest),
         3: .map([0: .bytes(request.requestID), 1: .bytes(request.requestDigest), 2: .bytes(request.challenge)])]) }
     func validate() throws {
-        guard profile.supportsStreamingExecution, profile.callerBinding.count == 16, profile.macID.count == 16, profile.accountID.count == 16,
+        guard profile.supportsExecutionControls, profile.callerBinding.count == 16, profile.macID.count == 16, profile.accountID.count == 16,
               submission.callerBinding == profile.callerBinding,
               submission.id.count == 16, submission.nonce.count == 32, submissionDigest.count == 32,
               request.requestID.count == 16, request.requestDigest.count == 32, request.challenge.count == 32 else {
@@ -48,9 +48,15 @@ struct CommandStreamFrame: Equatable {
     func encode(binding: CommandStreamBinding) throws -> Data {
         try binding.validate()
         guard sequence < UInt64.max else { throw CommandStreamError.sequence }
+        if binding.profile.supportsPipeExecutionControls {
+            switch body {
+            case .opened, .signal, .cancel: break
+            default: throw CommandStreamError.malformed
+            }
+        }
         let tag: UInt64, value: CBORValue
         switch body {
-        case .opened: tag = 1; value = .unsigned(UInt64(Self.inputWindow))
+        case .opened: tag = 1; value = binding.profile.supportsPipeExecutionControls ? .null : .unsigned(UInt64(Self.inputWindow))
         case .output(let bytes): tag = 2; value = try Self.chunk(bytes)
         case .outputEnd: tag = 3; value = .null
         case .inputCredit(let count):
@@ -78,7 +84,7 @@ struct CommandStreamFrame: Equatable {
         let body: Body
         switch tag {
         case 1:
-            guard value == .unsigned(UInt64(inputWindow)) else { throw CommandStreamError.capacity }
+            guard value == (binding.profile.supportsPipeExecutionControls ? .null : .unsigned(UInt64(inputWindow))) else { throw CommandStreamError.capacity }
             body = .opened
         case 2, 10:
             guard case .bytes(let chunk) = value else { throw CommandStreamError.malformed }

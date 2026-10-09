@@ -73,7 +73,8 @@ Pre-spawn runtime and launcher failures retain the same outcome path through com
 A separate boundary test verifies that a failure owner without runtime validation cannot spawn or release.
 The fixture launcher performs no credential change and is never embedded or installed.
 
-The controller connects legacy pipes and the [wire 4 PTY pump](macos-command-pty-pump.md). It does not install or expose a command service.
+The controller connects legacy pipes, the [wire 4 PTY pump](macos-command-pty-pump.md) and [wire 5 pipe controls](macos-command-pipe-controls.md).
+It does not install or expose a command service.
 The product frontend and installed service still need integration before activation.
 The selected elevation-policy integration, protected service installation and physical terminal checks remain gates.
 
