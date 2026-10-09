@@ -93,3 +93,7 @@ This result supports a monitor design. It does not establish production job cont
 
 The installed service, production elevation, actual macOS 26 runtime, real shell, and physical terminal checks remain gates.
 No user terminal, firewall rule, device setting, or installed service changed during these experiments.
+
+The same 50-trial experiment also passed on an Apple Silicon CI host with macOS 26.6.2 and SDK 26.5.
+The [completed Mac job](https://github.com/rock3r/remozio/actions/runs/37876164698/job/113650441702) records the actual runtime and source hashes.
+That result applies to PR 246, commit `ed4dad31e89a9dc1951c5b10d5cf1224f9a570b4`. It does not prove privileged or physical behavior.
