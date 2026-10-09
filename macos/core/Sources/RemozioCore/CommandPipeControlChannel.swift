@@ -13,6 +13,9 @@ final class CommandPipeControlChannel {
         opened = try channel.send(.opened)
         return opened
     }
+    func observeJobState(_ value: CommandJobStatePayload?) throws {
+        if connected { try channel.observeJobState(value) }
+    }
     func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCaller: () throws -> Void,
               checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void) throws {
         guard opened, connected else { return }
@@ -26,6 +29,7 @@ final class CommandPipeControlChannel {
                 default: throw CommandStreamError.malformed
                 }
             }
+            try channel.flushJobState()
         } catch { detach(); throw error }
     }
     func detach() { connected = false; channel.close() }

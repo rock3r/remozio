@@ -86,5 +86,6 @@ They do not activate an installed authority or grant production elevation.
 
 The local host runs macOS 27.0.1. The build targets arm64 macOS 26.
 These checks do not establish macOS 26 runtime behavior, protected service activation or cross-user policy.
-The packaged frontend, terminal restoration and job-state events remain required.
+[Wire 7](macos-command-job-events.md) adds native job observations through an explicit offer.
+The packaged frontend and terminal restoration remain required.
 Physical end-to-end checks stay in the interactive handoff.

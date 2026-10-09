@@ -184,6 +184,9 @@ final class CommandExecution {
             else {
                 do {
                     try flushPendingSignals(validation: validation, checkPolicy: checkStreamPolicy)
+                    let job = try currentJobState(observation)
+                    if job != nil { try checkStreamPolicy() }
+                    try pump.observeJobState(job)
                     if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
                         _ = try pump.open()
                     }
@@ -203,6 +206,9 @@ final class CommandExecution {
             else {
                 do {
                     try flushPendingSignals(validation: validation, checkPolicy: checkStreamPolicy)
+                    let job = try currentJobState(observation)
+                    if job != nil { try checkStreamPolicy() }
+                    try pipeControls.observeJobState(job)
                     if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
                         _ = try pipeControls.open()
                     }
@@ -243,6 +249,11 @@ final class CommandExecution {
         if cancelledBeforeRelease || observation.status.failed { cancelBeforeRelease(); return .preparing }
         return observation.prepared && (pump == nil || pump?.opened == true && pump?.connected == true) &&
             (pipeControls == nil || pipeControls?.opened == true && pipeControls?.connected == true) ? .prepared : .preparing
+    }
+    private func currentJobState(_ observation: remozio_command_monitor_observation_t) throws -> CommandJobStatePayload? {
+        guard resources.reportsJobState, releaseSucceeded, targetActive, !observationUncertain,
+              observation.status.latest.tag == UInt32(REMOZIO_MONITOR_JOB_STATE.rawValue) else { return nil }
+        return try CommandJobStatePayload(nativeRecord: observation.status.latest)
     }
     private func flushPendingSignals(validation: Validation, checkPolicy: () throws -> Void) throws {
         guard releaseSucceeded, !pendingSignals.isEmpty else { return }

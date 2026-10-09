@@ -35,6 +35,7 @@ The [typed result contract](macos-command-admission-results.md) uses wire 2 with
 The explicit [I/O channel profile](macos-command-io-channels.md) uses wire 3 with carrier 4 and retains all three streams and a terminal reply.
 The [PTY stream](macos-command-stream-channel.md) uses wire 4 with carrier 4.
 [Pipe controls](macos-command-pipe-controls.md) use wire 5 with carrier 4 and preserve separate stdio.
+[Native job observations](macos-command-job-events.md) use wire 6 for PTY streams and wire 7 for separate stdio controls.
 Each control profile requires an explicit offer. Existing defaults remain unchanged.
 There is no fallback to a carrier without the original input fileport.
 An authenticated incompatibility reply creates no retained session.

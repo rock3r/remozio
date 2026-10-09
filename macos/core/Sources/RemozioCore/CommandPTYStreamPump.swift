@@ -30,6 +30,9 @@ final class CommandPTYStreamPump {
         opened = try channel.send(.opened)
         return opened
     }
+    func observeJobState(_ value: CommandJobStatePayload?) throws {
+        if connected { try channel.observeJobState(value) }
+    }
     // The callbacks run only within this bounded turn. The pump never retains its native process owner.
     func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, allowInput: Bool, checkCaller: () throws -> Void,
               checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void) throws {
@@ -53,6 +56,7 @@ final class CommandPTYStreamPump {
                 }
             } catch { detach(); throw error }
         }
+        if connected { try channel.flushJobState() }
         for _ in 0..<4 {
             if allowInput { try pumpInput() }
             if connected, !outputEndSent, pendingCredit > 0 {

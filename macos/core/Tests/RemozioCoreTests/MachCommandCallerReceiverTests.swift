@@ -5067,6 +5067,7 @@ extension MachCommandCallerReceiverTests {
                 case .inputCapacity(let capacity): XCTAssertEqual(capacity, 32768)
                 case .terminal(let terminal): XCTAssertTrue(ended); exit = terminal.outcome
                 case .opened: XCTFail("The stream must open once")
+                case .jobState: XCTFail("A legacy PTY profile must not report job state")
                 }
             }
             guard Date() < deadline else { throw MachCommandCallerError.timeout }
@@ -6379,6 +6380,176 @@ extension MachCommandCallerReceiverTests {
         defer { handshake.close() }
         XCTAssertThrowsError(try ioPayloads(profile: handshake.profile, submission: submission, outputInterrupted: true)) {
             XCTAssertEqual($0 as? CommandTerminalResultError, .incompatible)
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    func testJobClientCoalescesUnsentStatesUnderBackpressureAndKeepsPTYEOFSeparate() throws {
+        for wire: UInt64 in [6, 7] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: wire)
+            let submission = try commandSubmission(ioMode: wire == 6 ? .pty : .pipes)
+            let profile = handshake.profile, binding = streamBinding(profile, submission), payloads = try ioPayloads(profile: profile, submission: submission)
+            let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+            let opened = DispatchSemaphore(value: 0), full = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
+            let completed = DispatchSemaphore(value: 0), result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+            DispatchQueue.global().async {
+                defer { completed.signal() }
+                result.withLock { output in output = Result {
+                    let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
+                    let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                    defer { received.closeIfUnclaimed() }
+                    let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                    let channel = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                    defer { channel.close(); terminal.close() }
+                    try received.sendAdmissionReply(payloads.0); try Self.waitQueued { try channel.send(.opened) }
+                    guard opened.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                    if wire == 6 {
+                        try Self.waitQueued { try channel.send(.outputEnd) }
+                        let deadline = Date().addingTimeInterval(5)
+                        while !channel.outputDrained {
+                            _ = try channel.receiveControl(expression: expression, userID: user, auditSessionID: nil)
+                            guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+                        }
+                    }
+                    for revision: UInt64 in 1...4 { XCTAssertTrue(try channel.send(.jobState(.init(revision: revision, state: .continued)))) }
+                    try channel.observeJobState(.init(revision: 5, state: .stopped(signal: UInt32(SIGSTOP), rawStopCode: UInt32(CLD_STOPPED), tracing: .unknown)))
+                    try channel.flushJobState()
+                    try channel.observeJobState(.init(revision: 7, state: .continued)); try channel.flushJobState()
+                    XCTAssertThrowsError(try channel.observeJobState(.init(revision: 6, state: .continued)))
+                    full.signal()
+                    guard drained.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                    try channel.flushJobState()
+                    try channel.observeJobState(.init(revision: 7, state: .continued)); try channel.flushJobState()
+                    try channel.observeJobState(.init(revision: 8, state: .continued)); try channel.observeJobState(nil); try channel.flushJobState()
+                    try terminal.sendTerminalNonblocking(payloads.1)
+                } }
+            }
+            defer { opened.signal(); drained.signal() }
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let response = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+            guard case .admitted(let session) = response else { return XCTFail("The job session must be admitted") }
+            defer { session.close() }
+            guard case .opened? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The controls must open first") }
+            opened.signal()
+            if wire == 6 {
+                guard case .outputEnded? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("PTY output must end") }
+                try Self.waitQueued { try session.acknowledgeOutput() }
+            } else { XCTAssertThrowsError(try session.acknowledgeOutput()) }
+            guard full.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+            for revision: UInt64 in 1...4 {
+                guard case .jobState(let job)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The bound job must arrive") }
+                XCTAssertEqual(job.revision, revision); XCTAssertEqual(job.state, .continued)
+                XCTAssertEqual(job.submission, submission.binding)
+                guard case .admitted(let request) = session.admission.outcome else { return XCTFail("The original request must remain retained") }
+                XCTAssertEqual(job.request, request)
+            }
+            drained.signal()
+            guard case .jobState(let latest)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("Only the latest unsent state must arrive") }
+            XCTAssertEqual(latest.revision, 7); XCTAssertEqual(latest.state, .continued)
+            guard case .terminal(let terminal)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("No duplicate or discarded state can precede the outcome") }
+            XCTAssertEqual(terminal.outcome, .exited(7))
+            XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try XCTUnwrap($0).get() }
+        }
+    }
+    func testJobClientRejectsRepeatedNativeRevisionEvenWithIncreasingChannelSequences() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 7)
+        let submission = try commandSubmission(), profile = handshake.profile, binding = streamBinding(profile, submission)
+        let payloads = try ioPayloads(profile: profile, submission: submission), expression = try selfExpression(), user = geteuid(), port = endpoint.port
+        let consumed = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0), result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { output in output = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
+                let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000); defer { received.closeIfUnclaimed() }
+                let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                let channel = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                defer { channel.close(); terminal.close() }
+                try received.sendAdmissionReply(payloads.0)
+                for body: CommandStreamFrame.Body in [.opened, .jobState(.init(revision: 3, state: .continued)), .jobState(.init(revision: 3, state: .continued))] {
+                    try Self.waitQueued { try channel.send(body) }
+                }
+                guard consumed.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+            } }
+        }
+        defer { consumed.signal() }
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let response = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = response else { return XCTFail("The session must remain original") }
+        defer { session.close() }
+        guard case .opened? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("Controls must open") }
+        guard case .jobState(let job)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The first native revision must arrive") }
+        XCTAssertEqual(job.revision, 3)
+        XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 1000)) { XCTAssertEqual($0 as? CommandStreamError, .sequence) }
+        consumed.signal()
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try XCTUnwrap($0).get() }
+    }
+    private func waitForNativeJob(_ terminal: Endpoint, profile: CommandHandshakeProfile, submission: CommandSubmission,
+                                  admission: VerifiedCommandAdmissionResult, stopped: Bool) throws -> CommandJobStatePayload {
+        guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: request)
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+                throw CommandStreamError.closed
+            }
+            defer { reply.caller.close(); right?.close() }
+            switch try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body {
+            case .jobState(let value):
+                if case .stopped = value.state { if stopped { return value } }
+                else if !stopped { return value }
+            case .output: break
+            default: throw CommandStreamError.closed
+            }
+        }
+        throw MachCommandCallerError.timeout
+    }
+    func testNativeJobEventsReportOwnedTargetStopContinueAndActualCancellationForBothModes() throws {
+        for wire: UInt64 in [6, 7] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let marker = fixture.root.appendingPathComponent("started")
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf ready > \"$1\"; exec /bin/sleep 60".utf8), Data("sh".utf8), Data(marker.path.utf8)],
+                wire: wire, ioMode: wire == 6 ? .pty : .pipes)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false); try beginDispatch(fixture, request: request, launcher: launcher)
+            let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission); defer { control.close() }
+            try waitForPipeMarker(marker)
+            try pipeSend(.signal(UInt32(SIGSTOP)), control: control, profile: profile, submission: submission, admission: admission)
+            let stopped = try waitForNativeJob(terminal, profile: profile, submission: submission, admission: admission, stopped: true)
+            guard case .stopped(let signal, let code, _) = stopped.state else { return XCTFail("The original target must stop") }
+            XCTAssertEqual(signal, UInt32(SIGSTOP)); XCTAssertEqual(code, UInt32(CLD_STOPPED))
+            try pipeSend(.signal(UInt32(SIGCONT)), control: control, profile: profile, submission: submission, admission: admission, sequence: 1)
+            let continued = try waitForNativeJob(terminal, profile: profile, submission: submission, admission: admission, stopped: false)
+            XCTAssertEqual(continued.state, .continued); XCTAssertGreaterThan(continued.revision, stopped.revision)
+            try pipeSend(.cancel, control: control, profile: profile, submission: submission, admission: admission, sequence: 2)
+            if wire == 6 {
+                guard case .admitted(let retained) = admission.outcome else { throw CommandStreamError.binding }
+                let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: retained)
+                var ended = false
+                let deadline = Date().addingTimeInterval(5)
+                while !ended {
+                    guard case .stream(let reply, let right) = try receiver(terminal, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+                        throw CommandStreamError.closed
+                    }
+                    defer { reply.caller.close(); right?.close() }
+                    let body = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body
+                    if body == .outputEnd { ended = true }
+                    else if case .output = body { }
+                    else { throw CommandStreamError.closed }
+                    guard Date() < deadline else { throw MachCommandCallerError.timeout }
+                }
+                try pipeSend(.outputDrained, control: control, profile: profile, submission: submission, admission: admission, sequence: 3)
+            }
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .signalled(UInt32(SIGKILL)))
+            try awaitDispatchCleanup(authority)
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
         }
     }
 }

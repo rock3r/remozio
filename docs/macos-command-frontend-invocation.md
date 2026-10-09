@@ -79,7 +79,8 @@ A separate test verifies that a raw absolute path claim remains unchanged for Ro
 
 This is invocation code, not an installed CLI executable.
 [Pipe controls](macos-command-pipe-controls.md) now preserve separate stdio with negotiated signals and cancellation.
-The packaged frontend, service discovery, settings loading and job-state events remain required.
+[Native job observations](macos-command-job-events.md) now have explicit PTY and pipe profiles.
+The packaged frontend, service discovery and settings loading remain required.
 The CLI must also restore terminal settings and bind all controls to the original authenticated execution session.
 Protected service activation, elevation-policy selection and physical end-to-end tests remain gates.
 These tests do not prove macOS 26 runtime behavior.

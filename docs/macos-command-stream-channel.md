@@ -58,6 +58,8 @@ Stream messages never establish an exit or authorize release. The native process
 ## Current integration boundary
 
 The native dispatcher supports wire 4 PTY execution and retains wire 3 pipes. Wire 4 pipes still fail before spawning.
+[Wire 6 job observations](macos-command-job-events.md) extend PTY streams through an explicit offer.
+They remain valid after output EOF without reopening output bytes.
 [Wire 5 pipe controls](macos-command-pipe-controls.md) add signals and cancellation without PTY stream meanings or output acknowledgment.
 
 The connected pump enforces native controls, continuous drain, final acknowledgment, and the captured disconnect behavior.

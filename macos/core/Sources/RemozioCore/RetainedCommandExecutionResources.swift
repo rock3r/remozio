@@ -32,6 +32,7 @@ final class RetainedCommandExecutionResources {
     }
     deinit { close() }
     var requiresStreamPump: Bool { profile.supportsStreamingExecution }
+    var reportsJobState: Bool { profile.supportsJobState }
     var requiresPipeControls: Bool { profile.supportsPipeExecutionControls }
     func makeStreamAuthority() throws -> MachCommandStreamAuthority {
         guard profile.supportsExecutionControls, !closed, !executionRetired else { throw CommandExecutionError.unavailable }
