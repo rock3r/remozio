@@ -22,6 +22,11 @@ typedef struct {
  * The path must identify the protected, verified launcher. This function does not validate code identity or policy. */
 int remozio_command_process_spawn(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, remozio_command_process_t **process);
+/* Only a dedicated session leader may call this API. PTY mode requires its owned foreground terminal.
+ * The child keeps the monitor session and receives a separate process group before preparation resumes.
+ * The same protected launcher, exclusive owner and durable release requirements apply. */
+int remozio_command_process_spawn_in_session(const char *path, const void *frame, size_t count,
+    int input, int output, int error, int directory, remozio_command_process_t **process);
 /* Nonblocking progress, including at most four owned stop/continue records per poll.
  * A private status EOF never establishes exec. Exit status is meaningful only after reaping. */
 int remozio_command_process_poll(remozio_command_process_t *process, remozio_command_process_observation_t *observation);

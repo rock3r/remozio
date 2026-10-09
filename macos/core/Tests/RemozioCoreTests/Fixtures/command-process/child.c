@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdbool.h>
+#include <termios.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -20,7 +22,8 @@ static int exact(int fd, void *value, size_t count) {
     return 0;
 }
 int main(int argc, char **argv) {
-    if(argc==2 && !strcmp(argv[1],"--execute")) {
+    if(argc==2 && (!strcmp(argv[1],"--execute") || !strcmp(argv[1],"--execute-in-session"))) {
+        bool in_session = !strcmp(argv[1],"--execute-in-session");
         if(strstr(argv[0],"stalled-child")) {for(;;)pause();}
         unsigned char header[40]={0};
         if(exact(3,header,40))return 70;
@@ -31,7 +34,8 @@ int main(int argc, char **argv) {
         unsigned char extra=0;if(read(3,&extra,1)!=0)return 70;close(3);
         remozio_child_spec_t spec={0};if(remozio_child_spec_decode(bytes,count,&spec))return 70;free(bytes);
         if(fchdir(4))return 70;close(4);
-        if(spec.io_mode==1 && (getsid(0)!=getpid() || ioctl(0,TIOCSCTTY,0)))return 70;
+        if(in_session && (getsid(0)==getpid() || getsid(0)!=getsid(getppid()) || getpgrp()!=getpid()))return 70;
+        if(spec.io_mode==1 && (in_session ? (tcgetsid(0)!=getsid(0) || tcgetpgrp(0)!=getpgrp()) : (getsid(0)!=getpid() || ioctl(0,TIOCSCTTY,0))))return 70;
         if(fcntl(5,F_SETFD,FD_CLOEXEC))return 70;
         unsigned char ready[12]={0x52,0x4d,0x52,0x31,0,0,0,1,0,0,0,0};
         if(strstr(argv[0],"malformed-child")) {ready[0]=0;write(5,ready,12);return 70;}

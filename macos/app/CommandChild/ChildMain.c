@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sysexits.h>
+#include <termios.h>
 #include <unistd.h>
 
 /* Root supplies only private descriptors 3 through 6. Stdin stays unread until exec. */
@@ -87,8 +88,10 @@ static void wipe(void *buffer, size_t count) {
     for (size_t index = 0; index < count; ++index) bytes[index] = 0;
 }
 int main(int argc, char **argv) {
-    if (argc != 2 || strcmp(argv[1], "--execute") != 0) return EX_USAGE;
+    if (argc != 2 || (strcmp(argv[1], "--execute") != 0 && strcmp(argv[1], "--execute-in-session") != 0)) return EX_USAGE;
+    bool in_session = strcmp(argv[1], "--execute-in-session") == 0;
     if (geteuid() != 0 || getuid() != 0) return EX_NOPERM;
+    if (in_session && (getsid(0) == getpid() || getsid(0) != getsid(getppid()) || getpgrp() != getpid())) return EX_CONFIG;
     signal(SIGPIPE, SIG_IGN);
     int error = private_descriptor(status_fd, true);
     if (error) return EX_CONFIG;
@@ -130,8 +133,12 @@ int main(int argc, char **argv) {
     if (fchdir(directory_fd) != 0) { error = errno; goto fail; }
     close(directory_fd); umask(spec.file_creation_mask);
     if (spec.io_mode == 1) {
-        if (getsid(0) != getpid()) { error = EINVAL; goto fail; }
-        if (ioctl(0, TIOCSCTTY, 0) != 0) { error = errno; goto fail; }
+        if (in_session) {
+            if (tcgetsid(0) != getsid(0) || tcgetpgrp(0) != getpgrp()) { error = EINVAL; goto fail; }
+        } else {
+            if (getsid(0) != getpid()) { error = EINVAL; goto fail; }
+            if (ioctl(0, TIOCSCTTY, 0) != 0) { error = errno; goto fail; }
+        }
     }
     if (milliseconds() >= deadline) { error = ETIMEDOUT; goto fail; }
     if ((error = report(1, 0))) goto fail;
