@@ -37,12 +37,15 @@ No new capture, descriptor import, terminal endpoint or caller binding replaces 
 Ordinary admission rechecks still require their own terminal right and reject a detached one.
 
 Closing pending request state does not close resources already transferred to the execution owner.
-The future dispatch controller must retain this owner and maintain its native child cleanup independently of storage availability.
+The native dispatch controller retains this owner and maintains child cleanup independently of storage availability.
 It must not drop a live child owner when journal recovery closes admission or stops request-expiry maintenance.
 
 The trusted controller supplies an established terminal observation after its required durable transition.
-The private send never waits for queue capacity. A failed send consumes the attempt and closes its send right.
-A second attempt is rejected. A lost reply cannot authorize a second execution.
+Private sends never wait for queue capacity. One-shot rejection paths consume a failed send and close its right.
+The native dispatcher retains one exact terminal packet and its original right across known zero-progress sends.
+It retries only that delivery on a later bounded turn. A queued result or permanent transport error retires the delivery.
+The [connected PTY contract](macos-command-pty-pump.md) defines interrupted output and the retained delivery bound.
+A lost reply cannot authorize a second execution.
 This resource owner does not infer a program exit from generic lifecycle state.
 
 ## Evidence and remaining integration

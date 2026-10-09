@@ -43,6 +43,9 @@ A slow frontend cannot defer or repeat the durable native transition. PTY EOF ca
 The final terminal reply follows output EOF and the authenticated acknowledgment while the frontend remains connected.
 If controls detach after opening, the result carries an authenticated output-interruption marker.
 The client retains the durable native outcome and exposes that marker. It never reports the interrupted stream as fully acknowledged.
+A full receive queue retains one exact terminal packet and its original reply right. Later turns retry only known zero-progress sends.
+A successful queue or permanent transport failure retires that delivery. It never repeats dispatch or the durable transition.
+The existing active-command bound includes these retained delivery owners; each packet has a 4096-byte limit.
 
 A failed outcome commit latches Unknown. Output must still drain before that reply.
 The retained owner retries only the durable Unknown transition after storage recovers. It never retries execution or sends a second result.
@@ -102,6 +105,8 @@ Native regressions retain a prepared helper through an early terminating signal 
 The EOF regression uses actual terminal mode changes and controlled zero or partial write results.
 Public client regressions retain an interrupted native outcome before EOF and after EOF without an acknowledgment.
 Native policy-change tests verify the interruption marker; normal results still require the complete output handshake.
+An actual native-output test fills all four queue slots before policy detachment. It verifies retained delivery after drain and cleanup after peer endpoint closure.
+A one-slot resource test preserves the original right and exact outcome across retries, rejects replacement, and delivers only once.
 
 The bulk fixture validates 128 KiB of input, echoes it, and writes a further 1 MiB pattern. The slow one-slot receiver checks every output byte.
 The continuation fixture closes controls, drains 1 MiB, writes one completion marker, and returns the actual exit result.
@@ -116,5 +121,5 @@ The internal fixture policy seam supplies test identities. It proves no installe
 Actual macOS 26 runtime, protected service installation, production elevation policy, frontend restoration, and physical terminal tests remain gates.
 No user terminal, firewall rule, installed service, or device was changed by these checks.
 
-The complete repository gate passed 1194 core tests and 97 Swift protocol tests, plus Python, packaging, experiment, and ownership checks.
+The complete repository gate passed 1196 core tests and 97 Swift protocol tests, plus Python, packaging, experiment, and ownership checks.
 The required Kotlin/Android tasks passed with JDK 21 and SDK 37. The wrapper records the required test, APK, and lint results.

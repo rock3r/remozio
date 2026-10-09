@@ -365,6 +365,19 @@ final class MachCommandReplyRight {
         defer { close() }
         try MachCommandWire.sendTerminalNonblocking(bytes, destination: port)
     }
+    /// A timeout or send interruption queued nothing. Keep this original right for a later bounded delivery turn.
+    func queueTerminalNonblocking(_ bytes: Data) throws -> Bool {
+        guard port != MACH_PORT_NULL else { throw MachCommandHandshakeError.retired }
+        guard identifier == MachCommandCallerReceiver.terminalReplyMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
+        do {
+            try MachCommandWire.sendTerminalNonblocking(bytes, destination: port)
+            close(); return true
+        } catch MachCommandCallerError.mach(let result) {
+            let code = result & ~MACH_MSG_MASK
+            if code == MACH_SEND_TIMED_OUT || code == MACH_SEND_INTERRUPTED { return false }
+            close(); throw MachCommandCallerError.mach(result)
+        } catch { close(); throw error }
+    }
     func copyStreamRight() throws -> MachCommandAuthorityPort {
         guard identifier == MachCommandCallerReceiver.terminalReplyMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
         try recheck()

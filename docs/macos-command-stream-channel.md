@@ -49,6 +49,8 @@ A detached wire 4 stream can still return the original authenticated native resu
 The marker is optional terminal field 7 with value 1. It is valid only for wire 4 after the stream opened.
 Absence keeps the normal EOF and output acknowledgment requirements. Other marker values and unknown fields fail closed.
 The public result exposes `outputInterrupted` separately from the native outcome. The interruption grants no retry authority.
+Known send timeouts or interruptions retain the exact terminal packet and original reply right. Only delivery is retried after queue capacity returns.
+Successful delivery or a permanent transport error retires that right. The dispatcher keeps no additional execution permission.
 Wire 3 and normal terminal envelopes keep their existing bytes. This wire 4 extension precedes product deployment.
 
 Stream messages never establish an exit or authorize release. The native process owner and durable journal remain the sources of those facts.

@@ -28,6 +28,8 @@ final class CommandExecution {
     private var cancelledBeforeRelease = false
     private var observationUncertain = false
     private var disposed = false
+    private var terminalDeliveryPending = false
+    private var terminalDeliveryFinished = false
     var dispatchRevision: UInt64 = 0
     var terminalCommitFailed = false
 
@@ -145,8 +147,12 @@ final class CommandExecution {
     }
     /// Delivery waits for the original frontend to drain output. Durable native outcomes remain independent.
     func deliverTerminal(_ outcome: CommandTerminalOutcome) {
-        guard pump?.readyForTerminal ?? true else { return }
-        try? resources.sendTerminalOutcome(outcome, outputInterrupted: pump?.outputInterrupted ?? false)
+        guard !terminalDeliveryFinished, pump?.readyForTerminal ?? true else { return }
+        terminalDeliveryPending = true
+        do {
+            guard try resources.queueTerminalOutcome(outcome, outputInterrupted: pump?.outputInterrupted ?? false) else { return }
+        } catch { }
+        terminalDeliveryPending = false; terminalDeliveryFinished = true
         pump?.finishDelivery()
     }
     func poll(checkStreamPolicy: () throws -> Void = { throw CommandExecutionError.unavailable }) -> Progress {
@@ -211,7 +217,7 @@ final class CommandExecution {
     /// Poll until this succeeds. Disposal never waits for a live child.
     func dispose() -> Bool {
         guard !disposed else { return true }
-        guard pump?.readyForTerminal ?? true else { return false }
+        guard !terminalDeliveryPending, pump?.readyForTerminal ?? true else { return false }
         if let process, remozio_command_process_dispose(process) != 0 { return false }
         process = nil; nativeOwned = false; disposed = true; pump?.close(); resources.close(); return true
     }

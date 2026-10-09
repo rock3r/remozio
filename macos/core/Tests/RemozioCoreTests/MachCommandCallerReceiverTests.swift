@@ -18,6 +18,12 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             port = borrowingSendRight; ownsReceive = false
         }
         func transferReceiveRight() -> mach_port_t { precondition(ownsReceive); ownsReceive = false; return port }
+        func closeReceiveRight() throws {
+            guard ownsReceive else { return }
+            let status = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1)
+            guard status == KERN_SUCCESS else { throw MachCommandCallerError.mach(status) }
+            ownsReceive = false
+        }
         init() throws {
             guard mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS,
                   mach_port_insert_right(mach_task_self_, port, port, UInt32(MACH_MSG_TYPE_MAKE_SEND)) == KERN_SUCCESS else {
@@ -5912,5 +5918,144 @@ extension MachCommandCallerReceiverTests {
             try result.withLock { try XCTUnwrap($0).get() }
             XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10))
         }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYInterruptedResultSurvivesFullOutputQueueUntilDrainOrPeerEndpointClosure() throws {
+        for peerClosesEndpoint in [false, true] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            var limits = mach_port_limits_t(mpl_qlimit: 4)
+            XCTAssertEqual(withUnsafeMutablePointer(to: &limits) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                    mach_port_set_attributes(mach_task_self_, terminal.port, MACH_PORT_LIMITS_INFO, $0, 1)
+                }
+            }, KERN_SUCCESS)
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf READY; /bin/dd if=/dev/zero bs=4096 count=8 2>/dev/null; /bin/sleep 10".utf8)], wire: 4, ioMode: .pty)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            try beginDispatch(fixture, request: request, launcher: launcher)
+            let receive = try receiver(terminal, maximum: 8192)
+            var control: MachCommandAuthorityPort?, incoming = CommandStreamReceiveSequence(direction: .toFrontend)
+            defer { control?.close(); try? terminal.closeReceiveRight(); try? awaitDispatchCleanup(authority) }
+            guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The private channel must open")
+            }
+            opened.caller.close()
+            try incoming.accept(CommandStreamFrame.decode(opened.payload, binding: binding, direction: .toFrontend))
+            control = try XCTUnwrap(carried).takeControlRight(); carried?.close()
+            guard case .stream(let ready, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The command must run before its role changes")
+            }
+            ready.caller.close(); extra?.close()
+            let first = try CommandStreamFrame.decode(ready.payload, binding: binding, direction: .toFrontend)
+            try incoming.accept(first)
+            guard case .output(let prefix) = first.body else { return XCTFail("Output must precede the role change") }
+            XCTAssertTrue(prefix.starts(with: Data("READY".utf8)))
+            let fullDeadline = Date().addingTimeInterval(5)
+            var queued: mach_port_msgcount_t = 0
+            while queued != 4 {
+                var status = mach_port_status_t(), count = mach_msg_type_number_t(MemoryLayout<mach_port_status_t>.size / MemoryLayout<integer_t>.size)
+                XCTAssertEqual(withUnsafeMutablePointer(to: &status) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                        mach_port_get_attributes(mach_task_self_, terminal.port, Int32(MACH_PORT_RECEIVE_STATUS), $0, &count)
+                    }
+                }, KERN_SUCCESS)
+                queued = status.mps_msgcount
+                guard Date() < fullDeadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+            }
+            try authority.write { tx in
+                let snapshot = try XCTUnwrap(tx.codePolicy()), old = try XCTUnwrap(snapshot.policy.entries.first)
+                let entry = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
+                    installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
+                    codeDirectoryHash: Data(repeating: 2, count: 20), active: true)
+                _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: snapshot.revision)
+            }
+            let signal = try CommandStreamFrame(sequence: 0, body: .signal(UInt32(SIGTERM))).encode(binding: binding)
+            XCTAssertTrue(try MachCommandWire.sendStream(signal, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+            let commitDeadline = Date().addingTimeInterval(5)
+            var committed = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+            while committed?.revision != 2 {
+                committed = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+                guard Date() < commitDeadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+            }
+            XCTAssertEqual(authority.activeCommandCount, 1, "A full queue must retain the committed result owner")
+            XCTAssertEqual(committed?.phase, .failed)
+            if peerClosesEndpoint { try terminal.closeReceiveRight() }
+            else {
+                var result: VerifiedCommandTerminalResult?
+                while result == nil {
+                    switch try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) {
+                    case .stream(let reply, let extra):
+                        defer { reply.caller.close(); extra?.close() }
+                        let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                        try incoming.accept(frame)
+                        guard case .output(let bytes) = frame.body else { return XCTFail("Queued output must retain its order") }
+                        XCTAssertTrue(bytes.allSatisfy { $0 == 0 })
+                    case .terminal(let reply):
+                        defer { reply.caller.close() }
+                        result = try CommandTerminalResultPayload.decode(reply.payload, profile: profile, original: submission, admission: admission)
+                    }
+                }
+                XCTAssertEqual(result?.outcome, .signalled(UInt32(SIGKILL)))
+                XCTAssertEqual(result?.outputInterrupted, true)
+                XCTAssertThrowsError(try receive.receiveTerminalReply(timeoutMilliseconds: 10))
+            }
+            try awaitDispatchCleanup(authority)
+            XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 2)
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testTerminalBackpressureRetainsOneExactOutcomeAndOriginalReplyRight() throws {
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminal = try Endpoint()
+        var limits = mach_port_limits_t(mpl_qlimit: 1)
+        XCTAssertEqual(withUnsafeMutablePointer(to: &limits) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                mach_port_set_attributes(mach_task_self_, terminal.port, MACH_PORT_LIMITS_INFO, $0, 1)
+            }
+        }, KERN_SUCCESS)
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal, wire: 4, ioMode: .pty)
+        let request = try admitCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try fixture.consume(request)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+        defer { resources.close() }
+        try terminal.send(Data([1]))
+        for _ in 0..<3 {
+            XCTAssertFalse(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: true))
+            XCTAssertEqual(try sendReferences(terminal.port), 2)
+        }
+        XCTAssertThrowsError(try resources.queueTerminalOutcome(.unknown, outputInterrupted: true)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: false)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try resources.sendTerminalOutcome(.unknown)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
+        }
+        let filler = try receiver(terminal).receive(timeoutMilliseconds: 1000)
+        filler.caller.close(); XCTAssertEqual(filler.payload, Data([1]))
+        XCTAssertTrue(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: true))
+        XCTAssertEqual(try sendReferences(terminal.port), 1)
+        let result = try ownerTerminal(terminal, submission: submission, admission: admission)
+        XCTAssertEqual(result.outcome, .signalled(UInt32(SIGKILL))); XCTAssertTrue(result.outputInterrupted)
+        XCTAssertEqual(result.submission, submission.binding); XCTAssertEqual(result.request.requestID, request.requestID)
+        XCTAssertThrowsError(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: true)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
+        }
+        XCTAssertThrowsError(try receiver(terminal).receiveTerminalReply(timeoutMilliseconds: 10))
     }
 }
