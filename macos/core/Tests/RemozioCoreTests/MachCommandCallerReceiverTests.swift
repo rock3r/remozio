@@ -5193,3 +5193,56 @@ extension MachCommandCallerReceiverTests {
         }
     }
 }
+
+
+extension MachCommandCallerReceiverTests {
+    func testStreamClientRejectsTerminalAfterEOFWithoutQueuedDrainAcknowledgment() throws {
+        for fullControlQueue in [false, true] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 4)
+            let submission = try commandSubmission(), profile = handshake.profile, binding = streamBinding(profile, submission)
+            let payloads = try ioPayloads(profile: profile, submission: submission)
+            let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+            let completed = DispatchSemaphore(value: 0), allowTerminal = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+            let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+            DispatchQueue.global().async {
+                defer { completed.signal() }
+                result.withLock { output in output = Result {
+                    let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
+                    let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                    defer { received.closeIfUnclaimed() }
+                    let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                    defer { terminal.close() }
+                    let stream = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                    defer { stream.close() }
+                    try received.sendAdmissionReply(payloads.0)
+                    try Self.waitQueued { try stream.send(.opened) }
+                    try Self.waitQueued { try stream.send(.outputEnd) }
+                    guard allowTerminal.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                    XCTAssertFalse(stream.outputDrained)
+                    try terminal.sendTerminalNonblocking(payloads.1)
+                    guard release.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                } }
+            }
+            defer { allowTerminal.signal(); release.signal() }
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let io = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+            guard case .admitted(let session) = io else { return XCTFail("The original channel must remain owned") }
+            defer { session.close() }
+            guard case .opened? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The stream must open") }
+            guard case .outputEnded? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The output must end before the terminal") }
+            if fullControlQueue {
+                for _ in 0..<4 { XCTAssertTrue(try session.forwardSignal(UInt32(SIGINT))) }
+                XCTAssertFalse(try session.acknowledgeOutput())
+            }
+            allowTerminal.signal()
+            XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 1000)) { XCTAssertEqual($0 as? CommandStreamError, .closed) }
+            XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandHandshakeError, .retired) }
+            XCTAssertThrowsError(try session.acknowledgeOutput())
+            release.signal(); XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+            try result.withLock { try XCTUnwrap($0).get() }
+            XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        }
+    }
+}

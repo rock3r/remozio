@@ -136,7 +136,7 @@ public final class RetainedCommandExecutionSession {
                     case .exited, .signalled: throw CommandStreamError.closed
                     default: break
                     }
-                } else if !incoming.ended { throw CommandStreamError.closed }
+                } else if !incoming.ended || !outputAcknowledged { throw CommandStreamError.closed }
                 terminal = result; close()
                 return .terminal(result)
             }
