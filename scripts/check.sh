@@ -20,6 +20,7 @@ if [ "$(uname -s)" = Darwin ]; then
     swift test --package-path protocol/swift --triple arm64-apple-macosx26.0
     swift test --package-path macos/core --triple arm64-apple-macosx26.0
     python3 scripts/run-macos-job-control-experiment.py
+    python3 scripts/run-macos-nested-shell-experiment.py
     python3 scripts/check-command-transfer.py
 fi
 git diff --check

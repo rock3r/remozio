@@ -1,0 +1,66 @@
+{
+  "experiment": "command-nested-shell-v1",
+  "measuredAtUTC": "2026-10-09T20:22:10.068774+00:00",
+  "host": {
+    "os": "27.0.1",
+    "build": "26A434",
+    "architecture": "arm64",
+    "sdk": "27.0",
+    "deploymentTarget": "26.0"
+  },
+  "sources": {
+    "experiments/command-nested-shell/monitor-fixture.c": "3df5eb4e196ab086c1891f74ba529450695cde0ecbf55e894eccab01bc54290a",
+    "experiments/command-nested-shell/probe.c": "bd190666215d4b760dbbcd7245a5c64c8b244664586d0422efd8e33a7ced5a66",
+    "macos/app/CommandMonitor/MonitorMain.c": "8be7c8fda18e54c7152fc7185603f5a80170a48585fd6c05bd1d8b206dbd5ac3",
+    "macos/core/Tests/RemozioCoreTests/Fixtures/command-process/child.c": "d72dbeed0be6f41756a5368f49595e92e0b29d633e9e3db6131b63741fc39f08",
+    "macos/core/Sources/RemozioMach/CommandMonitor.c": "ebb4e09b184b491bedaa1df2ee41043dc3d4b5707234c383706a1ed126be56ea",
+    "macos/core/Sources/RemozioMach/CommandProcess.c": "0b4dae4b5cbd337e54b7f27f18d0310844dc1a391642e5e863c0e5802473baf1",
+    "macos/core/Sources/RemozioMach/CommandPTY.c": "7c4d2c73a72da58f17ff440e1823180503b7a4bdfb2f5efdeb52242e7630ce70",
+    "macos/core/Sources/RemozioMach/CommandChildSpecification.c": "1e63f47ce38a3211f6fea03fe3844e43f4093fa3c525ff1b7cfaac27ea1bdaef",
+    "macos/core/Sources/RemozioMach/CommandMonitorProtocol.c": "9d2b10baa9fbe1e6edefffb193320e0c6a7e713c0ad0ab7ae86b232055000f78",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandMonitor.h": "a2059a41694dbff3300c4bd73f155ce8378c4b979cd1026e668a2e552fe33725",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandMonitorProtocol.h": "8c27daba357d66c9996c778845e7bf55c5a8ce2abad741d583c25a7be9793505",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandProcess.h": "443de2eb120f1ee3857fafdbb74b9e0552b0a47619e8588446fa8f7ede64f1d4",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandPTY.h": "2f21aabc187008ec100b0f9efdaca4fe159b6da09e430bdc2251089aa2a85e94",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandChild.h": "18148fadeb459eabfe9d02f821addcce240084db0fa12868bfc3c7579b3b3d65",
+    "scripts/run-macos-nested-shell-experiment.py": "7c83df398c07a6eddb7c1f750c4bd6875a454062ff26a029b942c4e00ebdd280"
+  },
+  "cases": {
+    "signal": {
+      "trials": 15,
+      "allTrialsMatch": true,
+      "observations": {
+        "failure": 0,
+        "nestedStopped": true,
+        "nestedResumed": true,
+        "foregroundInterrupted": true,
+        "shellExecObserved": true,
+        "shellExitObserved": true,
+        "monitorReaped": true,
+        "targetWait": 1792
+      }
+    },
+    "typed": {
+      "trials": 15,
+      "allTrialsMatch": true,
+      "observations": {
+        "failure": 0,
+        "nestedStopped": true,
+        "nestedResumed": true,
+        "foregroundInterrupted": true,
+        "shellExecObserved": true,
+        "shellExitObserved": true,
+        "monitorReaped": true,
+        "targetWait": 1792
+      }
+    }
+  },
+  "limits": [
+    "Disposable unprivileged Bash and sleep jobs in private terminals; no user terminal",
+    "Current monitor UID guard substituted; synthetic launcher changes no credentials",
+    "No protected installation, production elevation, actual CLI or cross-user proof",
+    "No external debugger, crash recovery, mixed streams or authenticated frontend job events",
+    "The runtime is recorded; deployment target does not prove macOS 26 runtime behavior",
+    "Fixture deadlines bound experiments only; no product command runtime limit"
+  ]
+}
