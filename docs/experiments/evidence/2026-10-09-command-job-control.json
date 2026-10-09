@@ -1,0 +1,116 @@
+{
+  "experiment": "command-job-control-v1",
+  "measuredAtUTC": "2026-10-09T02:40:58.045018+00:00",
+  "host": {
+    "os": "27.0.1",
+    "build": "26A434",
+    "architecture": "arm64",
+    "sdk": "27.0",
+    "deploymentTarget": "26.0"
+  },
+  "sources": {
+    "experiments/command-job-control/leader-probe.c": "d902998d8f76d2182eb73ac11a81b5652e9ec7bb2e67ba153d7bd45ccc203c57",
+    "experiments/command-job-control/leader-target.c": "8b0e0489c9cb238c84d547efbef06d81ce5ab1091db784ade2fab38519845520",
+    "experiments/command-job-control/monitor-probe.c": "084645f06b92f6ae2952c0f2a8d1f8fd903bee443499aa45419ffc4737423a6e",
+    "experiments/command-job-control/monitor-target.c": "22d5a8d497cd1039df71554e0bab211aab8163e48a8cab72f5a478d69f601700",
+    "experiments/command-job-control/monitor.c": "eb2de08d48a2f6c16c3c8ba0eb74a472929c6b2dc61406f9e18dd9fe3db72e88",
+    "macos/core/Tests/RemozioCoreTests/Fixtures/command-process/child.c": "cb5327abdbd4c1bd205f6cc2db373a02f12505e8194db1ed1112cd49f693ff54",
+    "macos/core/Sources/RemozioMach/CommandProcess.c": "a273c6834dbda9a5718357f93b55f7d1d7c4d249850c44da192d05801764f86b",
+    "macos/core/Sources/RemozioMach/CommandPTY.c": "7c4d2c73a72da58f17ff440e1823180503b7a4bdfb2f5efdeb52242e7630ce70",
+    "macos/core/Sources/RemozioMach/CommandChildSpecification.c": "1e63f47ce38a3211f6fea03fe3844e43f4093fa3c525ff1b7cfaac27ea1bdaef",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandProcess.h": "fcb0edae06affd4c22cf368d8c55a232c6c34bec17616ea0dfaa637233e417a2",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandPTY.h": "2f21aabc187008ec100b0f9efdaca4fe159b6da09e430bdc2251089aa2a85e94",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandChild.h": "18148fadeb459eabfe9d02f821addcce240084db0fa12868bfc3c7579b3b3d65",
+    "scripts/run-macos-job-control-experiment.py": "1a566c1e885b715075f7da5b7167e1408c497d028d0f09efa0a7e8f81896a6c9"
+  },
+  "cases": {
+    "native_leader": {
+      "trials": 10,
+      "allTrialsMatch": true,
+      "observations": {
+        "foregroundSIGTSTPStoppedLeader": false,
+        "foregroundSIGSTOPStoppedLeader": true,
+        "nativePollRetainedOwnedStoppedChild": true,
+        "foregroundContinueProducedActualExit7": true,
+        "exactOutput": true
+      }
+    },
+    "resume": {
+      "trials": 10,
+      "allTrialsMatch": true,
+      "observations": {
+        "case": "resume",
+        "terminalSuspendByteSent": false,
+        "defaultTSTPStopsTarget": true,
+        "monitorRemainsRunning": true,
+        "kernelExecObserved": true,
+        "execFailureReported": false,
+        "actualWaitOutcome": true,
+        "exactOutput": true,
+        "monitorReaped": true,
+        "externalKernelExecObserved": true,
+        "externalKernelExitObserved": true
+      }
+    },
+    "typed_suspend": {
+      "trials": 10,
+      "allTrialsMatch": true,
+      "observations": {
+        "case": "typed_suspend",
+        "terminalSuspendByteSent": true,
+        "defaultTSTPStopsTarget": true,
+        "monitorRemainsRunning": true,
+        "kernelExecObserved": true,
+        "execFailureReported": false,
+        "actualWaitOutcome": true,
+        "exactOutput": true,
+        "monitorReaped": true,
+        "externalKernelExecObserved": true,
+        "externalKernelExitObserved": true
+      }
+    },
+    "cancel": {
+      "trials": 10,
+      "allTrialsMatch": true,
+      "observations": {
+        "case": "cancel",
+        "terminalSuspendByteSent": false,
+        "defaultTSTPStopsTarget": true,
+        "monitorRemainsRunning": true,
+        "kernelExecObserved": true,
+        "execFailureReported": false,
+        "actualWaitOutcome": true,
+        "exactOutput": true,
+        "monitorReaped": true,
+        "externalKernelExecObserved": true,
+        "externalKernelExitObserved": true
+      }
+    },
+    "failure": {
+      "trials": 10,
+      "allTrialsMatch": true,
+      "observations": {
+        "case": "failure",
+        "terminalSuspendByteSent": false,
+        "defaultTSTPStopsTarget": false,
+        "monitorRemainsRunning": false,
+        "kernelExecObserved": false,
+        "execFailureReported": true,
+        "actualWaitOutcome": true,
+        "exactOutput": true,
+        "monitorReaped": true,
+        "externalKernelExecObserved": false,
+        "externalKernelExitObserved": true
+      }
+    }
+  },
+  "limits": [
+    "Disposable unprivileged children and terminals; no installed service or user terminal",
+    "Native leader uses the current C owner and synthetic launcher; not production elevation",
+    "Monitor prototype owns target waitpid; external kernel observation grants no target ownership",
+    "No protected monitor protocol, durable release, crash recovery or client integration",
+    "No nested foreground jobs, cross-user execution, real shell or physical terminal validation",
+    "The runtime version is recorded; deployment target does not prove macOS 26 runtime behavior",
+    "Loop deadlines bound fixtures only; they do not set product execution time limits"
+  ]
+}

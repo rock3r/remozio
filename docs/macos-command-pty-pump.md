@@ -123,3 +123,7 @@ No user terminal, firewall rule, installed service, or device was changed by the
 
 The complete repository gate passed 1196 core tests and 97 Swift protocol tests, plus Python, packaging, experiment, and ownership checks.
 The required Kotlin/Android tasks passed with JDK 21 and SDK 37. The wrapper records the required test, APK, and lint results.
+
+The [job-control experiment](experiments/macos-command-job-control.md) measures a missing interactive gate.
+The current fresh-session leader ignores default `SIGTSTP` in the recorded native trials.
+A disposable session monitor preserves terminal-generated stop and resume behavior. Its protected integration remains required.
