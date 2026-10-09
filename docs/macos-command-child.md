@@ -26,7 +26,9 @@ sequenceDiagram
 
 The parent must authenticate the installed executable and supply only these descriptors.
 It must create a separate process group, reset inherited signals and use a clean launcher environment.
-PTY mode also requires a new session and a private terminal slave.
+Legacy `--execute` PTY mode requires a new session and a private terminal slave.
+The monitor selects `--execute-in-session` to preserve its session and give the target a separate process group.
+That mode verifies the parent session and, for PTY mode, the existing controlling terminal and target foreground group.
 
 | Descriptor | Use |
 | --- | --- |
@@ -103,6 +105,6 @@ Pathname execution retains the user-approved replacement race after the final id
 
 Ten focused tests cover raw-byte preservation, malformed frames, cleanup and Darwin group normalization.
 Debug and Release packaging checks verify the embedded signature, runtime, architecture and macOS 26 deployment target.
-The refusal check proves a non-root caller cannot consume stdin or write command output.
+The refusal checks cover both private modes. A non-root caller cannot consume stdin or write command output.
 No privileged command, Root listener, service registration, PTY session or physical device was activated.
 Protected installation, Developer ID distribution and interactive credential/terminal checks remain open.

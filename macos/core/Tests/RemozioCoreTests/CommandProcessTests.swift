@@ -414,3 +414,44 @@ extension CommandProcessTests {
         try assertJobControlFixture("ownership_loss")
     }
 }
+
+extension CommandProcessTests {
+    private func assertSessionFixture(_ name: String, ioMode: CommandIOMode) throws {
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "session-context", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach"), harness = directory.appendingPathComponent("session-context")
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror",
+            "-I", native.appendingPathComponent("include").path, source.path,
+            native.appendingPathComponent("CommandProcess.c").path,
+            native.appendingPathComponent("CommandChildSpecification.c").path,
+            native.appendingPathComponent("CommandPTY.c").path, "-o", harness.path]
+        try compiler.run(); compiler.waitUntilExit()
+        XCTAssertEqual(compiler.terminationStatus, 0)
+        guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
+        let file = directory.appendingPathComponent("frame")
+        try frame(mode: "wait", ioMode: ioMode).write(to: file)
+        let probe = Process(); probe.executableURL = harness; probe.currentDirectoryURL = directory
+        probe.arguments = [launcher.path, file.path, name]
+        try probe.run(); probe.waitUntilExit()
+        XCTAssertEqual(probe.terminationStatus, 0, "Native monitor session fixture: \(name)")
+    }
+    func testMonitorSessionPreservesPipeInputAndStopsItsOwnedTargetGroup() throws {
+        try assertSessionFixture("pipes", ioMode: .pipes)
+    }
+    func testMonitorSessionPreservesTerminalOwnershipAcrossStopAndResume() throws {
+        try assertSessionFixture("terminal_signal", ioMode: .pty)
+    }
+    func testMonitorSessionTerminalSuspendCharacterStopsOnlyItsTarget() throws {
+        try assertSessionFixture("terminal_character", ioMode: .pty)
+    }
+    func testMonitorSessionCancelsAndReapsItsStoppedTarget() throws {
+        try assertSessionFixture("stopped_cancel", ioMode: .pty)
+    }
+    func testMonitorSessionRejectsAnUnownedTerminalBeforeCreatingAChild() throws {
+        try assertSessionFixture("unowned_terminal", ioMode: .pty)
+    }
+    func testMonitorSessionRejectsAnOrdinaryCallerWithoutConsumingInput() throws {
+        try assertSessionFixture("not_session_leader", ioMode: .pipes)
+    }
+}

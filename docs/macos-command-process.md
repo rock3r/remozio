@@ -33,7 +33,7 @@ Raw child endpoints close as soon as their owned duplicates exist, before spawn 
 Only the explicit mappings survive `POSIX_SPAWN_CLOEXEC_DEFAULT`.
 Darwin's public `pipe` API does not atomically set close-on-exec. The host must use close-on-exec defaults for every concurrent launch.
 This avoids inheritance during the short interval between pipe creation and descriptor marking.
-The launcher receives only its path and `--execute`, with an empty environment.
+The legacy launcher receives only its path and `--execute`, with an empty environment.
 The approved raw argv and deterministic environment travel through the private frame.
 
 Startup resets the child's signal mask and dispositions.
@@ -46,6 +46,40 @@ The caller must serialize this opaque owner and be its exclusive `waitpid` owner
 The factory rejects automatic child-reaping configurations before spawning.
 A failure after a successful spawn still returns the owned object. The caller must retire that object too.
 No polling or cleanup method waits for a child exit.
+
+## Dedicated monitor session
+
+The additive `spawn_in_session` API prepares a target inside a dedicated monitor's session.
+The product monitor and its authority connection remain pending. The diagram shows that required integration.
+The monitor must be both the session leader and its process-group leader. An ordinary caller is rejected before spawn.
+The target receives its own process group. Its live parent stays in the same session, preserving ordinary job-control stops.
+The legacy `spawn` API keeps its existing session behavior.
+
+```mermaid
+flowchart LR
+    R[Root dispatch owner] --> M[Protected monitor: session leader]
+    M --> T[Target: separate process group, same session]
+    P[Owned private terminal] -->|Foreground group| T
+    T -->|Stop, continue, actual exit| M
+    M -->|Private observations| R
+```
+
+In PTY mode, the monitor must own the supplied controlling terminal and initially own its foreground group.
+The native owner registers kernel observations and selects the target foreground group before resuming preparation.
+A failed handoff still returns any spawned child. The monitor retains responsibility for its cancellation and reaping.
+The native API does not restore the foreground group, drain output, or manage the monitor's terminal signal dispositions.
+The dedicated monitor must handle those operations and retain its terminal through target cleanup.
+Pipe mode preserves separate borrowed streams; it does not attach them as a controlling terminal.
+
+This path selects the protected child's `--execute-in-session` mode. Its root requirement remains unchanged.
+The child validates its inherited session and separate group. PTY mode verifies the existing controlling terminal instead of claiming it again.
+The private frame, preparation deadline, one release attempt, and exclusive exit owner remain unchanged.
+
+Six regressions use disposable session owners and a synthetic launcher.
+They cover pipe input, direct suspend, the terminal suspend character, stopped cancellation, and two rejected caller contexts.
+The targets stop while their session owners keep running. Resume and cancellation preserve actual exit ownership.
+The tests retain unread stdin and shared descriptor flags. Packaging checks exercise both modes' non-root refusal.
+These results do not prove protected monitor integration, debugger classification, cross-user execution, or frontend shell suspension.
 
 ## Bounded preparation and release
 

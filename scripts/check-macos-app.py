@@ -45,16 +45,17 @@ def check(configuration):
     require(child.read_bytes() == child_original.read_bytes(), 'Embedding changed the signed command child')
     require(subprocess.run([str(child)], timeout=5).returncode == 64, 'Command child must reject public command arguments')
     if os.geteuid() != 0:
-        read_descriptor, write_descriptor = os.pipe()
-        try:
-            os.write(write_descriptor, b'unread command input'); os.close(write_descriptor); write_descriptor = -1
-            denied_child = subprocess.run([str(child), '--execute'], stdin=read_descriptor, capture_output=True, timeout=5)
-            require(denied_child.returncode == 77, 'Command child must require root before reading private data')
-            require(os.read(read_descriptor, 64) == b'unread command input', 'Refused command child consumed stdin')
-            require(not denied_child.stdout and not denied_child.stderr, 'Command child wrote to the command streams')
-        finally:
-            os.close(read_descriptor)
-            if write_descriptor >= 0: os.close(write_descriptor)
+        for mode in ('--execute', '--execute-in-session'):
+            read_descriptor, write_descriptor = os.pipe()
+            try:
+                os.write(write_descriptor, b'unread command input'); os.close(write_descriptor); write_descriptor = -1
+                denied_child = subprocess.run([str(child), mode], stdin=read_descriptor, capture_output=True, timeout=5)
+                require(denied_child.returncode == 77, 'Command child must require root before reading private data')
+                require(os.read(read_descriptor, 64) == b'unread command input', 'Refused command child consumed stdin')
+                require(not denied_child.stdout and not denied_child.stderr, 'Command child wrote to the command streams')
+            finally:
+                os.close(read_descriptor)
+                if write_descriptor >= 0: os.close(write_descriptor)
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     require(info['CFBundleIdentifier'] == identity, 'Unexpected bundle identity')
     require(info['LSMinimumSystemVersion'] == '26.0', 'Unexpected deployment target')
