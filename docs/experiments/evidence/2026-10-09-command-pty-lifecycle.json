@@ -1,0 +1,865 @@
+{
+  "measuredOn": "2026-10-09",
+  "scope": "Disposable unprivileged fixtures only; no service, user terminal, device, or firewall changes.",
+  "experiments": {
+    "leaderExit": {
+      "minimumTarget": "macOS26arm64",
+      "runtime": "27.0.1",
+      "privileged": false,
+      "trials": [
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 384,
+          "eofAtMilliseconds": 384,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 1,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 2,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 3,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 6,
+          "eofAtMilliseconds": 6,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 4,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 5,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 6,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 7,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 8,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 9,
+          "descendantWriteErrno": 5
+        },
+        {
+          "error": 0,
+          "reapedAtMilliseconds": 5,
+          "eofAtMilliseconds": 5,
+          "signalAfterReapErrno": 3,
+          "outputBytes": 7,
+          "trial": 10,
+          "descendantWriteErrno": 5
+        }
+      ]
+    },
+    "foreground": {
+      "minimumTarget": "macOS26arm64",
+      "runtime": "27.0.1",
+      "privileged": false,
+      "trials": [
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 424,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 58,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 56,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 56,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 56,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 56,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 10
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 58,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 59,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 57,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 55,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 60,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 60,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 59,
+          "trial": 10
+        }
+      ]
+    },
+    "canonicalAndRawEOF": {
+      "minimumTarget": "macOS26arm64",
+      "runtime": "27.0.1",
+      "privileged": false,
+      "trials": [
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 487,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 6,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 7,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 5,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 6,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 5,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 5,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 5,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "empty",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 10
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 5,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 4,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "partial",
+          "outputBytes": 12,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 5,
+          "trial": 10
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 105,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 106,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 108,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 111,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 117,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 108,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 109,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 111,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 111,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "raw",
+          "outputBytes": 23,
+          "attributesUnchanged": true,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 109,
+          "trial": 10
+        }
+      ]
+    },
+    "opaqueForeground": {
+      "minimumTarget": "macOS26arm64",
+      "runtime": "27.0.1",
+      "privileged": false,
+      "masterExported": false,
+      "trials": [
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 536,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 63,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 60,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 63,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 68,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 61,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 60,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 64,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 59,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "interrupt",
+          "outputBytes": 27,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 61,
+          "trial": 10
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 1
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 61,
+          "trial": 2
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 61,
+          "trial": 3
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 4
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 5
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 6
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 7
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 8
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 9
+        },
+        {
+          "error": 0,
+          "mode": "cancel",
+          "outputBytes": 6,
+          "baselineDidNotReachForeground": true,
+          "foregroundSignalErrno": 0,
+          "reaped": true,
+          "eof": true,
+          "milliseconds": 62,
+          "trial": 10
+        }
+      ]
+    }
+  }
+}

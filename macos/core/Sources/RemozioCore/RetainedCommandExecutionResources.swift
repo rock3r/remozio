@@ -16,6 +16,12 @@ final class RetainedCommandExecutionResources {
     private var executionRetired = false
     private var closed = false
     private var terminalAttempted = false
+    private struct TerminalDelivery {
+        let outcome: CommandTerminalOutcome
+        let outputInterrupted: Bool
+        let bytes: Data
+    }
+    private var pendingTerminalDelivery: TerminalDelivery?
 
     init(capture: CommandCapture, caller: RetainedCommandCaller, input: RetainedCommandInputDescriptor,
          filesystem: CommandFilesystemCapture, outputs: RetainedCommandOutputChannels, terminal: MachCommandReplyRight,
@@ -26,6 +32,11 @@ final class RetainedCommandExecutionResources {
     }
     deinit { close() }
     var requiresStreamPump: Bool { profile.supportsStreamingExecution }
+    func makeStreamAuthority() throws -> MachCommandStreamAuthority {
+        guard requiresStreamPump, !closed, !executionRetired else { throw CommandExecutionError.unavailable }
+        return try MachCommandStreamAuthority(binding: .init(profile: profile, submission: capture.submission,
+            submissionDigest: submissionDigest, request: request), original: caller, terminal: terminal)
+    }
     var requesterExitObserved: Bool { caller.requesterExitObserved }
 
     func recheck(currentPolicy: XPCPeerPolicy, checkCancellation: () throws -> Void = {}) throws {
@@ -67,18 +78,38 @@ final class RetainedCommandExecutionResources {
 
     /// Only the trusted controller supplies an established result after the required durable transition.
     /// A failed private delivery consumes this attempt and cannot authorize another command.
-    func sendTerminalOutcome(_ outcome: CommandTerminalOutcome) throws {
-        guard !closed, !terminalAttempted else { throw MachCommandHandshakeError.retired }
+    func sendTerminalOutcome(_ outcome: CommandTerminalOutcome, outputInterrupted: Bool = false) throws {
+        guard !closed, !terminalAttempted, pendingTerminalDelivery == nil else { throw MachCommandHandshakeError.retired }
         let payload = CommandTerminalResultPayload(profile: profile, submission: capture.submission,
-            submissionDigest: submissionDigest, request: request, outcome: outcome)
+            submissionDigest: submissionDigest, request: request, outcome: outcome, outputInterrupted: outputInterrupted)
         let bytes = try payload.canonicalBytes
         terminalAttempted = true
         defer { terminal.close() }
         try terminal.sendTerminalNonblocking(bytes)
     }
+    /// Retains one exact result across known zero-progress sends. It cannot retry execution or replace the retained outcome.
+    func queueTerminalOutcome(_ outcome: CommandTerminalOutcome, outputInterrupted: Bool) throws -> Bool {
+        guard !closed, !terminalAttempted else { throw MachCommandHandshakeError.retired }
+        if pendingTerminalDelivery == nil {
+            let payload = CommandTerminalResultPayload(profile: profile, submission: capture.submission,
+                submissionDigest: submissionDigest, request: request, outcome: outcome, outputInterrupted: outputInterrupted)
+            pendingTerminalDelivery = try TerminalDelivery(outcome: outcome, outputInterrupted: outputInterrupted, bytes: payload.canonicalBytes)
+        }
+        guard let delivery = pendingTerminalDelivery, delivery.outcome == outcome, delivery.outputInterrupted == outputInterrupted else {
+            throw MachCommandHandshakeError.invalidConfiguration
+        }
+        do {
+            guard try terminal.queueTerminalNonblocking(delivery.bytes) else { return false }
+            terminalAttempted = true; pendingTerminalDelivery = nil
+            return true
+        } catch {
+            terminalAttempted = true; pendingTerminalDelivery = nil; terminal.close()
+            throw error
+        }
+    }
     func close() {
         guard !closed else { return }
-        closed = true; retireExecutionResources(); terminal.close()
+        closed = true; pendingTerminalDelivery = nil; retireExecutionResources(); terminal.close()
     }
     private func retireExecutionResources() {
         guard !executionRetired else { return }

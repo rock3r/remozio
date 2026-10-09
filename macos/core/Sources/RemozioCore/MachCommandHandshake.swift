@@ -365,6 +365,19 @@ final class MachCommandReplyRight {
         defer { close() }
         try MachCommandWire.sendTerminalNonblocking(bytes, destination: port)
     }
+    /// A timeout or send interruption queued nothing. Keep this original right for a later bounded delivery turn.
+    func queueTerminalNonblocking(_ bytes: Data) throws -> Bool {
+        guard port != MACH_PORT_NULL else { throw MachCommandHandshakeError.retired }
+        guard identifier == MachCommandCallerReceiver.terminalReplyMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
+        do {
+            try MachCommandWire.sendTerminalNonblocking(bytes, destination: port)
+            close(); return true
+        } catch MachCommandCallerError.mach(let result) {
+            let code = result & ~MACH_MSG_MASK
+            if code == MACH_SEND_TIMED_OUT || code == MACH_SEND_INTERRUPTED { return false }
+            close(); throw MachCommandCallerError.mach(result)
+        } catch { close(); throw error }
+    }
     func copyStreamRight() throws -> MachCommandAuthorityPort {
         guard identifier == MachCommandCallerReceiver.terminalReplyMessageID else { throw MachCommandHandshakeError.invalidConfiguration }
         try recheck()
@@ -400,6 +413,7 @@ final class MachCommandAuthorityPort {
 
 final class MachCommandPrivateReplyPort {
     var port: mach_port_t = 0
+    private var localSendReleased = false
     init(queueLimit: UInt32? = nil) throws {
         if let queueLimit, !(1...64).contains(queueLimit) { throw MachCommandHandshakeError.invalidConfiguration }
         let result = mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port)
@@ -420,10 +434,31 @@ final class MachCommandPrivateReplyPort {
             if result != KERN_SUCCESS { close(); throw MachCommandCallerError.mach(result) }
         }
     }
+    /// Release only the grant's local send reference. The receive right remains owned by this endpoint.
+    func releaseLocalSendRight() throws {
+        guard port != MACH_PORT_NULL, !localSendReleased else { throw MachCommandHandshakeError.retired }
+        let result = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_SEND, -1)
+        guard result == KERN_SUCCESS else { throw MachCommandCallerError.mach(result) }
+        localSendReleased = true
+    }
+    /// Includes a send right in a queued grant. Zero means the peer closed all controls, even if its process remains alive.
+    func hasSenders() throws -> Bool {
+        guard port != MACH_PORT_NULL else { throw MachCommandHandshakeError.retired }
+        var status = mach_port_status_t()
+        let capacity = MemoryLayout<mach_port_status_t>.size / MemoryLayout<natural_t>.size
+        var count = mach_msg_type_number_t(capacity)
+        let result = withUnsafeMutablePointer(to: &status) {
+            $0.withMemoryRebound(to: Int32.self, capacity: capacity) {
+                mach_port_get_attributes(mach_task_self_, port, MACH_PORT_RECEIVE_STATUS, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS, count == capacity else { throw MachCommandCallerError.mach(result) }
+        return status.mps_srights > 0
+    }
     func close() {
         if port != MACH_PORT_NULL {
             _ = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1)
-            _ = mach_port_deallocate(mach_task_self_, port)
+            if !localSendReleased { _ = mach_port_deallocate(mach_task_self_, port) }
             port = 0
         }
     }

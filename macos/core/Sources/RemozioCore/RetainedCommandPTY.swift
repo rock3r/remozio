@@ -56,6 +56,20 @@ final class RetainedCommandPTY {
         let status = remozio_command_pty_resize(handle, &size)
         if status != 0 { throw RetainedCommandPTYError.native(status) }
     }
+    /// Signals only this private terminal's current foreground group. The controller must retain native command ownership.
+    func signalForeground(_ number: Int32) throws {
+        guard let handle else { throw RetainedCommandPTYError.closed }
+        let status = remozio_command_pty_signal(handle, number)
+        if status != 0 { throw RetainedCommandPTYError.native(status) }
+    }
+    /// Raw mode has no terminal EOF character. This never changes the application's terminal attributes.
+    func currentCanonicalEOFSequence() throws -> Data? {
+        guard let handle else { throw RetainedCommandPTYError.closed }
+        var bytes = [UInt8](repeating: 0, count: 2), count = 0
+        let status = remozio_command_pty_eof_sequence(handle, &bytes, &count)
+        if status != 0 { throw RetainedCommandPTYError.native(status) }
+        return count == 0 ? nil : Data(bytes.prefix(count))
+    }
     /// Retain this owner until the child finishes and the output drains. Closing early can hang up the private slave.
     func close() { remozio_command_pty_close(handle); handle = nil }
 }

@@ -18,6 +18,12 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             port = borrowingSendRight; ownsReceive = false
         }
         func transferReceiveRight() -> mach_port_t { precondition(ownsReceive); ownsReceive = false; return port }
+        func closeReceiveRight() throws {
+            guard ownsReceive else { return }
+            let status = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1)
+            guard status == KERN_SUCCESS else { throw MachCommandCallerError.mach(status) }
+            ownsReceive = false
+        }
         init() throws {
             guard mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS,
                   mach_port_insert_right(mach_task_self_, port, port, UInt32(MACH_MSG_TYPE_MAKE_SEND)) == KERN_SUCCESS else {
@@ -1712,13 +1718,13 @@ final class MachCommandCallerReceiverTests: XCTestCase {
          .init(name: Data("HOME".utf8), value: Data("/synthetic/home".utf8), source: .minimal)]
     }
     private func commandSubmission(executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, binding: CapturedSubmission? = nil,
-                                   disconnect: StartedCommandDisconnect = .terminate) throws -> CommandSubmission {
+                                   disconnect: StartedCommandDisconnect = .terminate, ioMode: CommandIOMode = .pipes) throws -> CommandSubmission {
         try CommandSubmission(schemaVersion: 1, executablePath: Data(executablePath.utf8),
             arguments: arguments ?? [Data("custom argv0".utf8), Data(), Data([0xff, 0x0a, 0x22])],
             directoryPath: Data(FileManager.default.temporaryDirectory.path.utf8), requestedTargetUID: geteuid(),
             environmentAdditions: [.init(name: Data("HOME".utf8), value: Data("/synthetic/requested".utf8)),
                 .init(name: Data("RAW".utf8), value: Data([0xfe, 0x0a]))],
-            ioMode: .pipes, disconnectBehavior: disconnect, unverifiedRationale: "pid=123, caller claim",
+            ioMode: ioMode, disconnectBehavior: disconnect, unverifiedRationale: "pid=123, caller claim",
             binding: binding ?? .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32), callerBinding: assemblyBinding),
             limits: assemblyLimits)
     }
@@ -3769,13 +3775,14 @@ extension MachCommandCallerReceiverTests {
         return (completed, result)
     }
     private func ioPayloads(profile: CommandHandshakeProfile, submission: CommandSubmission,
-                            outcome: CommandAdmissionOutcome? = nil, terminal: CommandTerminalOutcome = .exited(7)) throws -> (Data, Data) {
+                            outcome: CommandAdmissionOutcome? = nil, terminal: CommandTerminalOutcome = .exited(7),
+                            outputInterrupted: Bool = false) throws -> (Data, Data) {
         let request = CommandAdmittedRequest(requestID: Data(repeating: 6, count: 16),
             requestDigest: Data(repeating: 7, count: 32), challenge: Data(repeating: 8, count: 32))
         let admission = CommandAdmissionResultPayload(profile: profile, submission: submission.binding,
             submissionDigest: Data(SHA256.hash(data: submission.canonicalBytes)), outcome: outcome ?? .admitted(request))
         return (try admission.canonicalBytes, try CommandTerminalResultPayload(profile: profile, original: submission,
-            request: request, outcome: terminal).canonicalBytes)
+            request: request, outcome: terminal, outputInterrupted: outputInterrupted).canonicalBytes)
     }
     func testIOClientKeepsSessionAfterEmptyPollAndReceivesBoundTerminalAndOriginalStreams() throws {
         let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 3)
@@ -3955,13 +3962,14 @@ extension MachCommandCallerReceiverTests {
 
 extension MachCommandCallerReceiverTests {
     private func ownerIOCommand(admission: Endpoint, terminal: Endpoint, inputDescriptor: Int32? = nil,
-                                executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, wire: UInt64 = 3) throws ->
+                                executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, wire: UInt64 = 3, ioMode: CommandIOMode = .pipes,
+                                disconnect: StartedCommandDisconnect = .terminate) throws ->
         (ReceivedMachCommandInputSubmission, RetainedCommandCapture, CommandSubmission, CommandHandshakeProfile) {
         let endpoint = try Endpoint(), input = inputDescriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         let output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
         guard input >= 0, output >= 0 else { throw MachCommandCallerError.unavailable }
         defer { if inputDescriptor == nil { _ = Darwin.close(input) }; _ = Darwin.close(output) }
-        let submission = try commandSubmission(executablePath: executablePath, arguments: arguments)
+        let submission = try commandSubmission(executablePath: executablePath, arguments: arguments, disconnect: disconnect, ioMode: ioMode)
         let profile = CommandHandshakeProfile(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: 4,
             callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
         try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
@@ -5114,9 +5122,11 @@ extension MachCommandCallerReceiverTests {
 
 extension MachCommandCallerReceiverTests {
     func testStreamClientRejectsNativeExitBeforeOpenAndAllowsKnownPreSpawnFailure() throws {
-        for outcome: CommandTerminalOutcome in [.exited(0), .failedBeforeStart] {
+        let cases: [(CommandTerminalOutcome, Bool)] = [(.exited(0), false), (.failedBeforeStart, false),
+            (.exited(0), true), (.failedBeforeStart, true)]
+        for (outcome, interrupted) in cases {
             let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 4)
-            let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission, terminal: outcome)
+            let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission, terminal: outcome, outputInterrupted: interrupted)
             let release = DispatchSemaphore(value: 0), server = try serveIO(endpoint.port, admission: payloads.0, terminal: payloads.1, release: release)
             defer { release.signal() }
             let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
@@ -5126,7 +5136,7 @@ extension MachCommandCallerReceiverTests {
             guard case .admitted(let session) = io else { return XCTFail("The original terminal channel must remain owned") }
             defer { session.close() }
             release.signal(); XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success); try server.1.withLock { try $0?.get() }
-            if outcome == .exited(0) {
+            if outcome == .exited(0) || interrupted {
                 XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 1000)) { XCTAssertEqual($0 as? CommandStreamError, .closed) }
             } else {
                 guard case .terminal(let result)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The pre-spawn result must remain available") }
@@ -5244,5 +5254,808 @@ extension MachCommandCallerReceiverTests {
             try result.withLock { try XCTUnwrap($0).get() }
             XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
         }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYStreamsOutputAndCommitsBeforeDrainAcknowledgmentWithoutRepeatingOutcome() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let input = try RetainedCommandPTY(size: winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0))
+        defer { input.close() }
+        let original = try input.withBorrowedSlave { descriptor -> (Int32, termios) in
+            var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            return (fcntl(descriptor, F_GETFL), attributes)
+        }
+        let (_, command, submission, profile) = try input.withBorrowedSlave {
+            try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("test -t 0 && test -t 1 && test -t 2 || exit 40; /bin/stty size; printf PTY_DONE; exit 7".utf8)],
+                wire: 4, ioMode: .pty)
+        }
+        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+            submissionDigest: admission.submissionDigest, request: admitted)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        try beginDispatch(fixture, request: request, launcher: launcher)
+        let receive = try receiver(terminal, maximum: 8192)
+        var control: MachCommandAuthorityPort?, output = Data(), ended = false
+        defer { control?.close() }
+        while !ended {
+            guard case .stream(let reply, let right) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("Output must drain before the original terminal result")
+            }
+            defer { reply.caller.close(); right?.close() }
+            let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+            switch frame.body {
+            case .opened: control = try XCTUnwrap(right).takeControlRight()
+            case .output(let bytes): output.append(bytes)
+            case .outputEnd: ended = true
+            default: XCTFail("This command sends no input or credit")
+            }
+        }
+        XCTAssertEqual(output, Data("24 80\nPTY_DONE".utf8))
+        let deadline = Date().addingTimeInterval(2)
+        while try authority.withRequests({ try $0.historicalOutcome(requestID: request.requestID) })?.revision != 2 {
+            guard Date() < deadline else { throw CommandExecutionError.unavailable }; usleep(1000)
+        }
+        let before = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+        XCTAssertEqual(before?.revision, 2)
+        XCTAssertEqual(authority.activeCommandCount, 1)
+        XCTAssertThrowsError(try receive.receiveExecutionEvent(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+        let lateInput = try CommandStreamFrame(sequence: 0, body: .input(Data("late".utf8))).encode(binding: binding)
+        XCTAssertTrue(try MachCommandWire.sendStream(lateInput, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+        let acknowledgment = try CommandStreamFrame(sequence: 1, body: .outputDrained).encode(binding: binding)
+        XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .exited(7))
+        try awaitDispatchCleanup(authority)
+        let after = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+        XCTAssertEqual(after?.revision, before?.revision)
+        XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        try input.withBorrowedSlave { descriptor in
+            var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            XCTAssertEqual(fcntl(descriptor, F_GETFL), original.0)
+            XCTAssertEqual(attributes.c_lflag, original.1.c_lflag); XCTAssertEqual(attributes.c_iflag, original.1.c_iflag)
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testStreamClosedSendRightsPreserveQueuedControlAndThenReportDisconnect() throws {
+        let source = try Endpoint(), output = try Endpoint()
+        try source.send(Data([1]))
+        let original = try receiver(source).receive(timeoutMilliseconds: 1000)
+        defer { original.caller.close() }
+        let profile = CommandHandshakeProfile(wireVersion: 4, submissionSchemaVersion: 1, inputCarrierVersion: 4,
+            callerBinding: assemblyBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+        let binding = streamBinding(profile, try commandSubmission())
+        XCTAssertEqual(mach_port_mod_refs(mach_task_self_, output.port, MACH_PORT_RIGHT_SEND, 1), KERN_SUCCESS)
+        let terminal = MachCommandReplyRight(taking: output.port, identifier: MachCommandCallerReceiver.terminalReplyMessageID)
+        defer { terminal.close() }
+        let stream = try MachCommandStreamAuthority(binding: binding, original: original.caller, terminal: terminal)
+        defer { stream.close() }
+        XCTAssertTrue(try stream.send(.opened))
+        guard case .stream(let reply, let carried) = try receiver(output, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+            return XCTFail("The private control must be granted")
+        }
+        defer { reply.caller.close() }
+        let control = try XCTUnwrap(carried).takeControlRight(); carried?.close()
+        let cancel = try CommandStreamFrame(sequence: 0, body: .cancel).encode(binding: binding)
+        XCTAssertTrue(try MachCommandWire.sendStream(cancel, destination: control.borrowed(), toAuthority: true))
+        control.close()
+        XCTAssertEqual(try stream.receiveControl(expression: selfExpression(), userID: geteuid(), auditSessionID: nil), .cancel)
+        XCTAssertThrowsError(try stream.receiveControl(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? CommandStreamError, .closed)
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYCanonicalInputEOFAndClosedControlsRetireTheOwnedChild() throws {
+        for closeControls in [false, true] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let input = try RetainedCommandPTY(); defer { input.close() }
+            try input.withBorrowedSlave { descriptor in
+                var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+                attributes.c_lflag |= UInt(ICANON); attributes.c_lflag &= ~UInt(ECHO)
+                XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            }
+            let path = closeControls ? "/bin/sh" : "/bin/cat"
+            let arguments = closeControls ? [Data("sh".utf8), Data("-c".utf8), Data("printf READY; /bin/sleep 10".utf8)] : [Data("cat".utf8)]
+            let (_, command, submission, profile) = try input.withBorrowedSlave {
+                try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
+                    executablePath: path, arguments: arguments, wire: 4, ioMode: .pty)
+            }
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            try beginDispatch(fixture, request: request, launcher: launcher)
+            let receive = try receiver(terminal, maximum: 8192)
+            guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The private channel must open")
+            }
+            XCTAssertEqual(try CommandStreamFrame.decode(opened.payload, binding: binding, direction: .toFrontend).body, .opened)
+            opened.caller.close()
+            let control = try XCTUnwrap(carried).takeControlRight(); carried?.close(); defer { control.close() }
+            if closeControls {
+                guard case .stream(let reply, _) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                    return XCTFail("The target must start before closing its controls")
+                }
+                defer { reply.caller.close() }
+                XCTAssertEqual(try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body, .output(Data("READY".utf8)))
+                control.close()
+                XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .signalled(UInt32(SIGKILL)))
+            } else {
+                let bytes = try CommandStreamFrame(sequence: 0, body: .input(Data("abc".utf8))).encode(binding: binding)
+                let end = try CommandStreamFrame(sequence: 1, body: .inputEnd).encode(binding: binding)
+                XCTAssertTrue(try MachCommandWire.sendStream(bytes, destination: control.borrowed(), toAuthority: true))
+                XCTAssertTrue(try MachCommandWire.sendStream(end, destination: control.borrowed(), toAuthority: true))
+                var output = Data(), credit: UInt32 = 0, ended = false
+                while !ended {
+                    guard case .stream(let reply, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                        return XCTFail("Output must drain before the terminal result")
+                    }
+                    defer { reply.caller.close(); extra?.close() }
+                    switch try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body {
+                    case .output(let bytes): output.append(bytes)
+                    case .inputCredit(let count): credit += count
+                    case .outputEnd: ended = true
+                    default: XCTFail("The stream must preserve its direction")
+                    }
+                }
+                XCTAssertEqual(output, Data("abc".utf8)); XCTAssertEqual(credit, 3)
+                let acknowledgment = try CommandStreamFrame(sequence: 2, body: .outputDrained).encode(binding: binding)
+                XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: control.borrowed(), toAuthority: true))
+                XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .exited(0))
+            }
+            try awaitDispatchCleanup(authority)
+            XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 2)
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYFullDuplexPreservesBinaryBytesThroughKernelBackpressure() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+        var queue = mach_port_limits_t(mpl_qlimit: 1)
+        XCTAssertEqual(withUnsafeMutablePointer(to: &queue) {
+            $0.withMemoryRebound(to: Int32.self, capacity: 1) {
+                mach_port_set_attributes(mach_task_self_, terminal.port, MACH_PORT_LIMITS_INFO, $0, 1)
+            }
+        }, KERN_SUCCESS)
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "pty-bulk", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let program = fixture.root.appendingPathComponent("fixture-pty-bulk")
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror", source.path, "-o", program.path]
+        try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
+        let input = try RetainedCommandPTY(); defer { input.close() }
+        try input.withBorrowedSlave { descriptor in
+            var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+        }
+        let (_, command, submission, profile) = try input.withBorrowedSlave {
+            try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
+                executablePath: program.path, arguments: [Data("program".utf8)], wire: 4, ioMode: .pty)
+        }
+        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+            submissionDigest: admission.submissionDigest, request: admitted)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        try beginDispatch(fixture, request: request, launcher: launcher)
+        let receive = try receiver(terminal, maximum: 8192), bytes = Data((0..<131072).map { UInt8($0 % 251) })
+        var control: MachCommandAuthorityPort?, available = 0, sent = 0, outgoing: UInt64 = 0
+        var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
+        var output = Data(), ended = false, inputEndSent = false, queueTimeouts = 0
+        defer { control?.close() }
+        // Shared CI runners still make steady progress through the deliberately slow one-slot output queue.
+        let deadline = Date().addingTimeInterval(180)
+        func enqueueInput(_ control: MachCommandAuthorityPort) throws {
+            while sent < bytes.count, available > 0 {
+                let count = min(4096, available, bytes.count - sent)
+                let body = CommandStreamFrame(sequence: outgoing, body: .input(Data(bytes[sent..<(sent + count)])))
+                if try MachCommandWire.sendStream(body.encode(binding: binding), destination: control.borrowed(), toAuthority: true) {
+                    sent += count; available -= count; outgoing += 1
+                } else { queueTimeouts += 1; break }
+            }
+        }
+        while !ended {
+            guard Date() < deadline else {
+                XCTFail("Bulk transfer stalled: sent=\(sent), output=\(output.count), credit=\(available), sequence=\(outgoing), inputEnd=\(inputEndSent), queueTimeouts=\(queueTimeouts)")
+                throw MachCommandCallerError.timeout
+            }
+            if let control {
+                if sent == 0 {
+                    // The worker holds only the fixture journal. The original frontend keeps its non-Sendable control right.
+                    let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
+                    let paused = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+                    DispatchQueue.global().async {
+                        defer { done.signal() }
+                        let result = Result {
+                            try authority.read { _ in
+                                entered.signal()
+                                guard resume.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                            }
+                        }
+                        paused.withLock { $0 = result }
+                    }
+                    defer { resume.signal() }
+                    XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+                    try enqueueInput(control)
+                    resume.signal()
+                    XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+                    try paused.withLock { try XCTUnwrap($0).get() }
+                } else { try enqueueInput(control) }
+                if sent == bytes.count, !inputEndSent {
+                    let end = try CommandStreamFrame(sequence: outgoing, body: .inputEnd).encode(binding: binding)
+                    if try MachCommandWire.sendStream(end, destination: control.borrowed(), toAuthority: true) { outgoing += 1; inputEndSent = true }
+                }
+            }
+            guard case .stream(let reply, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("All output must drain before the terminal result")
+            }
+            defer { reply.caller.close(); carried?.close() }
+            let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+            try incoming.accept(frame)
+            switch frame.body {
+            case .opened: control = try XCTUnwrap(carried).takeControlRight(); available = 32768
+            case .inputCredit(let count): available += Int(count); XCTAssertLessThanOrEqual(available, 32768)
+            case .output(let bytes): output.append(bytes); usleep(3000)
+            case .outputEnd: ended = true
+            default: XCTFail("The stream must preserve its direction")
+            }
+        }
+        XCTAssertEqual(sent, bytes.count); XCTAssertTrue(inputEndSent); XCTAssertGreaterThan(queueTimeouts, 0)
+        let expected = bytes + Data((0..<1048576).map { UInt8(($0 * 17 + 3) % 251) })
+        XCTAssertEqual(output, expected)
+        let acknowledgment = try CommandStreamFrame(sequence: outgoing, body: .outputDrained).encode(binding: binding)
+        try Self.waitQueued { try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true) }
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .exited(7))
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 2)
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYSelectedContinueDrainsAfterControlClosureWithoutKillingOrRepeatingWork() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let marker = fixture.root.appendingPathComponent("continued-once")
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+            executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                Data("printf READY; /bin/sleep 1; /usr/bin/head -c 1048576 /dev/zero; printf once >> \"$1\"; exit 7".utf8),
+                Data("sh".utf8), Data(marker.path.utf8)], wire: 4, ioMode: .pty, disconnect: .continueRunning)
+        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+            submissionDigest: admission.submissionDigest, request: admitted)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        try beginDispatch(fixture, request: request, launcher: launcher)
+        let receive = try receiver(terminal, maximum: 8192)
+        guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+            return XCTFail("The private stream must open")
+        }
+        XCTAssertEqual(try CommandStreamFrame.decode(opened.payload, binding: binding, direction: .toFrontend).body, .opened)
+        opened.caller.close()
+        let control = try XCTUnwrap(carried).takeControlRight(); carried?.close(); defer { control.close() }
+        guard case .stream(let ready, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+            return XCTFail("The target must start before the controls close")
+        }
+        defer { ready.caller.close(); extra?.close() }
+        XCTAssertEqual(try CommandStreamFrame.decode(ready.payload, binding: binding, direction: .toFrontend).body, .output(Data("READY".utf8)))
+        control.close()
+        let result: ReceivedMachCommandSubmission
+        do {
+            let deadline = Date().addingTimeInterval(180)
+            while true {
+                do { result = try receive.receiveTerminalReply(timeoutMilliseconds: 60000); break }
+                catch MachCommandCallerError.timeout where Date() < deadline { continue }
+            }
+        }
+        catch {
+            XCTFail("Continue cleanup stalled: marker=\(FileManager.default.fileExists(atPath: marker.path)), owners=\(authority.activeCommandCount), phase=\(try authority.withRequests { try $0.state(requestID: request.requestID).phase })")
+            throw error
+        }
+        defer { result.caller.close() }
+        XCTAssertEqual(try CommandTerminalResultPayload.decode(result.payload, profile: profile, original: submission,
+            admission: admission).outcome, .exited(7))
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try Data(contentsOf: marker), Data("once".utf8))
+        XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 2)
+        XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        XCTAssertThrowsError(try receive.receiveTerminalReply(timeoutMilliseconds: 10))
+    }
+
+    func testNativePTYTerminalCommitFailureWaitsForOutputAcknowledgmentThenRecoversOnlyUnknown() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let marker = fixture.root.appendingPathComponent("committed-once")
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf once >> \"$1\"; printf OUT; exit 7".utf8), Data("sh".utf8), Data(marker.path.utf8)], wire: 4, ioMode: .pty)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            let clock = TerminalCommitClock(now: fixture.now(130)); defer { clock.recover() }
+            try beginDispatch(fixture, request: request, launcher: launcher, clock: clock.read)
+            let receive = try receiver(terminal, maximum: 8192)
+            var control: MachCommandAuthorityPort?, output = Data(), ended = false
+            defer { control?.close() }
+            while !ended {
+                guard case .stream(let reply, let right) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                    return XCTFail("Output must drain before even an unknown terminal result")
+                }
+                defer { reply.caller.close(); right?.close() }
+                switch try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend).body {
+                case .opened: control = try XCTUnwrap(right).takeControlRight()
+                case .output(let bytes): output.append(bytes)
+                case .outputEnd: ended = true
+                default: XCTFail("This command sends no input or credit")
+                }
+            }
+            XCTAssertEqual(output, Data("OUT".utf8))
+            XCTAssertEqual(authority.activeCommandCount, 1)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: request.requestID).phase }, .executing)
+            XCTAssertThrowsError(try receive.receiveExecutionEvent(timeoutMilliseconds: 10)) {
+                XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+            }
+            let acknowledgment = try CommandStreamFrame(sequence: 0, body: .outputDrained).encode(binding: binding)
+            XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .unknown)
+            XCTAssertEqual(authority.activeCommandCount, 1)
+            clock.recover()
+            try awaitDispatchCleanup(authority)
+            let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+            XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 2)
+            XCTAssertEqual(try Data(contentsOf: marker), Data("once".utf8))
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+            XCTAssertThrowsError(try receive.receiveTerminalReply(timeoutMilliseconds: 10))
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYControlsResizeAndSignalTheCurrentForegroundJob() throws {
+        for cancel in [false, true] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let source = try XCTUnwrap(Bundle.module.url(forResource: "pty-controls", withExtension: "c", subdirectory: "Fixtures/command-process"))
+            let program = fixture.root.appendingPathComponent("fixture-pty-controls")
+            let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror", source.path, "-o", program.path]
+            try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
+            let input = try RetainedCommandPTY(); defer { input.close() }
+            try input.withBorrowedSlave { descriptor in
+                var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+                cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            }
+            let (_, command, submission, profile) = try input.withBorrowedSlave {
+                try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
+                    executablePath: program.path, arguments: [Data("program".utf8), Data((cancel ? "cancel" : "interrupt").utf8)],
+                    wire: 4, ioMode: .pty)
+            }
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            try beginDispatch(fixture, request: request, launcher: launcher)
+            let receive = try receiver(terminal, maximum: 8192)
+            var control: MachCommandAuthorityPort?, output = Data(), ended = false, resized = false, signalled = false
+            var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
+            defer { control?.close() }
+            while !ended {
+                guard case .stream(let reply, let right) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                    return XCTFail("Output must drain before the original terminal result")
+                }
+                defer { reply.caller.close(); right?.close() }
+                let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                try incoming.accept(frame)
+                switch frame.body {
+                case .opened: control = try XCTUnwrap(right).takeControlRight()
+                case .output(let bytes): output.append(bytes)
+                case .outputEnd: ended = true
+                default: XCTFail("This command sends no input or credit")
+                }
+                if !resized, output == Data("READY\n".utf8) {
+                    let resize = try CommandStreamFrame(sequence: 0, body: .resize(53, 143, 0, 0)).encode(binding: binding)
+                    XCTAssertTrue(try MachCommandWire.sendStream(resize, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+                    resized = true
+                }
+                if !signalled, output == Data("READY\nRESIZED\n".utf8) {
+                    let signal = try CommandStreamFrame(sequence: 1, body: cancel ? .cancel : .signal(UInt32(SIGINT))).encode(binding: binding)
+                    XCTAssertTrue(try MachCommandWire.sendStream(signal, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+                    signalled = true
+                }
+            }
+            XCTAssertTrue(resized); XCTAssertTrue(signalled)
+            XCTAssertEqual(output, Data((cancel ? "READY\nRESIZED\n" : "READY\nRESIZED\nCHILD_INT\nLEADER_END\n").utf8))
+            let acknowledgment = try CommandStreamFrame(sequence: 2, body: .outputDrained).encode(binding: binding)
+            XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, cancel ? .signalled(UInt32(SIGKILL)) : .exited(7))
+            try awaitDispatchCleanup(authority)
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYControlsRequireTheCurrentProtectedFrontendRole() throws {
+        for change in 0..<3 {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf READY; /bin/sleep 10".utf8)], wire: 4, ioMode: .pty)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            try beginDispatch(fixture, request: request, launcher: launcher)
+            let receive = try receiver(terminal, maximum: 8192)
+            guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The private channel must open")
+            }
+            opened.caller.close()
+            let control = try XCTUnwrap(carried).takeControlRight(); carried?.close(); defer { control.close() }
+            guard case .stream(let ready, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The command must start before its role changes")
+            }
+            defer { ready.caller.close(); extra?.close() }
+            XCTAssertEqual(try CommandStreamFrame.decode(ready.payload, binding: binding, direction: .toFrontend).body, .output(Data("READY".utf8)))
+            try authority.write { tx in
+                let snapshot = try XCTUnwrap(tx.codePolicy()), old = try XCTUnwrap(snapshot.policy.entries.first)
+                let entry = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
+                    installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
+                    codeDirectoryHash: change == 1 ? Data(repeating: 2, count: 20) : old.codeDirectoryHash, active: change != 2)
+                _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: snapshot.revision)
+            }
+            let signal = try CommandStreamFrame(sequence: 0, body: .signal(UInt32(SIGTERM))).encode(binding: binding)
+            XCTAssertTrue(try MachCommandWire.sendStream(signal, destination: control.borrowed(), toAuthority: true))
+            if change == 0 {
+                guard case .stream(let eof, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                    return XCTFail("Unchanged roles must keep the original control channel")
+                }
+                defer { eof.caller.close(); extra?.close() }
+                XCTAssertEqual(try CommandStreamFrame.decode(eof.payload, binding: binding, direction: .toFrontend).body, .outputEnd)
+                let acknowledgment = try CommandStreamFrame(sequence: 1, body: .outputDrained).encode(binding: binding)
+                XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: control.borrowed(), toAuthority: true))
+            }
+            let result = try ownerTerminal(terminal, submission: submission, admission: admission)
+            XCTAssertEqual(result.outcome, .signalled(UInt32(change == 0 ? SIGTERM : SIGKILL)))
+            XCTAssertEqual(result.outputInterrupted, change != 0)
+            try awaitDispatchCleanup(authority)
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYEarlySignalCannotKillThePreparedHelperBeforeCommittedRelease() throws {
+        try verifyEarlyPTYControl(isInput: false)
+    }
+    func testNativePTYEarlyInterruptInputCannotKillThePreparedHelperBeforeCommittedRelease() throws {
+        try verifyEarlyPTYControl(isInput: true)
+    }
+    private func verifyEarlyPTYControl(isInput: Bool) throws {
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let launcher = try dispatchLauncher(fixture), marker = fixture.root.appendingPathComponent("early-signal-target")
+        let input = try RetainedCommandPTY()
+        defer { input.close() }
+        try input.withBorrowedSlave { descriptor in
+            var attributes = termios()
+            XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            attributes.c_lflag |= tcflag_t(ICANON | ISIG)
+            attributes.c_lflag &= ~tcflag_t(ECHO)
+            withUnsafeMutableBytes(of: &attributes.c_cc) { $0[Int(VINTR)] = 3 }
+            XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+        }
+        let (_, command, submission, profile) = try input.withBorrowedSlave {
+            try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("/bin/sleep 10 && /usr/bin/touch \"$1\"".utf8), Data("sh".utf8), Data(marker.path.utf8)], wire: 4, ioMode: .pty)
+        }
+        let request = try admitCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+            submissionDigest: admission.submissionDigest, request: admitted)
+        _ = try fixture.consume(request)
+        let now = fixture.now(130)
+        let approval = try fixture.requests.authorizedCommandApproval(requestID: request.requestID, now: now)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: now)
+        let owner = CommandExecution(resources: resources, approval: approval, clock: { now }, receiptTime: { nil },
+            callerExpression: try selfExpression(), callerUserID: geteuid(), callerSessionID: nil,
+            validateLauncher: {}, validateElevation: { _ in })
+        var control: MachCommandAuthorityPort?
+        defer {
+            control?.close(); owner.cancelBeforeRelease()
+            let deadline = Date().addingTimeInterval(8)
+            while !owner.dispose() && Date() < deadline { _ = owner.poll(checkStreamPolicy: {}); usleep(1000) }
+        }
+        try owner.prepare(path: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)
+        var prepared = false
+        let preparationDeadline = Date().addingTimeInterval(5)
+        while !prepared {
+            if case .prepared = owner.poll(checkStreamPolicy: {}) { prepared = true }
+            guard Date() < preparationDeadline else { throw MachCommandCallerError.timeout }
+            usleep(1000)
+        }
+        let receive = try receiver(terminal, maximum: 8192)
+        guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+            return XCTFail("The private channel must open before the target is released")
+        }
+        opened.caller.close()
+        control = try XCTUnwrap(carried).takeControlRight(); carried?.close()
+        let signal = try CommandStreamFrame(sequence: 0, body: isInput ? .input(Data([3])) : .signal(UInt32(SIGKILL))).encode(binding: binding)
+        XCTAssertTrue(try MachCommandWire.sendStream(signal, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+        _ = owner.poll(checkStreamPolicy: {})
+        usleep(30000)
+        guard case .prepared = owner.poll(checkStreamPolicy: {}) else {
+            return XCTFail("An early control must leave the helper alive until the one committed release")
+        }
+        XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .authorized)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch,
+            now: now, receiptTimeMs: nil)
+        owner.dispatchRevision = 1
+        try owner.recheck(); try owner.release()
+        var outcome: CommandTerminalOutcome?
+        let deadline = Date().addingTimeInterval(5)
+        while outcome == nil {
+            if case .terminal(let observed) = owner.poll(checkStreamPolicy: {}) { outcome = observed }
+            guard Date() < deadline else { throw MachCommandCallerError.timeout }
+            usleep(1000)
+        }
+        let observed = try XCTUnwrap(outcome)
+        XCTAssertTrue(observed == .signalled(UInt32(isInput ? SIGINT : SIGKILL)) || observed == .failedBeforeStart ||
+            isInput && observed == .exited(130))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        var ended = false, credit: UInt32 = 0
+        while !ended {
+            guard case .stream(let event, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("Private output must end before the final result")
+            }
+            defer { event.caller.close(); extra?.close() }
+            switch try CommandStreamFrame.decode(event.payload, binding: binding, direction: .toFrontend).body {
+            case .inputCredit(let count): credit += count
+            case .outputEnd: ended = true
+            default: XCTFail("Only consumed input credit and output EOF are expected")
+            }
+        }
+        XCTAssertEqual(credit, isInput ? 1 : 0)
+        XCTAssertFalse(owner.dispose())
+        let acknowledgment = try CommandStreamFrame(sequence: 1, body: .outputDrained).encode(binding: binding)
+        XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+        _ = owner.poll(checkStreamPolicy: {})
+        _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 1, event: .verifyFailure,
+            now: now, receiptTimeMs: nil)
+        owner.deliverTerminal(observed)
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, observed)
+        XCTAssertTrue(owner.dispose())
+        XCTAssertEqual(try fixture.requests.historicalOutcome(requestID: request.requestID)?.revision, 2)
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testStreamClientRetainsBoundNativeOutcomeAfterControlDetachment() throws {
+        for outputEnded in [false, true] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 4)
+            let submission = try commandSubmission(), profile = handshake.profile, binding = streamBinding(profile, submission)
+            let payloads = try ioPayloads(profile: profile, submission: submission, terminal: .signalled(UInt32(SIGKILL)))
+            let interrupted = try CommandTerminalResultPayload(profile: profile, original: submission,
+                request: binding.request, outcome: .signalled(UInt32(SIGKILL)), outputInterrupted: true).canonicalBytes
+            let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+            let allowTerminal = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+            let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+            DispatchQueue.global().async {
+                defer { completed.signal() }
+                result.withLock { value in value = Result {
+                    let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
+                        userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
+                    let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                    defer { received.closeIfUnclaimed() }
+                    let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                    defer { terminal.close() }
+                    let stream = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                    defer { stream.close() }
+                    try received.sendAdmissionReply(payloads.0)
+                    try Self.waitQueued { try stream.send(.opened) }
+                    try Self.waitQueued { try stream.send(.output(Data("before detachment".utf8))) }
+                    if outputEnded { try Self.waitQueued { try stream.send(.outputEnd) } }
+                    guard allowTerminal.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                    XCTAssertFalse(stream.outputDrained)
+                    stream.close()
+                    try terminal.sendTerminalNonblocking(interrupted)
+                } }
+            }
+            defer { allowTerminal.signal() }
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let io = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+            guard case .admitted(let session) = io else { return XCTFail("The original session must be admitted") }
+            defer { session.close() }
+            guard case .opened? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The stream must open") }
+            guard case .output(let bytes)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("Output must be received") }
+            XCTAssertEqual(bytes, Data("before detachment".utf8))
+            if outputEnded {
+                guard case .outputEnded? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("Output must end") }
+            }
+            allowTerminal.signal()
+            guard case .terminal(let terminal)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else {
+                return XCTFail("Control detachment must preserve the authenticated native outcome")
+            }
+            XCTAssertEqual(terminal.outcome, .signalled(UInt32(SIGKILL)))
+            XCTAssertTrue(terminal.outputInterrupted)
+            XCTAssertThrowsError(try session.forwardSignal(UInt32(SIGINT)))
+            XCTAssertThrowsError(try session.acknowledgeOutput())
+            XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+            try result.withLock { try XCTUnwrap($0).get() }
+            XCTAssertThrowsError(try receiver(endpoint).receiveIOInput(timeoutMilliseconds: 10))
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYInterruptedResultSurvivesFullOutputQueueUntilDrainOrPeerEndpointClosure() throws {
+        for peerClosesEndpoint in [false, true] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            var limits = mach_port_limits_t(mpl_qlimit: 4)
+            XCTAssertEqual(withUnsafeMutablePointer(to: &limits) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                    mach_port_set_attributes(mach_task_self_, terminal.port, MACH_PORT_LIMITS_INFO, $0, 1)
+                }
+            }, KERN_SUCCESS)
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf READY; /bin/dd if=/dev/zero bs=4096 count=8 2>/dev/null; /bin/sleep 10".utf8)], wire: 4, ioMode: .pty)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            try beginDispatch(fixture, request: request, launcher: launcher)
+            let receive = try receiver(terminal, maximum: 8192)
+            var control: MachCommandAuthorityPort?, incoming = CommandStreamReceiveSequence(direction: .toFrontend)
+            defer { control?.close(); try? terminal.closeReceiveRight(); try? awaitDispatchCleanup(authority) }
+            guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The private channel must open")
+            }
+            opened.caller.close()
+            try incoming.accept(CommandStreamFrame.decode(opened.payload, binding: binding, direction: .toFrontend))
+            control = try XCTUnwrap(carried).takeControlRight(); carried?.close()
+            guard case .stream(let ready, let extra) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                return XCTFail("The command must run before its role changes")
+            }
+            ready.caller.close(); extra?.close()
+            let first = try CommandStreamFrame.decode(ready.payload, binding: binding, direction: .toFrontend)
+            try incoming.accept(first)
+            guard case .output(let prefix) = first.body else { return XCTFail("Output must precede the role change") }
+            XCTAssertTrue(prefix.starts(with: Data("READY".utf8)))
+            let fullDeadline = Date().addingTimeInterval(5)
+            var queued: mach_port_msgcount_t = 0
+            while queued != 4 {
+                var status = mach_port_status_t(), count = mach_msg_type_number_t(MemoryLayout<mach_port_status_t>.size / MemoryLayout<integer_t>.size)
+                XCTAssertEqual(withUnsafeMutablePointer(to: &status) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                        mach_port_get_attributes(mach_task_self_, terminal.port, Int32(MACH_PORT_RECEIVE_STATUS), $0, &count)
+                    }
+                }, KERN_SUCCESS)
+                queued = status.mps_msgcount
+                guard Date() < fullDeadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+            }
+            try authority.write { tx in
+                let snapshot = try XCTUnwrap(tx.codePolicy()), old = try XCTUnwrap(snapshot.policy.entries.first)
+                let entry = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
+                    installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
+                    codeDirectoryHash: Data(repeating: 2, count: 20), active: true)
+                _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: snapshot.revision)
+            }
+            let signal = try CommandStreamFrame(sequence: 0, body: .signal(UInt32(SIGTERM))).encode(binding: binding)
+            XCTAssertTrue(try MachCommandWire.sendStream(signal, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
+            let commitDeadline = Date().addingTimeInterval(5)
+            var committed = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+            while committed?.revision != 2 {
+                committed = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+                guard Date() < commitDeadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+            }
+            XCTAssertEqual(authority.activeCommandCount, 1, "A full queue must retain the committed result owner")
+            XCTAssertEqual(committed?.phase, .failed)
+            if peerClosesEndpoint { try terminal.closeReceiveRight() }
+            else {
+                var result: VerifiedCommandTerminalResult?
+                while result == nil {
+                    switch try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) {
+                    case .stream(let reply, let extra):
+                        defer { reply.caller.close(); extra?.close() }
+                        let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                        try incoming.accept(frame)
+                        guard case .output(let bytes) = frame.body else { return XCTFail("Queued output must retain its order") }
+                        XCTAssertTrue(bytes.allSatisfy { $0 == 0 })
+                    case .terminal(let reply):
+                        defer { reply.caller.close() }
+                        result = try CommandTerminalResultPayload.decode(reply.payload, profile: profile, original: submission, admission: admission)
+                    }
+                }
+                XCTAssertEqual(result?.outcome, .signalled(UInt32(SIGKILL)))
+                XCTAssertEqual(result?.outputInterrupted, true)
+                XCTAssertThrowsError(try receive.receiveTerminalReply(timeoutMilliseconds: 10))
+            }
+            try awaitDispatchCleanup(authority)
+            XCTAssertEqual(try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 2)
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testTerminalBackpressureRetainsOneExactOutcomeAndOriginalReplyRight() throws {
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminal = try Endpoint()
+        var limits = mach_port_limits_t(mpl_qlimit: 1)
+        XCTAssertEqual(withUnsafeMutablePointer(to: &limits) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                mach_port_set_attributes(mach_task_self_, terminal.port, MACH_PORT_LIMITS_INFO, $0, 1)
+            }
+        }, KERN_SUCCESS)
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal, wire: 4, ioMode: .pty)
+        let request = try admitCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try fixture.consume(request)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: fixture.now(130))
+        defer { resources.close() }
+        try terminal.send(Data([1]))
+        for _ in 0..<3 {
+            XCTAssertFalse(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: true))
+            XCTAssertEqual(try sendReferences(terminal.port), 2)
+        }
+        XCTAssertThrowsError(try resources.queueTerminalOutcome(.unknown, outputInterrupted: true)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: false)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try resources.sendTerminalOutcome(.unknown)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
+        }
+        let filler = try receiver(terminal).receive(timeoutMilliseconds: 1000)
+        filler.caller.close(); XCTAssertEqual(filler.payload, Data([1]))
+        XCTAssertTrue(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: true))
+        XCTAssertEqual(try sendReferences(terminal.port), 1)
+        let result = try ownerTerminal(terminal, submission: submission, admission: admission)
+        XCTAssertEqual(result.outcome, .signalled(UInt32(SIGKILL))); XCTAssertTrue(result.outputInterrupted)
+        XCTAssertEqual(result.submission, submission.binding); XCTAssertEqual(result.request.requestID, request.requestID)
+        XCTAssertThrowsError(try resources.queueTerminalOutcome(.signalled(UInt32(SIGKILL)), outputInterrupted: true)) {
+            XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
+        }
+        XCTAssertThrowsError(try receiver(terminal).receiveTerminalReply(timeoutMilliseconds: 10))
     }
 }

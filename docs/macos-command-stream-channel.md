@@ -19,7 +19,7 @@ sequenceDiagram
     Root-->>CLI: Original terminal result
 ```
 
-The diagram shows the channel contract. This PR connects the CLI session APIs and the authenticated transport owner. It does not connect the native PTY pump.
+The diagram shows the channel contract. The [connected PTY pump](macos-command-pty-pump.md) now joins the transport owner to native execution.
 
 ## Binding and ownership
 
@@ -45,13 +45,21 @@ Input EOF prevents more input bytes. It leaves signal, resize, cancellation, and
 
 The frontend acknowledges output after it consumes the bytes. The authority exposes that acknowledgment for its finish controller. This prevents a full output queue from losing the single terminal reply.
 
+A detached wire 4 stream can still return the original authenticated native result with an explicit interruption marker.
+The marker is optional terminal field 7 with value 1. It is valid only for wire 4 after the stream opened.
+Absence keeps the normal EOF and output acknowledgment requirements. Other marker values and unknown fields fail closed.
+The public result exposes `outputInterrupted` separately from the native outcome. The interruption grants no retry authority.
+Known send timeouts or interruptions retain the exact terminal packet and original reply right. Only delivery is retried after queue capacity returns.
+Successful delivery or a permanent transport error retires that right. The dispatcher keeps no additional execution permission.
+Wire 3 and normal terminal envelopes keep their existing bytes. This wire 4 extension precedes product deployment.
+
 Stream messages never establish an exit or authorize release. The native process owner and durable journal remain the sources of those facts.
 
 ## Current integration boundary
 
-The existing native pipe dispatcher rejects wire 4 before spawning a child. The marker test proves this boundary. Existing wire 3 pipe execution stays unchanged.
+The native dispatcher supports wire 4 PTY execution and retains wire 3 pipes. Wire 4 pipes still fail before spawning.
 
-The next integration must connect the Root PTY pump, native controls, continuous drain, and final reply. It must preserve the selected disconnect behavior.
+The connected pump enforces native controls, continuous drain, final acknowledgment, and the captured disconnect behavior.
 
 The CLI executable must restore its original terminal settings on every exit. It must read no input before admission and the opened event.
 
@@ -71,4 +79,4 @@ That probe used one-slot queues and a 4096-byte pending buffer. Its parent obser
 
 The minimum build target was macOS 26 on ARM64. The measured runtime was macOS 27.0.1. The retained evidence contains no secrets.
 
-Still unproven: installed Root service, cross-user policy, actual macOS 26 runtime, complete PTY pump, real terminal restoration, and physical device tests.
+Still unproven: installed Root service, cross-user policy, actual macOS 26 runtime, real frontend terminal restoration, and physical device tests.

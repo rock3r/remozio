@@ -14,9 +14,8 @@ flowchart LR
     Root -->|Bounded output frames| CLI
 ```
 
-The diagram shows the required complete integration. This PR implements the private terminal owner and native mechanics.
-The authenticated stream and control carrier, CLI forwarding and controller activation still need integration.
-The existing dispatcher retains its pipe guard until that complete channel is available.
+The [connected PTY pump](macos-command-pty-pump.md) now joins this private owner to authenticated wire 4 and the native dispatcher.
+The product frontend and installed service still need integration.
 
 ## Ownership and bounded operations
 
@@ -54,4 +53,4 @@ Those same-task experiments do not establish authenticated cross-process handoff
 
 The checks use unprivileged fixtures on macOS 27.0.1 with a macOS 26 ARM64 compiler target.
 Actual macOS 26 runtime, privileged allocation, CLI restoration and physical terminal checks remain platform gates.
-No service or device was activated. The complete frontend, authenticated carrier and protected controller integration remain required.
+No service or device was activated. The product frontend and protected installed service remain required.

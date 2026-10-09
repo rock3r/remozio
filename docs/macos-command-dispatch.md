@@ -44,7 +44,7 @@ The controller assumes no default policy based on administrator membership.
 ## Failure boundaries
 
 A failed preparation or final check cancels the helper without releasing the approved program.
-A failed dispatch commit never releases it. A failed result commit produces one Unknown on the original terminal channel.
+A failed dispatch commit never releases it. A failed result commit produces one Unknown on the original terminal channel after connected output drains.
 If the coordinator remains usable, retain the original execution owner and retry only the durable Unknown transition.
 Runtime and launcher failures before spawning use the same outcome owner. That owner has no runtime validation and cannot spawn.
 A later commit cannot revise the caller's Unknown result or repeat execution.
@@ -73,8 +73,8 @@ Pre-spawn runtime and launcher failures retain the same outcome path through com
 A separate boundary test verifies that a failure owner without runtime validation cannot spawn or release.
 The fixture launcher performs no credential change and is never embedded or installed.
 
-This change connects the pipe execution path. It does not install or expose a command service.
-Private PTY allocation, continuous stream forwarding, resize and authenticated signal controls remain required before product activation.
+The controller connects legacy pipes and the [wire 4 PTY pump](macos-command-pty-pump.md). It does not install or expose a command service.
+The product frontend and installed service still need integration before activation.
 The selected elevation-policy integration, protected service installation and physical terminal checks remain gates.
 
 An isolated native regression probe closes its own event descriptor after release.
