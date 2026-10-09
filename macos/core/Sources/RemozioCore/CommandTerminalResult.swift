@@ -14,10 +14,12 @@ public enum CommandTerminalOutcome: Equatable, Sendable {
 /// Constructed only after sender, request, submission and deadline checks. This grants no retry or dispatch authority.
 public struct VerifiedCommandTerminalResult: Sendable {
     public let outcome: CommandTerminalOutcome
+    /// The authority retired the stream before its output acknowledgment completed. This does not change the native outcome.
+    public let outputInterrupted: Bool
     public let request: CommandAdmittedRequest
     public let submission: CapturedSubmission
-    fileprivate init(outcome: CommandTerminalOutcome, request: CommandAdmittedRequest, submission: CapturedSubmission) {
-        self.outcome = outcome; self.request = request; self.submission = submission
+    fileprivate init(outcome: CommandTerminalOutcome, outputInterrupted: Bool, request: CommandAdmittedRequest, submission: CapturedSubmission) {
+        self.outcome = outcome; self.outputInterrupted = outputInterrupted; self.request = request; self.submission = submission
     }
 }
 
@@ -29,14 +31,16 @@ struct CommandTerminalResultPayload {
     private let submissionSchemaVersion: UInt64
     let request: CommandAdmittedRequest
     let outcome: CommandTerminalOutcome
-    init(profile: CommandHandshakeProfile, original: CommandSubmission, request: CommandAdmittedRequest, outcome: CommandTerminalOutcome) {
+    let outputInterrupted: Bool
+    init(profile: CommandHandshakeProfile, original: CommandSubmission, request: CommandAdmittedRequest,
+         outcome: CommandTerminalOutcome, outputInterrupted: Bool = false) {
         self.profile = profile; submission = original.binding; submissionDigest = Data(SHA256.hash(data: original.canonicalBytes))
-        submissionSchemaVersion = original.schemaVersion; self.request = request; self.outcome = outcome
+        submissionSchemaVersion = original.schemaVersion; self.request = request; self.outcome = outcome; self.outputInterrupted = outputInterrupted
     }
     init(profile: CommandHandshakeProfile, submission: CapturedSubmission, submissionDigest: Data,
-         request: CommandAdmittedRequest, outcome: CommandTerminalOutcome) {
+         request: CommandAdmittedRequest, outcome: CommandTerminalOutcome, outputInterrupted: Bool = false) {
         self.profile = profile; self.submission = submission; self.submissionDigest = submissionDigest
-        submissionSchemaVersion = profile.submissionSchemaVersion; self.request = request; self.outcome = outcome
+        submissionSchemaVersion = profile.submissionSchemaVersion; self.request = request; self.outcome = outcome; self.outputInterrupted = outputInterrupted
     }
     static func limits() throws -> CBORLimits { try .init(maxBytes: 4096, maxDepth: 6, maxItems: 128) }
     var canonicalBytes: Data { get throws {
@@ -59,12 +63,15 @@ struct CommandTerminalResultPayload {
         case .failedBeforeStart: tag = 7; body = .null
         case .unknown: tag = 8; body = .null
         }
+        guard !outputInterrupted || profile.supportsStreamingExecution else { throw CommandTerminalResultError.incompatible }
         let binding = submission
-        return try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: profile.fields,
+        var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: profile.fields,
             2: .map([0: .bytes(binding.id), 1: .bytes(binding.nonce), 2: .bytes(binding.callerBinding)]),
             3: .bytes(submissionDigest),
             4: .map([0: .bytes(request.requestID), 1: .bytes(request.requestDigest), 2: .bytes(request.challenge)]),
-            5: .unsigned(tag), 6: body]), limits: Self.limits())
+            5: .unsigned(tag), 6: body]
+        if outputInterrupted { fields[7] = .unsigned(1) }
+        return try DeterministicCBOR.encode(.map(fields), limits: Self.limits())
     } }
     static func decode(_ bytes: Data, profile: CommandHandshakeProfile, original: CommandSubmission,
                        admission: VerifiedCommandAdmissionResult) throws -> VerifiedCommandTerminalResult {
@@ -76,7 +83,7 @@ struct CommandTerminalResultPayload {
             throw CommandTerminalResultError.wrongBinding
         }
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
-              Set(fields.keys) == Set((0...6).map(UInt64.init)), fields[0] == .unsigned(1), let rawProfile = fields[1],
+              Set(fields.keys) == Set((0...(fields[7] == nil ? 6 : 7)).map(UInt64.init)), fields[0] == .unsigned(1), let rawProfile = fields[1],
               case .map(let binding) = fields[2], Set(binding.keys) == [0, 1, 2],
               binding[0] == .bytes(original.binding.id), binding[1] == .bytes(original.binding.nonce),
               binding[2] == .bytes(original.binding.callerBinding), fields[3] == .bytes(admission.submissionDigest),
@@ -86,6 +93,10 @@ struct CommandTerminalResultPayload {
             throw CommandTerminalResultError.malformed
         }
         guard try CommandHandshakeProfile.decode(rawProfile) == profile else { throw CommandTerminalResultError.wrongBinding }
+        let outputInterrupted = fields[7] != nil
+        guard !outputInterrupted || profile.supportsStreamingExecution && fields[7] == .unsigned(1) else {
+            throw CommandTerminalResultError.malformed
+        }
         let outcome: CommandTerminalOutcome
         switch tag {
         case 1:
@@ -106,8 +117,8 @@ struct CommandTerminalResultPayload {
             }
         default: throw CommandTerminalResultError.malformed
         }
-        let value = Self(profile: profile, original: original, request: request, outcome: outcome)
+        let value = Self(profile: profile, original: original, request: request, outcome: outcome, outputInterrupted: outputInterrupted)
         guard try value.canonicalBytes == bytes else { throw CommandTerminalResultError.malformed }
-        return VerifiedCommandTerminalResult(outcome: outcome, request: request, submission: original.binding)
+        return VerifiedCommandTerminalResult(outcome: outcome, outputInterrupted: outputInterrupted, request: request, submission: original.binding)
     }
 }

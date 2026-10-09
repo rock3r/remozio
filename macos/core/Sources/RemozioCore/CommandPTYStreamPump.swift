@@ -22,6 +22,7 @@ final class CommandPTYStreamPump {
     init(pty: RetainedCommandPTY, channel: MachCommandStreamAuthority) {
         self.pty = pty; self.channel = channel
     }
+    var outputInterrupted: Bool { opened && !connected && !(outputEndSent && channel.outputDrained) }
     var readyForTerminal: Bool { !opened || !connected || outputEndSent && channel.outputDrained }
     func open() throws -> Bool {
         guard connected else { throw CommandStreamError.closed }

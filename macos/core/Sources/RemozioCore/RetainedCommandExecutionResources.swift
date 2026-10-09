@@ -72,10 +72,10 @@ final class RetainedCommandExecutionResources {
 
     /// Only the trusted controller supplies an established result after the required durable transition.
     /// A failed private delivery consumes this attempt and cannot authorize another command.
-    func sendTerminalOutcome(_ outcome: CommandTerminalOutcome) throws {
+    func sendTerminalOutcome(_ outcome: CommandTerminalOutcome, outputInterrupted: Bool = false) throws {
         guard !closed, !terminalAttempted else { throw MachCommandHandshakeError.retired }
         let payload = CommandTerminalResultPayload(profile: profile, submission: capture.submission,
-            submissionDigest: submissionDigest, request: request, outcome: outcome)
+            submissionDigest: submissionDigest, request: request, outcome: outcome, outputInterrupted: outputInterrupted)
         let bytes = try payload.canonicalBytes
         terminalAttempted = true
         defer { terminal.close() }

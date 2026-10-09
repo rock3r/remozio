@@ -121,4 +121,33 @@ final class CommandTerminalResultTests: XCTestCase {
         var bytes = try payload().canonicalBytes
         XCTAssertEqual(bytes[0], 0xa7); bytes.replaceSubrange(1...1, with: [0x18, 0x00]); try reject(bytes)
     }
+    func testOutputInterruptionRequiresStreamingProfileAndExactCanonicalMarker() throws {
+        let original = try original()
+        XCTAssertThrowsError(try CommandTerminalResultPayload(profile: profile, original: original, request: request,
+            outcome: .unknown, outputInterrupted: true).canonicalBytes)
+        let streaming = CommandHandshakeProfile(wireVersion: 4, submissionSchemaVersion: 1, inputCarrierVersion: 4,
+            callerBinding: profile.callerBinding, macID: profile.macID, accountID: profile.accountID)
+        let admissionPayload = CommandAdmissionResultPayload(profile: streaming, submission: original.binding,
+            submissionDigest: Data(SHA256.hash(data: original.canonicalBytes)), outcome: .admitted(request))
+        let admitted = try CommandAdmissionResultPayload.decode(admissionPayload.canonicalBytes, profile: streaming, original: original)
+        for interrupted in [false, true] {
+            let payload = CommandTerminalResultPayload(profile: streaming, original: original, request: request,
+                outcome: .signalled(UInt32(SIGKILL)), outputInterrupted: interrupted)
+            let decoded = try CommandTerminalResultPayload.decode(payload.canonicalBytes, profile: streaming,
+                original: original, admission: admitted)
+            XCTAssertEqual(decoded.outputInterrupted, interrupted)
+            XCTAssertEqual(decoded.outcome, .signalled(UInt32(SIGKILL)))
+            guard case .map(var fields) = try DeterministicCBOR.decode(payload.canonicalBytes, limits: CommandTerminalResultPayload.limits()) else {
+                return XCTFail("The result must retain its canonical envelope")
+            }
+            XCTAssertEqual(fields[7], interrupted ? .unsigned(1) : nil)
+            for invalid: CBORValue in [.unsigned(0), .unsigned(2), .null, .bytes(Data([1]))] {
+                fields[7] = invalid
+                let bytes = try DeterministicCBOR.encode(.map(fields), limits: CommandTerminalResultPayload.limits())
+                XCTAssertThrowsError(try CommandTerminalResultPayload.decode(bytes, profile: streaming, original: original, admission: admitted))
+            }
+        }
+        try reject(mutated { $0[7] = .unsigned(1) })
+    }
+
 }

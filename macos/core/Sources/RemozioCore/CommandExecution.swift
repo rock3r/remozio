@@ -146,7 +146,7 @@ final class CommandExecution {
     /// Delivery waits for the original frontend to drain output. Durable native outcomes remain independent.
     func deliverTerminal(_ outcome: CommandTerminalOutcome) {
         guard pump?.readyForTerminal ?? true else { return }
-        try? resources.sendTerminalOutcome(outcome)
+        try? resources.sendTerminalOutcome(outcome, outputInterrupted: pump?.outputInterrupted ?? false)
         pump?.finishDelivery()
     }
     func poll(checkStreamPolicy: () throws -> Void = { throw CommandExecutionError.unavailable }) -> Progress {

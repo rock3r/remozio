@@ -45,6 +45,12 @@ Input EOF prevents more input bytes. It leaves signal, resize, cancellation, and
 
 The frontend acknowledges output after it consumes the bytes. The authority exposes that acknowledgment for its finish controller. This prevents a full output queue from losing the single terminal reply.
 
+A detached wire 4 stream can still return the original authenticated native result with an explicit interruption marker.
+The marker is optional terminal field 7 with value 1. It is valid only for wire 4 after the stream opened.
+Absence keeps the normal EOF and output acknowledgment requirements. Other marker values and unknown fields fail closed.
+The public result exposes `outputInterrupted` separately from the native outcome. The interruption grants no retry authority.
+Wire 3 and normal terminal envelopes keep their existing bytes. This wire 4 extension precedes product deployment.
+
 Stream messages never establish an exit or authorize release. The native process owner and durable journal remain the sources of those facts.
 
 ## Current integration boundary

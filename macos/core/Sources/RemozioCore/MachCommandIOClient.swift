@@ -132,11 +132,12 @@ public final class RetainedCommandExecutionSession {
                     original: original, admission: admission)
                 _ = try remaining()
                 if incoming.next == 0 {
+                    guard !result.outputInterrupted else { throw CommandStreamError.closed }
                     switch result.outcome {
                     case .exited, .signalled: throw CommandStreamError.closed
                     default: break
                     }
-                } else if !incoming.ended || !outputAcknowledged { throw CommandStreamError.closed }
+                } else if !result.outputInterrupted && (!incoming.ended || !outputAcknowledged) { throw CommandStreamError.closed }
                 terminal = result; close()
                 return .terminal(result)
             }
