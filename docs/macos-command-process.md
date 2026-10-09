@@ -76,6 +76,8 @@ It requests `WSTOPPED` and `WCONTINUED`, never `WEXITED`. The existing `waitpid`
 The observation includes the latest stop state, stop signal, kernel stop code and a revision for observed changes.
 `CLD_TRAPPED` stays distinct from `CLD_STOPPED`; a frontend must not treat a debugger trap as a shell suspension.
 The revision does not count every transition that the kernel can coalesce.
+The `P_PID` selector binds continued records to the owned child. Darwin can report the signal sender in their `si_pid`.
+Stop and trap records still require the owned child PID. An unchanged zeroed record represents no event.
 Repeated polls without an event keep the revision unchanged. Reaping or ownership loss clears the stop state.
 Preparation can itself produce a continued event because the launcher starts suspended. Consumers use relative revisions.
 These observations do not change session ownership or provide frontend job control by themselves.
@@ -114,7 +116,7 @@ A disposable PTY test verifies the new session, controlling slave, foreground gr
 Three cancellation regressions cover a retired preparation helper, ordinary prepared cancellation and a live permission failure.
 They verify actual child reaping and preserve unread stdin bytes and shared descriptor flags.
 The retired-helper regression uses a real kernel exit; only the live permission failure injects `EPERM`.
-Three job-state regressions check actual stop/continue events, cancellation while stopped and unexpected external reaping.
+Four job-state regressions check actual stop/continue events, synchronous `sigwait`, cancellation while stopped and unexpected external reaping.
 They check stable revisions, retained exit ownership, cleared stop state, unread stdin and unchanged descriptor flags.
 Debugger traps, protected monitor integration and frontend shell suspension remain unproven.
 The fixture never enters a product bundle, changes credentials or installs a service.

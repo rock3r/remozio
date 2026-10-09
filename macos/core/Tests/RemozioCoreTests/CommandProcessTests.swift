@@ -395,11 +395,14 @@ extension CommandProcessTests {
         XCTAssertEqual(compiler.terminationStatus, 0)
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
         let file = directory.appendingPathComponent("frame")
-        try frame(mode: "wait").write(to: file)
+        try frame(mode: name == "sigwait_resume" ? "sigwait" : "wait").write(to: file)
         let probe = Process(); probe.executableURL = harness; probe.currentDirectoryURL = directory
         probe.arguments = [launcher.path, file.path, name]
         try probe.run(); probe.waitUntilExit()
         XCTAssertEqual(probe.terminationStatus, 0, "Native job observation fixture: \(name)")
+    }
+    func testSynchronousContinueAcceptsActualSenderPidWithoutLosingOwnedChild() throws {
+        try assertJobControlFixture("sigwait_resume")
     }
     func testNativeStopContinueObservationsAdvanceOnlyForActualEvents() throws {
         try assertJobControlFixture("resume")

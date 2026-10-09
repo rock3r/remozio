@@ -188,8 +188,9 @@ static int observe_job_control(remozio_command_process_t *process) {
             if (errno == ECHILD) { process->state.ownership_lost = true; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
             return system_error();
         }
-        if (info.si_pid == 0) return 0;
-        if (info.si_pid != process->state.pid || (info.si_code != CLD_STOPPED && info.si_code != CLD_TRAPPED && info.si_code != CLD_CONTINUED)) return EPROTO;
+        if (info.si_signo == 0 && info.si_code == 0 && info.si_pid == 0) return 0;
+        if (info.si_signo != SIGCHLD || (info.si_code != CLD_STOPPED && info.si_code != CLD_TRAPPED && info.si_code != CLD_CONTINUED)) return EPROTO;
+        if (info.si_code != CLD_CONTINUED && info.si_pid != process->state.pid) return EPROTO;
         if (process->state.job_control_revision == UINT64_MAX) return EOVERFLOW;
         if (info.si_code == CLD_STOPPED || info.si_code == CLD_TRAPPED) {
             if (info.si_status <= 0 || info.si_status >= NSIG) return EPROTO;
