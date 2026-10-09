@@ -76,3 +76,9 @@ The [TLS peer pin policy](pinned-tls-peer.md) validates enrolled P-256 keys and 
 The [native byte channel](network-byte-channel.md) owns connection start, bounded I/O, cancellation, and cleanup. The TLS experiment uses it after pinned handshake admission.
 
 The [negotiated network channel](../../protocol/session-envelope.md) owns the Mac handshake, bounded framing, and session-bound message delivery.
+
+## Command frontend invocation
+
+[Invocation capture](../../docs/macos-command-frontend-invocation.md) preserves C argv bytes and explicit frontend options.
+It builds untrusted submissions for the existing authenticated command transport.
+The installed CLI, terminal lifecycle and service wiring remain implementation gates.
