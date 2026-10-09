@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 final class NativeStdioLayoutTests: XCTestCase {
-    private var directory: URL!, child: URL!, monitor: URL!, driver: URL!, target: URL!
+    private var directory: URL!, child: URL!, monitor: URL!, driver: URL!, target: URL!, standaloneDriver: URL!
 
     override func setUpWithError() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("remozio-native-stdio-\(UUID().uuidString)")
@@ -12,6 +12,7 @@ final class NativeStdioLayoutTests: XCTestCase {
         monitor = directory.appendingPathComponent("monitor")
         driver = directory.appendingPathComponent("driver")
         target = directory.appendingPathComponent("target")
+        standaloneDriver = directory.appendingPathComponent("standalone-driver")
         let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let native = core.appendingPathComponent("Sources/RemozioMach")
         let app = core.deletingLastPathComponent().appendingPathComponent("app")
@@ -61,6 +62,8 @@ final class NativeStdioLayoutTests: XCTestCase {
         try compile([fixture("mapped-target")], native: native, output: target)
         try compile([fixture("mapped-parent"), native.appendingPathComponent("CommandMonitor.c"), specification,
                      protocolSource, native.appendingPathComponent("CommandPTY.c")], native: native, output: driver)
+        try compile([fixture("mapped-standalone"), native.appendingPathComponent("CommandProcess.c"), specification,
+                     native.appendingPathComponent("CommandPTY.c")], native: native, output: standaloneDriver)
     }
 
     override func tearDownWithError() throws {
@@ -101,7 +104,7 @@ final class NativeStdioLayoutTests: XCTestCase {
         let file = directory.appendingPathComponent("frame.bin")
         try frame.write(to: file)
         let process = Process()
-        process.executableURL = driver
+        process.executableURL = mode == "standalone" ? standaloneDriver : driver
         process.currentDirectoryURL = directory
         process.arguments = [monitor.path, child.path, file.path, String(mask), mode]
         let output = Pipe()
@@ -115,7 +118,8 @@ final class NativeStdioLayoutTests: XCTestCase {
         XCTAssertEqual(record["failure"] as? Int, 0, diagnostic)
         if mode != "preflight" {
             XCTAssertEqual(record["independentExec"] as? Bool, mode != "prepared_cancel", diagnostic)
-            for key in ["independentExit", "monitorActuallyReaped", "terminalEOF"] {
+            let ownerKey = mode == "standalone" ? "childActuallyReaped" : "monitorActuallyReaped"
+            for key in ["independentExit", ownerKey, "terminalEOF"] {
                 XCTAssertEqual(record[key] as? Bool, true, diagnostic)
             }
         }
@@ -123,6 +127,10 @@ final class NativeStdioLayoutTests: XCTestCase {
 
     func testAllEightLayoutsExecuteWithExactBinaryStreamsAndSeparateTerminalControls() throws {
         for mask: UInt32 in 0...7 { try run(mask: mask, mode: "normal") }
+    }
+
+    func testStandaloneOwnerKeepsTheTerminalUntilActualChildCleanup() throws {
+        for mask: UInt32 in 0...7 { try run(mask: mask, mode: "standalone") }
     }
 
     func testAllEightLayoutsCancelThroughOwnedMonitor() throws {

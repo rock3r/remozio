@@ -40,7 +40,10 @@ int main(int argc, char **argv) {
     char *raw = getenv("RAW"), *empty = getenv("EMPTY"), *cwd = getenv("CWD");
     if (!raw || (unsigned char)raw[0] != 0xfd || raw[1] || !empty || *empty || !cwd || getenv("PATH")) return 92;
     for (int fd = 3; fd < 256; ++fd) if (fcntl(fd, F_GETFD) >= 0) return 93;
-    if (getpgrp() != getpid() || getsid(0) == getpid() || getsid(0) != getsid(getppid())) return 94;
+    if (getpgrp() != getpid()) return 94;
+    if (!strcmp(argv[4], "standalone")) {
+        if (getsid(0) != getpid()) return 94;
+    } else if (getsid(0) == getpid() || getsid(0) != getsid(getppid())) return 94;
     for (unsigned fd = 0; fd < 3; ++fd)
         if (!!isatty((int)fd) != (!!(mask & (1U << fd)) || (distinct && fd == 1))) return 95;
     int terminal = open("/dev/tty", O_RDWR | O_CLOEXEC);

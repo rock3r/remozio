@@ -18,6 +18,9 @@ flowchart LR
 ```
 
 The monitor retains its terminal descriptor through target cleanup.
+The standalone process owner retains its own terminal copy until disposal after actual reaping.
+Standalone callers drain output while the target runs and retires.
+They dispose the reaped owner before waiting for final terminal EOF.
 This matters when all three streams use direct destinations.
 The child closes its extra terminal descriptor before execution.
 The target can still open its controlling terminal through `/dev/tty`.
@@ -57,7 +60,7 @@ The Root owner must establish provenance, code identity, caller policy and durab
 
 ## Measured execution
 
-Six test methods cover 36 native cases on macOS 27.0.1 with SDK 27.0 and an arm64 macOS 26 deployment target.
+Seven test methods cover 44 native cases on macOS 27.0.1 with SDK 27.0 and an arm64 macOS 26 deployment target.
 They compile the actual monitor and child helper sources.
 The monitor fixture replaces its Root UID guard.
 The child fixture mocks credential operations and accepts only the test user's UID and GID.
@@ -67,13 +70,15 @@ All terminal, frame, descriptor, release, process ownership and execution operat
 | Cases | Count | Verified behavior |
 | --- | --- | --- |
 | Every stream mask | 8 | Exact binary input and separate output; resize and both control routes; actual target exit 7 |
+| Standalone execution | 8 | The terminal stays open before release; exact streams, controls, exit 7 and EOF after owner disposal |
 | Cancellation after execution | 8 | Actual target death by `SIGKILL`, reported by its exclusive monitor |
 | Cancellation before release | 8 | No target execution or release attempt; actual target death and monitor retirement |
 | Stop and continue | 3 | Actual stop observations and monitor-owned resume for masks 0, 5 and 7 |
 | Different output terminal | 1 | Mask 5 keeps stdout on another private terminal; stderr stays on the controlling terminal |
 | Rejected version or layout | 8 | No owner is created; buffered input and original flags remain intact |
 
-Execution cases require independent target exec and exit observations, a target reap report and actual monitor reaping.
+Monitor execution cases require independent target exec and exit observations, a target reap report and actual monitor reaping.
+Standalone cases require independent exec and exit observations and actual child reaping.
 The fixture drains output while the monitor retires, then requires terminal EOF.
 Target checks cover raw arguments, raw environment bytes, held working directory and private descriptor closure.
 Direct stream inspections compare descriptor settings before and after execution.
@@ -88,6 +93,8 @@ They must retain redirected streams and route credits only for streams that use 
 The frontend must integrate the [terminal lease](macos-frontend-terminal-lease.md) and reconcile local signals before suspension.
 An old job observation alone must not suspend the frontend.
 
-The direct standalone child API is compiled but lacks a separate live execution test here.
+A disposable probe initially observed terminal EOF before release through the standalone API with mask 0.
+The owner now retains a private descriptor copy; regression tests cover all eight masks.
+The in-session API relies on its session monitor retaining the terminal through cleanup.
 These tests do not prove privileged credential changes, signed helper deployment, foreign terminal ownership or a macOS 26 runtime.
 Installed service, physical terminal and phone approval tests remain separate gates.

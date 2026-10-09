@@ -19,7 +19,7 @@
 
 struct remozio_command_process {
     remozio_command_process_observation_t state;
-    int configuration, status, release, events;
+    int configuration, status, release, events, retained_terminal;
     unsigned char *frame;
     size_t frame_count, written;
     unsigned char status_bytes[12];
@@ -41,7 +41,8 @@ static void clear_frame(remozio_command_process_t *process) {
 }
 static void close_resources(remozio_command_process_t *process) {
     close_descriptor(&process->configuration); close_descriptor(&process->status);
-    close_descriptor(&process->release); close_descriptor(&process->events); clear_frame(process);
+    close_descriptor(&process->release); close_descriptor(&process->events);
+    close_descriptor(&process->retained_terminal); clear_frame(process);
 }
 static uint64_t now(remozio_command_process_t *process) {
     return (uint64_t)(((__uint128_t)mach_continuous_time() * process->timebase.numer) / ((uint64_t)process->timebase.denom * 1000000));
@@ -106,7 +107,11 @@ static int spawn_child(const char *path, const void *frame, size_t count,
     for (size_t i = 0; i < descriptor_count; ++i) copies[i] = -1;
     remozio_command_process_t *process = calloc(1, sizeof(*process));
     if (!process) return ENOMEM;
-    process->configuration = process->status = process->release = process->events = -1;
+    process->configuration = process->status = process->release = process->events = process->retained_terminal = -1;
+    if (mapped && !monitor_session) {
+        process->retained_terminal = fcntl(terminal, F_DUPFD_CLOEXEC, 128);
+        if (process->retained_terminal < 0) { failure = system_error(); goto cleanup; }
+    }
     process->frame = malloc(count); process->frame_count = count;
     if (!process->frame) { failure = ENOMEM; goto cleanup; }
     memcpy(process->frame, frame, count);

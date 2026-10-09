@@ -34,6 +34,8 @@ int remozio_command_process_spawn_in_session(const char *path, const void *frame
     int input, int output, int error, int directory, remozio_command_process_t **process);
 /* Explicit format-2 layout. Borrow the separate private terminal without changing
  * shared flags. Validate its relationship to every stream before spawning.
+ * The standalone owner retains a terminal copy until disposal after actual reaping.
+ * The in-session caller instead retains its terminal through target cleanup.
  * The same protected launcher, exclusive wait owner and durable permit are required. */
 int remozio_command_process_spawn_with_terminal(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, int terminal, remozio_command_process_t **process);
