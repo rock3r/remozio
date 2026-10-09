@@ -1,0 +1,33 @@
+import Darwin
+
+/// Owns only private controls. Separate stdin, stdout and stderr remain with the native process owner.
+final class CommandPipeControlChannel {
+    private let channel: MachCommandStreamAuthority
+    private(set) var opened = false
+    private(set) var connected = true
+
+    init(channel: MachCommandStreamAuthority) { self.channel = channel }
+    func open() throws -> Bool {
+        guard connected else { throw CommandStreamError.closed }
+        if opened { return true }
+        opened = try channel.send(.opened)
+        return opened
+    }
+    func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCaller: () throws -> Void,
+              checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void) throws {
+        guard opened, connected else { return }
+        do {
+            try checkCaller()
+            for _ in 0..<CommandPTYStreamPump.maximumControlsPerTurn {
+                guard let body = try channel.receiveControl(expression: expression, userID: userID, auditSessionID: auditSessionID) else { break }
+                try checkControlPolicy()
+                switch body {
+                case .signal, .cancel: try applyControl(body)
+                default: throw CommandStreamError.malformed
+                }
+            }
+        } catch { detach(); throw error }
+    }
+    func detach() { connected = false; channel.close() }
+    func close() { detach() }
+}

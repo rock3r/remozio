@@ -144,19 +144,21 @@ public enum CommandCallerReadiness {
     public static func submitIO(_ template: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
                                 authorityPort: () throws -> mach_port_t, authorityPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
                                 submissionLimits: CBORLimits, configuration: CommandCallerReadinessConfiguration,
+                                capabilities: CommandHandshakeCapabilities = .executionChannels,
                                 checkCancellation: () throws -> Void = {},
                                 onStatus: (CommandCallerReadinessStatus) -> Void = { _ in }) throws -> sending CommandIOAdmission {
         guard authorityPolicy.expectedUserID == 0 else { throw MachCommandHandshakeError.invalidConfiguration }
         return try submitIO(template, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor,
             authorityPort: authorityPort, expression: authorityPolicy.requirement, userID: 0,
             auditSessionID: authorityPolicy.expectedAuditSessionID, macID: macID, accountID: accountID,
-            submissionLimits: submissionLimits, configuration: configuration, checkCancellation: checkCancellation, onStatus: onStatus)
+            submissionLimits: submissionLimits, configuration: configuration, capabilities: capabilities, checkCancellation: checkCancellation, onStatus: onStatus)
     }
 
     /// Fixture identity and clock seams. The transport and result verification still use actual Mach messages.
     static func submitIO(_ template: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32, authorityPort: () throws -> mach_port_t,
                        expression: String, userID: uid_t, auditSessionID: au_asid_t?, macID: Data, accountID: Data,
                        submissionLimits: CBORLimits, configuration: CommandCallerReadinessConfiguration,
+                       capabilities: CommandHandshakeCapabilities = .executionChannels,
                        checkCancellation: () throws -> Void = {}, onStatus: (CommandCallerReadinessStatus) -> Void = { _ in },
                        clock: (() throws -> UInt64)? = nil, wait: ((UInt32, () throws -> Void) throws -> Void)? = nil) throws -> sending CommandIOAdmission {
         guard macID.count == 16, accountID.count == 16, submissionLimits.maxBytes > 0,
@@ -205,7 +207,7 @@ public enum CommandCallerReadiness {
                 try checkpoint()
                 handshake = try MachCommandHandshakeClient.negotiate(authorityPort: port, expression: expression,
                     userID: userID, auditSessionID: auditSessionID, macID: macID, accountID: accountID,
-                    capabilities: .executionChannels, timeoutMilliseconds: budget(), checkCancellation: {
+                    capabilities: capabilities, timeoutMilliseconds: budget(), checkCancellation: {
                         do { try checkpoint() } catch { negotiationCallbackError = error; throw error }
                     })
             } catch {

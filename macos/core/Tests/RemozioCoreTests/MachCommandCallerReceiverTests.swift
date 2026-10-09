@@ -3962,17 +3962,19 @@ extension MachCommandCallerReceiverTests {
 
 extension MachCommandCallerReceiverTests {
     private func ownerIOCommand(admission: Endpoint, terminal: Endpoint, inputDescriptor: Int32? = nil,
+                                outputDescriptor: Int32? = nil, errorDescriptor: Int32? = nil,
                                 executablePath: String = "/usr/bin/true", arguments: [Data]? = nil, wire: UInt64 = 3, ioMode: CommandIOMode = .pipes,
                                 disconnect: StartedCommandDisconnect = .terminate) throws ->
         (ReceivedMachCommandInputSubmission, RetainedCommandCapture, CommandSubmission, CommandHandshakeProfile) {
         let endpoint = try Endpoint(), input = inputDescriptor ?? Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
-        let output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
-        guard input >= 0, output >= 0 else { throw MachCommandCallerError.unavailable }
-        defer { if inputDescriptor == nil { _ = Darwin.close(input) }; _ = Darwin.close(output) }
+        let defaultOutput = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        let output = outputDescriptor ?? defaultOutput, error = errorDescriptor ?? output
+        guard input >= 0, output >= 0, error >= 0 else { throw MachCommandCallerError.unavailable }
+        defer { if inputDescriptor == nil { _ = Darwin.close(input) }; _ = Darwin.close(defaultOutput) }
         let submission = try commandSubmission(executablePath: executablePath, arguments: arguments, disconnect: disconnect, ioMode: ioMode)
         let profile = CommandHandshakeProfile(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: 4,
             callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
-        try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+        try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: error,
             destination: endpoint.port, admissionReply: admission.port, terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
         let received = try receiver(endpoint, maximum: 8192).receiveIOInput(timeoutMilliseconds: 1000)
         return (received, try assemble(received, admissionProfile: profile), submission, profile)
@@ -6121,5 +6123,262 @@ extension MachCommandCallerReceiverTests {
             XCTAssertEqual($0 as? MachCommandHandshakeError, .retired)
         }
         XCTAssertThrowsError(try receiver(terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testPipeControlClientUsesBackpressureWithoutPTYInputOrOutputAcknowledgments() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 5)
+        let submission = try commandSubmission(), profile = handshake.profile, binding = streamBinding(profile, submission)
+        let payloads = try ioPayloads(profile: profile, submission: submission, terminal: .exited(13))
+        let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+        let drain = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { output in output = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user,
+                    auditSessionID: nil, maxPayloadBytes: 8192)
+                let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                defer { received.closeIfUnclaimed() }
+                let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                let channel = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                defer { channel.close(); terminal.close() }
+                try received.sendAdmissionReply(payloads.0)
+                try Self.waitQueued { try channel.send(.opened) }
+                guard drain.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                var receivedControls: [CommandStreamFrame.Body] = []
+                let deadline = Date().addingTimeInterval(5)
+                while receivedControls.count < 5 {
+                    if let body = try channel.receiveControl(expression: expression, userID: user, auditSessionID: nil) { receivedControls.append(body) }
+                    guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+                }
+                XCTAssertEqual(receivedControls, Array(repeating: .signal(UInt32(SIGINT)), count: 4) + [.cancel])
+                // Separate pipes need neither a PTY output EOF event nor an output acknowledgment.
+                try terminal.sendTerminalNonblocking(payloads.1)
+            } }
+        }
+        defer { drain.signal() }
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let response = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = response else { return XCTFail("The original session must remain attached") }
+        defer { session.close() }
+        guard case .opened? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The private controls must open") }
+        XCTAssertThrowsError(try session.forwardInput(Data([1]))) { XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible) }
+        XCTAssertThrowsError(try session.finishInput())
+        XCTAssertThrowsError(try session.resizeTerminal(rows: 24, columns: 80))
+        XCTAssertThrowsError(try session.acknowledgeOutput())
+        XCTAssertThrowsError(try session.pollTerminalResult())
+        for _ in 0..<4 { XCTAssertTrue(try session.forwardSignal(UInt32(SIGINT))) }
+        XCTAssertFalse(try session.cancelCommand())
+        drain.signal(); try Self.waitQueued { try session.cancelCommand() }
+        guard case .terminal(let terminal)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The original result must arrive") }
+        XCTAssertEqual(terminal.outcome, .exited(13)); XCTAssertFalse(terminal.outputInterrupted)
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+        try result.withLock { try XCTUnwrap($0).get() }
+    }
+    func testPipeControlClientRejectsAProgramOutcomeBeforeItsOpenedEvent() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 5)
+        let submission = try commandSubmission(), payloads = try ioPayloads(profile: handshake.profile, submission: submission)
+        let release = DispatchSemaphore(value: 0)
+        let (completed, result) = try serveIO(endpoint.port, admission: payloads.0, terminal: payloads.1, release: release)
+        defer { release.signal() }
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let response = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = response else { return XCTFail("The request must be admitted") }
+        defer { session.close() }; release.signal()
+        XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 1000)) { XCTAssertEqual($0 as? CommandStreamError, .closed) }
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success); try result.withLock { try XCTUnwrap($0).get() }
+    }
+    private func pipeOpened(_ terminal: Endpoint, profile: CommandHandshakeProfile, submission: CommandSubmission,
+                            admission: VerifiedCommandAdmissionResult) throws -> MachCommandAuthorityPort {
+        guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
+        guard case .stream(let opened, let carried) = try receiver(terminal, maximum: 8192).receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+            throw CommandStreamError.closed
+        }
+        defer { opened.caller.close(); carried?.close() }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: request)
+        XCTAssertEqual(try CommandStreamFrame.decode(opened.payload, binding: binding, direction: .toFrontend).body, .opened)
+        return try XCTUnwrap(carried).takeControlRight()
+    }
+    private func pipeSend(_ body: CommandStreamFrame.Body, control: MachCommandAuthorityPort, profile: CommandHandshakeProfile,
+                          submission: CommandSubmission, admission: VerifiedCommandAdmissionResult, sequence: UInt64 = 0) throws {
+        guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: request)
+        let bytes = try CommandStreamFrame(sequence: sequence, body: body).encode(binding: binding)
+        try Self.waitQueued { try MachCommandWire.sendStream(bytes, destination: control.borrowed(), toAuthority: true) }
+    }
+    private func waitForPipeMarker(_ marker: URL) throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: marker.path) {
+            guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+        }
+    }
+    func testNativePipeControlsKeepBinaryStdinAndSeparateStdoutStderrWithoutFlagChanges() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let out = fixture.root.appendingPathComponent("stdout"), err = fixture.root.appendingPathComponent("stderr")
+        let output = Darwin.open(out.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
+        let error = Darwin.open(err.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
+        var input: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&input), 0)
+        defer { _ = Darwin.close(input[0]); _ = Darwin.close(output); _ = Darwin.close(error) }
+        let binary = Data([0x41, 0, 0xff, 10])
+        XCTAssertEqual(binary.withUnsafeBytes { Darwin.write(input[1], $0.baseAddress, $0.count) }, binary.count)
+        _ = Darwin.close(input[1])
+        // An ordinary first file write changes a kernel flag on this runtime. Establish that baseline before capture.
+        for fd in [output, error] {
+            XCTAssertEqual(Darwin.write(fd, "fixture", 7), 7)
+            XCTAssertEqual(ftruncate(fd, 0), 0); XCTAssertEqual(lseek(fd, 0, SEEK_SET), 0)
+        }
+        let flags = [input[0], output, error].map { fcntl($0, F_GETFL) }
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+            inputDescriptor: input[0], outputDescriptor: output, errorDescriptor: error, executablePath: "/bin/sh",
+            arguments: [Data("sh".utf8), Data("-c".utf8), Data("test ! -t 0 && test ! -t 1 && test ! -t 2 || exit 40; /bin/cat; printf OUT; printf ERR >&2; exit 7".utf8)], wire: 5)
+        var readable = pollfd(fd: input[0], events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&readable, 1, 0), 1); XCTAssertNotEqual(readable.revents & Int16(POLLIN), 0)
+        let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        try beginDispatch(fixture, request: request, launcher: launcher)
+        let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission); defer { control.close() }
+        let result = try ownerTerminal(terminal, submission: submission, admission: admission)
+        XCTAssertEqual(result.outcome, .exited(7)); XCTAssertFalse(result.outputInterrupted)
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try Data(contentsOf: out), binary + Data("OUT".utf8)); XCTAssertEqual(try Data(contentsOf: err), Data("ERR".utf8))
+        XCTAssertEqual([input[0], output, error].map { fcntl($0, F_GETFL) }, flags)
+    }
+    func testNativePipeControlsSignalCancelAndRecheckTheCurrentFrontendRole() throws {
+        for mode in ["signal", "cancel", "changedRole"] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let marker = fixture.root.appendingPathComponent("started")
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf ready > \"$1\"; exec /bin/sleep 60".utf8), Data("sh".utf8), Data(marker.path.utf8)], wire: 5)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false); try beginDispatch(fixture, request: request, launcher: launcher)
+            let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission); defer { control.close() }
+            try waitForPipeMarker(marker)
+            if mode == "changedRole" {
+                try authority.write { tx in
+                    let snapshot = try XCTUnwrap(tx.codePolicy()), old = try XCTUnwrap(snapshot.policy.entries.first)
+                    let entry = try AuthorityCodeEntry(role: old.role, teamID: old.teamID, identifier: old.identifier,
+                        installedGeneration: old.installedGeneration, minimumGeneration: old.minimumGeneration,
+                        codeDirectoryHash: Data(repeating: 2, count: 20), active: true)
+                    _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: snapshot.revision)
+                }
+            }
+            try pipeSend(mode == "cancel" ? .cancel : .signal(UInt32(SIGTERM)), control: control, profile: profile, submission: submission, admission: admission)
+            let result = try ownerTerminal(terminal, submission: submission, admission: admission)
+            XCTAssertEqual(result.outcome, .signalled(UInt32(mode == "signal" ? SIGTERM : SIGKILL))); XCTAssertFalse(result.outputInterrupted)
+            try awaitDispatchCleanup(authority)
+        }
+    }
+    func testNativePipeControlsDisconnectHonorsSelectedContinueOrTerminateWithoutRepeatingWork() throws {
+        for continuing in [false, true] {
+            let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+            let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let started = fixture.root.appendingPathComponent("started"), finished = fixture.root.appendingPathComponent("finished")
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+                executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("printf ready > \"$1\"; /bin/sleep 0.5; printf once >> \"$2\"; exit 7".utf8),
+                    Data("sh".utf8), Data(started.path.utf8), Data(finished.path.utf8)], wire: 5,
+                disconnect: continuing ? .continueRunning : .terminate)
+            let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false); try beginDispatch(fixture, request: request, launcher: launcher)
+            let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission)
+            try waitForPipeMarker(started); control.close()
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome,
+                           continuing ? .exited(7) : .signalled(UInt32(SIGKILL)))
+            try awaitDispatchCleanup(authority)
+            if continuing { XCTAssertEqual(try Data(contentsOf: finished), Data("once".utf8)) }
+            else { XCTAssertFalse(FileManager.default.fileExists(atPath: finished.path)) }
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        }
+    }
+    func testNativePipeControlsEarlySignalWaitsForTheOneCommittedRelease() throws {
+        try verifyEarlyPipeControl(cancel: false)
+    }
+    func testNativePipeControlsCancellationBeforeReleaseExecutesNoTarget() throws {
+        try verifyEarlyPipeControl(cancel: true)
+    }
+    private func verifyEarlyPipeControl(cancel: Bool) throws {
+        let fixture = try CommandRequestFixture(), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let launcher = try dispatchLauncher(fixture), marker = fixture.root.appendingPathComponent("effect")
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+            executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                Data("/bin/sleep 10; printf effect > \"$1\"".utf8), Data("sh".utf8), Data(marker.path.utf8)], wire: 5)
+        let request = try admitCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try fixture.consume(request); let now = fixture.now(130)
+        let approval = try fixture.requests.authorizedCommandApproval(requestID: request.requestID, now: now)
+        let resources = try fixture.requests.takeAuthorizedCommandExecution(requestID: request.requestID, now: now)
+        let owner = CommandExecution(resources: resources, approval: approval, clock: { now }, receiptTime: { nil },
+            callerExpression: try selfExpression(), callerUserID: geteuid(), callerSessionID: nil, validateLauncher: {}, validateElevation: { _ in })
+        defer {
+            owner.cancelBeforeRelease(); let deadline = Date().addingTimeInterval(8)
+            while !owner.dispose() && Date() < deadline { _ = owner.poll(checkStreamPolicy: {}); usleep(1000) }
+        }
+        try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)
+        let preparation = Date().addingTimeInterval(5)
+        while true {
+            if case .prepared = owner.poll(checkStreamPolicy: {}) { break }
+            guard Date() < preparation else { throw MachCommandCallerError.timeout }; usleep(1000)
+        }
+        let control = try pipeOpened(terminal, profile: profile, submission: submission, admission: admission); defer { control.close() }
+        try pipeSend(cancel ? .cancel : .signal(UInt32(SIGKILL)), control: control, profile: profile, submission: submission, admission: admission)
+        _ = owner.poll(checkStreamPolicy: {}); usleep(30000)
+        if cancel {
+            XCTAssertThrowsError(try owner.release()) { XCTAssertEqual($0 as? CommandExecutionError, .unavailable) }
+        } else {
+            guard case .prepared = owner.poll(checkStreamPolicy: {}) else { return XCTFail("The prepared helper must survive before release") }
+            _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch, now: now, receiptTimeMs: nil)
+            owner.dispatchRevision = 1; try owner.recheck(); try owner.release()
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        var outcome: CommandTerminalOutcome?
+        let deadline = Date().addingTimeInterval(5)
+        while outcome == nil {
+            if case .terminal(let value) = owner.poll(checkStreamPolicy: {}) { outcome = value }
+            guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+        }
+        let observed = try XCTUnwrap(outcome)
+        if cancel { XCTAssertEqual(observed, .failedBeforeStart) }
+        else { XCTAssertTrue(observed == .failedBeforeStart || observed == .signalled(UInt32(SIGKILL))) }
+        _ = try fixture.requests.recordOutcome(requestID: request.requestID, expectedRevision: cancel ? 0 : 1,
+            event: cancel ? .proveNoDispatch : .verifyFailure, now: now, receiptTimeMs: nil)
+        owner.deliverTerminal(observed)
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, observed)
+        XCTAssertTrue(owner.dispose()); XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePipeControlProfileRejectsPTYCaptureBeforeTargetExecution() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let marker = fixture.root.appendingPathComponent("must-not-run")
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+            executablePath: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)], wire: 5, ioMode: .pty)
+        let request = try admitOwnedCommand(command, fixture: fixture), admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher)) {
+            XCTAssertEqual($0 as? CommandExecutionError, .unavailable)
+        }
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .failedBeforeStart)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+    func testPipeControlProfileCannotClaimPTYOutputInterruption() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 5)
+        let submission = try commandSubmission()
+        defer { handshake.close() }
+        XCTAssertThrowsError(try ioPayloads(profile: handshake.profile, submission: submission, outputInterrupted: true)) {
+            XCTAssertEqual($0 as? CommandTerminalResultError, .incompatible)
+        }
     }
 }

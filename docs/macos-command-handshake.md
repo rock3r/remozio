@@ -33,6 +33,9 @@ An explicit [admission reply profile](macos-command-admission-replies.md) suppor
 The frontend advertises explicit sets. Root selects the highest common implemented wire/carrier pair.
 The [typed result contract](macos-command-admission-results.md) uses wire 2 with input carrier 3; legacy combinations remain supported.
 The explicit [I/O channel profile](macos-command-io-channels.md) uses wire 3 with carrier 4 and retains all three streams and a terminal reply.
+The [PTY stream](macos-command-stream-channel.md) uses wire 4 with carrier 4.
+[Pipe controls](macos-command-pipe-controls.md) use wire 5 with carrier 4 and preserve separate stdio.
+Each control profile requires an explicit offer. Existing defaults remain unchanged.
 There is no fallback to a carrier without the original input fileport.
 An authenticated incompatibility reply creates no retained session.
 Unknown fields, malformed sets, unsupported selections, changed scope, and wrong nonces fail without submitting a command.
