@@ -8,6 +8,9 @@
 typedef struct remozio_command_process remozio_command_process_t;
 typedef struct {
     pid_t pid;
+    /* Captured before preparation resumes. Retained after reap for private monitor records. */
+    bool birth_known;
+    uint64_t birth_seconds, birth_microseconds;
     bool configured, prepared, release_attempted, exec_observed, exit_observed, reaped;
     bool preparation_failed, status_closed, ownership_lost;
     int preparation_error, wait_status;

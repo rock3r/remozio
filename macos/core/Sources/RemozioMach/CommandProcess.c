@@ -27,8 +27,6 @@ struct remozio_command_process {
     int fault;
     bool cancelled;
     uint64_t deadline;
-    uint64_t birth_seconds, birth_microseconds;
-    bool birth_known;
     mach_timebase_info_data_t timebase;
 };
 static int system_error(void) { return errno ? errno : EIO; }
@@ -75,8 +73,8 @@ static void capture_birth(remozio_command_process_t *process) {
     struct proc_bsdinfo details = {0};
     int bytes = proc_pidinfo(process->state.pid, PROC_PIDTBSDINFO, 0, &details, sizeof(details));
     if (bytes == sizeof(details) && details.pbi_pid == (uint32_t)process->state.pid && details.pbi_start_tvsec && details.pbi_start_tvusec < 1000000) {
-        process->birth_seconds = details.pbi_start_tvsec; process->birth_microseconds = details.pbi_start_tvusec;
-        process->birth_known = true;
+        process->state.birth_seconds = details.pbi_start_tvsec; process->state.birth_microseconds = details.pbi_start_tvusec;
+        process->state.birth_known = true;
     }
 }
 static int spawn_child(const char *path, const void *frame, size_t count,
@@ -227,8 +225,8 @@ static int observe_job_control(remozio_command_process_t *process) {
             process->state.stop_tracing_known = process->state.stop_traced = false;
             struct proc_bsdinfo details = {0};
             int bytes = proc_pidinfo(process->state.pid, PROC_PIDTBSDINFO, 0, &details, sizeof(details));
-            if (process->birth_known && bytes == sizeof(details) && details.pbi_pid == (uint32_t)process->state.pid &&
-                details.pbi_start_tvsec == process->birth_seconds && details.pbi_start_tvusec == process->birth_microseconds &&
+            if (process->state.birth_known && bytes == sizeof(details) && details.pbi_pid == (uint32_t)process->state.pid &&
+                details.pbi_start_tvsec == process->state.birth_seconds && details.pbi_start_tvusec == process->state.birth_microseconds &&
                 details.pbi_status == SSTOP && !(details.pbi_flags & PROC_FLAG_INEXIT)) {
                 process->state.stop_tracing_known = true;
                 process->state.stop_traced = (details.pbi_flags & PROC_FLAG_TRACED) != 0;

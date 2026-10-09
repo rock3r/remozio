@@ -50,7 +50,7 @@ No polling or cleanup method waits for a child exit.
 ## Dedicated monitor session
 
 The additive `spawn_in_session` API prepares a target inside a dedicated monitor's session.
-The product monitor and its authority connection remain pending. The diagram shows that required integration.
+The [embedded monitor](macos-command-monitor.md) now uses this session API. Its Root parent and authority connection remain pending.
 The [private monitor status protocol](macos-command-monitor-protocol.md) defines records and stream transitions for that connection.
 The monitor must be both the session leader and its process-group leader. An ordinary caller is rejected before spawn.
 The target receives its own process group. Its live parent stays in the same session, preserving ordinary job-control stops.

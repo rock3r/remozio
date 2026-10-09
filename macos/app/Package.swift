@@ -5,5 +5,5 @@ import PackageDescription
 let package = Package(name: "SetupPreviewSnapshots", platforms: [.macOS("26.0")],
     dependencies: [.package(path: "../core")],
     targets: [.executableTarget(name: "SetupPreviewSnapshots", dependencies: [.product(name: "RemozioCore", package: "core")],
-        path: ".", exclude: ["CommandChild", "Remozio.xcodeproj", "README.md", "App/RemozioApp.swift", "App/en.lproj"],
+        path: ".", exclude: ["CommandChild", "CommandMonitor", "Remozio.xcodeproj", "README.md", "App/RemozioApp.swift", "App/en.lproj"],
         sources: ["App/SetupFilePreview.swift", "Snapshots/Render.swift"])])

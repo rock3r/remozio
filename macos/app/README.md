@@ -64,3 +64,12 @@ The authority does not launch it yet.
 The [private launch contract](../../docs/macos-command-child.md) defines bounded input, retained descriptors and the release barrier.
 The build check verifies both embedded signatures and unprivileged refusal without consuming stdin or writing to the command streams.
 The parent supervisor, protected installation and current elevation policy remain required before use.
+
+## Embedded command monitor
+
+`RemozioCommandMonitor` is embedded at `Contents/Helpers/RemozioCommandMonitor` with separate Debug and Release identities.
+It prepares one target in its dedicated session and owns that target's final wait result.
+Private status buffering preserves cancellation and reaping when Root stops reading.
+The [monitor contract](../../docs/macos-command-monitor.md) defines release, control, descriptor and cleanup behavior.
+The authority does not launch this helper yet. Its native parent, protected installation and current elevation policy remain required.
+The packaging check verifies both helper identities and non-root refusal before any private input is read.
