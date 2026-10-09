@@ -92,7 +92,8 @@ This result supports a monitor design. It does not establish production job cont
 - Preserve separate redirected streams and pipe controls. A PTY must not silently merge redirected stderr or remove signal forwarding.
 - Verify nested foreground jobs, monitor crashes, caller detachment, protected installation, and cross-user execution.
 
-The installed service, production elevation, integrated monitor behavior on macOS 26, real shell, and physical terminal checks remain gates.
+The [current native monitor and nested Bash experiment](macos-nested-shell.md) adds 30 private-terminal trials.
+The installed service, production elevation, real CLI, user-terminal restoration and physical terminal checks remain gates.
 No user terminal, firewall rule, device setting, or installed service changed during these experiments.
 
 The same 50-trial experiment also passed on an Apple Silicon CI host with macOS 26.6.2 and SDK 26.5.
