@@ -3,7 +3,8 @@
 The current private-terminal leader ignored `SIGTSTP` in ten native trials. A separate session monitor preserved normal stop and resume behavior.
 
 The [recorded evidence](evidence/2026-10-09-command-job-control.json) contains 50 trials. The runtime was macOS 27.0.1 on Apple Silicon.
-The deployment target was macOS 26. Actual macOS 26 behavior remains untested.
+The deployment target was macOS 26. The same experiment also passed on macOS 26.6.2 in CI, as recorded below.
+Production monitor integration and privileged execution remain untested on macOS 26.
 
 ## Current leader and candidate monitor
 
@@ -23,9 +24,9 @@ flowchart LR
     end
 ```
 
-The native case links the current `CommandProcess.c`, `CommandPTY.c`, and launch decoder. It uses the existing synthetic launcher.
+The recorded native case links `CommandProcess.c`, `CommandPTY.c`, and the launch decoder from PR 246. It uses the existing synthetic launcher.
 The stopped child remains owned and unreaped. `SIGSTOP` stops it; `SIGCONT` resumes it; the actual exit status is 7.
-The native observation structure currently exposes neither stopped nor continued states.
+That revision exposed neither stopped nor continued states. PR 249 adds raw native observations; it does not implement production job control.
 
 The candidate keeps the session leader alive in a separate process group. The target remains its child and becomes the terminal's foreground group.
 The monitor observes the child through `waitpid`, including stopped and continued states. The target closes private descriptors before exec.
@@ -91,7 +92,7 @@ This result supports a monitor design. It does not establish production job cont
 - Preserve separate redirected streams and pipe controls. A PTY must not silently merge redirected stderr or remove signal forwarding.
 - Verify nested foreground jobs, monitor crashes, caller detachment, protected installation, and cross-user execution.
 
-The installed service, production elevation, actual macOS 26 runtime, real shell, and physical terminal checks remain gates.
+The installed service, production elevation, integrated monitor behavior on macOS 26, real shell, and physical terminal checks remain gates.
 No user terminal, firewall rule, device setting, or installed service changed during these experiments.
 
 The same 50-trial experiment also passed on an Apple Silicon CI host with macOS 26.6.2 and SDK 26.5.
