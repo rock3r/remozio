@@ -239,7 +239,7 @@ int remozio_command_monitor_signal(remozio_command_monitor_t *monitor, int numbe
     if (!monitor || number <= 0 || number >= NSIG) return EINVAL;
     remozio_command_monitor_observation_t observed;
     int error = remozio_command_monitor_poll(monitor, &observed); if (error) return error;
-    if (observed.cancelled || observed.monitor_reaped || observed.monitor_ownership_lost || observed.status.failed || observed.status.reaped || observed.target_exit_observed) return ESRCH;
+    if (observed.cancelled || observed.monitor_reaped || observed.monitor_ownership_lost || observed.status.reaped || observed.target_exit_observed) return ESRCH;
     if (!observed.release_attempted || !observed.prepared) return EAGAIN;
     if (monitor->control_sequence == UINT64_MAX) return EOVERFLOW;
     remozio_monitor_control_t record = {.tag = REMOZIO_MONITOR_SIGNAL, .signal = (uint32_t)number, .sequence = monitor->control_sequence + 1};

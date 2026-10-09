@@ -1,6 +1,8 @@
 /* Unprivileged synthetic launcher and program. This fixture is never embedded or installed. */
 #include "RemozioCommandChild.h"
 #include <errno.h>
+#include <limits.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -25,6 +27,10 @@ static int exact(int fd, void *value, size_t count) {
 int main(int argc, char **argv) {
     if(argc==2 && (!strcmp(argv[1],"--execute") || !strcmp(argv[1],"--execute-in-session"))) {
         bool in_session = !strcmp(argv[1],"--execute-in-session");
+        if(strstr(argv[0],"held-prepare-child")) {
+            char ready[PATH_MAX];if(snprintf(ready,sizeof(ready),"%s.ready",argv[0])>=(int)sizeof(ready))return 70;
+            while(access(ready,F_OK)){if(errno!=ENOENT)return 70;usleep(1000);}
+        }
         if(strstr(argv[0],"stalled-child")) {for(;;)pause();}
         unsigned char header[40]={0};
         if(exact(3,header,40))return 70;
@@ -57,9 +63,9 @@ int main(int argc, char **argv) {
     if(!raw || (unsigned char)raw[0]!=0xfd || raw[1] || !empty || *empty || getenv("PATH"))return 92;
     for(int fd=3;fd<256;fd++)if(fcntl(fd,F_GETFD)>=0)return 93;
     if(getpgrp()!=getpid())return 94;
-    if(!strcmp(argv[3],"pty")) {if(!isatty(0)||getsid(0)!=getpid()||tcgetpgrp(0)!=getpgrp())return 99;return write(1,"PTY",3)==3?7:98;}
+    if(!strcmp(argv[3],"pty")) {if(!isatty(0)||tcgetsid(0)!=getsid(0)||tcgetpgrp(0)!=getpgrp())return 99;return write(1,"PTY",3)==3?7:98;}
     if(!strcmp(argv[3],"pty-bulk") || !strcmp(argv[3],"pty-infinite")) {
-        if(!isatty(0)||getsid(0)!=getpid()||tcgetpgrp(0)!=getpgrp())return 99;
+        if(!isatty(0)||tcgetsid(0)!=getsid(0)||tcgetpgrp(0)!=getpgrp())return 99;
         size_t offset=0;unsigned char block[4096];
         do {
             for(size_t i=0;i<sizeof(block);i++)block[i]=(unsigned char)((offset+i)%251);

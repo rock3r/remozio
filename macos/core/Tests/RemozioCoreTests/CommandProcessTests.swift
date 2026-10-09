@@ -370,6 +370,8 @@ extension CommandProcessTests {
         try probe.run(); probe.waitUntilExit()
         XCTAssertEqual(probe.terminationStatus, 0, "Native cancellation fixture: \(name)")
     }
+    func testCancellationExitSnapshotRequiresOriginalIdentityAndDoesNotInventAReap() throws { try assertCancellationFixture("exiting_without_reap", large: false) }
+    func testCancellationPermissionErrorUsesActualWaitWithoutAnExitEvent() throws { try assertCancellationFixture("prepared_exit_without_event", large: false) }
     func testCancellationAfterPreparedGateExitUsesActualReapAndPreservesInput() throws {
         try assertCancellationFixture("prepared_exit", large: true)
     }

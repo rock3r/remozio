@@ -43,8 +43,8 @@ final class CommandMonitorParentTests: XCTestCase {
         try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
     }
-    private func run(_ mode: String, fault: Int32? = nil, malformed: Bool = false) throws {
-        let arguments = [Data([0xff]), Data(), Data([0xfe]), Data((mode.contains("stop_resume") ? "plain_stop" : "output").utf8)]
+    private func run(_ mode: String, fault: Int32? = nil, malformed: Bool = false, launcherName: String? = nil) throws {
+        let arguments = [Data([0xff]), Data(), Data([0xfe]), Data((mode == "late_observation" ? "wait" : mode.contains("stop_resume") ? "plain_stop" : "output").utf8)]
         let environment = [Data("CWD=\(directory.path)".utf8), Data("EMPTY=".utf8), Data([0x52,0x41,0x57,0x3d,0xfd])]
         var body = Data()
         let executable = mode == "exec_failure" ? directory.appendingPathComponent("missing-target").path : child.path
@@ -59,8 +59,10 @@ final class CommandMonitorParentTests: XCTestCase {
         frame.append(body)
         let file = directory.appendingPathComponent("frame.bin"); try frame.write(to: file)
         let process = Process(); process.executableURL = fault == nil ? driver : faultDriver; process.currentDirectoryURL = directory
+        var launcher = child!
+        if let launcherName { launcher = directory.appendingPathComponent(launcherName); try FileManager.default.copyItem(at: child, to: launcher) }
         process.arguments = [(malformed ? malformedMonitor : monitor).path,
-                             malformed ? directory.appendingPathComponent(mode).path : child.path, file.path, mode]
+                             malformed ? directory.appendingPathComponent(mode).path : launcher.path, file.path, mode]
         if let fault { process.arguments?.append(String(fault)); process.environment = ["PARENT_FAULT": mode] }
         let output = Pipe(); process.standardOutput = output
         try process.run(); process.waitUntilExit()
@@ -76,6 +78,7 @@ final class CommandMonitorParentTests: XCTestCase {
     func testImmediateCancellationRetiresTheMonitor() throws { try run("immediate_cancel") }
     func testOwnedTerminalStopResume() throws { try run("pty_stop_resume") }
     func testOwnedTerminalCancellationRetainsItsMasterUntilCleanup() throws { try run("pty_cancel") }
+    func testReleasedObservationFailureKeepsRunningAndAcceptsOwnedSignal() throws { try run("late_observation", launcherName: "late-fault-child") }
     func testExecFailureHasNoFalseKernelExec() throws { try run("exec_failure") }
     func testRejectedPreflightCreatesNoOwnerAndPreservesInput() throws { try run("preflight") }
     func testMonitorRegistrationFailureRetainsAndRetiresTheSuspendedOwner() throws { try run("register_monitor", fault: EPERM) }

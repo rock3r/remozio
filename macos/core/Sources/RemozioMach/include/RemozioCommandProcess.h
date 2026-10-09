@@ -39,6 +39,8 @@ int remozio_command_process_poll(remozio_command_process_t *process, remozio_com
 int remozio_command_process_release(remozio_command_process_t *process);
 /* The child leader stays owned and unreaped while signaling its process group. */
 int remozio_command_process_signal(remozio_command_process_t *process, int signal);
+/* Requests cleanup; success does not establish exit or reaping. Keep polling until actual retirement.
+ * A permission failure remains visible unless the owned child is actually reaped or kernel-confirmed as exiting. */
 int remozio_command_process_cancel(remozio_command_process_t *process);
 /* EBUSY retains ownership. No PID or process group may be used after successful disposal. */
 int remozio_command_process_dispose(remozio_command_process_t *process);

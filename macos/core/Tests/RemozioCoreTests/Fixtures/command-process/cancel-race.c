@@ -8,15 +8,46 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/event.h>
 #include <sys/ioctl.h>
+#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
 static pid_t denied_pid = -1;
-static bool deny_kill;
+static bool deny_kill, hide_events, hide_reap;
+static int snapshot_fault;
+static pid_t fixture_waitpid(pid_t pid, int *status, int flags);
+static int fixture_sysctl(int *name, u_int count, void *old, size_t *size, void *value, size_t length);
+static int fixture_kevent(int q,const struct kevent *c,int n,struct kevent *e,int m,const struct timespec *t);
 static int fixture_signal(pid_t pid, int number);
+#define waitpid fixture_waitpid
+#define sysctl fixture_sysctl
 #define kill fixture_signal
+#define kevent(...) fixture_kevent(__VA_ARGS__)
 #include "CommandProcess.c"
+#undef waitpid
+#undef sysctl
 #undef kill
+#undef kevent
+static pid_t fixture_waitpid(pid_t pid, int *status, int flags) {
+    if(hide_reap && pid == denied_pid && flags == WNOHANG)return 0;
+    return waitpid(pid,status,flags);
+}
+static int fixture_sysctl(int *name,u_int count,void *old,size_t *size,void *value,size_t length) {
+    int e=sysctl(name,count,old,size,value,length);
+    if(!e && old && *size == sizeof(struct kinfo_proc)) {
+        struct kinfo_proc *p=old;
+        if(snapshot_fault==1)p->kp_proc.p_pid++;
+        if(snapshot_fault==2)p->kp_eproc.e_ppid++;
+        if(snapshot_fault==3)p->kp_proc.p_starttime.tv_usec++;
+        if(snapshot_fault==4)p->kp_proc.p_flag &= ~P_WEXIT;
+        if(snapshot_fault==5)*size=0;
+    }
+    return e;
+}
+static int fixture_kevent(int q,const struct kevent *c,int n,struct kevent *e,int m,const struct timespec *t) {
+    if(hide_events&&!n)return 0;return kevent(q,c,n,e,m,t);
+}
 static int fixture_signal(pid_t pid, int number) {
     if (deny_kill && pid == -denied_pid && number == SIGKILL) { errno = EPERM; return -1; }
     return kill(pid, number);
@@ -47,9 +78,11 @@ static int await_unreaped_exit(pid_t pid) {
 }
 int main(int argc, char **argv) {
     if (argc != 4) return 1;
+    bool exiting = !strcmp(argv[3], "exiting_without_reap");
+    bool no_event = !strcmp(argv[3], "prepared_exit_without_event");
     bool live_failure = !strcmp(argv[3], "live_permission_failure");
     bool normal_prepared = !strcmp(argv[3], "normal_prepared");
-    if (!live_failure && !normal_prepared && strcmp(argv[3], "prepared_exit")) return 1;
+    if (!exiting && !live_failure && !normal_prepared && !no_event && strcmp(argv[3], "prepared_exit")) return 1;
     FILE *file = fopen(argv[2], "rb"); if (!file) return 2;
     if (fseek(file, 0, SEEK_END)) return 3;
     long size = ftell(file);
@@ -93,6 +126,18 @@ int main(int argc, char **argv) {
     } else {
         close_descriptor(&process->configuration); close_descriptor(&process->release); clear_frame(process);
         if (await_unreaped_exit(observation.pid)) { failure = 13; goto cleanup; }
+        if(no_event || exiting){hide_events=true;deny_kill=true;denied_pid=observation.pid;}
+        if(exiting) {
+            hide_reap=true;
+            for(snapshot_fault=1;snapshot_fault<=5;snapshot_fault++) {
+                if(remozio_command_process_cancel(process)!=EPERM || process->state.reaped || process->state.exit_observed ||
+                    remozio_command_process_dispose(process)!=EBUSY){failure=20;goto cleanup;}
+            }
+            snapshot_fault=0;
+            if(remozio_command_process_cancel(process) || process->state.reaped || process->state.exit_observed ||
+                process->state.exec_observed || process->state.release_attempted || remozio_command_process_dispose(process)!=EBUSY){failure=21;goto cleanup;}
+            hide_reap=hide_events=false;
+        }
         int cancelled = remozio_command_process_cancel(process);
         int observed = remozio_command_process_poll(process, &observation);
         if (cancelled || observed || !observation.reaped ||
@@ -103,7 +148,7 @@ int main(int argc, char **argv) {
     if (ioctl(input[0], FIONREAD, &available) || available != 6 || read(input[0], bytes, sizeof(bytes)) != 6 ||
         memcmp(bytes, "unread", 6) || fcntl(input[0], F_GETFL) != original_flags) failure = 16;
 cleanup:
-    deny_kill = false; free(frame);
+    deny_kill = hide_events = hide_reap = false; snapshot_fault=0; free(frame);
     if (process) {
         remozio_command_process_cancel(process);
         remozio_command_process_observation_t state = {0}; uint64_t deadline = fixture_time() + 5000;

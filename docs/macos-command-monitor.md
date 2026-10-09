@@ -1,16 +1,16 @@
 # Embedded command monitor
 
 `RemozioCommandMonitor` is an embedded C helper. It owns one target through the existing native process API.
-The authority does not launch this helper yet. The [native parent](macos-command-monitor-parent.md) is available.
-Root integration, policy selection and frontend connection remain required.
+The authority dispatch API launches this helper through the [native parent](macos-command-monitor-parent.md).
+Protected host-service wiring, policy selection and frontend connection remain required.
 
 The helper accepts only `--monitor` and an absolute protected-child path. It requires real and effective UID zero before touching descriptors.
-It also requires its own session and process group. The future Root parent must verify both helpers before launching this dedicated session.
+It also requires its own session and process group. The Root parent must verify both helpers before launching this dedicated session.
 The helper provides no public listener and accepts no command arguments through its process arguments or environment.
 
 ```mermaid
 flowchart LR
-    R[Root owner: integration pending] -->|Private configuration, release and controls| M[Embedded monitor: session leader]
+    R[Serialized authority dispatch] -->|Private configuration, release and controls| M[Embedded monitor: session leader]
     M -->|Prepare, release once, signal group| T[Protected child: separate group]
     T -->|Owned stop and actual wait result| M
     M -->|Versioned private status| R
@@ -70,7 +70,9 @@ Process observation and cancellation continue while that write is blocked. The l
 Prepared, failure and final wait records are retained until sent or the status channel fails.
 Sequences are assigned when a record enters this retained output slot. Coalescing skips job revisions, not emitted record sequences.
 
-A failure keeps its first errno, prevents further release, and starts owned cancellation.
+A failure keeps its first errno and prevents further release. Preparation, protocol and channel failures start owned cancellation.
+An observation failure after target release retains the target without killing it. The monitor still collects its actual wait result.
+Authenticated private signals remain available while the original leader stays owned. Root records an unknown outcome for this observation failure.
 A preparation failure with a spawned target still retains the target's final wait result.
 A broken status pipe does not skip target cleanup. Unexpected wait ownership loss remains a failure with no invented final wait result.
 The monitor never signals a borrowed PID after reaping or ownership loss.
@@ -109,4 +111,5 @@ The refused helper preserves input and emits no command-stream output.
 
 These results do not prove production Root launch, cross-user execution, external debugger behavior, nested foreground jobs, or frontend shell suspension.
 [Issue 250](https://github.com/rock3r/remozio/issues/250) retains the debugger and frontend gates.
-The native Root parent, authority dispatch connection, selected elevation policy, service installation and physical tests remain required.
+The native Root parent and authority dispatch connection are implemented.
+The selected elevation policy, protected service installation, frontend connection and physical tests remain required.

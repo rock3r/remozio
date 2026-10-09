@@ -24,6 +24,7 @@ static int await_state(remozio_command_monitor_t *monitor, remozio_command_monit
 }
 int main(int argc,char **argv) {
     if(argc!=5)return 1;
+    bool late=!strcmp(argv[4],"late_observation");
     bool exec_failure=!strcmp(argv[4],"exec_failure");
     bool terminal=strstr(argv[4],"pty_")==argv[4];
     bool cancel=!strcmp(argv[4],"cancel")||!strcmp(argv[4],"pty_cancel"),stop=!strcmp(argv[4],"stop_resume")||!strcmp(argv[4],"pty_stop_resume"),immediate=!strcmp(argv[4],"immediate_cancel");
@@ -63,13 +64,17 @@ int main(int argc,char **argv) {
         else {
             if(remozio_command_monitor_release(monitor)||remozio_command_monitor_release(monitor)!=EALREADY){failure=10;goto cleanup;}
             if(stop){if(await_state(monitor,&state,1)||!state.target_exec_observed||remozio_command_monitor_signal(monitor,SIGCONT)){failure=11;goto cleanup;}}
+            if(late){uint64_t deadline=milliseconds()+8000;
+                while((!state.status.failed||!state.target_exec_observed)&&milliseconds()<deadline){if(remozio_command_monitor_poll(monitor,&state)){failure=26;goto cleanup;}usleep(1000);}
+                if(!state.status.failed||!state.target_exec_observed||state.monitor_reaped||state.target_exit_observed||remozio_command_monitor_signal(monitor,SIGTERM)){failure=27;goto cleanup;}
+            }
         }
     }
     if(await_state(monitor,&state,2)){failure=12;goto cleanup;}
     if(state.target_exec_observed!=(bool)(!cancel&&!immediate&&!exec_failure)||(!immediate&&(!state.status.reaped||!state.target_exit_observed))||state.monitor_ownership_lost){failure=13;goto cleanup;}
     if(!cancel&&!immediate){
-        if(state.status.failed!=exec_failure||state.status.latest.detail!=(uint32_t)((exec_failure?70:7)<<8)||state.monitor_wait_status!=(exec_failure?70<<8:0)||!state.status.target_release_attempted||(exec_failure&&state.status.failure_error!=ENOENT)){failure=14;goto cleanup;}
-        if(!stop&&!terminal&&!exec_failure){char out[64],err[16];if(read(output[0],out,sizeof(out))!=10||memcmp(out,"OUT:unread",10)||read(error_pipe[0],err,sizeof(err))!=3||memcmp(err,"ERR",3)){failure=15;goto cleanup;}}
+        if(state.status.failed!=(exec_failure||late)||state.status.latest.detail!=(uint32_t)(late?SIGTERM:(exec_failure?70:7)<<8)||state.monitor_wait_status!=((exec_failure||late)?70<<8:0)||!state.status.target_release_attempted||(exec_failure&&state.status.failure_error!=ENOENT)||(late&&state.status.failure_error!=EPROTO)){failure=14;goto cleanup;}
+        if(!stop&&!terminal&&!exec_failure&&!late){char out[64],err[16];if(read(output[0],out,sizeof(out))!=10||memcmp(out,"OUT:unread",10)||read(error_pipe[0],err,sizeof(err))!=3||memcmp(err,"ERR",3)){failure=15;goto cleanup;}}
     }else if(!immediate){int actual=(int)state.status.latest.detail;if(state.release_attempted||state.status.target_release_attempted||(!WIFSIGNALED(actual)&&!(WIFEXITED(actual)&&WEXITSTATUS(actual)==70))){failure=16;goto cleanup;}}
     if(remozio_command_monitor_signal(monitor,SIGTERM)!=ESRCH){failure=17;goto cleanup;}
 cleanup:

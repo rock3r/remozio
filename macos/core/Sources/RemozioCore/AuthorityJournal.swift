@@ -453,11 +453,11 @@ extension AuthorityJournal {
 
     /// Protected host integration. The elevation callback must enforce the selected administrator policy without reentry.
     /// Pipe and PTY execution stay inactive until the host installs the protected command endpoint.
-    public func beginCommandExecution(requestID: Data, childPath: String, preparationMilliseconds: UInt32,
+    public func beginCommandExecution(requestID: Data, monitorPath: String, childPath: String, preparationMilliseconds: UInt32,
                                       fileCreationMask: UInt32, maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
                                       validateElevation: @escaping @Sendable (CommandCapture) throws -> Void,
                                       clock: @escaping @Sendable () throws -> AuthorityMoment, receiptTime: @escaping @Sendable () -> UInt64? = { nil }) throws {
-        try beginCommandExecution(requestID: requestID, childPath: childPath,
+        try beginCommandExecution(requestID: requestID, monitorPath: monitorPath, childPath: childPath,
             preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask,
             maximumActiveCommands: maximumActiveCommands, pollIntervalMilliseconds: pollIntervalMilliseconds, validateElevation: validateElevation, clock: clock, receiptTime: receiptTime,
             runtime: { tx, approval, capture in
@@ -466,28 +466,36 @@ extension AuthorityJournal {
                 try approval.requireCurrent(tx.requestDeliveryTrust())
                 guard let snapshot = try tx.codePolicy(),
                       let child = snapshot.policy.entries.first(where: { $0.role == .commandChild }), child.active,
+                      let monitor = snapshot.policy.entries.first(where: { $0.role == .commandMonitor }), monitor.active,
                       let frontend = snapshot.policy.entries.first(where: { $0.role == .commandFrontend }), frontend.active,
                       let childRevision = snapshot.roleRevisions[.commandChild],
+                      let monitorRevision = snapshot.roleRevisions[.commandMonitor],
                       let frontendRevision = snapshot.roleRevisions[.commandFrontend] else { throw CommandExecutionError.policyChanged }
                 let policy = try XPCPeerPolicy(teamID: frontend.teamID, componentIdentifier: frontend.identifier,
                     approvedCodeDirectoryHashes: [frontend.codeDirectoryHash], expectedUserID: capture.requester.effectiveUID)
-                return CommandExecutionRuntime(child: child, childRevision: childRevision,
+                return CommandExecutionRuntime(child: child, childRevision: childRevision, monitor: monitor, monitorRevision: monitorRevision,
                     frontendRevision: frontendRevision, callerExpression: policy.requirement,
                     userID: capture.requester.effectiveUID, sessionID: nil)
             }, launcher: { context in
                 let path = try ProtectedExecutablePath.acquire(path: childPath)
+                let monitorPath = try ProtectedExecutablePath.acquire(path: monitorPath)
                 return {
                     let policy = try XPCPeerPolicy(teamID: context.child.teamID, componentIdentifier: context.child.identifier,
                         approvedCodeDirectoryHashes: [context.child.codeDirectoryHash], expectedUserID: 0)
                     let evidence = try SignedExecutableValidation.validate(path, policy: policy,
                         committedFloor: context.child.minimumGeneration, installedGeneration: context.child.installedGeneration)
                     guard evidence.generation == context.child.installedGeneration else { throw CommandExecutionError.policyChanged }
+                    let monitorPolicy = try XPCPeerPolicy(teamID: context.monitor.teamID, componentIdentifier: context.monitor.identifier,
+                        approvedCodeDirectoryHashes: [context.monitor.codeDirectoryHash], expectedUserID: 0)
+                    let monitorEvidence = try SignedExecutableValidation.validate(monitorPath, policy: monitorPolicy,
+                        committedFloor: context.monitor.minimumGeneration, installedGeneration: context.monitor.installedGeneration)
+                    guard monitorEvidence.generation == context.monitor.installedGeneration else { throw CommandExecutionError.policyChanged }
                 }
             })
     }
 
     /// Fixture identity seam. Native spawning, durable transitions and original resources follow the production path.
-    func beginCommandExecution(requestID: Data, childPath: String, preparationMilliseconds: UInt32,
+    func beginCommandExecution(requestID: Data, monitorPath: String, childPath: String, preparationMilliseconds: UInt32,
                                fileCreationMask: UInt32, maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
                                validateElevation: @escaping (CommandCapture) throws -> Void,
                                clock: @escaping () throws -> AuthorityMoment, receiptTime: @escaping () -> UInt64? = { nil },
@@ -525,7 +533,7 @@ extension AuthorityJournal {
                 validateLauncher: checkLauncher, validateElevation: validateElevation)
             commandExecutions[requestID] = execution
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
-            do { try execution.prepare(path: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask) }
+            do { try execution.prepare(monitorPath: monitorPath, childPath: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask) }
             catch { execution.cancelBeforeRelease(); throw error }
             // The closure stays under this journal's lock and can only verify the same original controller.
             commandStreamChecks[requestID] = {
@@ -620,6 +628,8 @@ extension AuthorityJournal {
 struct CommandExecutionRuntime: Equatable, Sendable {
     let child: AuthorityCodeEntry
     let childRevision: UUID
+    let monitor: AuthorityCodeEntry
+    let monitorRevision: UUID
     let frontendRevision: UUID
     let callerExpression: String
     let userID: uid_t

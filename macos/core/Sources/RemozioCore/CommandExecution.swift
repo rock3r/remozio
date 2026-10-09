@@ -3,7 +3,7 @@ import Foundation
 import RemozioMach
 import RemozioProtocol
 
-/// Owns one native child and the original command resources. Only the serialized journal calls this owner.
+/// Owns one monitor and the original command resources. Only the serialized journal calls this owner.
 final class CommandExecution {
     enum Progress { case preparing, prepared, running, terminal(CommandTerminalOutcome) }
     let resources: RetainedCommandExecutionResources
@@ -18,9 +18,10 @@ final class CommandExecution {
         let elevation: (CommandCapture) throws -> Void
     }
     private let validation: Validation?
-    private var process: OpaquePointer?
+    private var monitor: OpaquePointer?
     private var pump: CommandPTYStreamPump?
-    private var nativeOwned = false
+    private var monitorOwned = false
+    private var targetActive = false
     private var pendingSignals: [UInt32] = []
     var committedOutcome: CommandTerminalOutcome?
     private var released = false
@@ -60,9 +61,9 @@ final class CommandExecution {
         try validation.elevation(capture)
     }
 
-    /// A failed spawn can still return a live child. Retain and retire that child through ordinary polling.
-    func prepare(path: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
-        guard validation != nil, !disposed, !released, !cancelledBeforeRelease, process == nil,
+    /// A failed spawn can return a live monitor. Retain it until actual reaping or ownership loss.
+    func prepare(monitorPath: String, childPath: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
+        guard validation != nil, !disposed, !released, !cancelledBeforeRelease, monitor == nil,
               (resources.capture.ioMode == .pipes && !resources.requiresStreamPump ||
                resources.capture.ioMode == .pty && resources.requiresStreamPump) else { throw CommandExecutionError.unavailable }
         let frame = try CommandChildLaunchSpecification(capture: resources.capture,
@@ -86,15 +87,17 @@ final class CommandExecution {
             defer { pty?.sealSlave() }
             func spawn(_ input: Int32, _ output: Int32, _ error: Int32) -> Int32 {
                 frame.withUnsafeBytes { bytes in
-                    path.withCString { path in
-                        remozio_command_process_spawn(path, bytes.baseAddress, bytes.count, input, output, error, directory, &process)
+                    monitorPath.withCString { monitorPath in
+                        childPath.withCString { childPath in
+                            remozio_command_monitor_spawn(monitorPath, childPath, bytes.baseAddress, bytes.count, input, output, error, directory, &monitor)
+                        }
                     }
                 }
             }
             if let pty { return try pty.withBorrowedSlave { spawn($0, $0, $0) } }
             return spawn(input, output, error)
         }
-        nativeOwned = process != nil
+        monitorOwned = monitor != nil
         if status != 0 { cancelBeforeRelease(); throw CommandExecutionError.native(status) }
     }
 
@@ -106,9 +109,9 @@ final class CommandExecution {
 
     /// Call only after the dispatch transition commits and all final checks pass.
     func release() throws {
-        guard !disposed, !released, !cancelledBeforeRelease, let process else { throw CommandExecutionError.unavailable }
+        guard !disposed, !released, !cancelledBeforeRelease, let monitor else { throw CommandExecutionError.unavailable }
         released = true
-        let status = remozio_command_process_release(process)
+        let status = remozio_command_monitor_release(monitor)
         if status != 0 { pendingSignals.removeAll(); observationUncertain = true; cancelOwned(); throw CommandExecutionError.native(status) }
         releaseSucceeded = true
     }
@@ -118,12 +121,12 @@ final class CommandExecution {
         cancelOwned()
     }
     private func cancelOwned() {
-        guard nativeOwned, let process else { return }
-        try? pump?.signalForeground(SIGKILL)
-        _ = remozio_command_process_cancel(process)
+        guard monitorOwned, let monitor else { return }
+        if targetActive { try? pump?.signalForeground(SIGKILL) }
+        _ = remozio_command_monitor_cancel(monitor)
     }
     private func applyControl(_ body: CommandStreamFrame.Body) throws {
-        guard nativeOwned, let process else { return }
+        guard monitorOwned, let monitor else { return }
         switch body {
         case .cancel: if released { cancelOwned() } else { cancelBeforeRelease() }
         case .signal(let number):
@@ -133,12 +136,15 @@ final class CommandExecution {
                 pendingSignals.append(number)
                 return
             }
-            guard releaseSucceeded else { return }
-            do { try pump?.signalForeground(Int32(number)) }
-            catch RetainedCommandPTYError.native(let error) where error == EPIPE || error == EIO {
-                let status = remozio_command_process_signal(process, Int32(number))
+            guard releaseSucceeded, targetActive else { return }
+            func signalOriginalGroup() throws {
+                let status = remozio_command_monitor_signal(monitor, Int32(number))
                 if status != 0 && status != ESRCH { throw CommandExecutionError.native(status) }
             }
+            if let pump {
+                do { try pump.signalForeground(Int32(number)) }
+                catch RetainedCommandPTYError.native(let error) where error == EPIPE || error == EIO { try signalOriginalGroup() }
+            } else { try signalOriginalGroup() }
         case .resize(let rows, let columns, let width, let height):
             do { try pump?.resize(winsize(ws_row: rows, ws_col: columns, ws_xpixel: width, ws_ypixel: height)) }
             catch RetainedCommandPTYError.native(let error) where error == EPIPE || error == EIO { }
@@ -157,30 +163,32 @@ final class CommandExecution {
     }
     func poll(checkStreamPolicy: () throws -> Void = { throw CommandExecutionError.unavailable }) -> Progress {
         guard !disposed else { return .terminal(.unknown) }
-        guard let process else {
+        guard let monitor else {
             return .terminal(resources.requesterExitObserved ? .requesterExitedBeforeStart : .failedBeforeStart)
         }
-        var observation = remozio_command_process_observation_t()
-        let status = remozio_command_process_poll(process, &observation)
+        var observation = remozio_command_monitor_observation_t()
+        let status = remozio_command_monitor_poll(monitor, &observation)
         if status != 0 {
             observationUncertain = true
             if !released { cancelBeforeRelease() }
         }
-        nativeOwned = !observation.reaped && !observation.ownership_lost
+        monitorOwned = !observation.monitor_reaped && !observation.monitor_ownership_lost
+        targetActive = observation.prepared && !observation.target_exit_observed && !observation.status.reaped && !observation.monitor_ownership_lost
+        if observation.status.failed { observationUncertain = true }
         if let pump, let validation {
-            if observation.ownership_lost { pump.detach() }
+            if observation.monitor_ownership_lost { pump.detach() }
             else {
                 do {
                     if releaseSucceeded, !pendingSignals.isEmpty {
                         let signals = pendingSignals; pendingSignals.removeAll()
-                        if nativeOwned {
+                        if monitorOwned {
                             try resources.recheckCaller(expression: validation.callerExpression, userID: validation.callerUserID,
                                 auditSessionID: validation.callerSessionID)
                             try checkStreamPolicy()
                             for number in signals { try applyControl(.signal(number)) }
                         }
                     }
-                    if !released, !cancelledBeforeRelease, observation.prepared, !observation.reaped {
+                    if !released, !cancelledBeforeRelease, observation.prepared, !observation.monitor_reaped {
                         _ = try pump.open()
                     }
                     try pump.poll(expression: validation.callerExpression, userID: validation.callerUserID,
@@ -194,13 +202,19 @@ final class CommandExecution {
                 }
             }
         }
-        if observation.ownership_lost { return .terminal(.unknown) }
-        if observation.reaped {
+        if observation.monitor_ownership_lost { return .terminal(.unknown) }
+        if observation.monitor_reaped {
+            guard observation.status_closed || observation.protocol_failed else { return released ? .running : .preparing }
             if observationUncertain && released { return .terminal(.unknown) }
-            guard observation.exec_observed else { return .terminal(.failedBeforeStart) }
-            let signal = observation.wait_status & 0x7f
-            if signal == 0 { return .terminal(.exited(UInt8((observation.wait_status >> 8) & 0xff))) }
-            if signal > 0 && signal < NSIG { return .terminal(.signalled(UInt32(signal))) }
+            if !released { return .terminal(.failedBeforeStart) }
+            guard observation.status_closed, !observation.protocol_failed, observation.target_kernel_registered,
+                  observation.target_exit_observed, observation.status.reaped else { return .terminal(.unknown) }
+            guard observation.target_exec_observed else { return .terminal(.failedBeforeStart) }
+            guard observation.monitor_wait_status == 0, observation.status.target_release_attempted else { return .terminal(.unknown) }
+            let waitStatus = observation.status.latest.detail
+            let signal = waitStatus & 0x7f
+            if signal == 0 { return .terminal(.exited(UInt8((waitStatus >> 8) & 0xff))) }
+            if signal > 0 && signal < UInt32(NSIG) { return .terminal(.signalled(UInt32(signal))) }
             return .terminal(.unknown)
         }
         if released {
@@ -211,15 +225,15 @@ final class CommandExecution {
             }
             return .running
         }
-        if cancelledBeforeRelease || observation.preparation_failed { cancelBeforeRelease(); return .preparing }
+        if cancelledBeforeRelease || observation.status.failed { cancelBeforeRelease(); return .preparing }
         return observation.prepared && (pump == nil || pump?.opened == true && pump?.connected == true) ? .prepared : .preparing
     }
-    /// Poll until this succeeds. Disposal never waits for a live child.
+    /// Poll until this succeeds. Disposal does not wait for a live monitor.
     func dispose() -> Bool {
         guard !disposed else { return true }
         guard !terminalDeliveryPending, pump?.readyForTerminal ?? true else { return false }
-        if let process, remozio_command_process_dispose(process) != 0 { return false }
-        process = nil; nativeOwned = false; disposed = true; pump?.close(); resources.close(); return true
+        if let monitor, remozio_command_monitor_dispose(monitor) != 0 { return false }
+        monitor = nil; monitorOwned = false; targetActive = false; disposed = true; pump?.close(); resources.close(); return true
     }
 }
 
