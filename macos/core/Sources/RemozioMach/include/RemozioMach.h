@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include "RemozioCommandChild.h"
 #include "RemozioCommandProcess.h"
+#include "RemozioCommandMonitorProtocol.h"
 #include "RemozioCommandCaller.h"
 #include "RemozioCommandPTY.h"
 typedef struct {
