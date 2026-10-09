@@ -17,6 +17,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var commandCleanupTimer: DispatchSourceTimer?
     private var commandPollIntervalMilliseconds: Int?
     private var commandRuntimeChecks: [Data: () throws -> Void] = [:]
+    private var commandStreamChecks: [Data: () throws -> Void] = [:]
 
     /// Transfer exclusive ownership. The caller must not keep another user of this connection.
     public init(database: sending JournalDatabase) { self.database = database }
@@ -451,7 +452,7 @@ extension AuthorityJournal {
     public var activeCommandCount: Int { lock.withLock { commandExecutions.count } }
 
     /// Protected host integration. The elevation callback must enforce the selected administrator policy without reentry.
-    /// This pipe path stays inactive until the host installs the command endpoint. PTY integration remains a separate gate.
+    /// Pipe and PTY execution stay inactive until the host installs the protected command endpoint.
     public func beginCommandExecution(requestID: Data, childPath: String, preparationMilliseconds: UInt32,
                                       fileCreationMask: UInt32, maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
                                       validateElevation: @escaping @Sendable (CommandCapture) throws -> Void,
@@ -527,6 +528,15 @@ extension AuthorityJournal {
             do { try execution.prepare(path: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask) }
             catch { execution.cancelBeforeRelease(); throw error }
             // The closure stays under this journal's lock and can only verify the same original controller.
+            commandStreamChecks[requestID] = {
+                try self.validatedRead { tx in
+                    guard let snapshot = try tx.codePolicy(),
+                          snapshot.roleRevisions[.commandFrontend] == context.frontendRevision,
+                          snapshot.policy.entries.contains(where: { $0.role == .commandFrontend && $0.active }) else {
+                        throw CommandExecutionError.policyChanged
+                    }
+                }
+            }
             commandRuntimeChecks[requestID] = {
                 let current = try self.validatedRead { try runtime($0, approval, capture) }
                 guard current == context else { throw CommandExecutionError.policyChanged }
@@ -542,7 +552,10 @@ extension AuthorityJournal {
             requestOperationActive = true
             defer { requestOperationActive = false }
             for (id, execution) in commandExecutions {
-                switch execution.poll() {
+                switch execution.poll(checkStreamPolicy: {
+                    guard let check = self.commandStreamChecks[id] else { throw CommandExecutionError.unavailable }
+                    try check()
+                }) {
                 case .preparing, .running: continue
                 case .prepared:
                     do {
@@ -566,8 +579,8 @@ extension AuthorityJournal {
     /// Runs only under the journal lock and request-operation guard, including failed pre-spawn validation.
     private func finishCommandExecution(_ id: Data, execution: CommandExecution, observedOutcome: CommandTerminalOutcome) {
         let commitOutcome: CommandTerminalOutcome = execution.terminalCommitFailed ? .unknown : observedOutcome
-        var delivered: CommandTerminalOutcome = .unknown
-        if let requests, !requests.retired {
+        var delivered: CommandTerminalOutcome = execution.committedOutcome ?? .unknown
+        if execution.committedOutcome == nil, let requests, !requests.retired {
             do {
                 let event: RequestEvent
                 switch commitOutcome {
@@ -580,15 +593,16 @@ extension AuthorityJournal {
                 _ = try requests.recordOutcome(requestID: id, expectedRevision: execution.dispatchRevision,
                     event: event, now: execution.clock(), receiptTimeMs: execution.receiptTime())
                 delivered = commitOutcome
+                execution.committedOutcome = commitOutcome
             } catch {
                 execution.terminalCommitFailed = true
-                try? execution.resources.sendTerminalOutcome(.unknown)
+                execution.deliverTerminal(.unknown)
                 if !requests.retired { return }
                 retireRequests()
             }
         }
-        try? execution.resources.sendTerminalOutcome(delivered)
-        if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id) }
+        execution.deliverTerminal(delivered)
+        if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id); commandStreamChecks.removeValue(forKey: id) }
         if commandExecutions.isEmpty { commandCleanupTimer?.cancel(); commandCleanupTimer = nil; commandPollIntervalMilliseconds = nil }
     }
 

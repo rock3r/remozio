@@ -19,7 +19,7 @@ sequenceDiagram
     Root-->>CLI: Original terminal result
 ```
 
-The diagram shows the channel contract. This PR connects the CLI session APIs and the authenticated transport owner. It does not connect the native PTY pump.
+The diagram shows the channel contract. The [connected PTY pump](macos-command-pty-pump.md) now joins the transport owner to native execution.
 
 ## Binding and ownership
 
@@ -49,9 +49,9 @@ Stream messages never establish an exit or authorize release. The native process
 
 ## Current integration boundary
 
-The existing native pipe dispatcher rejects wire 4 before spawning a child. The marker test proves this boundary. Existing wire 3 pipe execution stays unchanged.
+The native dispatcher supports wire 4 PTY execution and retains wire 3 pipes. Wire 4 pipes still fail before spawning.
 
-The next integration must connect the Root PTY pump, native controls, continuous drain, and final reply. It must preserve the selected disconnect behavior.
+The connected pump enforces native controls, continuous drain, final acknowledgment, and the captured disconnect behavior.
 
 The CLI executable must restore its original terminal settings on every exit. It must read no input before admission and the opened event.
 
@@ -71,4 +71,4 @@ That probe used one-slot queues and a 4096-byte pending buffer. Its parent obser
 
 The minimum build target was macOS 26 on ARM64. The measured runtime was macOS 27.0.1. The retained evidence contains no secrets.
 
-Still unproven: installed Root service, cross-user policy, actual macOS 26 runtime, complete PTY pump, real terminal restoration, and physical device tests.
+Still unproven: installed Root service, cross-user policy, actual macOS 26 runtime, real frontend terminal restoration, and physical device tests.

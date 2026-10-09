@@ -30,7 +30,10 @@ final class MachCommandStreamAuthority {
         let bytes = try frame.encode(binding: binding)
         let queued = try MachCommandWire.sendStream(bytes, destination: output.borrowed(),
             openedControl: body == .opened ? endpoint.port : nil)
-        if queued { try outgoing.accept(frame) }
+        if queued {
+            try outgoing.accept(frame)
+            if body == .opened { try endpoint.releaseLocalSendRight() }
+        }
         return queued
     }
     func receiveControl(currentPolicy: XPCPeerPolicy) throws -> CommandStreamFrame.Body? {
@@ -45,7 +48,10 @@ final class MachCommandStreamAuthority {
             userID: userID, auditSessionID: auditSessionID, maxPayloadBytes: CommandStreamFrame.maximumBytes)
         let reply: ReceivedMachCommandSubmission
         do { reply = try receiver.receiveStreamControl() }
-        catch MachCommandCallerError.timeout { return nil }
+        catch MachCommandCallerError.timeout {
+            guard try endpoint.hasSenders() else { throw CommandStreamError.closed }
+            return nil
+        }
         defer { reply.caller.close() }
         try original.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         guard original.hasSameAuditBinding(as: reply.caller) else { throw MachCommandHandshakeError.wrongBinding }

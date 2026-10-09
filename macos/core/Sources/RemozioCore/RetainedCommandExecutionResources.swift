@@ -26,6 +26,11 @@ final class RetainedCommandExecutionResources {
     }
     deinit { close() }
     var requiresStreamPump: Bool { profile.supportsStreamingExecution }
+    func makeStreamAuthority() throws -> MachCommandStreamAuthority {
+        guard requiresStreamPump, !closed, !executionRetired else { throw CommandExecutionError.unavailable }
+        return try MachCommandStreamAuthority(binding: .init(profile: profile, submission: capture.submission,
+            submissionDigest: submissionDigest, request: request), original: caller, terminal: terminal)
+    }
     var requesterExitObserved: Bool { caller.requesterExitObserved }
 
     func recheck(currentPolicy: XPCPeerPolicy, checkCancellation: () throws -> Void = {}) throws {

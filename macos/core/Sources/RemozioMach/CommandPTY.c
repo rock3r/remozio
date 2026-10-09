@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <unistd.h>
 #include <util.h>
 
@@ -72,4 +73,20 @@ int remozio_command_pty_resize(remozio_command_pty_t *pty, const struct winsize 
 void remozio_command_pty_close(remozio_command_pty_t *pty) {
     if (!pty) return;
     close_descriptor(&pty->slave); close_descriptor(&pty->master); free(pty);
+}
+
+int remozio_command_pty_signal(remozio_command_pty_t *pty, int number) {
+    if (!pty || number <= 0 || number >= NSIG) return EINVAL;
+    if (pty->eof) return EPIPE;
+    return ioctl(pty->master, TIOCSIG, number) < 0 ? errno : 0;
+}
+int remozio_command_pty_eof_sequence(remozio_command_pty_t *pty, unsigned char bytes[2], size_t *count) {
+    if (!pty || !bytes || !count) return EINVAL;
+    *count = 0;
+    if (pty->eof) return EPIPE;
+    struct termios current;
+    if (tcgetattr(pty->master, &current) < 0) return errno;
+    if (!(current.c_lflag & ICANON) || current.c_cc[VEOF] == _POSIX_VDISABLE) return 0;
+    bytes[0] = bytes[1] = current.c_cc[VEOF]; *count = 2;
+    return 0;
 }

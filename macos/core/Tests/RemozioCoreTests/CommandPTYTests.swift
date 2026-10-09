@@ -108,3 +108,31 @@ final class CommandPTYTests: XCTestCase {
         XCTAssertThrowsError(try pty.resize(winsize())) { XCTAssertEqual($0 as? RetainedCommandPTYError, .closed) }
     }
 }
+
+
+extension CommandPTYTests {
+    func testCurrentCanonicalEOFSequencePreservesModesAndDoesNotInventRawBytes() throws {
+        let pty = try RetainedCommandPTY(); defer { pty.close() }
+        try pty.withBorrowedSlave { descriptor in
+            var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            attributes.c_lflag |= UInt(ICANON); attributes.c_lflag &= ~UInt(ECHO); withUnsafeMutableBytes(of: &attributes.c_cc) { $0[Int(VEOF)] = 4 }
+            XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            XCTAssertEqual(try pty.currentCanonicalEOFSequence(), Data([4, 4]))
+            cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            XCTAssertNil(try pty.currentCanonicalEOFSequence())
+            var after = termios(); XCTAssertEqual(tcgetattr(descriptor, &after), 0)
+            XCTAssertEqual(after.c_lflag, attributes.c_lflag); XCTAssertEqual(after.c_iflag, attributes.c_iflag)
+            var ready = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            XCTAssertEqual(poll(&ready, 1, 10), 0)
+        }
+    }
+    func testPrivateForegroundSignalRejectsInvalidNumbersAndClosedOwnership() throws {
+        let pty = try RetainedCommandPTY()
+        for value in [Int32(0), -1, NSIG] {
+            XCTAssertThrowsError(try pty.signalForeground(value)) { XCTAssertEqual($0 as? RetainedCommandPTYError, .native(EINVAL)) }
+        }
+        pty.close()
+        XCTAssertThrowsError(try pty.signalForeground(SIGINT)) { XCTAssertEqual($0 as? RetainedCommandPTYError, .closed) }
+        XCTAssertThrowsError(try pty.currentCanonicalEOFSequence()) { XCTAssertEqual($0 as? RetainedCommandPTYError, .closed) }
+    }
+}

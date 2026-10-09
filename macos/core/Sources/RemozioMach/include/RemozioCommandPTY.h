@@ -21,6 +21,10 @@ int remozio_command_pty_read(remozio_command_pty_t * _Nonnull pty, void * _Nonnu
 int remozio_command_pty_write(remozio_command_pty_t * _Nonnull pty, const void * _Nullable bytes, size_t count,
     size_t * _Nonnull written);
 int remozio_command_pty_resize(remozio_command_pty_t * _Nonnull pty, const struct winsize * _Nonnull size);
+/* Only the authorized owner may signal its owned terminal's current foreground group. Normal terminal flushing applies. */
+int remozio_command_pty_signal(remozio_command_pty_t * _Nonnull pty, int number);
+/* Returns two current EOF characters for canonical mode, or zero bytes for raw or disabled EOF. Changes no attributes. */
+int remozio_command_pty_eof_sequence(remozio_command_pty_t * _Nonnull pty, unsigned char * _Nonnull bytes, size_t * _Nonnull count);
 /* Closing the master can hang up a live slave. Retain the owner through child cleanup and output drain. */
 void remozio_command_pty_close(remozio_command_pty_t * _Nullable pty);
 #endif
