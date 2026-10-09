@@ -21,8 +21,10 @@ final class CommandExecution {
     private var process: OpaquePointer?
     private var pump: CommandPTYStreamPump?
     private var nativeOwned = false
+    private var pendingSignals: [UInt32] = []
     var committedOutcome: CommandTerminalOutcome?
     private var released = false
+    private var releaseSucceeded = false
     private var cancelledBeforeRelease = false
     private var observationUncertain = false
     private var disposed = false
@@ -105,11 +107,12 @@ final class CommandExecution {
         guard !disposed, !released, !cancelledBeforeRelease, let process else { throw CommandExecutionError.unavailable }
         released = true
         let status = remozio_command_process_release(process)
-        if status != 0 { observationUncertain = true; cancelOwned(); throw CommandExecutionError.native(status) }
+        if status != 0 { pendingSignals.removeAll(); observationUncertain = true; cancelOwned(); throw CommandExecutionError.native(status) }
+        releaseSucceeded = true
     }
     func cancelBeforeRelease() {
         guard !released else { return }
-        cancelledBeforeRelease = true
+        cancelledBeforeRelease = true; pendingSignals.removeAll()
         cancelOwned()
     }
     private func cancelOwned() {
@@ -122,6 +125,13 @@ final class CommandExecution {
         switch body {
         case .cancel: if released { cancelOwned() } else { cancelBeforeRelease() }
         case .signal(let number):
+            if !released {
+                guard !cancelledBeforeRelease else { return }
+                guard pendingSignals.count < CommandPTYStreamPump.maximumControlsPerTurn else { throw CommandStreamError.capacity }
+                pendingSignals.append(number)
+                return
+            }
+            guard releaseSucceeded else { return }
             do { try pump?.signalForeground(Int32(number)) }
             catch RetainedCommandPTYError.native(let error) where error == EPIPE || error == EIO {
                 let status = remozio_command_process_signal(process, Int32(number))
@@ -155,11 +165,20 @@ final class CommandExecution {
             if observation.ownership_lost { pump.detach() }
             else {
                 do {
+                    if releaseSucceeded, !pendingSignals.isEmpty {
+                        let signals = pendingSignals; pendingSignals.removeAll()
+                        if nativeOwned {
+                            try resources.recheckCaller(expression: validation.callerExpression, userID: validation.callerUserID,
+                                auditSessionID: validation.callerSessionID)
+                            try checkStreamPolicy()
+                            for number in signals { try applyControl(.signal(number)) }
+                        }
+                    }
                     if !released, !cancelledBeforeRelease, observation.prepared, !observation.reaped {
                         _ = try pump.open()
                     }
                     try pump.poll(expression: validation.callerExpression, userID: validation.callerUserID,
-                        auditSessionID: validation.callerSessionID,
+                        auditSessionID: validation.callerSessionID, allowInput: releaseSucceeded,
                         checkCaller: { try self.resources.recheckCaller(expression: validation.callerExpression,
                             userID: validation.callerUserID, auditSessionID: validation.callerSessionID) },
                         checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) })

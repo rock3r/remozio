@@ -136,3 +136,31 @@ extension CommandPTYTests {
         XCTAssertThrowsError(try pty.currentCanonicalEOFSequence()) { XCTAssertEqual($0 as? RetainedCommandPTYError, .closed) }
     }
 }
+
+
+extension CommandPTYTests {
+    func testEOFDeliveryRechecksRealTerminalModeAndCharacterAfterZeroAndPartialWrites() throws {
+        let pty = try RetainedCommandPTY(); defer { pty.close() }
+        try pty.withBorrowedSlave { descriptor in
+            var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            attributes.c_lflag |= UInt(ICANON); attributes.c_lflag &= ~UInt(ECHO)
+            withUnsafeMutableBytes(of: &attributes.c_cc) { $0[Int(VEOF)] = 4 }
+            XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            var eof = CommandPTYEOFDelivery()
+            XCTAssertFalse(try eof.flush(to: pty) { bytes in XCTAssertEqual(bytes, Data([4, 4])); return 0 })
+            cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            XCTAssertFalse(try eof.flush(to: pty) { _ in XCTFail("A raw retry must write no cached EOF bytes"); return 0 })
+            attributes.c_lflag |= UInt(ICANON)
+            withUnsafeMutableBytes(of: &attributes.c_cc) { $0[Int(VEOF)] = 6 }
+            XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            XCTAssertFalse(try eof.flush(to: pty) { bytes in XCTAssertEqual(bytes, Data([6, 6])); return 1 })
+            cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            XCTAssertFalse(try eof.flush(to: pty) { _ in XCTFail("A partial write must not leak its suffix into raw mode"); return 0 })
+            attributes.c_lflag |= UInt(ICANON)
+            withUnsafeMutableBytes(of: &attributes.c_cc) { $0[Int(VEOF)] = 7 }
+            XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+            XCTAssertTrue(try eof.flush(to: pty) { bytes in XCTAssertEqual(bytes, Data([7])); return 1 })
+            XCTAssertTrue(try eof.flush(to: pty) { _ in XCTFail("Completed EOF must not repeat"); return 0 })
+        }
+    }
+}

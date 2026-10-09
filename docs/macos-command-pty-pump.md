@@ -67,6 +67,10 @@ Each control requires the original request binding, sequence, kernel caller iden
 Closing all control send rights counts as disconnect even while the original process remains alive.
 Queued valid controls are consumed before the kernel's no-senders state retires the channel.
 
+Before release succeeds, the pump retains bounded input and at most four signal controls. It writes no input or EOF to the prepared helper.
+After the committed release succeeds, the controller applies retained signals in order after fresh caller and policy checks.
+Cancellation before release clears those signals and retires preparation. A failed release never flushes input or retained signals.
+
 Signals use the private terminal's current foreground group through `TIOCSIG`.
 Cancellation signals that foreground group and cancels the exclusively owned initial process group.
 Controls cannot signal a recycled process group after the native owner reports reaping or ownership loss.
@@ -75,7 +79,8 @@ Normal terminal signal flushing follows the application's current `NOFLSH` setti
 
 Logical input EOF ends further input frames. In canonical mode, two current enabled `VEOF` characters flush a partial line and end a read.
 Raw mode has no general input half-close. The pump invents no raw bytes, changes no application modes, and keeps output open.
-It can recheck canonical mode on later turns. It imposes no command runtime limit.
+Each EOF retry reads the current mode and enabled character again. It retains only the number of unsent characters.
+Zero or partial writes cannot retain a stale EOF byte across mode changes. The pump imposes no command runtime limit.
 
 Before release, disconnect cancels preparation. After release, the captured disconnect choice applies:
 
@@ -91,6 +96,8 @@ The existing active-command capacity includes owners awaiting output acknowledgm
 
 Actual Mach and native fixture tests cover exact full-duplex bytes, queue saturation, canonical EOF, foreground signals, resize, and cancellation.
 They also cover a live process closing its controls, selected continuation, delayed output acknowledgment, and ordinary or checkpointed journal failure.
+Native regressions retain a prepared helper through an early terminating signal and early terminal interrupt input.
+The EOF regression uses actual terminal mode changes and controlled zero or partial write results.
 
 The bulk fixture validates 128 KiB of input, echoes it, and writes a further 1 MiB pattern. The slow one-slot receiver checks every output byte.
 The continuation fixture closes controls, drains 1 MiB, writes one completion marker, and returns the actual exit result.
@@ -105,5 +112,5 @@ The internal fixture policy seam supplies test identities. It proves no installe
 Actual macOS 26 runtime, protected service installation, production elevation policy, frontend restoration, and physical terminal tests remain gates.
 No user terminal, firewall rule, installed service, or device was changed by these checks.
 
-The complete repository gate passed 1189 core tests and 97 Swift protocol tests, plus Python, packaging, experiment, and ownership checks.
-The required Kotlin/Android tasks passed with JDK 21 and SDK 37. Gradle reused 61 unchanged tasks and executed lint.
+The complete repository gate passed 1192 core tests and 97 Swift protocol tests, plus Python, packaging, experiment, and ownership checks.
+The required Kotlin/Android tasks passed with JDK 21 and SDK 37. The wrapper records the required test, APK, and lint results.

@@ -3,6 +3,7 @@ import Foundation
 
 /// Owns bounded private IO inside the serialized execution controller. This owner cannot release or repeat a command.
 final class CommandPTYStreamPump {
+    static let maximumControlsPerTurn = 4
     private let pty: RetainedCommandPTY
     private let channel: MachCommandStreamAuthority
     private var input = Data()
@@ -10,7 +11,7 @@ final class CommandPTYStreamPump {
     private var pendingCredit = 0
     private var inputEnded = false
     private var inputUnavailable = false
-    private var eofBytes: Data?
+    private var eof = CommandPTYEOFDelivery()
     private var eofWritten = false
     private var output: Data?
     private var outputEOF = false
@@ -29,13 +30,13 @@ final class CommandPTYStreamPump {
         return opened
     }
     // The callbacks run only within this bounded turn. The pump never retains its native process owner.
-    func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCaller: () throws -> Void,
+    func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, allowInput: Bool, checkCaller: () throws -> Void,
               checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void) throws {
         guard opened else { return }
         if connected {
             do {
                 try checkCaller()
-                for _ in 0..<4 {
+                for _ in 0..<Self.maximumControlsPerTurn {
                     guard let body = try channel.receiveControl(expression: expression, userID: userID, auditSessionID: auditSessionID) else { break }
                     try checkControlPolicy()
                     switch body {
@@ -52,7 +53,7 @@ final class CommandPTYStreamPump {
             } catch { detach(); throw error }
         }
         for _ in 0..<4 {
-            try pumpInput()
+            if allowInput { try pumpInput() }
             if connected, !outputEndSent, pendingCredit > 0 {
                 let credit = pendingCredit
                 if try channel.send(.inputCredit(UInt32(credit))) {
@@ -101,15 +102,7 @@ final class CommandPTYStreamPump {
             }
         }
         if inputEnded, input.isEmpty, !eofWritten {
-            // No bytes are invented for raw input. Recheck the application's current canonical mode on later turns.
-            if eofBytes == nil { eofBytes = try pty.currentCanonicalEOFSequence() }
-            if let bytes = eofBytes {
-                let written = try pty.write(bytes)
-                if written > 0 {
-                    eofBytes = Data(bytes.dropFirst(written))
-                    if eofBytes?.isEmpty == true { eofWritten = true }
-                }
-            }
+            eofWritten = try eof.flush(to: pty) { try pty.write($0) }
         }
     }
     func detach() {
@@ -121,4 +114,17 @@ final class CommandPTYStreamPump {
     func resize(_ size: winsize) throws { try pty.resize(size) }
     func finishDelivery() { channel.close(); connected = false }
     func close() { channel.close(); pty.close() }
+}
+
+/// Retains progress only. Every retry queries the application's current terminal mode and enabled EOF character.
+struct CommandPTYEOFDelivery {
+    private var remaining = 2
+    mutating func flush(to pty: RetainedCommandPTY, write: (Data) throws -> Int) throws -> Bool {
+        guard remaining > 0 else { return true }
+        guard let current = try pty.currentCanonicalEOFSequence() else { return false }
+        let bytes = Data(current.prefix(remaining)), written = try write(bytes)
+        guard (0...bytes.count).contains(written) else { throw RetainedCommandPTYError.native(EIO) }
+        remaining -= written
+        return remaining == 0
+    }
 }
