@@ -17,7 +17,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-enum { configuration_fd = 3, directory_fd = 4, status_fd = 5, release_fd = 6, control_fd = 7 };
+enum { configuration_fd = 3, directory_fd = 4, status_fd = 5, release_fd = 6, control_fd = 7, terminal_fd = 8 };
 typedef struct {
     int configuration, directory, status, release, control_pipe;
     remozio_command_process_t *target;
@@ -62,7 +62,7 @@ static int close_other_descriptors(void) {
     struct proc_fdinfo *items = malloc((size_t)bytes); if (!items) return ENOMEM;
     int received = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, items, bytes);
     if (received < 0 || received > bytes || received % sizeof(*items)) { free(items); return EIO; }
-    for (size_t i = 0; i < (size_t)received / sizeof(*items); ++i) if (items[i].proc_fd >= 8) close(items[i].proc_fd);
+    for (size_t i = 0; i < (size_t)received / sizeof(*items); ++i) if (items[i].proc_fd >= 9) close(items[i].proc_fd);
     free(items); return 0;
 }
 static void fail(monitor_t *monitor, int error) {
@@ -91,7 +91,7 @@ static int pump_configuration(monitor_t *monitor) {
         monitor->frame_used += (size_t)received;
         if (!monitor->frame && monitor->frame_used == sizeof(monitor->header)) {
             uint32_t count = word(monitor->header + 4), budget = word(monitor->header + 28);
-            if (word(monitor->header) != 0x524d4331 || count > REMOZIO_CHILD_MAX_BYTES - sizeof(monitor->header) || budget < 100 || budget > 60000) return EPROTO;
+            if ((word(monitor->header) != REMOZIO_CHILD_FRAME_V1 && word(monitor->header) != REMOZIO_CHILD_FRAME_V2) || count > REMOZIO_CHILD_MAX_BYTES - sizeof(monitor->header) || budget < 100 || budget > 60000) return EPROTO;
             monitor->deadline = monitor->started + budget;
             monitor->frame_count = sizeof(monitor->header) + count;
             monitor->frame = malloc(monitor->frame_count); if (!monitor->frame) return ENOMEM;
@@ -104,20 +104,33 @@ static int prepare_target(monitor_t *monitor, const char *child) {
     if (!monitor->configured || monitor->cancelled || monitor->target) return 0;
     remozio_child_spec_t spec = {0}; int error = remozio_child_spec_decode(monitor->frame, monitor->frame_count, &spec);
     if (error) return error;
-    if (spec.io_mode == 1) {
-        struct stat first, next;
-        if (fstat(0, &first)) error = system_error();
-        for (int descriptor = 1; !error && descriptor < 3; ++descriptor) {
-            if (fstat(descriptor, &next)) error = system_error();
-            else if (first.st_dev != next.st_dev || first.st_ino != next.st_ino || first.st_rdev != next.st_rdev) error = EINVAL;
+    bool mapped = spec.io_mode == 2;
+    if (spec.io_mode != 0) {
+        int controlling = mapped ? terminal_fd : 0;
+        if (mapped) {
+            int streams[3] = {0, 1, 2};
+            error = remozio_child_spec_validate_stdio(&spec, controlling, streams);
+        } else {
+            struct stat first, next;
+            if (fstat(0, &first)) error = system_error();
+            for (int descriptor = 1; !error && descriptor < 3; ++descriptor) {
+                if (fstat(descriptor, &next)) error = system_error();
+                else if (first.st_dev != next.st_dev || first.st_ino != next.st_ino || first.st_rdev != next.st_rdev) error = EINVAL;
+            }
         }
-        if (!error && ioctl(0, TIOCSCTTY, 0)) error = system_error();
-        if (!error && (tcgetsid(0) != getsid(0) || tcgetpgrp(0) != getpgrp())) error = EINVAL;
+        if (!error && ioctl(controlling, TIOCSCTTY, 0)) error = system_error();
+        if (!error && (tcgetsid(controlling) != getsid(0) || tcgetpgrp(controlling) != getpgrp())) error = EINVAL;
         if (!error && signal(SIGTTOU, SIG_IGN) == SIG_ERR) error = system_error();
     }
     remozio_child_spec_close(&spec);
+    if (!mapped) close(terminal_fd);
     if (!error && milliseconds(monitor) >= monitor->deadline) error = ETIMEDOUT;
-    if (!error) error = remozio_command_process_spawn_in_session(child, monitor->frame, monitor->frame_count, 0, 1, 2, monitor->directory, &monitor->target);
+    if (!error) {
+        if (mapped) error = remozio_command_process_spawn_in_session_with_terminal(child, monitor->frame,
+            monitor->frame_count, 0, 1, 2, monitor->directory, terminal_fd, &monitor->target);
+        else error = remozio_command_process_spawn_in_session(child, monitor->frame,
+            monitor->frame_count, 0, 1, 2, monitor->directory, &monitor->target);
+    }
     clear_frame(monitor); close_descriptor(&monitor->directory);
     return error;
 }
@@ -249,5 +262,6 @@ int main(int argc, char **argv) {
     if (remozio_command_process_dispose(monitor.target)) return EX_SOFTWARE;
     close_descriptor(&monitor.configuration); close_descriptor(&monitor.directory); close_descriptor(&monitor.status);
     close_descriptor(&monitor.release); close_descriptor(&monitor.control_pipe);
+    close(terminal_fd);
     return monitor.failure ? EX_SOFTWARE : EX_OK;
 }

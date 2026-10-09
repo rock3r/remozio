@@ -3,6 +3,9 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <unistd.h>
 
 static uint32_t word(const unsigned char *bytes) {
     return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
@@ -46,16 +49,28 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
     memset(output, 0, sizeof(*output));
     if (!input || count < REMOZIO_CHILD_HEADER_BYTES || count > REMOZIO_CHILD_MAX_BYTES) return EINVAL;
     const unsigned char *bytes = input;
-    if (word(bytes) != 0x524d4331 || word(bytes + 4) != count - REMOZIO_CHILD_HEADER_BYTES) return EINVAL;
+    uint32_t magic = word(bytes);
+    if ((magic != REMOZIO_CHILD_FRAME_V1 && magic != REMOZIO_CHILD_FRAME_V2) ||
+        word(bytes + 4) != count - REMOZIO_CHILD_HEADER_BYTES) return EINVAL;
     remozio_child_spec_t spec = {0};
+    spec.format_version = magic == REMOZIO_CHILD_FRAME_V1 ? 1 : 2;
+    size_t body_start = REMOZIO_CHILD_HEADER_BYTES;
     spec.uid = word(bytes + 8); spec.gid = word(bytes + 12); spec.group_count = word(bytes + 16);
     spec.argument_count = word(bytes + 20); spec.environment_count = word(bytes + 24);
     spec.preparation_milliseconds = word(bytes + 28); spec.file_creation_mask = word(bytes + 32); spec.io_mode = word(bytes + 36);
+    if (spec.format_version == 1) {
+        if (spec.io_mode > 1) return EINVAL;
+        spec.stdio_pty_mask = spec.io_mode == 1 ? 7 : 0;
+    } else {
+        if (spec.io_mode != 2 || count < body_start + 4) return EINVAL;
+        spec.stdio_pty_mask = word(bytes + body_start); body_start += 4;
+        if (spec.stdio_pty_mask > 7) return EINVAL;
+    }
     if (spec.uid == UINT32_MAX || spec.gid == UINT32_MAX || spec.group_count > 16 || spec.argument_count == 0 ||
         spec.argument_count > REMOZIO_CHILD_MAX_ENTRIES || spec.environment_count > REMOZIO_CHILD_MAX_ENTRIES ||
-        spec.io_mode > 1 || spec.preparation_milliseconds < 100 || spec.preparation_milliseconds > 60000 || spec.file_creation_mask > 0777) return EINVAL;
+        spec.preparation_milliseconds < 100 || spec.preparation_milliseconds > 60000 || spec.file_creation_mask > 0777) return EINVAL;
     size_t entries = 1U + spec.argument_count + spec.environment_count;
-    if (spec.group_count * 4U + entries * 4U > count - REMOZIO_CHILD_HEADER_BYTES) return EINVAL;
+    if (spec.group_count * 4U + entries * 4U > count - body_start) return EINVAL;
     spec.groups = calloc(spec.group_count + 1U, sizeof(uint32_t));
     spec.arguments = calloc(spec.argument_count + 1U, sizeof(char *));
     spec.environment = calloc(spec.environment_count + 1U, sizeof(char *));
@@ -63,7 +78,7 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
     if (!spec.groups || !spec.arguments || !spec.environment || !spec.storage) {
         remozio_child_spec_close(&spec); return ENOMEM;
     }
-    size_t cursor = REMOZIO_CHILD_HEADER_BYTES, used = 0;
+    size_t cursor = body_start, used = 0;
     int error = EINVAL;
     for (uint32_t index = 0; index < spec.group_count; ++index) {
         spec.groups[index] = word(bytes + cursor); cursor += 4;
@@ -89,4 +104,21 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
     *output = spec; return 0;
 fail:
     remozio_child_spec_close(&spec); return error;
+}
+
+int remozio_child_spec_validate_stdio(const remozio_child_spec_t *spec, int terminal, const int streams[3]) {
+    if (!spec || !streams || spec->stdio_pty_mask > 7 || spec->io_mode > 2) return EINVAL;
+    if (spec->io_mode == 0) return spec->format_version == 1 && terminal < 0 && spec->stdio_pty_mask == 0 ? 0 : EINVAL;
+    if ((spec->io_mode == 1 && (spec->format_version != 1 || spec->stdio_pty_mask != 7)) ||
+        (spec->io_mode == 2 && spec->format_version != 2)) return EINVAL;
+    struct stat control, stream;
+    struct termios attributes;
+    if (fstat(terminal, &control) < 0 || tcgetattr(terminal, &attributes) < 0) return errno;
+    if (!S_ISCHR(control.st_mode)) return ENOTTY;
+    for (unsigned index = 0; index < 3; ++index) {
+        if (fstat(streams[index], &stream) < 0) return errno;
+        bool same = control.st_dev == stream.st_dev && control.st_ino == stream.st_ino && control.st_rdev == stream.st_rdev;
+        if (same != ((spec->stdio_pty_mask & (1U << index)) != 0)) return EINVAL;
+    }
+    return 0;
 }

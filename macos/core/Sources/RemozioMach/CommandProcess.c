@@ -79,7 +79,7 @@ static void capture_birth(remozio_command_process_t *process) {
     }
 }
 static int spawn_child(const char *path, const void *frame, size_t count,
-    int input, int output, int error, int directory, bool monitor_session, remozio_command_process_t **result) {
+    int input, int output, int error, int directory, int terminal, bool mapped, bool monitor_session, remozio_command_process_t **result) {
     if (!result) return EINVAL;
     *result = NULL;
     if (monitor_session && (getsid(0) != getpid() || getpgrp() != getpid())) return EINVAL;
@@ -90,12 +90,20 @@ static int spawn_child(const char *path, const void *frame, size_t count,
     remozio_child_spec_t spec = {0};
     int failure = remozio_child_spec_decode(frame, count, &spec);
     if (failure) return failure;
+    if (spec.format_version != (mapped ? 2U : 1U)) { remozio_child_spec_close(&spec); return ENOTSUP; }
+    if (mapped) {
+        int streams[3] = {input, output, error};
+        failure = remozio_child_spec_validate_stdio(&spec, terminal, streams);
+        if (failure) { remozio_child_spec_close(&spec); return failure; }
+    }
     uint32_t budget = spec.preparation_milliseconds, io_mode = spec.io_mode;
     remozio_child_spec_close(&spec);
-    if (monitor_session && io_mode == 1 && (tcgetsid(input) != getsid(0) || tcgetpgrp(input) != getpgrp())) return EINVAL;
-    int original[7] = {input, output, error, -1, directory, -1, -1}, copies[7];
+    int controlling = mapped ? terminal : input;
+    if (monitor_session && io_mode != 0 && (tcgetsid(controlling) != getsid(0) || tcgetpgrp(controlling) != getpgrp())) return EINVAL;
+    size_t descriptor_count = mapped ? 8 : 7;
+    int original[8] = {input, output, error, -1, directory, -1, -1, terminal}, copies[8];
     int config[2] = {-1,-1}, status[2] = {-1,-1}, release[2] = {-1,-1};
-    for (size_t i = 0; i < 7; ++i) copies[i] = -1;
+    for (size_t i = 0; i < descriptor_count; ++i) copies[i] = -1;
     remozio_command_process_t *process = calloc(1, sizeof(*process));
     if (!process) return ENOMEM;
     process->configuration = process->status = process->release = process->events = -1;
@@ -121,7 +129,7 @@ static int spawn_child(const char *path, const void *frame, size_t count,
         (failure = mark_private(process->status, true, false)) ||
         (failure = mark_private(process->release, true, true))) goto cleanup;
     original[3] = config[0]; original[5] = status[1]; original[6] = release[0];
-    for (size_t i = 0; i < 7; ++i) {
+    for (size_t i = 0; i < descriptor_count; ++i) {
         copies[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 128);
         if (copies[i] < 0) { failure = system_error(); goto cleanup; }
     }
@@ -131,15 +139,15 @@ static int spawn_child(const char *path, const void *frame, size_t count,
     if ((failure = mark_private(process->events, false, false))) goto cleanup;
     posix_spawn_file_actions_t actions;
     if ((failure = posix_spawn_file_actions_init(&actions))) goto cleanup;
-    for (int i = 0; i < 7; ++i) {
-        failure = posix_spawn_file_actions_adddup2(&actions, copies[i], i);
+    for (size_t i = 0; i < descriptor_count; ++i) {
+        failure = posix_spawn_file_actions_adddup2(&actions, copies[i], (int)i);
         if (failure) { posix_spawn_file_actions_destroy(&actions); goto cleanup; }
     }
     posix_spawnattr_t attributes;
     if ((failure = posix_spawnattr_init(&attributes))) { posix_spawn_file_actions_destroy(&actions); goto cleanup; }
     sigset_t empty, defaults; sigemptyset(&empty); sigfillset(&defaults);
     short flags = POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
-    flags |= io_mode == 1 && !monitor_session ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP;
+    flags |= io_mode != 0 && !monitor_session ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP;
     failure = posix_spawnattr_setsigmask(&attributes, &empty);
     if (!failure) failure = posix_spawnattr_setsigdefault(&attributes, &defaults);
     if (!failure && (io_mode == 0 || monitor_session)) failure = posix_spawnattr_setpgroup(&attributes, 0);
@@ -153,10 +161,10 @@ static int spawn_child(const char *path, const void *frame, size_t count,
     EV_SET(&change, process->state.pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_CLEAR, NOTE_EXEC | NOTE_EXIT, 0, NULL);
     if (kevent(process->events, &change, 1, NULL, 0, NULL) < 0) { failure = system_error(); goto cleanup; }
     capture_birth(process);
-    if (monitor_session && io_mode == 1 && tcsetpgrp(input, process->state.pid) < 0) { failure = system_error(); goto cleanup; }
+    if (monitor_session && io_mode != 0 && tcsetpgrp(controlling, process->state.pid) < 0) { failure = system_error(); goto cleanup; }
     if (kill(process->state.pid, SIGCONT) < 0) { failure = system_error(); goto cleanup; }
 cleanup:
-    for (size_t i = 0; i < 7; ++i) close_descriptor(&copies[i]);
+    for (size_t i = 0; i < descriptor_count; ++i) close_descriptor(&copies[i]);
     for (size_t i = 0; i < 2; ++i) { close_descriptor(&config[i]); close_descriptor(&status[i]); close_descriptor(&release[i]); }
     if (failure && !*result) { close_resources(process); free(process); }
     if (failure && *result) process->fault = failure;
@@ -164,11 +172,19 @@ cleanup:
 }
 int remozio_command_process_spawn(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, remozio_command_process_t **result) {
-    return spawn_child(path, frame, count, input, output, error, directory, false, result);
+    return spawn_child(path, frame, count, input, output, error, directory, -1, false, false, result);
 }
 int remozio_command_process_spawn_in_session(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, remozio_command_process_t **result) {
-    return spawn_child(path, frame, count, input, output, error, directory, true, result);
+    return spawn_child(path, frame, count, input, output, error, directory, -1, false, true, result);
+}
+int remozio_command_process_spawn_with_terminal(const char *path, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, remozio_command_process_t **result) {
+    return spawn_child(path, frame, count, input, output, error, directory, terminal, true, false, result);
+}
+int remozio_command_process_spawn_in_session_with_terminal(const char *path, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, remozio_command_process_t **result) {
+    return spawn_child(path, frame, count, input, output, error, directory, terminal, true, true, result);
 }
 static int pump_configuration(remozio_command_process_t *process) {
     if (process->configuration < 0) return 0;
