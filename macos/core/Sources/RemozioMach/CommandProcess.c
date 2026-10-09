@@ -237,10 +237,14 @@ int remozio_command_process_signal(remozio_command_process_t *process, int numbe
 }
 int remozio_command_process_cancel(remozio_command_process_t *process) {
     if (!process) return EINVAL;
-    close_descriptor(&process->configuration); close_descriptor(&process->release); clear_frame(process);
     process->cancelled = true;
-    if (process->state.reaped) return 0;
-    int error = remozio_command_process_signal(process, SIGKILL);
+    int error = process->state.reaped ? 0 : remozio_command_process_signal(process, SIGKILL);
+    close_descriptor(&process->configuration); close_descriptor(&process->release); clear_frame(process);
+    if (error == EPERM) {
+        remozio_command_process_observation_t observation;
+        (void)remozio_command_process_poll(process, &observation);
+        if (observation.reaped) return 0;
+    }
     return error == ESRCH ? 0 : error;
 }
 int remozio_command_process_dispose(remozio_command_process_t *process) {
