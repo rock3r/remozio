@@ -13,6 +13,7 @@ typedef struct {
     int preparation_error, wait_status;
     /* Latest observed stop state. Stop records never consume the child exit result. */
     bool stopped;
+    /* Raw waitid evidence. Darwin stop codes do not classify debugger stops. */
     int stop_signal, stop_code;
     uint64_t job_control_revision;
 } remozio_command_process_observation_t;

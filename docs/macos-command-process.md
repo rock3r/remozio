@@ -74,7 +74,10 @@ It must preserve unknown when evidence is unavailable.
 Each poll consumes at most four owned stop or continue records through nonblocking `waitid`.
 It requests `WSTOPPED` and `WCONTINUED`, never `WEXITED`. The existing `waitpid` owner still consumes the final exit result.
 The observation includes the latest stop state, stop signal, kernel stop code and a revision for observed changes.
-`CLD_TRAPPED` stays distinct from `CLD_STOPPED`; a frontend must not treat a debugger trap as a shell suspension.
+The stop code is raw kernel evidence, not a debugger classification. Darwin can report debugger stops as `CLD_STOPPED`.
+A frontend must establish separate tracing state before mapping an observed stop to shell suspension.
+[Issue 250](https://github.com/rock3r/remozio/issues/250) tracks this required monitor integration gate.
+It must not infer a trap distinction from `stop_code` or forward a debugger trap as a shell suspension.
 The revision does not count every transition that the kernel can coalesce.
 The `P_PID` selector binds continued records to the owned child. Darwin can report the signal sender in their `si_pid`.
 Stop and trap records still require the owned child PID. An unchanged zeroed record represents no event.
