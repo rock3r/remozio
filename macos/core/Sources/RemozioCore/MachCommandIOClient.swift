@@ -8,8 +8,15 @@ public enum CommandIOAdmission {
     case result(VerifiedCommandAdmissionResult)
 }
 
+/// Ordered stream observations grant no execution or retry permission.
+public enum CommandExecutionStreamEvent {
+    case opened, output(Data), outputEnded, inputCapacity(Int)
+    case terminal(VerifiedCommandTerminalResult)
+}
+
 /// Owns the original Root handshake and private terminal endpoint after admission. The caller serializes all operations.
 public final class RetainedCommandExecutionSession {
+    public static let maximumInputChunk = CommandStreamFrame.maximumChunk
     public let admission: VerifiedCommandAdmissionResult
     private let original: CommandSubmission
     private let handshake: VerifiedCommandHandshake
@@ -20,12 +27,24 @@ public final class RetainedCommandExecutionSession {
     private let auditSessionID: au_asid_t?
     private var terminal: VerifiedCommandTerminalResult?
     private var closed = false
+    private var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
+    private var outgoing = CommandStreamReceiveSequence(direction: .toAuthority)
+    private var control: MachCommandAuthorityPort?
+    private var inputCapacity = 0
+    private var outputAcknowledged = false
+    private var streamBinding: CommandStreamBinding {
+        get throws {
+            guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
+            return CommandStreamBinding(profile: handshake.profile, submission: original.binding,
+                submissionDigest: admission.submissionDigest, request: request)
+        }
+    }
     fileprivate init(admission: VerifiedCommandAdmissionResult, original: CommandSubmission, handshake: VerifiedCommandHandshake,
                      endpoint: MachCommandPrivateReplyPort, expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
         self.admission = admission; self.original = original; self.handshake = handshake; self.endpoint = endpoint
         self.expression = expression; self.userID = userID; self.auditSessionID = auditSessionID
         receiver = try MachCommandCallerReceiver(receivePort: endpoint.port, expression: expression, userID: userID,
-            auditSessionID: auditSessionID, maxPayloadBytes: 4096)
+            auditSessionID: auditSessionID, maxPayloadBytes: handshake.profile.supportsStreamingExecution ? CommandStreamFrame.maximumBytes : 4096)
     }
     /// A poll timeout with no observed message returns nil. It does not expire an approval or impose a command runtime limit.
     /// Malformed, late or unauthenticated results retire this channel. They never authorize resubmission.
@@ -35,6 +54,7 @@ public final class RetainedCommandExecutionSession {
     }
     func pollTerminalResult(timeoutMilliseconds: UInt32, checkCancellation: () throws -> Void = {},
                             clock: (() throws -> UInt64)?) throws -> VerifiedCommandTerminalResult? {
+        guard !handshake.profile.supportsStreamingExecution else { throw MachCommandHandshakeError.incompatible }
         if let terminal { return terminal }
         guard !closed else { throw MachCommandHandshakeError.retired }
         guard (1...60_000).contains(timeoutMilliseconds) else { throw MachCommandHandshakeError.invalidConfiguration }
@@ -64,7 +84,99 @@ public final class RetainedCommandExecutionSession {
             return result
         } catch { close(); throw error }
     }
-    public func close() { if !closed { closed = true; endpoint.close(); handshake.close() } }
+    /// Each poll has a finite wait. It imposes no command lifetime limit and never repeats a submission.
+    public func pollStreamEvent(timeoutMilliseconds: UInt32 = 250) throws -> CommandExecutionStreamEvent? {
+        guard handshake.profile.supportsStreamingExecution, (1...60_000).contains(timeoutMilliseconds) else {
+            throw MachCommandHandshakeError.incompatible
+        }
+        if let terminal { return .terminal(terminal) }
+        guard !closed else { throw MachCommandHandshakeError.retired }
+        let clock = try AuthorityClock(), started = try clock.now().milliseconds
+        func remaining() throws -> UInt32 {
+            let current = try clock.now().milliseconds
+            guard current >= started, current - started < UInt64(timeoutMilliseconds) else { throw CommandTerminalResultError.deadlineExceeded }
+            return UInt32(UInt64(timeoutMilliseconds) - (current - started))
+        }
+        do {
+            try handshake.authenticateReplyAuthority(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            let event: ReceivedMachCommandExecutionEvent
+            do { event = try receiver.receiveExecutionEvent(timeoutMilliseconds: remaining()) }
+            catch MachCommandCallerError.timeout { return nil }
+            switch event {
+            case .stream(let reply, let right):
+                defer { reply.caller.close(); right?.close() }
+                try handshake.authenticateReply(reply.caller, expression: expression, userID: userID, auditSessionID: auditSessionID)
+                let frame = try CommandStreamFrame.decode(reply.payload, binding: streamBinding, direction: .toFrontend)
+                _ = try remaining()
+                try incoming.check(frame)
+                guard (frame.body == .opened) == (right != nil) else { throw CommandStreamError.malformed }
+                let observation: CommandExecutionStreamEvent
+                switch frame.body {
+                case .opened:
+                    guard let right else { throw CommandStreamError.malformed }
+                    control = try right.takeControlRight()
+                    inputCapacity = CommandStreamFrame.inputWindow; observation = .opened
+                case .output(let bytes): observation = .output(bytes)
+                case .outputEnd: observation = .outputEnded
+                case .inputCredit(let count):
+                    guard Int(count) <= CommandStreamFrame.inputWindow - inputCapacity else { throw CommandStreamError.capacity }
+                    inputCapacity += Int(count); observation = .inputCapacity(inputCapacity)
+                default: throw CommandStreamError.malformed
+                }
+                try incoming.accept(frame)
+                return observation
+            case .terminal(let reply):
+                defer { reply.caller.close() }
+                try handshake.authenticateReply(reply.caller, expression: expression, userID: userID, auditSessionID: auditSessionID)
+                let result = try CommandTerminalResultPayload.decode(reply.payload, profile: handshake.profile,
+                    original: original, admission: admission)
+                _ = try remaining()
+                if incoming.next == 0 {
+                    switch result.outcome {
+                    case .exited, .signalled: throw CommandStreamError.closed
+                    default: break
+                    }
+                } else if !incoming.ended || !outputAcknowledged { throw CommandStreamError.closed }
+                terminal = result; close()
+                return .terminal(result)
+            }
+        } catch { close(); throw error }
+    }
+    /// Returns the accepted count. Keep the entire unsent input when this returns zero.
+    /// The caller bounds its own buffer and must not read input before admission and the opened event.
+    public func forwardInput(_ bytes: Data) throws -> Int {
+        guard !closed, control != nil, !outgoing.ended else { throw CommandStreamError.closed }
+        guard (1...CommandStreamFrame.maximumChunk).contains(bytes.count) else { throw CommandStreamError.capacity }
+        guard bytes.count <= inputCapacity else { return 0 }
+        if try sendControl(.input(bytes)) { inputCapacity -= bytes.count; return bytes.count }
+        return 0
+    }
+    public func finishInput() throws -> Bool { try sendControl(.inputEnd) }
+    public func forwardSignal(_ signal: UInt32) throws -> Bool { try sendControl(.signal(signal)) }
+    public func resizeTerminal(rows: UInt16, columns: UInt16, pixelWidth: UInt16 = 0, pixelHeight: UInt16 = 0) throws -> Bool {
+        try sendControl(.resize(rows, columns, pixelWidth, pixelHeight))
+    }
+    public func cancelCommand() throws -> Bool { try sendControl(.cancel) }
+    /// Call after all output bytes are consumed. A full control queue preserves this acknowledgment for the caller to retry.
+    public func acknowledgeOutput() throws -> Bool {
+        guard !closed, incoming.ended else { throw CommandStreamError.closed }
+        if outputAcknowledged { return true }
+        outputAcknowledged = try sendControl(.outputDrained)
+        return outputAcknowledged
+    }
+    private func sendControl(_ body: CommandStreamFrame.Body) throws -> Bool {
+        guard !closed, handshake.profile.supportsStreamingExecution, let control else { throw CommandStreamError.closed }
+        let frame = CommandStreamFrame(sequence: outgoing.next, body: body)
+        try outgoing.check(frame)
+        let bytes = try frame.encode(binding: streamBinding)
+        do {
+            try handshake.authenticateReplyAuthority(expression: expression, userID: userID, auditSessionID: auditSessionID)
+            let queued = try MachCommandWire.sendStream(bytes, destination: control.borrowed(), toAuthority: true)
+            if queued { try outgoing.accept(frame) }
+            return queued
+        } catch { close(); throw error }
+    }
+    public func close() { if !closed { closed = true; control?.close(); control = nil; endpoint.close(); handshake.close() } }
     deinit { close() }
 }
 
@@ -85,7 +197,7 @@ public enum MachCommandIOClient {
         do {
             let admissionEndpoint = try MachCommandPrivateReplyPort()
             defer { admissionEndpoint.close() }
-            let terminalEndpoint = try MachCommandPrivateReplyPort()
+            let terminalEndpoint = try MachCommandPrivateReplyPort(queueLimit: handshake.profile.supportsStreamingExecution ? 4 : nil)
             guard handshake.profile.supportsExecutionChannels, submission.schemaVersion == handshake.profile.submissionSchemaVersion,
                   submission.binding.callerBinding == handshake.profile.callerBinding, (1...60_000).contains(timeoutMilliseconds) else {
                 throw MachCommandHandshakeError.incompatible

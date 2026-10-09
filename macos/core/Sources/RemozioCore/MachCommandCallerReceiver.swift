@@ -33,6 +33,9 @@ public final class MachCommandCallerReceiver {
     public static let ioInputMessageID: mach_msg_id_t = 0x524d0407
     public static let ioInputCarrierVersion: UInt32 = 4
     public static let terminalReplyMessageID: mach_msg_id_t = 0x524d0408
+    static let streamOutputMessageID: mach_msg_id_t = 0x524d0409
+    static let streamOpenedMessageID: mach_msg_id_t = 0x524d040a
+    static let streamControlMessageID: mach_msg_id_t = 0x524d040b
     private let port: mach_port_t
     private let maxPayloadBytes: Int
     private let expression: String
@@ -95,6 +98,22 @@ public final class MachCommandCallerReceiver {
         return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
     }
 
+    func receiveStreamControl() throws -> sending ReceivedMachCommandSubmission {
+        let packet = try receivePacket(timeoutMilliseconds: 0, kind: .streamControl)
+        return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
+    }
+    func receiveExecutionEvent(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandExecutionEvent {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil)
+        switch packet.kind {
+        case .streamOpened: return .stream(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller), packet.reply)
+        case .streamOutput: return .stream(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller), nil)
+        case .terminalReply: return .terminal(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller))
+        default:
+            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close()
+            throw MachCommandCallerError.malformed
+        }
+    }
+
     /// Receives protocol metadata and a private reply right from the actual frontend process.
     /// The listener must still reserve capacity and validate its current protected role before retaining a session.
     public func receiveHello(timeoutMilliseconds: UInt32) throws -> sending MachCommandHello {
@@ -128,7 +147,7 @@ public final class MachCommandCallerReceiver {
         }
     }
 
-    private enum PacketKind { case submission, input, hello, helloReply, admissionInput, admissionReply, ioInput, terminalReply }
+    private enum PacketKind { case submission, input, hello, helloReply, admissionInput, admissionReply, ioInput, terminalReply, streamOutput, streamOpened, streamControl }
 
     private struct Packet {
         let kind: PacketKind
@@ -141,7 +160,8 @@ public final class MachCommandCallerReceiver {
 
     private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?, previewTimeoutMilliseconds: UInt32? = nil) throws -> sending Packet {
         let previewWait = previewTimeoutMilliseconds ?? timeoutMilliseconds
-        guard timeoutMilliseconds > 0, previewWait > 0, previewWait <= timeoutMilliseconds else { throw MachCommandCallerError.configuration }
+        guard (timeoutMilliseconds > 0 || requestedKind == .streamControl),
+              (previewWait > 0 || requestedKind == .streamControl), previewWait <= timeoutMilliseconds else { throw MachCommandCallerError.configuration }
         let started = DispatchTime.now().uptimeNanoseconds
         var preview = remozio_mach_preview_t()
         let previewResult = remozio_preview_audit(port, previewWait, &preview)
@@ -155,12 +175,16 @@ public final class MachCommandCallerReceiver {
             case Self.inputMessageID: kind = .input
             case Self.admissionInputMessageID: kind = .admissionInput
             case Self.ioInputMessageID: kind = .ioInput
+            case Self.streamOutputMessageID: kind = .streamOutput
+            case Self.streamOpenedMessageID: kind = .streamOpened
+            case Self.terminalReplyMessageID: kind = .terminalReply
             default: try discardQueueHead(); throw MachCommandCallerError.malformed
             }
         }
         let hasInput = kind == .input || kind == .admissionInput || kind == .ioInput
-        let hasPort = hasInput || kind == .hello
-        let payloadLimit = kind == .hello || kind == .helloReply || (kind == .admissionReply || kind == .terminalReply) ? min(maxPayloadBytes, CommandHandshakeOffer.maximumBytes) : maxPayloadBytes
+        let hasPort = hasInput || kind == .hello || kind == .streamOpened
+        let isStream = [.streamOutput, .streamOpened, .streamControl].contains(kind)
+        let payloadLimit = isStream ? min(maxPayloadBytes, CommandStreamFrame.maximumBytes) : kind == .hello || kind == .helloReply || (kind == .admissionReply || kind == .terminalReply) ? min(maxPayloadBytes, CommandHandshakeOffer.maximumBytes) : maxPayloadBytes
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
         let descriptorCount = kind == .ioInput ? 5 : (kind == .admissionInput ? 2 : (hasPort ? 1 : 0))
         let descriptorBytes = hasPort ? MemoryLayout<mach_msg_body_t>.size + descriptorCount * MemoryLayout<mach_msg_port_descriptor_t>.size : 0
@@ -177,6 +201,9 @@ public final class MachCommandCallerReceiver {
         case .admissionReply: identifier = Self.admissionReplyMessageID; carrierVersion = Self.admissionReplyCarrierVersion
         case .ioInput: identifier = Self.ioInputMessageID; carrierVersion = Self.ioInputCarrierVersion
         case .terminalReply: identifier = Self.terminalReplyMessageID; carrierVersion = Self.admissionReplyCarrierVersion
+        case .streamOutput: identifier = Self.streamOutputMessageID; carrierVersion = Self.handshakeCarrierVersion
+        case .streamOpened: identifier = Self.streamOpenedMessageID; carrierVersion = Self.handshakeCarrierVersion
+        case .streamControl: identifier = Self.streamControlMessageID; carrierVersion = Self.handshakeCarrierVersion
         }
         let maximumMessage = (prefixBytes + payloadLimit + 3) & ~3
         guard preview.identifier == identifier, preview.size >= prefixBytes, preview.size <= maximumMessage else {
@@ -198,12 +225,12 @@ public final class MachCommandCallerReceiver {
         defer { if !completed { caller.close() } }
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         let budget = UInt64(timeoutMilliseconds) * 1_000_000
-        guard elapsed < budget else {
+        guard budget == 0 || elapsed < budget else {
             try discardQueueHead()
             if kind == .terminalReply { throw CommandTerminalResultError.deadlineExceeded }
             throw MachCommandCallerError.timeout
         }
-        let remaining = UInt32((budget - elapsed + 999_999) / 1_000_000)
+        let remaining = budget == 0 ? 0 : UInt32((budget - elapsed + 999_999) / 1_000_000)
         let capacity = maximumMessage + MemoryLayout<mach_msg_audit_trailer_t>.size
         let storage = UnsafeMutableRawPointer.allocate(byteCount: capacity,
             alignment: max(MemoryLayout<mach_msg_header_t>.alignment, MemoryLayout<mach_msg_audit_trailer_t>.alignment))
@@ -279,6 +306,8 @@ public final class MachCommandCallerReceiver {
         if kind == .hello || kind == .admissionInput || kind == .ioInput {
             let index = kind == .hello ? 0 : (kind == .ioInput ? 3 : 1)
             reply = takeReply(index, identifier: kind == .hello ? Self.helloReplyMessageID : Self.admissionReplyMessageID)
+        } else if kind == .streamOpened {
+            reply = takeReply(0, identifier: Self.streamControlMessageID)
         } else { reply = nil }
         completed = true
         return Packet(kind: kind, payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller, input: input, reply: reply, outputs: outputs)
@@ -302,6 +331,11 @@ public final class MachCommandCallerReceiver {
         guard status == errSecSuccess, let requirement else { throw MachCommandCallerError.security(status) }
         return requirement
     }
+}
+
+enum ReceivedMachCommandExecutionEvent {
+    case stream(ReceivedMachCommandSubmission, MachCommandReplyRight?)
+    case terminal(ReceivedMachCommandSubmission)
 }
 
 /// Payload fields remain untrusted. Only the receiver can construct this sender binding.

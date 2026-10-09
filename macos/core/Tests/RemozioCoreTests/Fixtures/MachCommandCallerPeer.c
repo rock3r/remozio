@@ -45,13 +45,32 @@ static int send_io(mach_port_t endpoint, const char *path) {
     for (int index = 0; index < 5; index++) mach_port_deallocate(mach_task_self(), ports[index]);
     return result == KERN_SUCCESS ? 0 : 26;
 }
+static int send_control(mach_port_t endpoint, const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 30;
+    unsigned char bytes[8193]; size_t count = fread(bytes, 1, sizeof(bytes), file); fclose(file);
+    if (!count || count > 8192) return 31;
+    size_t prefix = sizeof(mach_msg_header_t), size = (prefix + 8 + count + 3) & ~3u;
+    unsigned char *storage = calloc(1, size);
+    if (!storage) return 32;
+    mach_msg_header_t *header = (mach_msg_header_t *)storage;
+    header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    header->msgh_size = (mach_msg_size_t)size; header->msgh_remote_port = endpoint; header->msgh_id = 0x524d040b;
+    uint32_t version = htonl(1), length = htonl((uint32_t)count);
+    memcpy(storage + prefix, &version, 4); memcpy(storage + prefix + 4, &length, 4); memcpy(storage + prefix + 8, bytes, count);
+    kern_return_t result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, header->msgh_size, 0, MACH_PORT_NULL, 5000, MACH_PORT_NULL);
+    free(storage); return result == KERN_SUCCESS ? 0 : 33;
+}
 int main(int argc, char **argv) {
-    if (argc != 2 && argc != 3) return 1;
+    if (argc != 2 && argc != 3 && argc != 4) return 1;
     int first = strcmp(argv[1], "first") == 0;
     if (!first && strcmp(argv[1], "second")) return 2;
     mach_port_t endpoint = MACH_PORT_NULL;
     if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &endpoint) != KERN_SUCCESS) return 3;
-    if (argc == 3) {
+    if (argc == 4) {
+        if (strcmp(argv[3], "control")) return 34;
+        int error = send_control(endpoint, argv[2]); if (error) return error;
+    } else if (argc == 3) {
         int error = send_io(endpoint, argv[2]);
         if (error) return error;
     } else {

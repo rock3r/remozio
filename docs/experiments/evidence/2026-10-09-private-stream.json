@@ -1,0 +1,21 @@
+{
+  "runtime": "27.0.1",
+  "target": "macOS26 arm64",
+  "privileged": false,
+  "source_sha256": "8498e6d8c94c9ba5bbbd3f15b083e1c1fa996844e716ac7a669c0eba1d16a827",
+  "scope": "Disposable unprivileged channel mechanics; production Root identity and full request carrier are separate gates.",
+  "fixture": "<temporary-fixture>",
+  "peer_root_code_validation": false,
+  "trials": [
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 211, "frames": 128, "queue_timeouts": 3, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 192, "frames": 128, "queue_timeouts": 2, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 197, "frames": 128, "queue_timeouts": 0, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 192, "frames": 128, "queue_timeouts": 1, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 196, "frames": 128, "queue_timeouts": 2, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 209, "frames": 128, "queue_timeouts": 2, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 194, "frames": 128, "queue_timeouts": 2, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 207, "frames": 128, "queue_timeouts": 1, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 251, "frames": 128, "queue_timeouts": 2, "rejected_impostors": 1},
+    {"buffer_bound": 4096, "bytes": 524288, "child_status": 0, "elapsed_ms": 215, "frames": 128, "queue_timeouts": 3, "rejected_impostors": 1}
+  ]
+}
