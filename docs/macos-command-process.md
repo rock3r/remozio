@@ -71,6 +71,20 @@ An exit from the launcher without a later exec cannot become an approved-program
 The future bound terminal controller must require both actual exec evidence and a reaped result for a program outcome.
 It must preserve unknown when evidence is unavailable.
 
+Each poll consumes at most four owned stop or continue records through nonblocking `waitid`.
+It requests `WSTOPPED` and `WCONTINUED`, never `WEXITED`. The existing `waitpid` owner still consumes the final exit result.
+The observation includes the latest stop state, stop signal, kernel stop code and a revision for observed changes.
+The stop code is raw kernel evidence, not a debugger classification. Darwin can report debugger stops as `CLD_STOPPED`.
+A frontend must establish separate tracing state before mapping an observed stop to shell suspension.
+[Issue 250](https://github.com/rock3r/remozio/issues/250) tracks this required monitor integration gate.
+It must not infer a trap distinction from `stop_code` or forward a debugger trap as a shell suspension.
+The revision does not count every transition that the kernel can coalesce.
+The `P_PID` selector binds continued records to the owned child. Darwin can report the signal sender in their `si_pid`.
+Stop and trap records still require the owned child PID. An unchanged zeroed record represents no event.
+Repeated polls without an event keep the revision unchanged. Reaping or ownership loss clears the stop state.
+Preparation can itself produce a continued event because the launcher starts suspended. Consumers use relative revisions.
+These observations do not change session ownership or provide frontend job control by themselves.
+
 Signals target the process group only while the original leader remains owned and unreaped.
 Zero, invalid signals and a reaped or lost leader are rejected.
 An unexpected `ECHILD` retires PID ownership and prevents later signaling or reaping through that object.
@@ -105,6 +119,9 @@ A disposable PTY test verifies the new session, controlling slave, foreground gr
 Three cancellation regressions cover a retired preparation helper, ordinary prepared cancellation and a live permission failure.
 They verify actual child reaping and preserve unread stdin bytes and shared descriptor flags.
 The retired-helper regression uses a real kernel exit; only the live permission failure injects `EPERM`.
+Four job-state regressions check actual stop/continue events, synchronous `sigwait`, cancellation while stopped and unexpected external reaping.
+They check stable revisions, retained exit ownership, cleared stop state, unread stdin and unchanged descriptor flags.
+Debugger traps, protected monitor integration and frontend shell suspension remain unproven.
 The fixture never enters a product bundle, changes credentials or installs a service.
 
 Protected launcher validation, durable dispatch ownership, bound terminal results and current elevation-policy selection remain separate gates.

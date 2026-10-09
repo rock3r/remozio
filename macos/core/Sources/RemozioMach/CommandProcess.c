@@ -179,6 +179,27 @@ static int pump_status(remozio_command_process_t *process) {
     }
     return 0;
 }
+static int observe_job_control(remozio_command_process_t *process) {
+    if (process->state.reaped || process->state.ownership_lost) return 0;
+    for (unsigned turn = 0; turn < 4; ++turn) {
+        siginfo_t info = {0};
+        if (waitid(P_PID, (id_t)process->state.pid, &info, WSTOPPED | WCONTINUED | WNOHANG) < 0) {
+            if (errno == EINTR) return 0;
+            if (errno == ECHILD) { process->state.ownership_lost = true; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
+            return system_error();
+        }
+        if (info.si_signo == 0 && info.si_code == 0 && info.si_pid == 0) return 0;
+        if (info.si_signo != SIGCHLD || (info.si_code != CLD_STOPPED && info.si_code != CLD_TRAPPED && info.si_code != CLD_CONTINUED)) return EPROTO;
+        if (info.si_code != CLD_CONTINUED && info.si_pid != process->state.pid) return EPROTO;
+        if (process->state.job_control_revision == UINT64_MAX) return EOVERFLOW;
+        if (info.si_code == CLD_STOPPED || info.si_code == CLD_TRAPPED) {
+            if (info.si_status <= 0 || info.si_status >= NSIG) return EPROTO;
+            process->state.stopped = true; process->state.stop_signal = info.si_status; process->state.stop_code = info.si_code;
+        } else { process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
+        ++process->state.job_control_revision;
+    }
+    return 0;
+}
 int remozio_command_process_poll(remozio_command_process_t *process, remozio_command_process_observation_t *observation) {
     if (!process || !observation) return EINVAL;
     int error = process->fault;
@@ -199,14 +220,16 @@ int remozio_command_process_poll(remozio_command_process_t *process, remozio_com
     }
     int status_error = pump_status(process);
     if (!error) error = status_error;
+    int job_error = observe_job_control(process);
+    if (!error) error = job_error;
     /* A fault still permits a nonblocking reap of the exclusively owned child, without killing released work.
      * Never infer exec from this fallback. */
     if (!process->state.reaped && !process->state.ownership_lost && (process->state.exit_observed || error)) {
         int status = 0;
         pid_t ended = waitpid(process->state.pid, &status, WNOHANG);
-        if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; }
+        if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
         else if (ended < 0 && errno != EINTR) {
-            if (errno == ECHILD) process->state.ownership_lost = true;
+            if (errno == ECHILD) { process->state.ownership_lost = true; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
             if (!error) error = system_error();
         }
     }

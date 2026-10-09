@@ -70,6 +70,11 @@ int main(int argc, char **argv) {
     if(!strcmp(argv[3],"signal")) {raise(SIGTERM);return 95;}
     if(!strcmp(argv[3],"short-wait")) {usleep(300000);return 0;}
     if(!strcmp(argv[3],"wait")) {for(;;)pause();}
+    if(!strcmp(argv[3],"sigwait")) {
+        sigset_t signals;sigemptyset(&signals);sigaddset(&signals,SIGCONT);
+        if(sigprocmask(SIG_BLOCK,&signals,NULL)||write(1,"WAIT\n",5)!=5)return 101;
+        for(;;){int number=0;if(sigwait(&signals,&number)||number!=SIGCONT)return 102;}
+    }
     struct stat held,named;if(stat(".",&held)||stat(getenv("CWD"),&named)||held.st_ino!=named.st_ino||held.st_dev!=named.st_dev)return 96;
     char input[64]={0};ssize_t n=read(0,input,sizeof(input));if(n<0)return 97;
     if(write(1,"OUT:",4)!=4 || write(1,input,(size_t)n)!=n || write(2,"ERR",3)!=3)return 98;

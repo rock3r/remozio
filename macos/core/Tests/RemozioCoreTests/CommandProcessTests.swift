@@ -380,3 +380,37 @@ extension CommandProcessTests {
         try assertCancellationFixture("live_permission_failure", large: false)
     }
 }
+
+extension CommandProcessTests {
+    private func assertJobControlFixture(_ name: String) throws {
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "job-state", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach"), harness = directory.appendingPathComponent("job-state")
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror",
+            "-I", native.appendingPathComponent("include").path, source.path,
+            native.appendingPathComponent("CommandProcess.c").path,
+            native.appendingPathComponent("CommandChildSpecification.c").path, "-o", harness.path]
+        try compiler.run(); compiler.waitUntilExit()
+        XCTAssertEqual(compiler.terminationStatus, 0)
+        guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
+        let file = directory.appendingPathComponent("frame")
+        try frame(mode: name == "sigwait_resume" ? "sigwait" : "wait").write(to: file)
+        let probe = Process(); probe.executableURL = harness; probe.currentDirectoryURL = directory
+        probe.arguments = [launcher.path, file.path, name]
+        try probe.run(); probe.waitUntilExit()
+        XCTAssertEqual(probe.terminationStatus, 0, "Native job observation fixture: \(name)")
+    }
+    func testSynchronousContinueAcceptsActualSenderPidWithoutLosingOwnedChild() throws {
+        try assertJobControlFixture("sigwait_resume")
+    }
+    func testNativeStopContinueObservationsAdvanceOnlyForActualEvents() throws {
+        try assertJobControlFixture("resume")
+    }
+    func testNativeCancellationReapsStoppedChildAndClearsStopObservation() throws {
+        try assertJobControlFixture("cancel")
+    }
+    func testNativeOwnershipLossClearsStopObservationAndPreventsSignals() throws {
+        try assertJobControlFixture("ownership_loss")
+    }
+}
