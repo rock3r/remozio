@@ -15,6 +15,8 @@ typedef struct {
     bool stopped;
     /* Raw waitid evidence. Darwin stop codes do not classify debugger stops. */
     int stop_signal, stop_code;
+    /* Current stopped-process snapshot. Unknown never establishes an ordinary job-control stop. */
+    bool stop_tracing_known, stop_traced;
     uint64_t job_control_revision;
 } remozio_command_process_observation_t;
 /* Borrows stdio and directory. Output owns any successfully spawned child, including a later setup failure.

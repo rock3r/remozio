@@ -54,11 +54,11 @@ int main(int argc, char **argv) {
         }
         if (used != sizeof(ready) || memcmp(ready, "WAIT\n", 5)) { failure = 22; goto cleanup; }
     }
-    if (state.stopped || state.stop_signal || state.stop_code) { failure = 7; goto cleanup; }
+    if (state.stopped || state.stop_signal || state.stop_code || state.stop_tracing_known || state.stop_traced) { failure = 7; goto cleanup; }
     uint64_t baseline = state.job_control_revision;
     if (!synchronous) {
         if (remozio_command_process_signal(process, SIGSTOP) || await_state(process, &state, 2, 0)) { failure = 8; goto cleanup; }
-        if (state.stop_signal != SIGSTOP || state.stop_code != CLD_STOPPED || state.job_control_revision <= baseline || state.reaped || state.ownership_lost) { failure = 9; goto cleanup; }
+        if (state.stop_signal != SIGSTOP || state.stop_code != CLD_STOPPED || !state.stop_tracing_known || state.stop_traced || state.job_control_revision <= baseline || state.reaped || state.ownership_lost) { failure = 9; goto cleanup; }
         uint64_t stable = state.job_control_revision;
         for (int turn = 0; turn < 10; ++turn) {
             if (remozio_command_process_poll(process, &state) || !state.stopped || state.job_control_revision != stable || state.reaped) { failure = 10; goto cleanup; }
@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
             if (info.si_signo != SIGCHLD || info.si_code != CLD_CONTINUED || info.si_pid != getpid()) { failure = 23; goto cleanup; }
         }
         if (await_state(process, &state, 3, revision)) { failure = 11; goto cleanup; }
-        if (state.stop_signal || state.stop_code || state.reaped || state.ownership_lost) { failure = 12; goto cleanup; }
+        if (state.stop_signal || state.stop_code || state.stop_tracing_known || state.stop_traced || state.reaped || state.ownership_lost) { failure = 12; goto cleanup; }
         revision = state.job_control_revision;
         if (!synchronous && (remozio_command_process_signal(process, SIGSTOP) || await_state(process, &state, 2, 0) || state.job_control_revision <= revision)) { failure = 13; goto cleanup; }
     }
@@ -91,11 +91,11 @@ int main(int argc, char **argv) {
         while (!(ended = waitpid(state.pid, &status, WNOHANG)) && milliseconds() < deadline) usleep(1000);
         if (ended != state.pid || !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) { failure = 15; goto cleanup; }
         int error = remozio_command_process_poll(process, &state);
-        if (error != ECHILD || !state.ownership_lost || state.reaped || state.stopped || state.stop_signal || state.stop_code ||
+        if (error != ECHILD || !state.ownership_lost || state.reaped || state.stopped || state.stop_signal || state.stop_code || state.stop_tracing_known || state.stop_traced ||
             remozio_command_process_signal(process, SIGCONT) != ESRCH) { failure = 16; goto cleanup; }
     } else {
         if (remozio_command_process_cancel(process) || await_state(process, &state, 4, 0)) { failure = 17; goto cleanup; }
-        if (!state.exec_observed || state.stopped || state.stop_signal || state.stop_code || state.ownership_lost ||
+        if (!state.exec_observed || state.stopped || state.stop_signal || state.stop_code || state.stop_tracing_known || state.stop_traced || state.ownership_lost ||
             !WIFSIGNALED(state.wait_status) || WTERMSIG(state.wait_status) != SIGKILL) { failure = 18; goto cleanup; }
         if (remozio_command_process_signal(process, SIGCONT) != ESRCH) { failure = 19; goto cleanup; }
     }

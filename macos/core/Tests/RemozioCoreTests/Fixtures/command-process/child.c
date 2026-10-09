@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/ptrace.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 static uint32_t word(const unsigned char *b) { return ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|((uint32_t)b[2]<<8)|b[3]; }
@@ -69,6 +70,11 @@ int main(int argc, char **argv) {
             }
             offset+=sizeof(block);
         } while(!strcmp(argv[3],"pty-infinite")||offset<1048576);
+        return 7;
+    }
+    if(!strcmp(argv[3],"plain_stop") || !strcmp(argv[3],"trace_stop") || !strcmp(argv[3],"trace_trap")) {
+        if(strcmp(argv[3],"plain_stop") && ptrace(PT_TRACE_ME,0,NULL,0))return 103;
+        if(raise(!strcmp(argv[3],"trace_trap") ? SIGTRAP : SIGSTOP))return 104;
         return 7;
     }
     if(!strcmp(argv[3],"signal")) {raise(SIGTERM);return 95;}

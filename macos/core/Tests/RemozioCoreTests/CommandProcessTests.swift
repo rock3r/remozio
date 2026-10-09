@@ -455,3 +455,62 @@ extension CommandProcessTests {
         try assertSessionFixture("not_session_leader", ioMode: .pipes)
     }
 }
+
+
+extension CommandProcessTests {
+    private func assertTracingFixture(_ name: String) throws {
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "trace-state", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach"), harness = directory.appendingPathComponent("trace-state")
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror",
+            "-I", native.path, "-I", native.appendingPathComponent("include").path, source.path,
+            native.appendingPathComponent("CommandChildSpecification.c").path, "-o", harness.path]
+        try compiler.run(); compiler.waitUntilExit()
+        XCTAssertEqual(compiler.terminationStatus, 0)
+        guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
+        let mode = name.contains("plain") ? "plain_stop" : name.contains("trap") ? "trace_trap" : "trace_stop"
+        let file = directory.appendingPathComponent("frame")
+        try frame(mode: mode).write(to: file)
+        let probe = Process(); probe.executableURL = harness; probe.currentDirectoryURL = directory
+        probe.arguments = [launcher.path, file.path, name]
+        try probe.run(); probe.waitUntilExit()
+        XCTAssertEqual(probe.terminationStatus, 0, "Native tracing snapshot fixture: \(name)")
+    }
+    func testOrdinaryStopHasAnUntracedSnapshotAndRetainsActualExit() throws {
+        try assertTracingFixture("plain_stop")
+    }
+    func testSelfTracedStopHasATracedSnapshotAndRetainsActualExit() throws {
+        try assertTracingFixture("trace_stop")
+    }
+    func testSelfTracedTrapHasATracedSnapshotAndRetainsActualExit() throws {
+        try assertTracingFixture("trace_trap")
+    }
+    func testUnavailableTracingMetadataKeepsATracedStopUnknown() throws {
+        try assertTracingFixture("metadata_traced_stop_unavailable")
+    }
+    func testUnavailableTracingMetadataKeepsATracedTrapUnknown() throws {
+        try assertTracingFixture("metadata_traced_trap_unavailable")
+    }
+    func testUnavailableTracingMetadataKeepsAnOrdinaryStopUnknown() throws {
+        try assertTracingFixture("metadata_plain_stop_unavailable")
+    }
+    func testTracingSnapshotRejectsMismatchedPid() throws {
+        try assertTracingFixture("metadata_traced_stop_mismatch")
+    }
+    func testTracingSnapshotRejectsRunningMetadata() throws {
+        try assertTracingFixture("metadata_traced_stop_not_stopped")
+    }
+    func testTracingSnapshotRejectsExitInProgress() throws {
+        try assertTracingFixture("metadata_traced_stop_in_exit")
+    }
+    func testTracingSnapshotRejectsPartialMetadata() throws {
+        try assertTracingFixture("metadata_traced_stop_partial")
+    }
+    func testTracingSnapshotRejectsChangedBirthTimestamp() throws {
+        try assertTracingFixture("metadata_traced_stop_birth_mismatch")
+    }
+    func testUnavailableBirthMetadataKeepsTracingUnknownWithoutFailingExecution() throws {
+        try assertTracingFixture("metadata_traced_stop_birth_unavailable")
+    }
+}
