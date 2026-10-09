@@ -1,7 +1,8 @@
 # Embedded command monitor
 
 `RemozioCommandMonitor` is an embedded C helper. It owns one target through the existing native process API.
-The authority does not launch this helper yet. The Root parent, policy selection and frontend connection remain required.
+The authority does not launch this helper yet. The [native parent](macos-command-monitor-parent.md) is available.
+Root integration, policy selection and frontend connection remain required.
 
 The helper accepts only `--monitor` and an absolute protected-child path. It requires real and effective UID zero before touching descriptors.
 It also requires its own session and process group. The future Root parent must verify both helpers before launching this dedicated session.
