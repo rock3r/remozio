@@ -110,6 +110,7 @@ A one-slot resource test preserves the original right and exact outcome across r
 
 The bulk fixture validates 128 KiB of input, echoes it, and writes a further 1 MiB pattern. The slow one-slot receiver checks every output byte.
 The continuation fixture closes controls, drains 1 MiB, writes one completion marker, and returns the actual exit result.
+[The cancellation-gap regression](experiments/macos-pty-cancellation-gap.md) separates nested foreground termination from cancellation of the original target.
 Finite fixture deadlines bound tests only. They add no production runtime limit.
 
 [Lifecycle experiment evidence](experiments/evidence/2026-10-09-command-pty-lifecycle.json) retains 80 disposable native trials.

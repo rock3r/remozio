@@ -41,6 +41,13 @@ int main(int argc, char **argv) {
     if (write(ready[1],"R",1) != 1) return 53;
     close(ready[1]); int status;
     if (waitpid(child,&status,0) != child) return 54;
+    if (!strcmp(argv[1],"cancel") || !strcmp(argv[1],"cancel-gap")) {
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) return 55;
+        if (!strcmp(argv[1],"cancel-gap") && write(1,"CHILD_KILLED\n",13) != 13) return 62;
+        long deadline = milliseconds()+5000;
+        while (milliseconds()<deadline) usleep(1000);
+        return 61;
+    }
     if (strcmp(argv[1],"interrupt") || status != 0) return 55;
     if (tcsetpgrp(0,getpgrp())) return 56;
     if (write(1,"LEADER_END\n",11) != 11) return 57;

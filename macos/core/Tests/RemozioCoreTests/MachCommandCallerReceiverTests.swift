@@ -6555,3 +6555,79 @@ extension MachCommandCallerReceiverTests {
         }
     }
 }
+
+
+extension MachCommandCallerReceiverTests {
+    func testNativePTYCancellationGapRetainsOriginalTargetUntilMonitorCancellation() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let source = try XCTUnwrap(Bundle.module.url(forResource: "pty-controls", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let program = fixture.root.appendingPathComponent("fixture-pty-cancel-gap")
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror", source.path, "-o", program.path]
+        try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
+        let input = try RetainedCommandPTY(); defer { input.close() }
+        try input.withBorrowedSlave { descriptor in
+            var attributes = termios(); XCTAssertEqual(tcgetattr(descriptor, &attributes), 0)
+            cfmakeraw(&attributes); XCTAssertEqual(tcsetattr(descriptor, TCSANOW, &attributes), 0)
+        }
+        let (_, command, submission, profile) = try input.withBorrowedSlave {
+            try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
+                executablePath: program.path, arguments: [Data("program".utf8), Data("cancel-gap".utf8)], wire: 4, ioMode: .pty)
+        }
+        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The original request must be admitted") }
+        let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+            submissionDigest: admission.submissionDigest, request: admitted)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        try beginDispatch(fixture, request: request, launcher: launcher)
+        let receive = try receiver(terminal, maximum: 8192)
+        guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+            return XCTFail("The original controls must open")
+        }
+        let openedFrame = try CommandStreamFrame.decode(opened.payload, binding: binding, direction: .toFrontend)
+        opened.caller.close()
+        let control = try XCTUnwrap(carried).takeControlRight(); carried?.close(); defer { control.close() }
+        var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
+        try incoming.accept(openedFrame); XCTAssertEqual(openedFrame.body, .opened)
+        func receiveOutput(_ expected: Data) throws {
+            var output = Data()
+            while output.count < expected.count {
+                guard case .stream(let reply, let right) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                    throw CommandStreamError.closed
+                }
+                defer { reply.caller.close(); right?.close() }
+                let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                try incoming.accept(frame)
+                guard case .output(let bytes) = frame.body else { throw CommandStreamError.closed }
+                output.append(bytes)
+                guard output.count <= expected.count, expected.prefix(output.count) == output else { throw CommandStreamError.malformed }
+            }
+        }
+        try receiveOutput(Data("READY\n".utf8))
+        try pipeSend(.resize(53, 143, 0, 0), control: control, profile: profile, submission: submission, admission: admission)
+        try receiveOutput(Data("RESIZED\n".utf8))
+        try pipeSend(.signal(UInt32(SIGKILL)), control: control, profile: profile, submission: submission, admission: admission, sequence: 1)
+        try receiveOutput(Data("CHILD_KILLED\n".utf8))
+        do {
+            let early = try receive.receiveExecutionEvent(timeoutMilliseconds: 100)
+            switch early {
+            case .stream(let reply, let right): reply.caller.close(); right?.close()
+            case .terminal(let reply): reply.caller.close()
+            }
+            return XCTFail("The original target must remain alive across the cancellation gap")
+        } catch MachCommandCallerError.timeout { }
+        try pipeSend(.cancel, control: control, profile: profile, submission: submission, admission: admission, sequence: 2)
+        guard case .stream(let reply, let right) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+            return XCTFail("Output must end after monitor cancellation")
+        }
+        defer { reply.caller.close(); right?.close() }
+        let end = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+        try incoming.accept(end); XCTAssertEqual(end.body, .outputEnd)
+        try pipeSend(.outputDrained, control: control, profile: profile, submission: submission, admission: admission, sequence: 3)
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .signalled(UInt32(SIGKILL)))
+        try awaitDispatchCleanup(authority)
+        XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+    }
+}
