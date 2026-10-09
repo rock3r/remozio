@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/event.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -236,6 +237,16 @@ static int observe_job_control(remozio_command_process_t *process) {
     }
     return 0;
 }
+static int reap_owned(remozio_command_process_t *process) {
+    if (process->state.reaped || process->state.ownership_lost) return 0;
+    int status = 0; pid_t ended = waitpid(process->state.pid, &status, WNOHANG);
+    if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; clear_stop(process); }
+    else if (ended < 0 && errno != EINTR) {
+        if (errno == ECHILD) { process->state.ownership_lost = true; clear_stop(process); }
+        return system_error();
+    }
+    return 0;
+}
 int remozio_command_process_poll(remozio_command_process_t *process, remozio_command_process_observation_t *observation) {
     if (!process || !observation) return EINVAL;
     int error = process->fault;
@@ -261,13 +272,8 @@ int remozio_command_process_poll(remozio_command_process_t *process, remozio_com
     /* A fault still permits a nonblocking reap of the exclusively owned child, without killing released work.
      * Never infer exec from this fallback. */
     if (!process->state.reaped && !process->state.ownership_lost && (process->state.exit_observed || error)) {
-        int status = 0;
-        pid_t ended = waitpid(process->state.pid, &status, WNOHANG);
-        if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; clear_stop(process); }
-        else if (ended < 0 && errno != EINTR) {
-            if (errno == ECHILD) { process->state.ownership_lost = true; clear_stop(process); }
-            if (!error) error = system_error();
-        }
+        int wait_error = reap_owned(process);
+        if (!error) error = wait_error;
     }
     if (error) { process->fault = error; close_descriptor(&process->configuration); close_descriptor(&process->release); clear_frame(process); }
     *observation = process->state;
@@ -294,6 +300,16 @@ int remozio_command_process_signal(remozio_command_process_t *process, int numbe
     if (process->state.reaped || process->state.ownership_lost || process->state.pid <= 0) return ESRCH;
     return kill(-process->state.pid, number) == 0 ? 0 : system_error();
 }
+static bool owned_exit_in_progress(remozio_command_process_t *process) {
+    if (!process->state.birth_known || process->state.reaped || process->state.ownership_lost) return false;
+    struct kinfo_proc info = {0}; size_t count = sizeof(info);
+    int selector[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, process->state.pid};
+    if (sysctl(selector, 4, &info, &count, NULL, 0) || count != sizeof(info)) return false;
+    return info.kp_proc.p_pid == process->state.pid && info.kp_eproc.e_ppid == getpid() &&
+        (info.kp_proc.p_flag & P_WEXIT) &&
+        (uint64_t)info.kp_proc.p_starttime.tv_sec == process->state.birth_seconds &&
+        (uint64_t)info.kp_proc.p_starttime.tv_usec == process->state.birth_microseconds;
+}
 int remozio_command_process_cancel(remozio_command_process_t *process) {
     if (!process) return EINVAL;
     process->cancelled = true;
@@ -302,7 +318,8 @@ int remozio_command_process_cancel(remozio_command_process_t *process) {
     if (error == EPERM) {
         remozio_command_process_observation_t observation;
         (void)remozio_command_process_poll(process, &observation);
-        if (observation.reaped) return 0;
+        if (!observation.reaped && !observation.ownership_lost) (void)reap_owned(process);
+        if (process->state.reaped || owned_exit_in_progress(process)) return 0;
     }
     return error == ESRCH ? 0 : error;
 }

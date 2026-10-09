@@ -4389,6 +4389,36 @@ extension MachCommandCallerReceiverTests {
             source.path, native.appendingPathComponent("CommandChildSpecification.c").path, "-o", path.path]
         try compiler.run(); compiler.waitUntilExit()
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
+        let probe = Process(); probe.executableURL = path; probe.arguments = []
+        try probe.run(); probe.waitUntilExit()
+        guard probe.terminationReason == .exit, probe.terminationStatus == 91 else { throw CocoaError(.executableNotLoadable) }
+        return path.path
+    }
+    private func dispatchMonitor(_ fixture: CommandRequestFixture) throws -> String {
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach"), path = fixture.root.appendingPathComponent("fixture-monitor")
+        if FileManager.default.fileExists(atPath: path.path) { return path.path }
+        let wrapper = fixture.root.appendingPathComponent("fixture-monitor.c")
+        let product = core.deletingLastPathComponent().appendingPathComponent("app/CommandMonitor/MonitorMain.c")
+        // Substitute only the monitor UID guard. The synthetic launcher grants no privilege.
+        try """
+        #include <unistd.h>
+        static uid_t fixture_root_uid(void) { return 0; }
+        #define getuid fixture_root_uid
+        #define geteuid fixture_root_uid
+        #include "\(product.path)"
+        """.write(to: wrapper, atomically: false, encoding: .utf8)
+        let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror", "-I", native.appendingPathComponent("include").path,
+            wrapper.path, native.appendingPathComponent("CommandProcess.c").path, native.appendingPathComponent("CommandChildSpecification.c").path,
+            native.appendingPathComponent("CommandMonitorProtocol.c").path, "-o", path.path]
+        try compiler.run(); compiler.waitUntilExit()
+        guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
+        // Complete first-launch policy evaluation before starting the request fixture's receive window.
+        let probe = Process(); probe.executableURL = path
+        probe.arguments = []
+        try probe.run(); probe.waitUntilExit()
+        guard probe.terminationReason == .exit, probe.terminationStatus == 64 else { throw CocoaError(.executableNotLoadable) }
         return path.path
     }
     private func nativeDispatchFixture(checkpointed: Bool = false, path: String = "/usr/bin/true",
@@ -4410,7 +4440,7 @@ extension MachCommandCallerReceiverTests {
                                clock: (() throws -> AuthorityMoment)? = nil,
                                runtimeFailure: Bool = false, launcherFailure: Bool = false, callerExpression: String? = nil) throws {
         let authority = try XCTUnwrap(fixture.authority), expression = try callerExpression ?? selfExpression(), now = fixture.now(130)
-        try authority.beginCommandExecution(requestID: request.requestID, childPath: launcher,
+        try authority.beginCommandExecution(requestID: request.requestID, monitorPath: dispatchMonitor(fixture), childPath: launcher,
             preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: elevation, clock: clock ?? { now },
             runtime: { tx, approval, capture in
                 if runtimeFailure { throw CommandExecutionError.policyChanged }
@@ -4418,7 +4448,9 @@ extension MachCommandCallerReceiverTests {
                 let snapshot = try XCTUnwrap(tx.codePolicy())
                 let frontend = try XCTUnwrap(snapshot.policy.entries.first(where: { $0.role == .commandFrontend }))
                 let token = try XCTUnwrap(snapshot.roleRevisions[.commandFrontend])
-                return CommandExecutionRuntime(child: frontend, childRevision: token, frontendRevision: token,
+                let monitor = snapshot.policy.entries.first { $0.role == .commandMonitor } ?? frontend
+                let monitorToken = snapshot.roleRevisions[.commandMonitor] ?? token
+                return CommandExecutionRuntime(child: frontend, childRevision: token, monitor: monitor, monitorRevision: monitorToken, frontendRevision: token,
                     callerExpression: expression, userID: capture.requester.effectiveUID, sessionID: nil)
             }, launcher: { _ in
                 if launcherFailure { throw CommandExecutionError.policyChanged }
@@ -4434,6 +4466,38 @@ extension MachCommandCallerReceiverTests {
     }
     private func nativeDispatchOutcome(_ test: NativeDispatchFixture) throws -> CommandTerminalOutcome {
         try ownerTerminal(test.terminal, submission: test.submission, admission: test.admission).outcome
+    }
+    func testNativeDispatchChangedMonitorRolePreventsReleaseWithoutChangingFrontendRole() throws {
+        let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
+        let source = try dispatchLauncher(fixture)
+        let marker = fixture.root.appendingPathComponent("approved-effect")
+        let admissionPort = try Endpoint(), terminal = try Endpoint()
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
+            executablePath: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
+        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        _ = try ownerDecision(request, fixture: fixture, decline: false)
+        try authority.write { tx in
+            let old = try XCTUnwrap(tx.codePolicy()), frontend = try XCTUnwrap(old.policy.entries.first)
+            let monitor = try AuthorityCodeEntry(role: .commandMonitor, teamID: frontend.teamID, identifier: "dev.remozio.test.monitor",
+                installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+            _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: old.policy.entries + [monitor]), expectedRevision: old.revision)
+        }
+        let launcher = fixture.root.appendingPathComponent("held-prepare-child")
+        try FileManager.default.copyItem(atPath: source, toPath: launcher.path)
+        try beginDispatch(fixture, request: request, launcher: launcher.path)
+        try authority.write { tx in
+            let old = try XCTUnwrap(tx.codePolicy()), monitor = try XCTUnwrap(old.policy.entries.first { $0.role == .commandMonitor })
+            let changed = try AuthorityCodeEntry(role: monitor.role, teamID: monitor.teamID, identifier: monitor.identifier,
+                installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)
+            let next = try tx.installCodePolicy(AuthorityCodePolicy(entries: old.policy.entries.filter { $0.role != .commandMonitor } + [changed]), expectedRevision: old.revision)
+            XCTAssertEqual(next.roleRevisions[.commandFrontend], old.roleRevisions[.commandFrontend])
+            XCTAssertNotEqual(next.roleRevisions[.commandMonitor], old.roleRevisions[.commandMonitor])
+        }
+        try Data().write(to: URL(fileURLWithPath: launcher.path + ".ready"))
+        try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .failedBeforeStart)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
     func testNativeDispatchCommitsBeforeReleaseAndDeliversOriginalObservedExitWithoutReplay() throws {
         for checkpointed in [false, true] {
@@ -4581,7 +4645,7 @@ extension MachCommandCallerReceiverTests {
             let deadline = Date().addingTimeInterval(8)
             while !owner.dispose() && Date() < deadline { _ = owner.poll(); usleep(1000) }
         }
-        XCTAssertThrowsError(try owner.prepare(path: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)) {
+        XCTAssertThrowsError(try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)) {
             XCTAssertEqual($0 as? CommandExecutionError, .unavailable)
         }
         XCTAssertThrowsError(try owner.release()) { XCTAssertEqual($0 as? CommandExecutionError, .unavailable) }
@@ -4688,7 +4752,7 @@ extension MachCommandCallerReceiverTests {
     func testNativeDispatchPublicEntryRequiresActualRootBeforeSpawning() throws {
         guard geteuid() != 0 else { throw XCTSkip("Unprivileged entry gate") }
         let test = try nativeDispatchFixture(), now = test.fixture.now(130)
-        XCTAssertThrowsError(try test.authority.beginCommandExecution(requestID: test.request.requestID, childPath: test.launcher,
+        XCTAssertThrowsError(try test.authority.beginCommandExecution(requestID: test.request.requestID, monitorPath: dispatchMonitor(test.fixture), childPath: test.launcher,
             preparationMilliseconds: 5000, fileCreationMask: 0o022, validateElevation: { _ in }, clock: { now })) {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
@@ -4791,7 +4855,7 @@ extension MachCommandCallerReceiverTests {
                 })
             defer { XCTAssertTrue(execution.dispose()) }
             if callerExits { try peer.stop() }
-            XCTAssertThrowsError(try execution.prepare(path: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022))
+            XCTAssertThrowsError(try execution.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022))
             guard case .terminal(let outcome) = execution.poll() else { return XCTFail("Unspawned owner must retire") }
             XCTAssertEqual(outcome, callerExits ? .requesterExitedBeforeStart : .failedBeforeStart)
             XCTAssertEqual(resources.requesterExitObserved, callerExits)
@@ -5796,7 +5860,7 @@ extension MachCommandCallerReceiverTests {
             let deadline = Date().addingTimeInterval(8)
             while !owner.dispose() && Date() < deadline { _ = owner.poll(checkStreamPolicy: {}); usleep(1000) }
         }
-        try owner.prepare(path: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)
+        try owner.prepare(monitorPath: dispatchMonitor(fixture), childPath: launcher, preparationMilliseconds: 5000, fileCreationMask: 0o022)
         var prepared = false
         let preparationDeadline = Date().addingTimeInterval(5)
         while !prepared {

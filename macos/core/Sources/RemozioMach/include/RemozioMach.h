@@ -8,6 +8,7 @@
 #include "RemozioCommandChild.h"
 #include "RemozioCommandProcess.h"
 #include "RemozioCommandMonitorProtocol.h"
+#include "RemozioCommandMonitor.h"
 #include "RemozioCommandCaller.h"
 #include "RemozioCommandPTY.h"
 typedef struct {

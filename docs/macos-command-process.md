@@ -50,7 +50,7 @@ No polling or cleanup method waits for a child exit.
 ## Dedicated monitor session
 
 The additive `spawn_in_session` API prepares a target inside a dedicated monitor's session.
-The [embedded monitor](macos-command-monitor.md) now uses this session API. Its Root parent and authority connection remain pending.
+The [embedded monitor](macos-command-monitor.md) now uses this session API. Its Root parent and authority dispatch API are connected. The protected host service remains pending.
 The [private monitor status protocol](macos-command-monitor-protocol.md) defines records and stream transitions for that connection.
 The monitor must be both the session leader and its process-group leader. An ordinary caller is rejected before spawn.
 The target receives its own process group. Its live parent stays in the same session, preserving ordinary job-control stops.
@@ -151,10 +151,18 @@ It is an ownership failure, not a known command result.
 Cancellation signals the owned group before closing the configuration and release pipes and wiping the frame.
 This order avoids retiring a prepared launcher before the signal reaches its group.
 If Darwin returns `EPERM`, one nonblocking poll can confirm that the owned child has exited and been reaped.
-Only that actual reap makes cancellation successful. A live child retains the permission error and its process ownership.
+The fallback also makes one nonblocking wait for the exclusively owned child when an exit event is not yet available.
+If the wait is not ready, a kernel snapshot can confirm that the same owned child is already exiting.
+That snapshot must match its PID, parent and retained birth identity, and contain `P_WEXIT`. Missing or mismatched evidence retains the permission error.
+This exception records no exec, exit event or wait result. The owner must still observe and reap the actual child before disposal.
+A live child retains the permission error and its process ownership. No delay or runtime limit is added.
 Neither cancellation path releases an unapproved command.
 Disposal returns `EBUSY` while the leader remains unreaped. The caller retains ownership and polls again.
 No hidden reaper thread or blocking destructor takes that responsibility.
+
+Apple's [signal source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c) excludes zombies during group iteration and can return `EPERM` when no member is selected.
+Its [snapshot source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c) maps the kernel exit flag to `P_WEXIT`.
+A local PTY cancellation trace observed this interval before the target became waitable. It used only disposable unprivileged processes.
 
 ## PTY integration
 
@@ -174,9 +182,11 @@ Native tests use an unprivileged synthetic launcher and an actual executable fix
 They cover unread stdin, raw argv/environment, retained directory, descriptor isolation, private release, real exit/signal results and group forwarding.
 They also cover large frames, deadlines, malformed status, failed release writes, cancellation and unexpected external reaping.
 A disposable PTY test verifies the new session, controlling slave, foreground group, output and observed program exit.
-Three cancellation regressions cover a retired preparation helper, ordinary prepared cancellation and a live permission failure.
+Cancellation regressions cover a retired preparation helper, ordinary prepared cancellation and a live permission failure.
 They verify actual child reaping and preserve unread stdin bytes and shared descriptor flags.
-The retired-helper regression uses a real kernel exit; only the live permission failure injects `EPERM`.
+The retired-helper regressions use real kernel exits. Fault wrappers inject permission failures, delay observation or reaping, and mutate snapshot fields.
+They reject the wrong PID, parent, birth, absent exit flag and missing snapshot without inventing a terminal result.
+The live permission failure still returns `EPERM` and retains the live child.
 Four job-state regressions check actual stop/continue events, synchronous `sigwait`, cancellation while stopped and unexpected external reaping.
 They check stable revisions, retained exit ownership, cleared stop state, unread stdin and unchanged descriptor flags.
 Twelve tracing regressions cover ordinary stops, self-traced stops and traps, and unavailable or mismatched metadata.

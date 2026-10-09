@@ -904,7 +904,7 @@ final class CheckpointedJournalTests: XCTestCase {
         return try AuthorityCodePolicy.decode(DeterministicCBOR.encode(.map(fields), limits: limits))
     }
 
-    func testCommandChildCatalogUpgradePreservesCheckpointAndRoleFloorsAcrossReopen() throws {
+    func testCommandHelperCatalogUpgradePreservesCheckpointAndRoleFloorsAcrossReopen() throws {
         let fixture = try Fixture()
         let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
         let legacy = try legacyCodePolicy()
@@ -912,16 +912,20 @@ final class CheckpointedJournalTests: XCTestCase {
         let before = try fixture.store.read().committed
         let child = try AuthorityCodeEntry(role: .commandChild, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.command-child",
             installedGeneration: 5, minimumGeneration: 4, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
-        let policy = try AuthorityCodePolicy(entries: initial.policy.entries + [child])
+        let monitor = try AuthorityCodeEntry(role: .commandMonitor, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.command-monitor",
+            installedGeneration: 3, minimumGeneration: 2, codeDirectoryHash: Data(repeating: 4, count: 20), active: false)
+        let policy = try AuthorityCodePolicy(entries: initial.policy.entries + [child, monitor])
         let upgraded = try commits.write(epoch: fixture.epoch) {
             try $0.installCodePolicy(policy, expectedRevision: initial.revision)
         }
         let after = try fixture.store.read().committed
-        XCTAssertEqual(upgraded.policy.formatVersion, 2)
+        XCTAssertEqual(upgraded.policy.formatVersion, 3)
         XCTAssertEqual(upgraded.roleRevisions[.authority], initial.roleRevisions[.authority])
         XCTAssertNotNil(upgraded.roleRevisions[.commandChild])
+        XCTAssertNotNil(upgraded.roleRevisions[.commandMonitor])
         XCTAssertEqual(upgraded.policy.entries.first { $0.role == .authority }, initial.policy.entries.first)
         XCTAssertEqual(upgraded.policy.entries.first { $0.role == .commandChild }, child)
+        XCTAssertEqual(upgraded.policy.entries.first { $0.role == .commandMonitor }, monitor)
         XCTAssertEqual(after.authorityGeneration, try XCTUnwrap(before.authorityGeneration) + 1)
         XCTAssertNotEqual(after.authorityDigest, before.authorityDigest)
         XCTAssertEqual(after.ledgerDigest, before.ledgerDigest)

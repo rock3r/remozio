@@ -69,6 +69,10 @@ static void fail(monitor_t *monitor, int error) {
     if (!monitor->failure) monitor->failure = error ? error : EIO;
     monitor->cancelled = true;
 }
+static void observe_failure(monitor_t *monitor, int error) {
+    if (!monitor->observed.release_attempted || monitor->observed.ownership_lost) { fail(monitor, error); return; }
+    if (!monitor->failure) monitor->failure = error ? error : EIO;
+}
 static int pump_configuration(monitor_t *monitor) {
     if (monitor->configured || monitor->cancelled || monitor->target) return 0;
     if (milliseconds(monitor) >= monitor->deadline) return ETIMEDOUT;
@@ -127,7 +131,8 @@ static int pump_release(monitor_t *monitor) {
     if (byte != 1) return EPROTO;
     int error = remozio_command_process_release(monitor->target);
     int observed_error = remozio_command_process_poll(monitor->target, &monitor->observed);
-    return error ? error : observed_error;
+    if (observed_error) observe_failure(monitor, observed_error);
+    return error;
 }
 static int pump_control(monitor_t *monitor) {
     if (monitor->cancelled) return 0;
@@ -211,8 +216,8 @@ int main(int argc, char **argv) {
         if ((error = pump_configuration(&monitor)) || (error = prepare_target(&monitor, argv[2]))) fail(&monitor, error);
         if (monitor.target) {
             error = remozio_command_process_poll(monitor.target, &monitor.observed);
-            if (error) fail(&monitor, error);
-            if (monitor.observed.preparation_failed) fail(&monitor, monitor.observed.preparation_error);
+            if (error) observe_failure(&monitor, error);
+            if (monitor.observed.preparation_failed) observe_failure(&monitor, monitor.observed.preparation_error);
             if (monitor.observed.reaped && !monitor.observed.prepared) fail(&monitor, EPROTO);
         }
         if (!monitor.release_consumed && !monitor.cancelled && milliseconds(&monitor) >= monitor.deadline) fail(&monitor, ETIMEDOUT);

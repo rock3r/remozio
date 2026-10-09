@@ -8,7 +8,7 @@ public enum AuthorityCodePolicyError: Error, Equatable {
 /// Stable storage identifiers. Extending this catalog requires a new policy format.
 public enum AuthorityCodeRole: UInt64, CaseIterable, Sendable {
     case app = 1, authority, guiAgent, transport, commandFrontend, notificationGateway
-    case tunnelClient, setupController, bridgeEndpoint, bridgeCommand, commandChild
+    case tunnelClient, setupController, bridgeEndpoint, bridgeCommand, commandChild, commandMonitor
 }
 
 /// Retained installation metadata. Construction does not verify a binary or authorize its activation.
@@ -40,12 +40,12 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
     public let formatVersion: UInt64
     public let entries: [AuthorityCodeEntry]
     public init(entries: [AuthorityCodeEntry]) throws {
-        try self.init(entries: entries, formatVersion: 2)
+        try self.init(entries: entries, formatVersion: 3)
     }
 
     private init(entries: [AuthorityCodeEntry], formatVersion: UInt64) throws {
-        guard formatVersion == 1 || formatVersion == 2 else { throw AuthorityCodePolicyError.invalidPolicy }
-        let maximumRole: UInt64 = formatVersion == 1 ? 10 : 11
+        guard (1...3).contains(formatVersion) else { throw AuthorityCodePolicyError.invalidPolicy }
+        let maximumRole: UInt64 = formatVersion == 1 ? 10 : formatVersion == 2 ? 11 : 12
         guard !entries.isEmpty, entries.count <= Int(maximumRole),
               entries.allSatisfy({ $0.role.rawValue <= maximumRole }),
               Set(entries.map(\.role)).count == entries.count else { throw AuthorityCodePolicyError.invalidPolicy }

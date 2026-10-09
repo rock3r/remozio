@@ -1,7 +1,8 @@
 # Native monitor parent
 
 `CommandMonitor.c` gives the serialized Root owner a native monitor API.
-The authority and Swift executor do not use this API yet. Installed-code checks and the durable approval transition remain upstream requirements.
+The authority and Swift executor now use this API. Both helpers pass protected-path and installed-code checks before preparation and release.
+The host service and command frontend remain disconnected until their installation and selected elevation policy are ready.
 
 ```mermaid
 sequenceDiagram
@@ -27,7 +28,7 @@ sequenceDiagram
     T-->>P: Independent kernel exec and exit events
     T-->>M: Exclusive actual target wait result
     M-->>P: Bound target wait report
-    M-->>P: Actual owned monitor wait result
+    P->>P: Reap monitor and retain actual wait result
     P-->>R: Separate observations for outcome validation
 ```
 
@@ -81,13 +82,14 @@ The monitor observes EOF and cancels its own target group while retaining the ac
 If startup failed while the owned monitor was suspended, cancellation resumes that still-owned monitor once so it can observe EOF.
 This startup resume does not release the target gate. A reaped monitor or lost wait owner receives no signal.
 
-The caller must cancel after a poll fault and continue polling until actual monitor reaping or explicit ownership loss.
+The caller must cancel an unreleased command after a poll fault. Released observation failures retain cleanup without killing selected continuing work.
+The caller keeps polling until actual monitor reaping or explicit ownership loss.
 Disposal returns `EBUSY` while the monitor remains owned and live. There is no hidden reaper, blocking destructor or ownership transfer.
 An owned terminal master must remain alive and drain through cleanup. The parent borrows only its slave during spawning.
 
 ## Evidence and remaining gates
 
-Twenty regressions exercise the actual parent source with disposable processes.
+Twenty-one regressions exercise the actual parent source with disposable processes.
 Normal cases cover separate streams, unchanged input, independent exec and exit, stop/resume, terminal ownership, cancellation and actual exec failure.
 Preflight cases reject missing helpers, wrong stream modes and dispositions that discard child wait results.
 Fault wrappers exercise registration, startup resume, unavailable metadata, wrong parent, changed birth and changed identity across registration.
@@ -95,8 +97,18 @@ Malformed monitor fixtures cover unsupported versions, truncated EOF, skipped se
 
 The actual monitor source uses a test wrapper that changes only its UID guard. The synthetic child performs no credential changes.
 The malformed monitor has no target. No test fixture is packaged in the app.
+Dispatch fixtures run both helpers with no arguments before starting their request receive window. Each probe must exit with its expected fixture error.
+This completes first-launch policy evaluation for the newly compiled fixture without changing product timeouts or launching a target.
+All 80 affected policy, monitor, cancellation and dispatch tests passed after this integration.
+The full native gate passed with 1,288 core tests, 97 protocol tests, packaging checks and included experiments.
+All six required Kotlin/Android tasks also passed, including APK assembly and lint.
 Local experiments used macOS 27.0.1 with an arm64 macOS 26 deployment target. They do not prove behavior on a macOS 26 runtime.
 
-Required later work includes protected installation, helper verification, durable Root integration, policy selection and the command frontend.
+The Swift owner checks both helper roles, preserves the durable dispatch transition, and retains the monitor through actual cleanup.
+A changed monitor role prevents release while the unchanged frontend role keeps its original token.
+Known command results require independent target exec and exit, a valid bound target wait report, and a successful actual monitor wait.
+A released observation failure remains unknown. It does not automatically kill the target, and authenticated owned controls remain available.
+
+Required later work includes protected installation, host-service wiring, policy selection and the command frontend.
 Privileged cross-user execution, nested terminal foreground behavior and external debugger attach/detach remain platform gates.
 The debugger ownership gate remains tracked in [issue 250](https://github.com/rock3r/remozio/issues/250).
