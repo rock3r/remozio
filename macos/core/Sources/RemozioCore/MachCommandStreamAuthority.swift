@@ -11,6 +11,8 @@ final class MachCommandStreamAuthority {
     private var incoming = CommandStreamReceiveSequence(direction: .toAuthority)
     private var outgoing = CommandStreamReceiveSequence(direction: .toFrontend)
     private var closed = false
+    private var observedJob: CommandJobStatePayload?
+    private var pendingJob: CommandJobStatePayload?
     private(set) var outputDrained = false
 
     init(binding: CommandStreamBinding, original: RetainedCommandCaller, terminal: MachCommandReplyRight) throws {
@@ -35,6 +37,22 @@ final class MachCommandStreamAuthority {
             if body == .opened { try endpoint.releaseLocalSendRight() }
         }
         return queued
+    }
+    /// Coalesce only unsent observations. Native revisions can skip; emitted channel sequences cannot.
+    func observeJobState(_ value: CommandJobStatePayload?) throws {
+        guard binding.profile.supportsJobState, !closed else { return }
+        guard let value else { pendingJob = nil; return }
+        _ = try value.fields
+        if let observedJob, value.revision <= observedJob.revision {
+            guard value == observedJob else { throw CommandStreamError.sequence }
+            return
+        }
+        observedJob = value; pendingJob = value
+    }
+    func flushJobState(checkPolicy: () throws -> Void) throws {
+        guard !closed, outgoing.next > 0, let pendingJob else { return }
+        try checkPolicy()
+        if try send(.jobState(pendingJob)) { self.pendingJob = nil }
     }
     func receiveControl(currentPolicy: XPCPeerPolicy) throws -> CommandStreamFrame.Body? {
         try receiveControl(expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
@@ -65,6 +83,6 @@ final class MachCommandStreamAuthority {
     }
     func close() {
         guard !closed else { return }
-        closed = true; endpoint.close(); output.close()
+        closed = true; pendingJob = nil; endpoint.close(); output.close()
     }
 }

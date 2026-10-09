@@ -32,7 +32,7 @@ struct CommandStreamFrame: Equatable {
     static let inputWindow = 32768
     enum Direction { case toAuthority, toFrontend }
     enum Body: Equatable {
-        case opened, output(Data), outputEnd, inputCredit(UInt32)
+        case opened, output(Data), outputEnd, inputCredit(UInt32), jobState(CommandJobStatePayload)
         case input(Data), inputEnd, signal(UInt32), resize(UInt16, UInt16, UInt16, UInt16), cancel, outputDrained
     }
     let sequence: UInt64
@@ -40,7 +40,7 @@ struct CommandStreamFrame: Equatable {
 
     var direction: Direction {
         switch body {
-        case .opened, .output, .outputEnd, .inputCredit: .toFrontend
+        case .opened, .output, .outputEnd, .inputCredit, .jobState: .toFrontend
         case .input, .inputEnd, .signal, .resize, .cancel, .outputDrained: .toAuthority
         }
     }
@@ -48,9 +48,10 @@ struct CommandStreamFrame: Equatable {
     func encode(binding: CommandStreamBinding) throws -> Data {
         try binding.validate()
         guard sequence < UInt64.max else { throw CommandStreamError.sequence }
+        if case .jobState = body, !binding.profile.supportsJobState { throw CommandStreamError.malformed }
         if binding.profile.supportsPipeExecutionControls {
             switch body {
-            case .opened, .signal, .cancel: break
+            case .opened, .signal, .cancel, .jobState: break
             default: throw CommandStreamError.malformed
             }
         }
@@ -62,6 +63,7 @@ struct CommandStreamFrame: Equatable {
         case .inputCredit(let count):
             guard (1...UInt32(Self.inputWindow)).contains(count) else { throw CommandStreamError.capacity }
             tag = 4; value = .unsigned(UInt64(count))
+        case .jobState(let observation): tag = 5; value = try observation.fields
         case .input(let bytes): tag = 10; value = try Self.chunk(bytes)
         case .inputEnd: tag = 11; value = .null
         case .signal(let signal):
@@ -96,6 +98,7 @@ struct CommandStreamFrame: Equatable {
         case 4:
             guard case .unsigned(let count) = value, count > 0, count <= UInt64(inputWindow) else { throw CommandStreamError.capacity }
             body = .inputCredit(UInt32(count))
+        case 5: body = .jobState(try CommandJobStatePayload.decode(value))
         case 12:
             guard case .unsigned(let signal) = value, signal > 0, signal < UInt64(NSIG) else { throw CommandStreamError.malformed }
             body = .signal(UInt32(signal))
@@ -127,7 +130,10 @@ struct CommandStreamReceiveSequence {
         guard frame.direction == direction, frame.sequence == next, next < UInt64.max else { throw CommandStreamError.sequence }
         switch direction {
         case .toFrontend:
-            guard !ended, (next == 0) == (frame.body == .opened) else { throw CommandStreamError.closed }
+            if ended {
+                guard case .jobState = frame.body else { throw CommandStreamError.closed }
+            }
+            guard (next == 0) == (frame.body == .opened) else { throw CommandStreamError.closed }
         case .toAuthority:
             if ended, case .input = frame.body { throw CommandStreamError.closed }
             if ended, frame.body == .inputEnd { throw CommandStreamError.closed }

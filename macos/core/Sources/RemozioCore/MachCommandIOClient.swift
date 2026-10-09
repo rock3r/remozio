@@ -8,10 +8,22 @@ public enum CommandIOAdmission {
     case result(VerifiedCommandAdmissionResult)
 }
 
+/// Authenticated state for the original request. It is not a suspend instruction or proof of program execution.
+public struct VerifiedCommandExecutionJobObservation: Equatable, Sendable {
+    public let revision: UInt64
+    public let state: CommandExecutionJobState
+    public let request: CommandAdmittedRequest
+    public let submission: CapturedSubmission
+    fileprivate init(value: CommandJobStatePayload, request: CommandAdmittedRequest, submission: CapturedSubmission) {
+        revision = value.revision; state = value.state; self.request = request; self.submission = submission
+    }
+}
+
 /// Ordered stream observations grant no execution or retry permission.
 public enum CommandExecutionStreamEvent {
     case opened, output(Data), outputEnded, inputCapacity(Int)
     case terminal(VerifiedCommandTerminalResult)
+    case jobState(VerifiedCommandExecutionJobObservation)
 }
 
 /// Owns the original Root handshake and private terminal endpoint after admission. The caller serializes all operations.
@@ -32,6 +44,7 @@ public final class RetainedCommandExecutionSession {
     private var control: MachCommandAuthorityPort?
     private var inputCapacity = 0
     private var outputAcknowledged = false
+    private var lastJobRevision: UInt64 = 0
     private var streamBinding: CommandStreamBinding {
         get throws {
             guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
@@ -116,6 +129,10 @@ public final class RetainedCommandExecutionSession {
                     guard let right else { throw CommandStreamError.malformed }
                     control = try right.takeControlRight()
                     inputCapacity = handshake.profile.supportsStreamingExecution ? CommandStreamFrame.inputWindow : 0; observation = .opened
+                case .jobState(let value):
+                    guard value.revision > lastJobRevision, case .admitted(let request) = admission.outcome else { throw CommandStreamError.sequence }
+                    lastJobRevision = value.revision
+                    observation = .jobState(.init(value: value, request: request, submission: original.binding))
                 case .output(let bytes): observation = .output(bytes)
                 case .outputEnd: observation = .outputEnded
                 case .inputCredit(let count):
