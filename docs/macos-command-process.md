@@ -112,6 +112,29 @@ The stop code is raw kernel evidence, not a debugger classification. Darwin can 
 A frontend must establish separate tracing state before mapping an observed stop to shell suspension.
 [Issue 250](https://github.com/rock3r/remozio/issues/250) tracks this required monitor integration gate.
 It must not infer a trap distinction from `stop_code` or forward a debugger trap as a shell suspension.
+The observation also reports `stop_tracing_known` and `stop_traced` from a separate stopped-process snapshot.
+The native owner records the child's public BSD birth timestamp while it is still suspended, before preparation resumes.
+The stop snapshot must match that timestamp and PID, return the complete structure, remain stopped, and exclude exit in progress.
+A missing initial timestamp or failed, partial, mismatched, running, or exiting snapshot keeps tracing unknown.
+Metadata failure does not fail execution or change the raw stop record. Continue, reap, and ownership loss clear these fields.
+
+```mermaid
+flowchart LR
+    E[Owned raw stop record] --> B[Read BSD process snapshot]
+    B --> V{Exact record, birth, PID and stopped state?}
+    V -->|No| U[Tracing unknown]
+    V -->|Yes| T[Record current traced flag]
+    U --> G[Preserve raw stop and exit ownership]
+    T --> G
+```
+
+This is a current tracing snapshot, not proof of the historical stop cause.
+It does not authorize forwarding a trap as a shell suspension. Monitor and frontend consumers still need explicit classification behavior.
+Self-trace tests do not prove external debugger attachment or detach behavior.
+[Apple's attach/detach implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/mach_process.c) can change the wait parent; the existing permanent `ECHILD` disposition needs integration validation.
+The unprivileged sibling-attach fixture was refused with `EPERM`; it did not establish that behavior.
+Issue 250 remains open for these monitor and frontend gates.
+
 The revision does not count every transition that the kernel can coalesce.
 The `P_PID` selector binds continued records to the owned child. Darwin can report the signal sender in their `si_pid`.
 Stop and trap records still require the owned child PID. An unchanged zeroed record represents no event.
@@ -155,7 +178,10 @@ They verify actual child reaping and preserve unread stdin bytes and shared desc
 The retired-helper regression uses a real kernel exit; only the live permission failure injects `EPERM`.
 Four job-state regressions check actual stop/continue events, synchronous `sigwait`, cancellation while stopped and unexpected external reaping.
 They check stable revisions, retained exit ownership, cleared stop state, unread stdin and unchanged descriptor flags.
-Debugger traps, protected monitor integration and frontend shell suspension remain unproven.
+Twelve tracing regressions cover ordinary stops, self-traced stops and traps, and unavailable or mismatched metadata.
+They verify stable revisions, unread stdin, shared flags, birth binding, actual final exit, and cleared metadata.
+Metadata-fault cases inject only the query response; stop and exit records remain real kernel events.
+External debugger attachment, protected monitor integration and frontend shell suspension remain unproven.
 The fixture never enters a product bundle, changes credentials or installs a service.
 
 Protected launcher validation, durable dispatch ownership, bound terminal results and current elevation-policy selection remain separate gates.

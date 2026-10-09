@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <libproc.h>
+#include <sys/proc.h>
 #include <mach/mach_time.h>
 #include <signal.h>
 #include <spawn.h>
@@ -25,6 +27,8 @@ struct remozio_command_process {
     int fault;
     bool cancelled;
     uint64_t deadline;
+    uint64_t birth_seconds, birth_microseconds;
+    bool birth_known;
     mach_timebase_info_data_t timebase;
 };
 static int system_error(void) { return errno ? errno : EIO; }
@@ -62,6 +66,18 @@ static int private_pipe(int ends[2]) {
     if (!error) error = mark_private(ends[1], false, false);
     if (error) { close_descriptor(&ends[0]); close_descriptor(&ends[1]); }
     return error;
+}
+static void clear_stop(remozio_command_process_t *process) {
+    process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0;
+    process->state.stop_tracing_known = process->state.stop_traced = false;
+}
+static void capture_birth(remozio_command_process_t *process) {
+    struct proc_bsdinfo details = {0};
+    int bytes = proc_pidinfo(process->state.pid, PROC_PIDTBSDINFO, 0, &details, sizeof(details));
+    if (bytes == sizeof(details) && details.pbi_pid == (uint32_t)process->state.pid && details.pbi_start_tvsec && details.pbi_start_tvusec < 1000000) {
+        process->birth_seconds = details.pbi_start_tvsec; process->birth_microseconds = details.pbi_start_tvusec;
+        process->birth_known = true;
+    }
 }
 static int spawn_child(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, bool monitor_session, remozio_command_process_t **result) {
@@ -137,6 +153,7 @@ static int spawn_child(const char *path, const void *frame, size_t count,
     struct kevent change;
     EV_SET(&change, process->state.pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_CLEAR, NOTE_EXEC | NOTE_EXIT, 0, NULL);
     if (kevent(process->events, &change, 1, NULL, 0, NULL) < 0) { failure = system_error(); goto cleanup; }
+    capture_birth(process);
     if (monitor_session && io_mode == 1 && tcsetpgrp(input, process->state.pid) < 0) { failure = system_error(); goto cleanup; }
     if (kill(process->state.pid, SIGCONT) < 0) { failure = system_error(); goto cleanup; }
 cleanup:
@@ -197,7 +214,7 @@ static int observe_job_control(remozio_command_process_t *process) {
         siginfo_t info = {0};
         if (waitid(P_PID, (id_t)process->state.pid, &info, WSTOPPED | WCONTINUED | WNOHANG) < 0) {
             if (errno == EINTR) return 0;
-            if (errno == ECHILD) { process->state.ownership_lost = true; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
+            if (errno == ECHILD) { process->state.ownership_lost = true; clear_stop(process); }
             return system_error();
         }
         if (info.si_signo == 0 && info.si_code == 0 && info.si_pid == 0) return 0;
@@ -207,7 +224,16 @@ static int observe_job_control(remozio_command_process_t *process) {
         if (info.si_code == CLD_STOPPED || info.si_code == CLD_TRAPPED) {
             if (info.si_status <= 0 || info.si_status >= NSIG) return EPROTO;
             process->state.stopped = true; process->state.stop_signal = info.si_status; process->state.stop_code = info.si_code;
-        } else { process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
+            process->state.stop_tracing_known = process->state.stop_traced = false;
+            struct proc_bsdinfo details = {0};
+            int bytes = proc_pidinfo(process->state.pid, PROC_PIDTBSDINFO, 0, &details, sizeof(details));
+            if (process->birth_known && bytes == sizeof(details) && details.pbi_pid == (uint32_t)process->state.pid &&
+                details.pbi_start_tvsec == process->birth_seconds && details.pbi_start_tvusec == process->birth_microseconds &&
+                details.pbi_status == SSTOP && !(details.pbi_flags & PROC_FLAG_INEXIT)) {
+                process->state.stop_tracing_known = true;
+                process->state.stop_traced = (details.pbi_flags & PROC_FLAG_TRACED) != 0;
+            }
+        } else { clear_stop(process); }
         ++process->state.job_control_revision;
     }
     return 0;
@@ -239,9 +265,9 @@ int remozio_command_process_poll(remozio_command_process_t *process, remozio_com
     if (!process->state.reaped && !process->state.ownership_lost && (process->state.exit_observed || error)) {
         int status = 0;
         pid_t ended = waitpid(process->state.pid, &status, WNOHANG);
-        if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
+        if (ended == process->state.pid) { process->state.reaped = true; process->state.wait_status = status; clear_stop(process); }
         else if (ended < 0 && errno != EINTR) {
-            if (errno == ECHILD) { process->state.ownership_lost = true; process->state.stopped = false; process->state.stop_signal = process->state.stop_code = 0; }
+            if (errno == ECHILD) { process->state.ownership_lost = true; clear_stop(process); }
             if (!error) error = system_error();
         }
     }
