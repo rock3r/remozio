@@ -11,6 +11,8 @@ public final class RetainedCommandCapture {
     public let capture: CommandCapture
     private let caller: RetainedCommandCaller
     private let input: RetainedCommandInputDescriptor
+    private let controlTerminal: RetainedCommandInputDescriptor?
+    private let stdioObservation: RetainedCommandStdioObservation?
     private let filesystem: CommandFilesystemCapture
     let outputs: RetainedCommandOutputChannels?
     let admissionProfile: CommandHandshakeProfile?
@@ -67,17 +69,39 @@ public final class RetainedCommandCapture {
             let filesystem = try CommandFilesystemCapture(executablePath: submission.executablePath,
                 directoryPath: submission.directoryPath, checkCancellation: checkCancellation)
             heldFilesystem = filesystem
-            let source = try received.input.capture(streamBinding: streamBinding)
+            let stdioObservation: RetainedCommandStdioObservation?
+            let source: CapturedCommandInput
+            let requester: CapturedRequester
+            if captureSchemaVersion == 3 {
+                let context = try received.caller.captureTerminalContext(expression: expression, userID: userID, auditSessionID: auditSessionID)
+                let observation = try RetainedCommandStdioObservation(received: received, context: context,
+                    mode: submission.ioMode, inputBinding: streamBinding)
+                stdioObservation = observation; source = observation.layout.input.source
+                let original = received.caller.requester
+                requester = CapturedRequester(executablePath: original.executablePath, realUID: original.realUID,
+                    effectiveUID: original.effectiveUID, pid: original.pid, pidVersion: original.pidVersion, signing: original.signing,
+                    sessionID: UInt32(context.sessionID), ttyPath: observation.layout.terminal?.stream.source.observedPath)
+            } else {
+                guard received.carrierVersion != MachCommandCallerReceiver.mappedIOInputCarrierVersion else {
+                    throw RetainedCommandCaptureError.invalidContext
+                }
+                stdioObservation = nil; source = try received.input.capture(streamBinding: streamBinding)
+                requester = received.caller.requester
+            }
             let ancestry = try received.caller.captureAncestry(expression: expression, userID: userID,
                 auditSessionID: auditSessionID, maximumEntries: maximumAncestryEntries, checkCancellation: checkCancellation)
             let capture = try CommandCapture(schemaVersion: captureSchemaVersion, executable: filesystem.executable,
                 arguments: submission.arguments, directory: filesystem.directory, target: resolvedTarget, environment: environment,
                 input: source, ioMode: submission.ioMode, disconnectBehavior: submission.disconnectBehavior,
-                requester: received.caller.requester, ancestry: ancestry, unverifiedRationale: submission.unverifiedRationale,
-                submission: submission.binding, limits: captureLimits)
+                requester: requester, ancestry: ancestry, unverifiedRationale: submission.unverifiedRationale,
+                submission: submission.binding, stdioLayout: stdioObservation?.layout, limits: captureLimits)
             try filesystem.recheck(checkCancellation: checkCancellation)
+            if let stdioObservation, let outputs = received.outputs {
+                try stdioObservation.recheck(input: received.input, outputs: outputs, controlTerminal: received.controlTerminal)
+                try received.caller.recheckTerminalContext(stdioObservation.context, expression: expression, userID: userID, auditSessionID: auditSessionID)
+            }
             try received.caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
-            self.outputs = received.outputs
+            self.outputs = received.outputs; self.controlTerminal = received.controlTerminal; self.stdioObservation = stdioObservation
             try received.outputs?.recheck()
             self.capture = capture; self.caller = received.caller; self.input = received.input; self.filesystem = filesystem
             if let admissionProfile {
@@ -90,7 +114,7 @@ public final class RetainedCommandCapture {
             self.admissionProfile = admissionProfile; self.submissionDigest = Data(SHA256.hash(data: received.payload))
             self.admissionReply = received.reply
         } catch {
-            heldFilesystem?.close(); received.caller.close(); received.input.close(); received.reply?.close(); received.outputs?.close()
+            heldFilesystem?.close(); received.caller.close(); received.input.close(); received.reply?.close(); received.outputs?.close(); received.controlTerminal?.close()
             throw error
         }
     }
@@ -123,6 +147,10 @@ public final class RetainedCommandCapture {
             try filesystem.recheck(checkCancellation: checkCancellation)
             try input.withBorrowedDescriptor { _ in () }
             try outputs?.recheck()
+            if let stdioObservation, let outputs {
+                try stdioObservation.recheck(input: input, outputs: outputs, controlTerminal: controlTerminal)
+                try caller.recheckTerminalContext(stdioObservation.context, expression: expression, userID: userID, auditSessionID: auditSessionID)
+            }
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         } catch { close(); throw error }
     }
@@ -182,11 +210,12 @@ public final class RetainedCommandCapture {
         closed = true
         admissionReply?.close(); admissionReply = nil
         return RetainedCommandExecutionResources(capture: capture, caller: caller, input: input, filesystem: filesystem,
-            outputs: outputs, terminal: terminal, profile: profile, submissionDigest: submissionDigest, request: request)
+            outputs: outputs, terminal: terminal, profile: profile, submissionDigest: submissionDigest, request: request,
+            controlTerminal: controlTerminal, stdioObservation: stdioObservation)
     }
 
     public func close() {
-        if !closed { filesystem.close(); outputs?.close(); caller.close(); input.close(); admissionReply?.close(); closed = true }
+        if !closed { filesystem.close(); outputs?.close(); caller.close(); input.close(); controlTerminal?.close(); admissionReply?.close(); closed = true }
     }
 
     private static func environment(minimal: [CapturedEnvironmentEntry], additions: [CommandEnvironmentAddition]) throws -> [CapturedEnvironmentEntry] {

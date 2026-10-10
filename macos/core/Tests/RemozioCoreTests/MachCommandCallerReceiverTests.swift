@@ -1523,7 +1523,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         private var control: Int32 = -1
         var pid: pid_t { child }
 
-        init(endpoint: Endpoint, submission: Data? = nil, controlFrame: Data? = nil, terminalRole: Int? = nil, bindTerminal: Bool = false) throws {
+        init(endpoint: Endpoint, submission: Data? = nil, controlFrame: Data? = nil, terminalRole: Int? = nil, bindTerminal: Bool = false, mappedTerminalMask: Int? = nil, rawMappedTerminal: Bool = false, mappedHasTerminal: Bool = true, mappedForeignTerminalRole: Int? = nil) throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
             do {
@@ -1568,7 +1568,11 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     let payload = directory.appendingPathComponent("submission")
                     try submission.write(to: payload)
                     launchArguments.append(payload.path)
-                    if let terminalRole { launchArguments.append("\(bindTerminal ? "bound" : "raw")-terminal-\(terminalRole)") }
+                    if let mappedForeignTerminalRole { launchArguments.append("mapped-foreign-terminal-\(mappedForeignTerminalRole)") }
+                    else if let mappedTerminalMask {
+                        launchArguments.append(mappedHasTerminal ? "mapped-\(rawMappedTerminal ? "raw-" : "")terminal-\(mappedTerminalMask)" : "mapped-no-terminal-0")
+                    }
+                    else if let terminalRole { launchArguments.append("\(bindTerminal ? "bound" : "raw")-terminal-\(terminalRole)") }
                 }
                 let words = launchArguments.map { strdup($0) }
                 defer { words.forEach { free($0) } }
@@ -1601,6 +1605,11 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 XCTFail(String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
                 throw MachCommandCallerError.unavailable
             }
+        }
+
+        func revokeOwnTerminal() throws {
+            var byte: UInt8 = 0x72
+            guard write(control, &byte, 1) == 1 else { throw MachCommandCallerError.unavailable }
         }
 
         func advance() throws {
@@ -2733,6 +2742,319 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         XCTAssertEqual(try sendReferences(admission.port), 1); XCTAssertEqual(try sendReferences(terminal.port), 1)
     }
 
+    func testMappedIOCarrierKeepsSeparateTerminalWithAllStdioRedirectedAndOptionalAbsence() throws {
+        for hasTerminal in [false, true] {
+            let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+            var input: [Int32] = [-1, -1], output: [Int32] = [-1, -1], error: [Int32] = [-1, -1]
+            XCTAssertEqual(pipe(&input), 0); XCTAssertEqual(pipe(&output), 0); XCTAssertEqual(pipe(&error), 0)
+            defer { for fd in input + output + error { _ = Darwin.close(fd) } }
+            var master: Int32 = -1, slave: Int32 = -1
+            if hasTerminal { XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0) }
+            defer { if hasTerminal { _ = Darwin.close(master); _ = Darwin.close(slave) } }
+            let descriptors = [input[0], output[1], error[1]] + (hasTerminal ? [slave] : [])
+            let flags = descriptors.map { fcntl($0, F_GETFL) }
+            XCTAssertEqual(Darwin.write(input[1], "pending", 7), 7)
+            if hasTerminal { XCTAssertEqual(Darwin.write(master, "queued\n", 7), 7) }
+            try MachCommandIOWire.sendMapped(Data([0xa0]), inputDescriptor: input[0], outputDescriptor: output[1], errorDescriptor: error[1],
+                controlTerminalDescriptor: hasTerminal ? slave : nil, destination: endpoint.port, admissionReply: admission.port,
+                terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            let received = try receiver(endpoint, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 1000)
+            XCTAssertEqual(received.carrierVersion, 5)
+            XCTAssertEqual(received.payload, Data([0xa0]))
+            let outputs = try XCTUnwrap(received.outputs)
+            XCTAssertEqual(descriptors.map { fcntl($0, F_GETFL) }, flags)
+            try outputs.output.withBorrowedDescriptor { XCTAssertEqual(Darwin.write($0, "out", 3), 3) }
+            try outputs.error.withBorrowedDescriptor { XCTAssertEqual(Darwin.write($0, "err", 3), 3) }
+            let afterWrites = descriptors.map { fcntl($0, F_GETFL) }
+            if hasTerminal {
+                let terminal = try XCTUnwrap(received.controlTerminal)
+                try terminal.withBorrowedDescriptor { retained in
+                    XCTAssertNotEqual(retained, slave)
+                    var imported = stat(), original = stat()
+                    XCTAssertEqual(fstat(retained, &imported), 0); XCTAssertEqual(fstat(slave, &original), 0)
+                    XCTAssertEqual(imported.st_rdev, original.st_rdev)
+                    XCTAssertEqual(imported.st_ino, original.st_ino)
+                    XCTAssertEqual(isatty(retained), 1)
+                    XCTAssertEqual(fcntl(retained, F_GETFL), flags.last)
+                }
+                received.closeIfUnclaimed()
+                XCTAssertThrowsError(try terminal.withBorrowedDescriptor { _ in () })
+                var bytes = [UInt8](repeating: 0, count: 7)
+                XCTAssertEqual(Darwin.read(slave, &bytes, bytes.count), bytes.count)
+                XCTAssertEqual(Data(bytes), Data("queued\n".utf8))
+            } else {
+                XCTAssertNil(received.controlTerminal)
+                received.closeIfUnclaimed()
+            }
+            XCTAssertEqual(descriptors.map { fcntl($0, F_GETFL) }, afterWrites)
+            for (fd, expected) in [(input[0], "pending"), (output[0], "out"), (error[0], "err")] {
+                var bytes = [UInt8](repeating: 0, count: expected.utf8.count)
+                XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count)
+                XCTAssertEqual(Data(bytes), Data(expected.utf8))
+            }
+            XCTAssertEqual(try sendReferences(admission.port), 1)
+            XCTAssertEqual(try sendReferences(result.port), 1)
+        }
+    }
+
+    func testMappedIOCarrierTransfersTerminalClaimOnlyOnceAndRetiresItsImportedDescriptor() throws {
+        let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+        let null = Darwin.open("/dev/null", O_RDWR)
+        var master: Int32 = -1, slave: Int32 = -1
+        XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0)
+        defer { _ = Darwin.close(null); _ = Darwin.close(master); _ = Darwin.close(slave) }
+        try MachCommandIOWire.sendMapped(Data([0xa0]), inputDescriptor: null, outputDescriptor: null, errorDescriptor: null,
+            controlTerminalDescriptor: slave, destination: endpoint.port, admissionReply: admission.port,
+            terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        guard case let .input(original) = try receiver(endpoint, maximum: 8192).receiveNext(timeoutMilliseconds: 1000) else {
+            return XCTFail("Expected the mapped input carrier")
+        }
+        let terminal = try XCTUnwrap(original.controlTerminal)
+        let (owned, reply) = try original.takeForAdmissionAttempt()
+        defer { reply.close() }
+        original.closeIfUnclaimed()
+        try terminal.withBorrowedDescriptor { XCTAssertEqual(isatty($0), 1) }
+        XCTAssertThrowsError(try original.takeForAdmissionAttempt()) {
+            XCTAssertEqual($0 as? RetainedCommandCaptureError, .alreadyOwned)
+        }
+        owned.closeIfUnclaimed()
+        XCTAssertThrowsError(try terminal.withBorrowedDescriptor { _ in () })
+        XCTAssertEqual(isatty(slave), 1)
+    }
+
+    func testMappedIOCarrierRejectsRawControlAliasAndRecoversForTheNextSubmission() throws {
+        let endpoint = try Endpoint()
+        let peer = try Peer(endpoint: endpoint, submission: Data([0xa0]), mappedTerminalMask: 0, rawMappedTerminal: true)
+        let expression = "(" + peer.expression + ") or (" + (try selfExpression()) + ")"
+        let receive = try receiver(endpoint, expression: expression, maximum: 8192)
+        XCTAssertThrowsError(try receive.receiveNext(timeoutMilliseconds: 5000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .malformed)
+        }
+        try peer.stop()
+        let admission = try Endpoint(), result = try Endpoint()
+        let null = Darwin.open("/dev/null", O_RDWR)
+        defer { _ = Darwin.close(null) }
+        try MachCommandIOWire.sendMapped(Data([0xa1]), inputDescriptor: null, outputDescriptor: null, errorDescriptor: null,
+            controlTerminalDescriptor: nil, destination: endpoint.port, admissionReply: admission.port,
+            terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        guard case let .input(received) = try receive.receiveNext(timeoutMilliseconds: 1000) else {
+            return XCTFail("Expected the next mapped submission")
+        }
+        defer { received.closeIfUnclaimed() }
+        XCTAssertEqual(received.payload, Data([0xa1]))
+        XCTAssertEqual(received.carrierVersion, 5)
+        XCTAssertNil(received.controlTerminal)
+    }
+
+    func testSchemaThreeCaptureUsesAuthenticatedCallerTerminalForEveryRoutingMask() throws {
+        for mask: UInt32 in 0...7 {
+            let endpoint = try Endpoint()
+            let submission = try commandSubmission(ioMode: .pty)
+            let peer = try Peer(endpoint: endpoint, submission: submission.canonicalBytes, mappedTerminalMask: Int(mask))
+            let received = try receiver(endpoint, expression: peer.expression, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 5000)
+            let owner = try assemble(received, schema: 3, callerExpression: peer.expression)
+            defer { owner.close() }
+            let capture = owner.capture
+            let layout = try XCTUnwrap(capture.stdioLayout)
+            let terminal = try XCTUnwrap(layout.terminal)
+            XCTAssertEqual(layout.ptyMask, mask)
+            XCTAssertEqual(terminal.sessionID, UInt32(peer.pid))
+            XCTAssertEqual(capture.requester.sessionID, terminal.sessionID)
+            XCTAssertEqual(capture.requester.pid, UInt32(peer.pid))
+            XCTAssertEqual(layout.input.source, capture.input)
+            XCTAssertEqual(terminal.stream.access, .readWrite)
+            XCTAssertEqual(terminal.stream.source.kind, .tty)
+            for (index, stream) in [layout.input, layout.output, layout.error].enumerated() {
+                if mask & (1 << index) != 0 {
+                    XCTAssertEqual(stream.source.identity, terminal.stream.source.identity)
+                    XCTAssertEqual(stream.source.kind, .tty)
+                    XCTAssertEqual(stream.access, .readWrite)
+                } else {
+                    XCTAssertEqual(stream.source.kind, index == 0 ? .pipe : .null)
+                    XCTAssertEqual(stream.access, index == 0 ? .readOnly : .writeOnly)
+                }
+            }
+            let reparsed = try CommandCapture(canonicalBytes: capture.canonicalBytes, limits: assemblyLimits, expectedSchemaVersion: 3)
+            XCTAssertEqual(reparsed, capture)
+            try owner.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil)
+            owner.close()
+            if let control = received.controlTerminal {
+                XCTAssertThrowsError(try control.withBorrowedDescriptor { _ in () })
+            }
+            try peer.stop()
+        }
+    }
+
+    func testSchemaThreeCaptureKeepsForeignTerminalsUnselectedInEveryStreamRole() throws {
+        for role in 0...2 {
+            let endpoint = try Endpoint(), submission = try commandSubmission(ioMode: .pty)
+            let peer = try Peer(endpoint: endpoint, submission: submission.canonicalBytes, mappedForeignTerminalRole: role)
+            let received = try receiver(endpoint, expression: peer.expression, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 5000)
+            let owner = try assemble(received, schema: 3, callerExpression: peer.expression)
+            defer { owner.close() }
+            let layout = try XCTUnwrap(owner.capture.stdioLayout), terminal = try XCTUnwrap(layout.terminal)
+            XCTAssertEqual(layout.ptyMask, 7 & ~(1 << UInt32(role)))
+            for (index, stream) in [layout.input, layout.output, layout.error].enumerated() {
+                XCTAssertEqual(stream.source.kind, .tty)
+                if index == role { XCTAssertNotEqual(stream.source.identity, terminal.stream.source.identity) }
+                else { XCTAssertEqual(stream.source.identity, terminal.stream.source.identity) }
+            }
+            try owner.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil)
+            owner.close()
+            try peer.stop()
+        }
+    }
+
+    func testSchemaThreeCapturePreservesPTYModeWithoutAnOriginalCallerTerminal() throws {
+        let endpoint = try Endpoint(), submission = try commandSubmission(ioMode: .pty)
+        let peer = try Peer(endpoint: endpoint, submission: submission.canonicalBytes, mappedTerminalMask: 0, mappedHasTerminal: false)
+        let received = try receiver(endpoint, expression: peer.expression, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 5000)
+        let context = try received.caller.captureTerminalContext(expression: peer.expression, userID: geteuid(), auditSessionID: nil)
+        XCTAssertNil(context.terminalDevice)
+        XCTAssertEqual(context.sessionID, peer.pid)
+        let owner = try assemble(received, schema: 3, callerExpression: peer.expression)
+        defer { owner.close() }
+        let layout = try XCTUnwrap(owner.capture.stdioLayout)
+        XCTAssertEqual(owner.capture.ioMode, .pty)
+        XCTAssertEqual(layout.ptyMask, 0)
+        XCTAssertNil(layout.terminal)
+        XCTAssertEqual(layout.input.source.kind, .pipe)
+        XCTAssertEqual(layout.output.source.kind, .null)
+        XCTAssertEqual(layout.error.source.kind, .null)
+        try owner.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil)
+        owner.close()
+        try peer.stop()
+    }
+
+    func testMappedIOCarrierCannotBeSilentlyCapturedUnderLegacySchemas() throws {
+        for schema: UInt64 in [1, 2] {
+            let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+            let null = Darwin.open("/dev/null", O_RDWR)
+            defer { _ = Darwin.close(null) }
+            let submission = try commandSubmission()
+            try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: null, outputDescriptor: null, errorDescriptor: null,
+                controlTerminalDescriptor: nil, destination: endpoint.port, admissionReply: admission.port,
+                terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            let received = try receiver(endpoint, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 1000)
+            XCTAssertThrowsError(try assemble(received, schema: schema)) {
+                XCTAssertEqual($0 as? RetainedCommandCaptureError, .invalidContext)
+            }
+            XCTAssertThrowsError(try received.input.withBorrowedDescriptor { _ in () })
+            XCTAssertThrowsError(try received.outputs?.recheck())
+            XCTAssertEqual(fcntl(null, F_GETFL) & O_ACCMODE, O_RDWR)
+            XCTAssertEqual(try sendReferences(admission.port), 1)
+            XCTAssertEqual(try sendReferences(result.port), 1)
+        }
+    }
+
+    func testSchemaThreeCaptureRejectsRevokedCallerTerminalEvenWithAllStdioRedirected() throws {
+        for mask in [0, 7] {
+            let endpoint = try Endpoint(), submission = try commandSubmission(ioMode: .pty)
+            let peer = try Peer(endpoint: endpoint, submission: submission.canonicalBytes, mappedTerminalMask: mask)
+            let receive = try receiver(endpoint, expression: peer.expression, maximum: 8192)
+            let received = try receive.receiveMappedIOInput(timeoutMilliseconds: 5000)
+            let owner = try assemble(received, schema: 3, callerExpression: peer.expression)
+            defer { owner.close() }
+            XCTAssertEqual(owner.capture.stdioLayout?.ptyMask, UInt32(mask))
+            try owner.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil)
+            let pid = peer.pid
+            try peer.revokeOwnTerminal()
+            let notice = try receive.receive(timeoutMilliseconds: 5000)
+            defer { notice.caller.close() }
+            XCTAssertEqual(notice.payload, Data("revoked".utf8))
+            XCTAssertEqual(notice.caller.requester.pid, UInt32(pid))
+            XCTAssertEqual(notice.caller.requester.pidVersion, owner.capture.requester.pidVersion)
+            XCTAssertEqual(notice.caller.requester.sessionID, owner.capture.requester.sessionID)
+            let afterRevocation = try notice.caller.captureTerminalContext(expression: peer.expression, userID: geteuid(), auditSessionID: nil)
+            XCTAssertNil(afterRevocation.terminalDevice)
+            XCTAssertNotNil(owner.capture.stdioLayout?.terminal)
+            XCTAssertThrowsError(try owner.recheck(expression: peer.expression, userID: geteuid(), auditSessionID: nil)) {
+                switch $0 {
+                case CommandStreamObservationError.changed, RetainedCommandInputError.system(EBADF): break
+                default: XCTFail("Unexpected revocation error: \($0)")
+                }
+            }
+            XCTAssertThrowsError(try received.controlTerminal?.withBorrowedDescriptor { _ in () })
+            XCTAssertThrowsError(try received.input.withBorrowedDescriptor { _ in () })
+            XCTAssertThrowsError(try received.outputs?.recheck())
+            try peer.stop()
+        }
+    }
+
+    func testSchemaThreeCaptureRechecksRedirectFlagsAndRetiresAllOwnedStreams() throws {
+        let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+        let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let submission = try commandSubmission()
+        try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            controlTerminalDescriptor: nil, destination: endpoint.port, admissionReply: admission.port,
+            terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        let received = try receiver(endpoint, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 1000)
+        let owner = try assemble(received, schema: 3)
+        defer { owner.close() }
+        let layout = try XCTUnwrap(owner.capture.stdioLayout)
+        XCTAssertEqual(layout.ptyMask, 0)
+        XCTAssertNil(layout.terminal)
+        XCTAssertEqual(layout.output.access, .writeOnly)
+        XCTAssertEqual(layout.input.access, .readOnly)
+        try owner.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)
+        let flags = fcntl(output, F_GETFL)
+        XCTAssertEqual(fcntl(output, F_SETFL, flags | O_APPEND), 0)
+        XCTAssertThrowsError(try owner.recheck(expression: selfExpression(), userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? CommandStreamObservationError, .changed)
+        }
+        XCTAssertThrowsError(try received.input.withBorrowedDescriptor { _ in () })
+        XCTAssertThrowsError(try received.outputs?.recheck())
+        XCTAssertEqual(fcntl(output, F_GETFL), flags | O_APPEND)
+    }
+
+    func testSchemaThreeCaptureRejectsLegacyCarrierAndForeignControlTerminalAndClosesCopies() throws {
+        for mapped in [false, true] {
+            let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+            let null = Darwin.open("/dev/null", O_RDWR)
+            var master: Int32 = -1, slave: Int32 = -1
+            XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0)
+            defer { _ = Darwin.close(null); _ = Darwin.close(master); _ = Darwin.close(slave) }
+            let submission = try commandSubmission(ioMode: .pty)
+            if mapped {
+                try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: null, outputDescriptor: null, errorDescriptor: null,
+                    controlTerminalDescriptor: slave, destination: endpoint.port, admissionReply: admission.port,
+                    terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            } else {
+                try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: null, outputDescriptor: null, errorDescriptor: null,
+                    destination: endpoint.port, admissionReply: admission.port, terminalReply: result.port,
+                    maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            }
+            let receive = try receiver(endpoint, maximum: 8192)
+            let received = mapped ? try receive.receiveMappedIOInput(timeoutMilliseconds: 1000) : try receive.receiveIOInput(timeoutMilliseconds: 1000)
+            XCTAssertThrowsError(try assemble(received, schema: 3)) {
+                XCTAssertEqual($0 as? RetainedCommandCaptureError, .invalidContext)
+            }
+            XCTAssertThrowsError(try received.input.withBorrowedDescriptor { _ in () })
+            if let terminal = received.controlTerminal { XCTAssertThrowsError(try terminal.withBorrowedDescriptor { _ in () }) }
+            XCTAssertEqual(isatty(slave), 1)
+            XCTAssertEqual(fcntl(null, F_GETFL) & O_ACCMODE, O_RDWR)
+            XCTAssertEqual(try sendReferences(admission.port), 1)
+            XCTAssertEqual(try sendReferences(result.port), 1)
+        }
+    }
+
+    func testMappedIOCarrierRejectsNonterminalControlWithoutSending() throws {
+        let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+        let null = Darwin.open("/dev/null", O_RDWR)
+        defer { _ = Darwin.close(null) }
+        XCTAssertThrowsError(try MachCommandIOWire.sendMapped(Data([0xa0]), inputDescriptor: null, outputDescriptor: null, errorDescriptor: null,
+            controlTerminalDescriptor: null, destination: endpoint.port, admissionReply: admission.port,
+            terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .malformed)
+        }
+        XCTAssertThrowsError(try receiver(endpoint).receiveNext(timeoutMilliseconds: 10)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        XCTAssertEqual(try sendReferences(admission.port), 1)
+        XCTAssertEqual(try sendReferences(result.port), 1)
+    }
+
     func testIOCarrierRejectsReadOnlyOutputsWithoutSendingOrChangingInput() throws {
         let endpoint = try Endpoint(), admission = try Endpoint(), terminal = try Endpoint()
         let input = Darwin.open("/dev/null", O_RDONLY), output = Darwin.open("/dev/null", O_WRONLY)
@@ -2762,6 +3084,23 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                           session: au_asid_t? = nil, maximum: Int = 64) throws -> MachCommandCallerReceiver {
         try MachCommandCallerReceiver(receivePort: endpoint.port, expression: expression ?? selfExpression(),
             userID: user ?? geteuid(), auditSessionID: session, maxPayloadBytes: maximum)
+    }
+
+    func testTerminalContextUsesTheOriginalAuthenticatedCallerAndRejectsRetiredRecords() throws {
+        let endpoint = try Endpoint(), expression = try selfExpression()
+        try endpoint.send(Data([1]))
+        let received = try receiver(endpoint, expression: expression).receive(timeoutMilliseconds: 1000)
+        defer { received.caller.close() }
+        let context = try received.caller.captureTerminalContext(expression: expression, userID: geteuid(), auditSessionID: nil)
+        XCTAssertEqual(context.sessionID, getsid(0))
+        try received.caller.recheckTerminalContext(context, expression: expression, userID: geteuid(), auditSessionID: nil)
+        received.caller.close()
+        XCTAssertThrowsError(try received.caller.recheckTerminalContext(context, expression: expression, userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .retired)
+        }
+        XCTAssertThrowsError(try received.caller.captureTerminalContext(expression: expression, userID: geteuid(), auditSessionID: nil)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .retired)
+        }
     }
 
     func testKernelIdentityIgnoresPayloadClaimsAndPreservesRawBytes() throws {

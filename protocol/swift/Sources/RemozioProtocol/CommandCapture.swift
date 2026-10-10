@@ -52,6 +52,42 @@ public struct CapturedCommandInput: Equatable, Sendable {
         self.kind = kind; self.streamBinding = streamBinding; self.observedPath = observedPath; self.identity = identity
     }
 }
+public enum CommandStreamAccess: UInt64, Sendable { case readOnly, writeOnly, readWrite }
+public struct CommandStreamFlags: OptionSet, Equatable, Sendable {
+    public let rawValue: UInt64
+    public init(rawValue: UInt64) { self.rawValue = rawValue }
+    public static let append = Self(rawValue: 1)
+    public static let nonblocking = Self(rawValue: 2)
+    public static let asynchronous = Self(rawValue: 4)
+    public static let synchronous = Self(rawValue: 8)
+}
+public struct CapturedCommandStream: Equatable, Sendable {
+    public let source: CapturedCommandInput
+    public let access: CommandStreamAccess
+    public let flags: CommandStreamFlags
+    public init(source: CapturedCommandInput, access: CommandStreamAccess, flags: CommandStreamFlags) {
+        self.source = source; self.access = access; self.flags = flags
+    }
+}
+public struct CapturedCommandTerminal: Equatable, Sendable {
+    public let stream: CapturedCommandStream
+    public let sessionID: UInt32
+    public let terminalDevice: UInt32
+    public init(stream: CapturedCommandStream, sessionID: UInt32, terminalDevice: UInt32) {
+        self.stream = stream; self.sessionID = sessionID; self.terminalDevice = terminalDevice
+    }
+}
+public struct CapturedCommandStdioLayout: Equatable, Sendable {
+    public let input: CapturedCommandStream
+    public let output: CapturedCommandStream
+    public let error: CapturedCommandStream
+    public let terminal: CapturedCommandTerminal?
+    public let ptyMask: UInt32
+    public init(input: CapturedCommandStream, output: CapturedCommandStream, error: CapturedCommandStream,
+                terminal: CapturedCommandTerminal?, ptyMask: UInt32) {
+        self.input = input; self.output = output; self.error = error; self.terminal = terminal; self.ptyMask = ptyMask
+    }
+}
 public enum CommandIOMode: UInt64, Sendable { case pipes, pty }
 public enum StartedCommandDisconnect: UInt64, Sendable { case terminate, continueRunning }
 public enum CapturedSigningStatus: UInt64, Sendable { case unsigned, adHoc, validated, invalid, unavailable }
@@ -109,7 +145,7 @@ public struct CapturedSubmission: Equatable, Sendable {
 
 /// Encodes and parses command claims. OS provenance, authenticated issuance, and execution remain separate responsibilities.
 public struct CommandCapture: Equatable, Sendable {
-    public static let supportedSchemaVersions: Set<UInt64> = [1, 2]
+    public static let supportedSchemaVersions: Set<UInt64> = [1, 2, 3]
     public let schemaVersion: UInt64
     public let canonicalBytes: Data
     public let executable: CapturedExecutable
@@ -119,6 +155,7 @@ public struct CommandCapture: Equatable, Sendable {
     public let environment: [CapturedEnvironmentEntry]
     public let input: CapturedCommandInput
     public let ioMode: CommandIOMode
+    public let stdioLayout: CapturedCommandStdioLayout?
     public let disconnectBehavior: StartedCommandDisconnect
     public let requester: CapturedRequester
     public let ancestry: CapturedAncestry
@@ -129,7 +166,7 @@ public struct CommandCapture: Equatable, Sendable {
                 target: CommandTarget, environment: [CapturedEnvironmentEntry], input: CapturedCommandInput,
                 ioMode: CommandIOMode, disconnectBehavior: StartedCommandDisconnect, requester: CapturedRequester,
                 ancestry: CapturedAncestry, unverifiedRationale: String?, submission: CapturedSubmission,
-                limits: CBORLimits) throws {
+                stdioLayout: CapturedCommandStdioLayout? = nil, limits: CBORLimits) throws {
         guard Self.supportedSchemaVersions.contains(schemaVersion) else { throw CommandCaptureError.version }
         func identity(_ value: CapturedFileIdentity) -> CBORValue {
             .map([0: .unsigned(value.device), 1: .unsigned(value.inode)])
@@ -155,15 +192,29 @@ public struct CommandCapture: Equatable, Sendable {
                 2: $0.executablePath.map { .bytes($0) } ?? .null, 3: .unsigned(UInt64($0.uid))])
         }), 2: .unsigned(ancestry.reason.rawValue)])
         let submissionValue: CBORValue = .map([0: .bytes(submission.id), 1: .bytes(submission.nonce), 2: .bytes(submission.callerBinding)])
-        let fields: CBORValue = .map([0: .unsigned(schemaVersion), 1: executableValue, 2: .array(arguments.map { .bytes($0) }),
+        guard (schemaVersion == 3) == (stdioLayout != nil) else { throw CommandCaptureError.fields }
+        var fields: [UInt64: CBORValue] = [0: .unsigned(schemaVersion), 1: executableValue, 2: .array(arguments.map { .bytes($0) }),
             3: directoryValue, 4: targetValue, 5: environmentValue, 6: inputValue, 7: .unsigned(ioMode.rawValue),
             8: .unsigned(disconnectBehavior.rawValue), 9: requesterValue, 10: ancestryValue,
-            11: unverifiedRationale.map { .text($0) } ?? .null, 12: submissionValue])
-        try self.init(canonicalBytes: DeterministicCBOR.encode(fields, limits: limits), limits: limits, expectedSchemaVersion: schemaVersion)
+            11: unverifiedRationale.map { .text($0) } ?? .null, 12: submissionValue]
+        func source(_ value: CapturedCommandInput) -> CBORValue {
+            .map([0: .unsigned(value.kind.rawValue), 1: value.streamBinding.map { .bytes($0) } ?? .null,
+                2: value.observedPath.map { .bytes($0) } ?? .null, 3: value.identity.map(identity) ?? .null])
+        }
+        func stream(_ value: CapturedCommandStream) -> CBORValue {
+            .map([0: source(value.source), 1: .unsigned(value.access.rawValue), 2: .unsigned(value.flags.rawValue)])
+        }
+        if let layout = stdioLayout {
+            fields[13] = .map([0: stream(layout.input), 1: stream(layout.output), 2: stream(layout.error),
+                3: layout.terminal.map { .map([0: stream($0.stream), 1: .unsigned(UInt64($0.sessionID)),
+                    2: .unsigned(UInt64($0.terminalDevice))]) } ?? .null, 4: .unsigned(UInt64(layout.ptyMask))])
+        }
+        try self.init(canonicalBytes: DeterministicCBOR.encode(.map(fields), limits: limits), limits: limits, expectedSchemaVersion: schemaVersion)
     }
 
     public init(canonicalBytes: Data, limits: CBORLimits, expectedSchemaVersion: UInt64 = 1) throws {
-        let root = try CaptureFields(DeterministicCBOR.decode(canonicalBytes, limits: limits), count: 13)
+        guard Self.supportedSchemaVersions.contains(expectedSchemaVersion) else { throw CommandCaptureError.version }
+        let root = try CaptureFields(DeterministicCBOR.decode(canonicalBytes, limits: limits), count: expectedSchemaVersion == 3 ? 14 : 13)
         schemaVersion = try root.uint(0)
         guard Self.supportedSchemaVersions.contains(expectedSchemaVersion), schemaVersion == expectedSchemaVersion else {
             throw CommandCaptureError.version
@@ -189,18 +240,17 @@ public struct CommandCapture: Equatable, Sendable {
             previous = name
         }
         self.environment = environment
-        let input = try CaptureFields(root[6], count: 4)
-        let kind: CommandInputKind = try input.tag(0)
-        guard schemaVersion >= kind.minimumSchemaVersion else { throw CommandCaptureError.enumeration }
-        let binding = try input.optionalBytes(1, count: 16)
-        let path = try input.optionalPath(2)
-        let identity = try input.optionalIdentity(3)
-        if kind == .null {
-            guard binding == nil, path == nil, identity == nil else { throw CommandCaptureError.fields }
-        } else {
-            guard binding != nil else { throw CommandCaptureError.bytes }
+        func source(_ value: CBORValue) throws -> CapturedCommandInput {
+            let fields = try CaptureFields(value, count: 4)
+            let kind: CommandInputKind = try fields.tag(0)
+            guard expectedSchemaVersion >= kind.minimumSchemaVersion else { throw CommandCaptureError.enumeration }
+            let binding = try fields.optionalBytes(1, count: 16), path = try fields.optionalPath(2), identity = try fields.optionalIdentity(3)
+            if kind == .null {
+                guard binding == nil, path == nil, identity == nil else { throw CommandCaptureError.fields }
+            } else { guard binding != nil else { throw CommandCaptureError.bytes } }
+            return CapturedCommandInput(kind: kind, streamBinding: binding, observedPath: path, identity: identity)
         }
-        self.input = CapturedCommandInput(kind: kind, streamBinding: binding, observedPath: path, identity: identity)
+        self.input = try source(root[6])
         self.ioMode = try root.tag(7)
         self.disconnectBehavior = try root.tag(8)
         let requester = try CaptureFields(root[9], count: 8)
@@ -225,6 +275,38 @@ public struct CommandCapture: Equatable, Sendable {
         let submission = try CaptureFields(root[12], count: 3)
         self.submission = try CapturedSubmission(id: submission.bytes(0, count: 16), nonce: submission.bytes(1, count: 32),
             callerBinding: submission.bytes(2, count: 16))
+        if schemaVersion == 3 {
+            func stream(_ value: CBORValue) throws -> CapturedCommandStream {
+                let fields = try CaptureFields(value, count: 3)
+                let flags = try fields.uint(2)
+                guard flags <= 15 else { throw CommandCaptureError.enumeration }
+                return try CapturedCommandStream(source: source(fields[0]), access: fields.tag(1), flags: .init(rawValue: flags))
+            }
+            let fields = try CaptureFields(root[13], count: 5)
+            let input = try stream(fields[0]), output = try stream(fields[1]), error = try stream(fields[2])
+            let terminal: CapturedCommandTerminal?
+            if fields[3] == .null { terminal = nil }
+            else {
+                let value = try CaptureFields(fields[3], count: 3)
+                let control = try stream(value[0]), session = try value.pid(1), device = try value.uint32(2)
+                guard control.access == .readWrite, [.tty, .pty].contains(control.source.kind),
+                      control.source.identity != nil, device != UInt32.max, self.requester.sessionID == session else {
+                    throw CommandCaptureError.fields
+                }
+                terminal = CapturedCommandTerminal(stream: control, sessionID: session, terminalDevice: device)
+            }
+            let mask = try fields.uint32(4)
+            guard mask <= 7, input.source == self.input, input.access != .writeOnly,
+                  output.access != .readOnly, error.access != .readOnly,
+                  ioMode == .pty || (mask == 0 && terminal == nil), terminal != nil || mask == 0 else {
+                throw CommandCaptureError.fields
+            }
+            for (index, value) in [input, output, error].enumerated() where mask & (1 << index) != 0 {
+                guard [.tty, .pty].contains(value.source.kind), let identity = value.source.identity,
+                      identity == terminal?.stream.source.identity else { throw CommandCaptureError.fields }
+            }
+            stdioLayout = CapturedCommandStdioLayout(input: input, output: output, error: error, terminal: terminal, ptyMask: mask)
+        } else { stdioLayout = nil }
         self.canonicalBytes = canonicalBytes
     }
 }

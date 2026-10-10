@@ -1,6 +1,6 @@
-# Command capture schemas 1 and 2
+# Command capture schemas 1, 2, and 3
 
-`CommandCapture` supports approval wire 1 with command capture schemas 1 and 2. Swift and Kotlin retain typed fields and exact canonical bytes.
+`CommandCapture` supports approval wire 1 with command capture schemas 1, 2, and 3. Swift and Kotlin retain typed fields and exact canonical bytes.
 
 The caller supplies the expected schema from the authenticated request contract. The default is schema 1 for existing callers. The inner version must match exactly. Parsing establishes structure, not OS provenance.
 
@@ -26,7 +26,7 @@ Every map has exactly the documented keys. Optional observations use explicit CB
 
 | Key | Field | Type |
 | --- | --- | --- |
-| 0 | Capture schema | Unsigned `1` or `2`, matching the signed contract |
+| 0 | Capture schema | Unsigned `1`, `2`, or `3`, matching the signed contract |
 | 1 | Effective executable | Map below |
 | 2 | Complete argv, including argv[0] | Nonempty array of raw byte strings |
 | 3 | Working directory | Map below |
@@ -39,8 +39,11 @@ Every map has exactly the documented keys. Optional observations use explicit CB
 | 10 | Observed ancestry and limits | Map below |
 | 11 | Unverified caller rationale | Text or null |
 | 12 | Submission bindings | Map below |
+| 13 | Stream layout, schema 3 only | Map below |
 
 The disconnect field describes an already-started command. It does not add resumable admission, detached approval, or automatic retries. Product defaults and supported I/O combinations belong to the execution adapter.
+
+Schemas 1 and 2 contain exactly fields 0 through 12. Schema 3 contains exactly fields 0 through 13. Legacy bytes stay unchanged.
 
 ## Paths, argv, environment, and credentials
 
@@ -60,21 +63,73 @@ Stdin is `{0: kind, 1: stream binding16|null, 2: observed absolute path bytes|nu
 
 | Kind | Tag | Supported schemas |
 | --- | --- | --- |
-| Null | 0 | 1, 2 |
-| Caller-controlled pipe | 1 | 1, 2 |
-| File | 2 | 1, 2 |
-| Caller-controlled TTY | 3 | 1, 2 |
-| Caller-controlled PTY | 4 | 1, 2 |
-| Caller-controlled socket | 5 | 2 |
-| Directory | 6 | 2 |
-| Caller-controlled device | 7 | 2 |
-| Other caller-controlled source | 8 | 2 |
+| Null | 0 | 1, 2, 3 |
+| Caller-controlled pipe | 1 | 1, 2, 3 |
+| File | 2 | 1, 2, 3 |
+| Caller-controlled TTY | 3 | 1, 2, 3 |
+| Caller-controlled PTY | 4 | 1, 2, 3 |
+| Caller-controlled socket | 5 | 2, 3 |
+| Directory | 6 | 2, 3 |
+| Caller-controlled device | 7 | 2, 3 |
+| Other caller-controlled source | 8 | 2, 3 |
 
 Null input requires all three remaining values to be null. Other kinds require the opaque stream binding. Available path and identity observations remain optional.
 
 Schema 2 keeps all existing fields and tag meanings. Schema 1 rejects tags 5 through 8. Future tags and schemas fail in both parsers. An unavailable classification must use `other`, never a fabricated file or pipe label. A directory label does not promise that reading succeeds.
 
 The authority retains the actual stream behind that binding. A path or stream ID alone cannot open, replace, or authorize an input stream. The phone must disclose that caller-controlled content is not captured or approved byte-for-byte. Streaming remains supported.
+
+## Stream layout in schema 3
+
+Schema 3 binds the three stream observations and terminal routing to the approved bytes.
+Field 6 remains the stdin source. It must equal the source in the layout's stdin observation.
+
+| Layout key | Value |
+| --- | --- |
+| 0 | Stdin observation |
+| 1 | Stdout observation |
+| 2 | Stderr observation |
+| 3 | Original caller terminal observation or null |
+| 4 | PTY selection mask, unsigned 0 through 7 |
+
+Each stream observation is `{0: source map, 1: access tag, 2: semantic flag mask}`.
+The source map uses the same keys and meanings as field 6.
+Access is read-only `0`, write-only `1`, or read/write `2`.
+Stdin rejects write-only access. Stdout and stderr reject read-only access.
+
+| Semantic flag | Bit value |
+| --- | --- |
+| Append | 1 |
+| Nonblocking | 2 |
+| Asynchronous IO | 4 |
+| Synchronous IO | 8 |
+
+The mask ranges from 0 through 15. These are portable meanings, not Darwin flag integers.
+The authority observes these flags without changing the caller's shared stream state.
+Null sources still carry their access and flags. Their source metadata stays null.
+
+The caller terminal observation is `{0: stream observation, 1: session ID, 2: terminal device}`.
+Its source must be a TTY or PTY with a file identity and read/write access.
+Its session ID must be positive, at most Int32.max, and equal the requester session ID.
+Its terminal device is the kernel's UInt32 device value. `UInt32.max`, the absent-device sentinel, fails.
+Paths and labels provide no terminal authority.
+
+The selection mask uses bit 1 for stdin, bit 2 for stdout, and bit 4 for stderr.
+Each selected stream must be a TTY or PTY with the caller terminal's file identity.
+The execution adapter routes selected streams through the private command terminal.
+It preserves each unselected stream's retained source, including files, pipes, and foreign terminals.
+
+Pipes mode requires a zero selection mask and no caller terminal observation.
+PTY mode permits every selection mask, including zero when all three streams are redirected.
+A missing caller terminal requires a zero mask. It does not prohibit a private command terminal.
+The adapter must establish each mapping from authenticated kernel observations, not caller-supplied paths.
+It must recheck the original caller, terminal, retained stream identities, and semantic flags before dispatch.
+
+These codecs validate the representation. The [retained layout adapter](../docs/macos-command-stdio-layout.md) implements the separate descriptor carrier and OS rechecks.
+Mapped execution remains integration work.
+The Android connection still advertises schemas 1 and 2 until the complete schema 3 inspection UI is integrated.
+
+## Requester observations
 
 Requester fields are:
 
@@ -111,7 +166,10 @@ The authority still must capture the OS values, bind the live caller and streams
 
 ## Evidence and bounds
 
-Schema 1 retains its nine valid and 86 invalid shared fixtures unchanged. Schema 2 adds 13 valid and 16 invalid shared fixtures.
+Schema 1 retains its nine valid and 86 invalid shared fixtures unchanged. Schema 2 adds 13 valid and 16 invalid shared fixtures. Schema 3 adds 39 valid and 75 invalid shared fixtures.
+
+The schema 3 fixtures cover all eight routing masks, all 16 flag combinations, mixed redirects, and malformed nested layouts.
+Both languages verify that routing and append-mode changes alter the issued request digest.
 
 Both parsers require explicit version selection. Phone tests cover signed version mismatches, disjoint offers, unknown contracts, and schema downgrade after reconnect.
 

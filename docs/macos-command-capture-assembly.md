@@ -51,9 +51,11 @@ The host must select PATH, HOME, and locale behavior through the eventual policy
 This class adds no hidden environment restriction or product default.
 
 The host explicitly selects the negotiated phone capture schema.
-Actual socket, directory, device, and other-source inputs require schema 2. Schema 1 cannot substitute a different source kind.
+Actual socket, directory, device, and other-source inputs require schema 2 or 3. Schema 1 cannot substitute a different source kind.
 The `CommandCapture` producer encodes every field and passes the result through the existing strict parser.
-Shared schema 1 and 2 vectors re-encode to their exact original canonical bytes.
+Shared schema 1, 2, and 3 vectors re-encode to their exact original canonical bytes.
+Schema 3 also binds retained stdout, stderr, access modes, flags, and terminal routing.
+The [layout adapter](macos-command-stdio-layout.md) captures and rechecks these observations from carrier 5.
 
 ## Ownership and dispatch
 
@@ -73,6 +75,8 @@ Borrowers must not close, retain, or pass those descriptors to another thread.
 Input capture and recheck do not read stdin. Streaming content remains caller-controlled.
 Input paths are descriptive observations. Dispatch retains the original object rather than reopening its descriptive path.
 Capturing metadata does not freeze content, offsets, flags, terminal settings, dependencies, or process ancestry.
+Schema 3 rechecks the captured stream identities, semantic flags, and original caller terminal context.
+A mismatch retires the request resources.
 
 ## Evidence and remaining integration
 

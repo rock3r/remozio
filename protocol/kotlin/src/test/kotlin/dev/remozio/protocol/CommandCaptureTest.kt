@@ -13,7 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class CommandCaptureTest {
     private val limits = CborLimits(8192, 16, 1024)
-    private fun vectors(version: Int = 1) = Json.parseToJsonElement(File(checkNotNull(System.getProperty(if (version == 1) "remozio.commandVectors" else "remozio.commandVectors2"))).readText()).jsonObject
+    private fun vectors(version: Int = 1) = Json.parseToJsonElement(File(checkNotNull(System.getProperty(if (version == 1) "remozio.commandVectors" else "remozio.commandVectors$version"))).readText()).jsonObject
     private fun hex(value: String) = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     private fun first() = hex(vectors().getValue("valid").jsonArray[0].jsonObject.getValue("hex").jsonPrimitive.content)
     @Test fun sharedCapturesPreserveExactBytesAndProvenance() {
@@ -80,7 +80,7 @@ class CommandCaptureTest {
         }
         assertFailsWith<CommandCaptureException> { CommandCapture(first(), limits, expectedSchemaVersion = 2u) }
         assertFailsWith<CommandCaptureException> { CommandCapture(first(), limits, expectedSchemaVersion = 3u) }
-        assertEquals(setOf(1uL, 2uL), CommandCapture.supportedSchemaVersions)
+        assertEquals(setOf(1uL, 2uL, 3uL), CommandCapture.supportedSchemaVersions)
     }
 
     @Test fun boundsAndImmutableSnapshots() {
@@ -100,6 +100,55 @@ class CommandCaptureTest {
             assertFailsWith<CborException> { CommandCapture(original, bound) }
         }
     }
+    @Test fun schemaThreeStreamLayoutAndMalformedBindings() {
+        val rows = vectors(3)
+        assertEquals(39, rows.getValue("valid").jsonArray.size)
+        assertEquals(75, rows.getValue("invalid").jsonArray.size)
+        for (row in rows.getValue("valid").jsonArray) {
+            val fields = row.jsonObject
+            val name = fields.getValue("name").jsonPrimitive.content
+            val bytes = hex(fields.getValue("hex").jsonPrimitive.content)
+            val capture = CommandCapture(bytes, limits, 3u)
+            val layout = checkNotNull(capture.stdioLayout)
+            assertContentEquals(bytes, capture.canonicalBytes, name)
+            assertEquals(capture.input, layout.input.source, name)
+            assertEquals(fields.getValue("ptyMask").jsonPrimitive.content.toUInt(), layout.ptyMask, name)
+            val streams = listOf(layout.input, layout.output, layout.error)
+            assertEquals(fields.getValue("streamKinds").jsonArray.map { it.jsonPrimitive.content.toULong() }, streams.map { it.source.kind.wireValue }, name)
+            assertEquals(fields.getValue("streamAccess").jsonArray.map { it.jsonPrimitive.content.toULong() }, streams.map { it.access.wireValue }, name)
+            assertEquals(fields.getValue("streamFlags").jsonArray.map { it.jsonPrimitive.content.toULong() }, streams.map { it.flags.wireValue }, name)
+            assertEquals(fields.getValue("terminalSession").jsonPrimitive.contentOrNull?.toUInt(), layout.terminal?.sessionID, name)
+            assertEquals(fields.getValue("arguments").jsonArray.map { CborValue.Bytes(hex(it.jsonPrimitive.content)) }, capture.arguments, name)
+            assertEquals(fields.getValue("environmentNames").jsonArray.map { CborValue.Bytes(hex(it.jsonPrimitive.content)) }, capture.environment.map { it.name }, name)
+            assertFailsWith<CommandCaptureException>(name) { CommandCapture(bytes, limits) }
+            assertFailsWith<CommandCaptureException>(name) { CommandCapture(bytes, limits, 2u) }
+        }
+        for (row in rows.getValue("invalid").jsonArray) {
+            val fields = row.jsonObject
+            assertFailsWith<CommandCaptureException>(fields.getValue("name").jsonPrimitive.content) {
+                CommandCapture(hex(fields.getValue("hex").jsonPrimitive.content), limits, 3u)
+            }
+        }
+        assertEquals(null, CommandCapture(first(), limits).stdioLayout)
+    }
+
+    @Test fun approvedDigestBindsStreamRoutingAndFlags() {
+        val rows = vectors(3).getValue("valid").jsonArray
+        val contract = RequestContract(RequestKind.COMMAND, 1u, 3u)
+        fun issued(name: String): IssuedRequestPayload {
+            val row = rows.first { it.jsonObject.getValue("name").jsonPrimitive.content == name }.jsonObject
+            return IssuedRequestPayload(contract, ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 },
+                ByteArray(32) { 4 }, emptySet(), 10u, 20u, hex(row.getValue("hex").jsonPrimitive.content),
+                listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), limits, limits)
+        }
+        val first = issued("schema3-terminal-mask-0")
+        val decoded = IssuedRequestPayload.decode(first.encode(limits), limits, limits, ContractCapabilities(mapOf(contract to emptySet())))
+        assertContentEquals(first.canonicalCapture, decoded.canonicalCapture)
+        assertEquals(0u, CommandCapture(decoded.canonicalCapture, limits, decoded.contract.schemaVersion).stdioLayout?.ptyMask)
+        kotlin.test.assertFalse(first.requestDigest(limits, limits).contentEquals(issued("schema3-terminal-mask-1").requestDigest(limits, limits)))
+        kotlin.test.assertFalse(issued("schema3-semantic-flags-0").requestDigest(limits, limits).contentEquals(issued("schema3-semantic-flags-1").requestDigest(limits, limits)))
+    }
+
     @Test fun issuedRequestPreservesCompleteCapture() {
         val bytes = first()
         val contract = RequestContract(RequestKind.COMMAND, 1u, 1u)

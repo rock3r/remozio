@@ -32,6 +32,8 @@ public final class MachCommandCallerReceiver {
     public static let admissionReplyCarrierVersion: UInt32 = 1
     public static let ioInputMessageID: mach_msg_id_t = 0x524d0407
     public static let ioInputCarrierVersion: UInt32 = 4
+    static let mappedIOInputMessageID: mach_msg_id_t = 0x524d040c
+    static let mappedIOInputCarrierVersion: UInt32 = 5
     public static let terminalReplyMessageID: mach_msg_id_t = 0x524d0408
     static let streamOutputMessageID: mach_msg_id_t = 0x524d0409
     static let streamOpenedMessageID: mach_msg_id_t = 0x524d040a
@@ -81,11 +83,21 @@ public final class MachCommandCallerReceiver {
     func receiveIOInput(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandInputSubmission {
         let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .ioInput)
         guard let input = packet.input, let reply = packet.reply, let outputs = packet.outputs else {
-            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close()
+            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close(); packet.controlTerminal?.close()
             throw MachCommandCallerError.malformed
         }
         return ReceivedMachCommandInputSubmission(payload: packet.payload, caller: packet.caller, input: input,
             carrierVersion: Self.ioInputCarrierVersion, reply: reply, outputs: outputs)
+    }
+
+    func receiveMappedIOInput(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandInputSubmission {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: .mappedIOInput)
+        guard let input = packet.input, let reply = packet.reply, let outputs = packet.outputs else {
+            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close(); packet.controlTerminal?.close()
+            throw MachCommandCallerError.malformed
+        }
+        return ReceivedMachCommandInputSubmission(payload: packet.payload, caller: packet.caller, input: input,
+            carrierVersion: Self.mappedIOInputCarrierVersion, reply: reply, outputs: outputs, controlTerminal: packet.controlTerminal)
     }
 
     func receiveAdmissionReply(timeoutMilliseconds: UInt32, previewTimeoutMilliseconds: UInt32? = nil) throws -> sending ReceivedMachCommandSubmission {
@@ -109,7 +121,7 @@ public final class MachCommandCallerReceiver {
         case .streamOutput: return .stream(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller), nil)
         case .terminalReply: return .terminal(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller))
         default:
-            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close()
+            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close(); packet.controlTerminal?.close()
             throw MachCommandCallerError.malformed
         }
     }
@@ -135,19 +147,23 @@ public final class MachCommandCallerReceiver {
         case .hello:
             guard let reply = packet.reply else { packet.caller.close(); throw MachCommandCallerError.malformed }
             return .hello(MachCommandHello(payload: packet.payload, caller: packet.caller, reply: reply))
-        case .input, .admissionInput, .ioInput:
-            guard let input = packet.input else { packet.caller.close(); packet.reply?.close(); throw MachCommandCallerError.malformed }
+        case .input, .admissionInput, .ioInput, .mappedIOInput:
+            guard let input = packet.input else {
+                packet.caller.close(); packet.reply?.close(); packet.outputs?.close(); packet.controlTerminal?.close()
+                throw MachCommandCallerError.malformed
+            }
             return .input(ReceivedMachCommandInputSubmission(payload: packet.payload, caller: packet.caller, input: input,
                 carrierVersion: packet.kind == .input ? Self.inputCarrierVersion :
-                    (packet.kind == .ioInput ? Self.ioInputCarrierVersion : Self.admissionInputCarrierVersion),
-                reply: packet.reply, outputs: packet.outputs))
+                    (packet.kind == .mappedIOInput ? Self.mappedIOInputCarrierVersion :
+                        (packet.kind == .ioInput ? Self.ioInputCarrierVersion : Self.admissionInputCarrierVersion)),
+                reply: packet.reply, outputs: packet.outputs, controlTerminal: packet.controlTerminal))
         default:
-            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close()
+            packet.caller.close(); packet.input?.close(); packet.reply?.close(); packet.outputs?.close(); packet.controlTerminal?.close()
             throw MachCommandCallerError.malformed
         }
     }
 
-    private enum PacketKind { case submission, input, hello, helloReply, admissionInput, admissionReply, ioInput, terminalReply, streamOutput, streamOpened, streamControl }
+    private enum PacketKind { case submission, input, hello, helloReply, admissionInput, admissionReply, ioInput, mappedIOInput, terminalReply, streamOutput, streamOpened, streamControl }
 
     private struct Packet {
         let kind: PacketKind
@@ -156,6 +172,7 @@ public final class MachCommandCallerReceiver {
         let input: RetainedCommandInputDescriptor?
         let reply: MachCommandReplyRight?
         let outputs: RetainedCommandOutputChannels?
+        let controlTerminal: RetainedCommandInputDescriptor?
     }
 
     private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?, previewTimeoutMilliseconds: UInt32? = nil) throws -> sending Packet {
@@ -175,18 +192,20 @@ public final class MachCommandCallerReceiver {
             case Self.inputMessageID: kind = .input
             case Self.admissionInputMessageID: kind = .admissionInput
             case Self.ioInputMessageID: kind = .ioInput
+            case Self.mappedIOInputMessageID: kind = .mappedIOInput
             case Self.streamOutputMessageID: kind = .streamOutput
             case Self.streamOpenedMessageID: kind = .streamOpened
             case Self.terminalReplyMessageID: kind = .terminalReply
             default: try discardQueueHead(); throw MachCommandCallerError.malformed
             }
         }
-        let hasInput = kind == .input || kind == .admissionInput || kind == .ioInput
+        let isIO = kind == .ioInput || kind == .mappedIOInput
+        let hasInput = kind == .input || kind == .admissionInput || isIO
         let hasPort = hasInput || kind == .hello || kind == .streamOpened
         let isStream = [.streamOutput, .streamOpened, .streamControl].contains(kind)
         let payloadLimit = isStream ? min(maxPayloadBytes, CommandStreamFrame.maximumBytes) : kind == .hello || kind == .helloReply || (kind == .admissionReply || kind == .terminalReply) ? min(maxPayloadBytes, CommandHandshakeOffer.maximumBytes) : maxPayloadBytes
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
-        let descriptorCount = kind == .ioInput ? 5 : (kind == .admissionInput ? 2 : (hasPort ? 1 : 0))
+        let descriptorCount = kind == .mappedIOInput ? 6 : kind == .ioInput ? 5 : (kind == .admissionInput ? 2 : (hasPort ? 1 : 0))
         let descriptorBytes = hasPort ? MemoryLayout<mach_msg_body_t>.size + descriptorCount * MemoryLayout<mach_msg_port_descriptor_t>.size : 0
         let metadataOffset = headerBytes + descriptorBytes
         let prefixBytes = metadataOffset + 8
@@ -200,6 +219,7 @@ public final class MachCommandCallerReceiver {
         case .admissionInput: identifier = Self.admissionInputMessageID; carrierVersion = Self.admissionInputCarrierVersion
         case .admissionReply: identifier = Self.admissionReplyMessageID; carrierVersion = Self.admissionReplyCarrierVersion
         case .ioInput: identifier = Self.ioInputMessageID; carrierVersion = Self.ioInputCarrierVersion
+        case .mappedIOInput: identifier = Self.mappedIOInputMessageID; carrierVersion = Self.mappedIOInputCarrierVersion
         case .terminalReply: identifier = Self.terminalReplyMessageID; carrierVersion = Self.admissionReplyCarrierVersion
         case .streamOutput: identifier = Self.streamOutputMessageID; carrierVersion = Self.handshakeCarrierVersion
         case .streamOpened: identifier = Self.streamOpenedMessageID; carrierVersion = Self.handshakeCarrierVersion
@@ -270,7 +290,8 @@ public final class MachCommandCallerReceiver {
                     index * MemoryLayout<mach_msg_port_descriptor_t>.size, as: mach_msg_port_descriptor_t.self)
                 guard descriptor.type == UInt32(MACH_MSG_PORT_DESCRIPTOR),
                       descriptor.disposition == UInt32(MACH_MSG_TYPE_PORT_SEND),
-                      descriptor.name != MACH_PORT_NULL, descriptor.name != UInt32.max else {
+                      (descriptor.name != MACH_PORT_NULL || (kind == .mappedIOInput && index == 3)),
+                      descriptor.name != UInt32.max else {
                     throw MachCommandCallerError.malformed
                 }
                 carriedPorts.append(descriptor.name)
@@ -295,22 +316,34 @@ public final class MachCommandCallerReceiver {
             storage.storeBytes(of: descriptor, toByteOffset: offset, as: mach_msg_port_descriptor_t.self)
             return right
         }
+        let controlTerminal: RetainedCommandInputDescriptor?
+        if kind == .mappedIOInput, carriedPorts[3] != MACH_PORT_NULL {
+            let terminal = try RetainedCommandInputDescriptor(fileport: carriedPorts[3])
+            try terminal.withBorrowedDescriptor { fd in
+                let flags = fcntl(fd, F_GETFL)
+                guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
+                guard flags & O_ACCMODE == O_RDWR, flags & O_EVTONLY == 0, isatty(fd) == 1 else {
+                    throw MachCommandCallerError.malformed
+                }
+            }
+            controlTerminal = terminal
+        } else { controlTerminal = nil }
         let outputs: RetainedCommandOutputChannels?
-        if kind == .ioInput {
+        if isIO {
             let output = try RetainedCommandOutputDescriptor(fileport: carriedPorts[1])
             let error = try RetainedCommandOutputDescriptor(fileport: carriedPorts[2])
             outputs = RetainedCommandOutputChannels(output: output, error: error,
-                result: takeReply(4, identifier: Self.terminalReplyMessageID))
+                result: takeReply(kind == .mappedIOInput ? 5 : 4, identifier: Self.terminalReplyMessageID))
         } else { outputs = nil }
         let reply: MachCommandReplyRight?
-        if kind == .hello || kind == .admissionInput || kind == .ioInput {
-            let index = kind == .hello ? 0 : (kind == .ioInput ? 3 : 1)
+        if kind == .hello || kind == .admissionInput || isIO {
+            let index = kind == .hello ? 0 : (kind == .mappedIOInput ? 4 : (kind == .ioInput ? 3 : 1))
             reply = takeReply(index, identifier: kind == .hello ? Self.helloReplyMessageID : Self.admissionReplyMessageID)
         } else if kind == .streamOpened {
             reply = takeReply(0, identifier: Self.streamControlMessageID)
         } else { reply = nil }
         completed = true
-        return Packet(kind: kind, payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller, input: input, reply: reply, outputs: outputs)
+        return Packet(kind: kind, payload: Data(bytes: storage.advanced(by: prefixBytes), count: count), caller: caller, input: input, reply: reply, outputs: outputs, controlTerminal: controlTerminal)
     }
 
     private func discardQueueHead() throws {
@@ -353,15 +386,18 @@ public struct ReceivedMachCommandInputSubmission {
     public let carrierVersion: UInt32
     let reply: MachCommandReplyRight?
     let outputs: RetainedCommandOutputChannels?
+    let controlTerminal: RetainedCommandInputDescriptor?
     private let ownership = InputSubmissionOwnership()
     fileprivate init(payload: Data, caller: RetainedCommandCaller, input: RetainedCommandInputDescriptor,
-                     carrierVersion: UInt32, reply: MachCommandReplyRight?, outputs: RetainedCommandOutputChannels? = nil) {
+                     carrierVersion: UInt32, reply: MachCommandReplyRight?, outputs: RetainedCommandOutputChannels? = nil,
+                     controlTerminal: RetainedCommandInputDescriptor? = nil) {
         self.payload = payload; self.caller = caller; self.input = input
-        self.carrierVersion = carrierVersion; self.reply = reply; self.outputs = outputs
+        self.carrierVersion = carrierVersion; self.reply = reply; self.outputs = outputs; self.controlTerminal = controlTerminal
     }
     /// Sends one opaque control reply before input transfer. It is not a no-admission proof or retry grant.
     public func sendAdmissionReply(_ bytes: Data, timeoutMilliseconds: UInt32 = 5000) throws {
-        guard !ownership.claimed, [MachCommandCallerReceiver.admissionInputCarrierVersion, MachCommandCallerReceiver.ioInputCarrierVersion].contains(carrierVersion),
+        guard !ownership.claimed, [MachCommandCallerReceiver.admissionInputCarrierVersion, MachCommandCallerReceiver.ioInputCarrierVersion,
+                   MachCommandCallerReceiver.mappedIOInputCarrierVersion].contains(carrierVersion),
               let reply else { throw MachCommandHandshakeError.retired }
         try reply.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
     }
@@ -373,15 +409,16 @@ public struct ReceivedMachCommandInputSubmission {
     /// The original claim protects aliases. The new receipt owns the same kernel objects but no reply right.
     func takeForAdmissionAttempt() throws -> (ReceivedMachCommandInputSubmission, MachCommandReplyRight) {
         guard !ownership.claimed else { throw RetainedCommandCaptureError.alreadyOwned }
-        guard [MachCommandCallerReceiver.admissionInputCarrierVersion, MachCommandCallerReceiver.ioInputCarrierVersion].contains(carrierVersion), let reply else {
+        guard [MachCommandCallerReceiver.admissionInputCarrierVersion, MachCommandCallerReceiver.ioInputCarrierVersion,
+                   MachCommandCallerReceiver.mappedIOInputCarrierVersion].contains(carrierVersion), let reply else {
             closeIfUnclaimed(); throw MachCommandHandshakeError.incompatible
         }
         ownership.claimed = true
         return (ReceivedMachCommandInputSubmission(payload: payload, caller: caller, input: input,
-            carrierVersion: carrierVersion, reply: nil, outputs: outputs), reply)
+            carrierVersion: carrierVersion, reply: nil, outputs: outputs, controlTerminal: controlTerminal), reply)
     }
     func closeIfUnclaimed() {
-        if !ownership.claimed { ownership.claimed = true; caller.close(); input.close(); reply?.close(); outputs?.close() }
+        if !ownership.claimed { ownership.claimed = true; caller.close(); input.close(); reply?.close(); outputs?.close(); controlTerminal?.close() }
     }
 }
 
@@ -521,6 +558,21 @@ public final class RetainedCommandCaller {
             try Self.valid(code, requirement: requirement)
             guard try Self.path(token) == requester.executablePath else { throw MachCommandCallerError.wrongPeer }
         } catch { close(); throw error }
+    }
+
+    /// Only a new terminal-layout capture requests this observation. Legacy profiles retain their existing behavior.
+    func captureTerminalContext(expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws -> CommandCallerTerminalContext {
+        try recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        let context = try CommandCallerTerminalContext(originalAuditToken: token)
+        try recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        return context
+    }
+
+    /// Recheck the same caller record and terminal context. This never observes a replacement caller as the original.
+    func recheckTerminalContext(_ context: CommandCallerTerminalContext, expression: String, userID: uid_t, auditSessionID: au_asid_t?) throws {
+        try recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        try context.recheck(originalAuditToken: token)
+        try recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
     }
 
     /// Observes parent links with kernel process incarnations. Ancestors are observations, not trusted initiators or consent.

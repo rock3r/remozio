@@ -103,7 +103,32 @@ class CommandRequestSessionTest {
         assertEquals(IssuedRequestFailure.UNSUPPORTED_CONTRACT, assertFailsWith<IssuedRequestException> {
             negotiated(request(schema = 2u, capture = captureVersion(2u)), setOf(1u))
         }.reason)
-        assertFailsWith<IllegalArgumentException> { negotiated(request, setOf(3u)) }
+        assertFailsWith<IllegalArgumentException> { negotiated(request, setOf(4u)) }
+    }
+
+    @Test fun schemaThreeRequiresExplicitNegotiationAndExposesTheAuthenticatedStreamLayout() {
+        val capture = schemaThreeCapture("schema3-terminal-mask-0")
+        val issued = request(schema = 3u, capture = capture)
+        val body = issued.encode(bound)
+        val signature = sign(body)
+        assertEquals(IssuedRequestFailure.UNSUPPORTED_CONTRACT, assertFailsWith<IssuedRequestException> {
+            CommandRequestSession.open(body, signature, mac, account, publicKey(pair), limits)
+        }.reason)
+        CommandRequestSession.open(body, signature, mac, account, publicKey(pair), limits, setOf(3u)).use { session ->
+            val parsed = assertNotNull(session.snapshot(time()).capture)
+            assertContentEquals(capture, parsed.canonicalBytes)
+            val layout = assertNotNull(parsed.stdioLayout)
+            assertEquals(0u, layout.ptyMask)
+            assertEquals(CommandInputKind.PIPE, layout.input.source.kind)
+            assertEquals(CommandInputKind.FILE, layout.output.source.kind)
+            assertTrue(layout.output.flags.append)
+            assertEquals(CommandInputKind.SOCKET, layout.error.source.kind)
+            assertNotNull(layout.terminal)
+        }
+        val altered = request(schema = 3u, capture = schemaThreeCapture("schema3-terminal-mask-1")).encode(bound)
+        assertEquals(CommandSessionRejection.INVALID_SIGNATURE, assertFailsWith<CommandSessionException> {
+            CommandRequestSession.open(altered, signature, mac, account, publicKey(pair), limits, setOf(3u))
+        }.reason)
     }
 
     @Test fun validTerminalUpdateReleasesCaptureBeforePublishingRevisionAndCannotResurrect() {
