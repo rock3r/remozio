@@ -93,6 +93,6 @@ public final class GatewayHistoryCollector {
     public func invalidate() { stopped = true; records.removeAll(); operations.removeAll(); bytes = 0 }
 
     private func kind(_ receipt: GatewayControlReceipt) -> UInt64 {
-        switch receipt { case .candidate: 1; case .recipient(let value): value.kind.rawValue }
+        receipt.kind
     }
 }

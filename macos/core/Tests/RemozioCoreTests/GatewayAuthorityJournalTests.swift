@@ -858,6 +858,34 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     private func verifiedHead(_ controls: [GatewayAuthorityEnvelope]) throws -> VerifiedGatewayHead {
         try gatewayEvidence(controls).0
     }
+    func testUnknownSubmissionHistoryCannotRepairPhoneTrustOrAdvanceRootHead() throws {
+        for kind in [GatewaySubmissionKind.rotation, .revocation] {
+            let fixture = try Fixture(), db = try setup(fixture), registration = try trust().registration
+            var writer: AuditEpochWriter?
+            let revision = try enrollForRecovery(db, onWriter: { writer = $0 })
+            let control = try GatewaySubmissionControl(kind: kind,
+                binding: GatewaySubmissionBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5)),
+                revision: 1, operationID: id(30), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000,
+                credentialID: id(31), publicKey: kind == .rotation ? P256.Signing.PrivateKey().publicKey.x963Representation : nil)
+            let payload = try control.encode(limits: limits)
+            let signature = try key.signature(for: GatewaySubmissionSigningInput.make(wireVersion: 1, kind: kind,
+                canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)).rawRepresentation
+            let envelope = GatewayAuthorityEnvelope(kind: kind.rawValue, operationID: control.operationID,
+                revision: 1, canonicalPayload: payload, signature: signature, registrationToken: nil)
+            let (head, history) = try gatewayEvidence([envelope], after: 0)
+            XCTAssertEqual(try db.write { try $0.acknowledgeGatewayHead(head) }.disposition, .missingLocalHistory)
+            XCTAssertEqual(try db.write { try $0.reconcileGatewayDeliveryHistory(XCTUnwrap(history), registrationActive: true,
+                expectedTrustRevision: revision, expectedLocalRevision: 0, now: moment(120)) }.disposition, .requiresTrustRecovery)
+            XCTAssertThrowsError(try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+                receiptTimeMs: 1020, writer: XCTUnwrap(writer), expectedAuditHead: 1) }) {
+                XCTAssertEqual($0 as? GatewayAuthorityError, .unsupportedSubmissionControl)
+            }
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, 0)
+            XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(registration) })
+            XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot() }.revision, revision)
+        }
+    }
+
     private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil, includeBoundary: Bool = true,
                                  maximumRecords: Int = 16, collect: Bool = true, onPage: ((VerifiedGatewayControlHistory) -> Void)? = nil) throws -> (VerifiedGatewayHead, VerifiedGatewayHistory?) {
         let f = try Fixture(), trusted = try trust()
@@ -871,6 +899,10 @@ final class GatewayAuthorityJournalTests: XCTestCase {
             if control.kind == 1 {
                 _ = try gateway.admitCandidate(canonicalPayload: control.canonicalPayload, signature: control.signature,
                     wireVersion: 1, registrationToken: XCTUnwrap(control.registrationToken), trust: snapshot,
+                    nowUnixMillis: 1010, now: moment(110))
+            } else if GatewaySubmissionKind(rawValue: control.kind) != nil {
+                _ = try gateway.applySubmission(canonicalPayload: control.canonicalPayload, signature: control.signature,
+                    wireVersion: 1, trust: GatewaySubmissionTrust(registration: r, active: true, revision: UUID(), appliedControlRevision: gateway.head()),
                     nowUnixMillis: 1010, now: moment(110))
             } else {
                 _ = try gateway.applyRecipient(canonicalPayload: control.canonicalPayload, signature: control.signature,

@@ -69,18 +69,27 @@ public struct GatewayHeadEvidence: Sendable, CustomStringConvertible, CustomDebu
 public enum GatewayControlReceipt: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     case candidate(GatewayCandidateReceipt)
     case recipient(GatewayRecipientReceipt)
+    case submission(GatewaySubmissionReceipt)
+
+    public var kind: UInt64 {
+        switch self {
+        case .candidate: 1
+        case .recipient(let value): value.kind.rawValue
+        case .submission(let value): value.control.kind.rawValue
+        }
+    }
 
     public var revision: UInt64 {
-        switch self { case .candidate(let value): value.candidate.revision; case .recipient(let value): value.revision }
+        switch self { case .candidate(let value): value.candidate.revision; case .recipient(let value): value.revision; case .submission(let value): value.control.revision }
     }
     public var operationID: Data {
-        switch self { case .candidate(let value): value.candidate.operationID; case .recipient(let value): value.operationID }
+        switch self { case .candidate(let value): value.candidate.operationID; case .recipient(let value): value.operationID; case .submission(let value): value.control.operationID }
     }
     public var canonicalPayload: Data {
-        switch self { case .candidate(let value): value.canonicalPayload; case .recipient(let value): value.canonicalPayload }
+        switch self { case .candidate(let value): value.canonicalPayload; case .recipient(let value): value.canonicalPayload; case .submission(let value): value.canonicalPayload }
     }
     public var signature: Data {
-        switch self { case .candidate(let value): value.signature; case .recipient(let value): value.signature }
+        switch self { case .candidate(let value): value.signature; case .recipient(let value): value.signature; case .submission(let value): value.signature }
     }
     public var description: String { "GatewayControlReceipt(redacted)" }
     public var debugDescription: String { description }

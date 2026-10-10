@@ -174,8 +174,7 @@ extension GatewayDatabase {
         let page = try controlHistory(afterRevision: after, throughRevision: through, maximumRecords: Int(maximum))
         guard try GatewayHeadWire.bytes(fields, 2) == page.registration.encode() else { throw GatewayHeadReplyError.wrongScope }
         let entries: [CBORValue] = page.records.map { receipt in
-            let kind: UInt64
-            switch receipt { case .candidate: kind = 1; case .recipient(let value): kind = value.kind.rawValue }
+            let kind = receipt.kind
             return .map([0: .unsigned(kind), 1: .bytes(receipt.canonicalPayload), 2: .bytes(receipt.signature), 3: .unsigned(receipt.revision)])
         }
         let payload = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .unsigned(3),
@@ -194,12 +193,7 @@ extension GatewayDatabase {
         guard nonce.count == 32 else { throw GatewayHeadReplyError.invalidMessage }
         let evidence = try headEvidence()
         guard try GatewayHeadWire.bytes(fields, 2) == evidence.registration.encode() else { throw GatewayHeadReplyError.wrongScope }
-        let kind: UInt64
-        switch evidence.receipt {
-        case .candidate: kind = 1
-        case .recipient(let value): kind = value.kind.rawValue
-        case nil: kind = 0
-        }
+        let kind = evidence.receipt?.kind ?? 0
         let payload = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .unsigned(1),
             2: .bytes(evidence.registration.encode()), 3: .bytes(nonce), 4: .unsigned(evidence.revision),
             5: .unsigned(kind), 6: .bytes(evidence.receipt?.canonicalPayload ?? Data()),
@@ -251,6 +245,12 @@ private enum GatewayHeadWire {
                     throw GatewayHeadReplyError.invalidReceipt
                 }
                 return .candidate(GatewayCandidateReceipt(candidate: candidate, canonicalPayload: payload, signature: signature))
+            }
+            if let submissionKind = GatewaySubmissionKind(rawValue: kind) {
+                let control = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+                    registration: registration, payloadLimits: receiptLimits, signingLimits: signingLimits)
+                guard control.kind == submissionKind, control.revision == revision else { throw GatewayHeadReplyError.invalidReceipt }
+                return .submission(GatewaySubmissionReceipt(control: control, canonicalPayload: payload, signature: signature))
             }
             guard let kind = GatewayRecipientKind(rawValue: kind) else { throw GatewayHeadReplyError.invalidReceipt }
             let control = try GatewayStoredRecipient.decode(payload, kind: kind, limits: receiptLimits)
