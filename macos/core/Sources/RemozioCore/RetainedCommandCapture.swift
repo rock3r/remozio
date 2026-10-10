@@ -65,6 +65,12 @@ public final class RetainedCommandCapture {
                 throw RetainedCommandCaptureError.binding
             }
             guard resolvedTarget.uid == submission.requestedTargetUID else { throw RetainedCommandCaptureError.invalidContext }
+            if let admissionProfile, admissionProfile.supportsMappedLayout {
+                guard captureSchemaVersion == 3,
+                      submission.ioMode == (admissionProfile.supportsStreamingExecution ? .pty : .pipes) else {
+                    throw RetainedCommandCaptureError.invalidContext
+                }
+            }
             let environment = try Self.environment(minimal: minimalEnvironment, additions: submission.environmentAdditions)
             let filesystem = try CommandFilesystemCapture(executablePath: submission.executablePath,
                 directoryPath: submission.directoryPath, checkCancellation: checkCancellation)

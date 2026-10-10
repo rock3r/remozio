@@ -24,6 +24,8 @@ struct CommandChildLaunchSpecification {
             }
             appendWord(count); body.append(value)
         }
+        let mappedTerminal = capture.ioMode == .pty && capture.stdioLayout != nil
+        if mappedTerminal { appendWord(capture.stdioLayout!.ptyMask) }
         for group in capture.target.supplementaryGroups { appendWord(group) }
         guard capture.executable.path.first == 0x2f else { throw CommandChildSpecificationError.invalid }
         try appendString(capture.executable.path)
@@ -41,9 +43,9 @@ struct CommandChildLaunchSpecification {
             throw CommandChildSpecificationError.invalid
         }
         var frame = Data()
-        for value: UInt32 in [0x524d4331, count, capture.target.uid, capture.target.gid,
+        for value: UInt32 in [mappedTerminal ? 0x524d4332 : 0x524d4331, count, capture.target.uid, capture.target.gid,
             UInt32(capture.target.supplementaryGroups.count), UInt32(capture.arguments.count), UInt32(capture.environment.count),
-            preparationMilliseconds, fileCreationMask, UInt32(capture.ioMode.rawValue)] {
+            preparationMilliseconds, fileCreationMask, mappedTerminal ? 2 : UInt32(capture.ioMode.rawValue)] {
             var word = value.bigEndian; withUnsafeBytes(of: &word) { frame.append(contentsOf: $0) }
         }
         frame.append(body); canonicalBytes = frame

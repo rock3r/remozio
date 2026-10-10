@@ -2,6 +2,7 @@
 #define REMOZIO_COMMAND_PTY_H
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 
@@ -12,6 +13,12 @@ int remozio_command_pty_create(const struct termios * _Nullable attributes, cons
     remozio_command_pty_t * _Nullable * _Nonnull output);
 /* Borrow the slave only for spawning the bound child; never close or retain this descriptor. */
 int remozio_command_pty_borrow_slave(remozio_command_pty_t * _Nonnull pty, int * _Nonnull descriptor);
+/* Own a separate description of this private slave. Access tags are read 0,
+ * write 1, read/write 2. Semantic bits are append 1, nonblocking 2, async 4,
+ * sync 8. Recheck the opened object and change only its independent flags.
+ * The caller closes the returned descriptor after the bounded spawn callback. */
+int remozio_command_pty_copy_stream(remozio_command_pty_t * _Nonnull pty, uint32_t access,
+    uint32_t semantic_flags, int * _Nonnull output);
 /* Close the owner's slave after spawning. The child owns its separate copies. */
 void remozio_command_pty_seal_slave(remozio_command_pty_t * _Nonnull pty);
 /* Nonblocking bounded reads. EOF refers only to the stream and never establishes child exit or execution. */

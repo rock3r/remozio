@@ -5,6 +5,9 @@
 #include <signal.h>
 #include <unistd.h>
 #include <util.h>
+#include <limits.h>
+#include <string.h>
+#include <sys/stat.h>
 
 struct remozio_command_pty { int master, slave; bool eof; };
 static void close_descriptor(int *descriptor) {
@@ -89,4 +92,40 @@ int remozio_command_pty_eof_sequence(remozio_command_pty_t *pty, unsigned char b
     if (!(current.c_lflag & ICANON) || current.c_cc[VEOF] == _POSIX_VDISABLE) return 0;
     bytes[0] = bytes[1] = current.c_cc[VEOF]; *count = 2;
     return 0;
+}
+
+static bool same_terminal(const struct stat *first, const struct stat *second) {
+    return S_ISCHR(first->st_mode) && S_ISCHR(second->st_mode) &&
+        first->st_dev == second->st_dev && first->st_ino == second->st_ino && first->st_rdev == second->st_rdev;
+}
+int remozio_command_pty_copy_stream(remozio_command_pty_t *pty, uint32_t access, uint32_t semantic_flags, int *output) {
+    if (!output) return EINVAL;
+    *output = -1;
+    if (!pty || access > 2 || semantic_flags > 15) return EINVAL;
+    if (pty->slave < 0) return EBADF;
+    struct stat original = {0}, opened = {0}, current = {0};
+    if (fstat(pty->slave, &original)) return errno;
+    if (!S_ISCHR(original.st_mode) || isatty(pty->slave) != 1) return EINVAL;
+    char path[PATH_MAX] = {0};
+    if (fcntl(pty->slave, F_GETPATH, path)) return errno;
+    if (path[0] != '/' || !memchr(path, 0, sizeof(path))) return EINVAL;
+    int mode = access == 0 ? O_RDONLY : access == 1 ? O_WRONLY : O_RDWR;
+    int flags = (semantic_flags & 1 ? O_APPEND : 0) | (semantic_flags & 2 ? O_NONBLOCK : 0) |
+        (semantic_flags & 4 ? O_ASYNC : 0) | (semantic_flags & 8 ? O_SYNC : 0);
+    int descriptor = open(path, mode | flags | O_NOCTTY | O_CLOEXEC);
+    if (descriptor < 0) return errno;
+    int error = 0;
+    if (fstat(descriptor, &opened) || fstat(pty->slave, &current)) error = errno;
+    if (!error && (!same_terminal(&original, &opened) || !same_terminal(&original, &current) || isatty(descriptor) != 1)) error = ESTALE;
+    int status = !error ? fcntl(descriptor, F_GETFL) : -1;
+    if (!error && status < 0) error = errno;
+    const int semantic_mask = O_APPEND | O_NONBLOCK | O_ASYNC | O_SYNC;
+    if (!error && fcntl(descriptor, F_SETFL, (status & ~semantic_mask) | flags)) error = errno;
+    if (!error) {
+        status = fcntl(descriptor, F_GETFL);
+        if (status < 0) error = errno;
+        else if ((status & O_ACCMODE) != mode || (status & semantic_mask) != flags) error = EINVAL;
+    }
+    if (error) { close(descriptor); return error; }
+    *output = descriptor; return 0;
 }

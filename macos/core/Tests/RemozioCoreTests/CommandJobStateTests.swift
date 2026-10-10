@@ -7,7 +7,7 @@ import XCTest
 
 final class CommandJobStateTests: XCTestCase {
     private func binding(_ wire: UInt64) -> CommandStreamBinding {
-        .init(profile: .init(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: 4,
+        .init(profile: .init(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: wire >= 8 ? 5 : 4,
             callerBinding: Data(repeating: 1, count: 16), macID: Data(repeating: 2, count: 16), accountID: Data(repeating: 3, count: 16)),
             submission: .init(id: Data(repeating: 4, count: 16), nonce: Data(repeating: 5, count: 32), callerBinding: Data(repeating: 1, count: 16)),
             submissionDigest: Data(repeating: 6, count: 32),
@@ -18,7 +18,7 @@ final class CommandJobStateTests: XCTestCase {
     }
     func testEachJobProfileRequiresAnExplicitOfferWithoutChangingLegacyDefaults() throws {
         let nonce = Data(repeating: 10, count: 32)
-        for (wire, capabilities): (UInt64, CommandHandshakeCapabilities) in [(6, .streamingJobExecution), (7, .pipeJobExecutionControls)] {
+        for (wire, capabilities): (UInt64, CommandHandshakeCapabilities) in [(6, .streamingJobExecution), (7, .pipeJobExecutionControls), (8, .mappedTerminalJobExecution), (9, .mappedPipeJobExecutionControls)] {
             let profile = binding(wire).profile, bytes = try CommandHandshakeReply(nonce: nonce, profile: profile).bytes
             XCTAssertEqual(try CommandHandshakeReply.decode(bytes, offer: CommandHandshakeOffer(nonce: nonce, capabilities: capabilities),
                 macID: profile.macID, accountID: profile.accountID), profile)
@@ -27,15 +27,15 @@ final class CommandJobStateTests: XCTestCase {
                     macID: profile.macID, accountID: profile.accountID))
             }
             XCTAssertTrue(profile.supportsJobState)
-            XCTAssertEqual(profile.supportsStreamingExecution, wire == 6)
-            XCTAssertEqual(profile.supportsPipeExecutionControls, wire == 7)
+            XCTAssertEqual(profile.supportsStreamingExecution, [6, 8].contains(wire))
+            XCTAssertEqual(profile.supportsPipeExecutionControls, [7, 9].contains(wire))
         }
         XCTAssertEqual(CommandHandshakeCapabilities.streamingExecution.wireVersions, [4])
         XCTAssertEqual(CommandHandshakeCapabilities.pipeExecutionControls.wireVersions, [5])
         XCTAssertEqual(CommandHandshakeCapabilities.executionChannels.wireVersions, [3])
     }
     func testJobFramesPreserveUnknownTracingRawStopCodesAndExactBinding() throws {
-        for wire: UInt64 in [6, 7] {
+        for wire: UInt64 in [6, 7, 8, 9] {
             for tracing: CommandStopTracing in [.unknown, .untraced, .traced] {
                 for code in [CLD_STOPPED, CLD_TRAPPED] {
                     let payload = CommandJobStatePayload(revision: 3, state: .stopped(signal: UInt32(SIGTRAP), rawStopCode: UInt32(code), tracing: tracing))

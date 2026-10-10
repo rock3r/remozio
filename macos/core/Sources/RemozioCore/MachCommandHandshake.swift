@@ -32,8 +32,14 @@ public struct CommandHandshakeCapabilities: Equatable, Sendable {
     /// Explicit separate stdio and controls with native target job-state observations.
     public static let pipeJobExecutionControls = CommandHandshakeCapabilities(knownWire: [7], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.ioInputCarrierVersion)])
-    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2, 3, 4, 5, 6, 7], submission: CommandSubmission.supportedSchemaVersions,
-        input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion), UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion), UInt64(MachCommandCallerReceiver.ioInputCarrierVersion)])
+    /// Explicit schema-3 terminal routing with a separate caller terminal and target job state.
+    public static let mappedTerminalJobExecution = CommandHandshakeCapabilities(knownWire: [8], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
+    /// Explicit schema-3 direct streams with private controls and target job state.
+    public static let mappedPipeJobExecutionControls = CommandHandshakeCapabilities(knownWire: [9], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
+    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2, 3, 4, 5, 6, 7, 8, 9], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion), UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion), UInt64(MachCommandCallerReceiver.ioInputCarrierVersion), UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
     private init(knownWire: Set<UInt64>, submission: Set<UInt64>, input: Set<UInt64>) {
         wireVersions = knownWire; submissionSchemaVersions = submission; inputCarrierVersions = input
     }
@@ -105,12 +111,15 @@ public struct CommandHandshakeProfile: Equatable, Sendable {
         return Self(wireVersion: wire, submissionSchemaVersion: submission, inputCarrierVersion: input,
             callerBinding: binding, macID: mac, accountID: account)
     }
-    var supportsAdmissionResults: Bool { submissionSchemaVersion == 1 &&
+    var supportsMappedLayout: Bool { [8, 9].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 5 }
+    var supportsAdmissionResults: Bool { supportsMappedLayout || submissionSchemaVersion == 1 &&
         ((wireVersion == 2 && inputCarrierVersion == 3) || ([3, 4, 5, 6, 7].contains(wireVersion) && inputCarrierVersion == 4)) }
-    var supportsExecutionChannels: Bool { [3, 4, 5, 6, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
-    var supportsStreamingExecution: Bool { [4, 6].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
-    var supportsPipeExecutionControls: Bool { [5, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
-    var supportsJobState: Bool { [6, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+    var supportsExecutionChannels: Bool { supportsMappedLayout || [3, 4, 5, 6, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+    var supportsStreamingExecution: Bool { supportsMappedLayout && wireVersion == 8 ||
+        [4, 6].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+    var supportsPipeExecutionControls: Bool { supportsMappedLayout && wireVersion == 9 ||
+        [5, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+    var supportsJobState: Bool { supportsMappedLayout || [6, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
     var supportsExecutionControls: Bool { supportsStreamingExecution || supportsPipeExecutionControls }
     func supported(by capabilities: CommandHandshakeCapabilities) -> Bool {
         let understood = (wireVersion == 1 && submissionSchemaVersion == 1 && [2, 3].contains(inputCarrierVersion)) || supportsAdmissionResults

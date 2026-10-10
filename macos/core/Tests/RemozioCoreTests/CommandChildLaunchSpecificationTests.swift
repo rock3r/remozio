@@ -6,7 +6,7 @@ import XCTest
 @testable import RemozioCore
 
 final class CommandChildLaunchSpecificationTests: XCTestCase {
-    private func capture() throws -> CommandCapture {
+    private func capture(ioMode: CommandIOMode = .pipes) throws -> CommandCapture {
         try .init(schemaVersion: 1,
             executable: .init(path: Data("/usr/bin/true".utf8), identity: .init(device: 1, inode: 2), sha256: Data(count: 32)),
             arguments: [Data([0xff]), Data(), Data([0xfe, 0x0a])],
@@ -15,7 +15,7 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
             environment: [.init(name: Data("EMPTY".utf8), value: Data(), source: .requested),
                 .init(name: Data("RAW".utf8), value: Data([0xff, 0x3d, 0x0a]), source: .requested)],
             input: .init(kind: .pipe, streamBinding: Data(count: 16), observedPath: nil, identity: nil),
-            ioMode: .pipes, disconnectBehavior: .terminate,
+            ioMode: ioMode, disconnectBehavior: .terminate,
             requester: .init(executablePath: Data("/fixture/caller".utf8), realUID: 501, effectiveUID: 501, pid: 10, pidVersion: 11,
                 signing: .init(status: .unsigned, identifier: nil, team: nil, cdHash: nil), sessionID: nil, ttyPath: nil),
             ancestry: .init(completeness: .unavailable, entries: [], reason: .unsupported), unverifiedRationale: nil,
@@ -50,6 +50,56 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
         word(2, offset: 36, bytes: &bytes)
         return bytes
     }
+    private func layoutCapture(mask: UInt32, mode: CommandIOMode) throws -> CommandCapture {
+        let original = try capture(ioMode: mode)
+        let terminalSource = CapturedCommandInput(kind: .tty, streamBinding: Data(repeating: 9, count: 16), observedPath: nil,
+            identity: .init(device: 7, inode: 8))
+        let input = CapturedCommandStream(source: mask & 1 == 0 ? original.input : terminalSource, access: .readOnly, flags: [])
+        let output = CapturedCommandStream(source: mask & 2 == 0 ? original.input : terminalSource, access: .writeOnly, flags: [])
+        let error = CapturedCommandStream(source: mask & 4 == 0 ? original.input : terminalSource, access: .writeOnly, flags: [])
+        let terminal = mode == .pty ? CapturedCommandTerminal(stream: .init(source: terminalSource, access: .readWrite, flags: []),
+            sessionID: 123, terminalDevice: 9) : nil
+        let requester = original.requester
+        return try CommandCapture(schemaVersion: 3, executable: original.executable, arguments: original.arguments,
+            directory: original.directory, target: original.target, environment: original.environment, input: input.source,
+            ioMode: mode, disconnectBehavior: original.disconnectBehavior,
+            requester: .init(executablePath: requester.executablePath, realUID: requester.realUID, effectiveUID: requester.effectiveUID,
+                pid: requester.pid, pidVersion: requester.pidVersion, signing: requester.signing, sessionID: 123, ttyPath: nil),
+            ancestry: original.ancestry, unverifiedRationale: nil, submission: original.submission,
+            stdioLayout: .init(input: input, output: output, error: error, terminal: terminal, ptyMask: mask),
+            limits: .init(maxBytes: 8192, maxDepth: 16, maxItems: 1024))
+    }
+
+    func testEncoderSelectsExplicitTerminalFormatFromEveryApprovedSchemaThreeMask() throws {
+        for mask: UInt32 in 0...7 {
+            let capture = try layoutCapture(mask: mask, mode: .pty), original = capture.canonicalBytes
+            let frame = try CommandChildLaunchSpecification(capture: capture, preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+            XCTAssertEqual(frame, try mappedFrame(mask: mask))
+            XCTAssertEqual(try decode(frame) { spec in
+                XCTAssertEqual(spec.format_version, 2)
+                XCTAssertEqual(spec.io_mode, 2)
+                XCTAssertEqual(spec.stdio_pty_mask, mask)
+                XCTAssertEqual(try raw(spec.arguments[0]), capture.arguments[0])
+            }, 0)
+            XCTAssertEqual(capture.canonicalBytes, original)
+        }
+    }
+
+    func testSchemaThreePipesAndLegacyTerminalRetainTheirNativeFrameMeanings() throws {
+        let pipes = try CommandChildLaunchSpecification(capture: layoutCapture(mask: 0, mode: .pipes),
+            preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+        XCTAssertEqual(pipes, try frame())
+        let legacy = try CommandChildLaunchSpecification(capture: capture(ioMode: .pty),
+            preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+        var expected = try frame(); word(1, offset: 36, bytes: &expected)
+        XCTAssertEqual(legacy, expected)
+        XCTAssertEqual(try decode(legacy) { spec in
+            XCTAssertEqual(spec.format_version, 1)
+            XCTAssertEqual(spec.io_mode, 1)
+            XCTAssertEqual(spec.stdio_pty_mask, 7)
+        }, 0)
+    }
+
     func testMappedFormatAcceptsEveryExplicitMaskWithoutChangingInvocationBytes() throws {
         let expected = try capture()
         for mask: UInt32 in 0...7 {
