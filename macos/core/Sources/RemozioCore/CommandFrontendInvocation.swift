@@ -102,6 +102,10 @@ public struct CommandFrontendInvocation: Equatable, Sendable {
         ioMode = mode; disconnectBehavior = disconnect; unverifiedRationale = rationale
     }
 
+    func submissionControlTerminal(_ descriptor: Int32) -> Int32? {
+        ioMode == .pty && descriptor >= 0 ? descriptor : nil
+    }
+
     /// Copies the current directory bytes. Root must retain and recheck the named directory independently.
     public static func currentDirectory() throws -> Data {
         guard let pointer = getcwd(nil, 0) else { throw CommandFrontendInvocationError.system(errno) }

@@ -2797,6 +2797,46 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testFrontendPipeSelectionWithAvailableTerminalPassesRootCaptureWithoutConsumingStreams() throws {
+        let invocation = try CommandFrontendInvocation(arguments: ["remozio", "run", "--pipes", "--", "/usr/bin/true"].map { Data($0.utf8) },
+            defaultIOMode: .pty, defaultDisconnectBehavior: .terminate, limits: assemblyLimits)
+        var input: [Int32] = [-1, -1], output: [Int32] = [-1, -1], error: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&input), 0); XCTAssertEqual(pipe(&output), 0); XCTAssertEqual(pipe(&error), 0)
+        var master: Int32 = -1, slave: Int32 = -1
+        XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0)
+        defer { for fd in input + output + error + [master, slave] { _ = Darwin.close(fd) } }
+        let descriptors = [input[0], output[1], error[1], slave], flags = descriptors.map { fcntl($0, F_GETFL) }
+        XCTAssertEqual(Darwin.write(input[1], "pending", 7), 7)
+        XCTAssertEqual(Darwin.write(master, "queued\n", 7), 7)
+        for malformed in [true, false] {
+            let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
+            let submission = try commandSubmission(ioMode: invocation.ioMode)
+            let profile = CommandHandshakeProfile(wireVersion: 11, submissionSchemaVersion: 1, inputCarrierVersion: 5,
+                callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+            try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: input[0], outputDescriptor: output[1], errorDescriptor: error[1],
+                controlTerminalDescriptor: malformed ? slave : invocation.submissionControlTerminal(slave), destination: endpoint.port,
+                admissionReply: admission.port, terminalReply: result.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            let received = try receiver(endpoint, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 1000)
+            if malformed {
+                XCTAssertThrowsError(try assemble(received, schema: 3, admissionProfile: profile)) {
+                    XCTAssertEqual($0 as? RetainedCommandCaptureError, .invalidContext)
+                }
+            } else {
+                let capture = try assemble(received, schema: 3, admissionProfile: profile)
+                defer { capture.close() }
+                XCTAssertNil(capture.capture.stdioLayout?.terminal)
+                XCTAssertEqual(capture.capture.stdioLayout?.ptyMask, 0)
+            }
+            try expectAssemblyResourcesRetired(received)
+            XCTAssertEqual(descriptors.map { fcntl($0, F_GETFL) }, flags)
+        }
+        for (fd, expected) in [(input[0], "pending"), (slave, "queued\n")] {
+            var bytes = [UInt8](repeating: 0, count: expected.utf8.count)
+            XCTAssertEqual(Darwin.read(fd, &bytes, bytes.count), bytes.count)
+            XCTAssertEqual(Data(bytes), Data(expected.utf8))
+        }
+    }
+
     func testMappedIOCarrierTransfersTerminalClaimOnlyOnceAndRetiresItsImportedDescriptor() throws {
         let endpoint = try Endpoint(), admission = try Endpoint(), result = try Endpoint()
         let null = Darwin.open("/dev/null", O_RDWR)

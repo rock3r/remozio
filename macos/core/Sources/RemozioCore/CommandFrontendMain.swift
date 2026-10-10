@@ -106,7 +106,7 @@ public enum CommandFrontendMain {
         defer { endpoint.close() }
         let response = try CommandCallerReadiness.submitMappedIO(template, inputDescriptor: STDIN_FILENO,
             outputDescriptor: STDOUT_FILENO, errorDescriptor: STDERR_FILENO,
-            controlTerminalDescriptor: terminalDescriptor >= 0 ? terminalDescriptor : nil,
+            controlTerminalDescriptor: invocation.submissionControlTerminal(terminalDescriptor),
             authorityPort: endpoint.lookup, authorityPolicy: configuration.authorityPolicy,
             macID: configuration.macID, accountID: configuration.accountID, submissionLimits: configuration.submissionLimits,
             configuration: settings.readiness, checkCancellation: {
