@@ -611,7 +611,7 @@ public actor GatewayDeliveryCoordinator {
                 // A lost response does not establish receipt. The original candidate remains the only retry scope.
                 let retry = !Task.isCancelled && !stopped && (error as? FCMError) == .network
                 try database.finishProbe(reservation, outcome: retry ? .retry(minimumDelayMillis: backoff(reservation.number)) : .terminal,
-                    now: current().moment)
+                    now: clockSample().moment)
                 if !retry { throw error }
             }
         }
@@ -638,6 +638,10 @@ public actor GatewayDeliveryCoordinator {
     private func current() throws -> Sample {
         do { try validateAuthority() }
         catch { authorityUnavailable(); throw error }
+        return try clockSample()
+    }
+    /// Finish an existing reservation after authority loss while retaining clock epoch and regression checks.
+    private func clockSample() throws -> Sample {
         let result = try sample()
         guard result.moment.epoch == lastMoment.epoch, result.moment.milliseconds >= lastMoment.milliseconds else {
             stopped = true

@@ -110,7 +110,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func enrollment(active: Bool = true, phone: UInt8 = 6) throws -> GatewayPhoneEnrollment {
             try .init(phoneID: id(phone), epoch: id(7), tag: id(phone, 32), active: active)
         }
-        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil, validateAuthority: @escaping @Sendable () throws -> Void = {}) throws -> GatewayDeliveryCoordinator {
+        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil, validateAuthority: @escaping @Sendable () throws -> Void = {}, beforeSend: @escaping @Sendable () throws -> Void = {}) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
             let source = try tokenSource ?? FCMTokenSource(now: { .now }, refresh: {
                 refreshes.value.withLock { $0 += 1 }
@@ -131,6 +131,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             return try GatewayDeliveryCoordinator(database: db, identity: coordinatorIdentity ?? identity(), tokens: source,
                 policy: GatewayDeliveryPolicy(maximumFlights: maximumFlights, minimumSendIntervalMillis: 10, retryBaseDelayMillis: retryBase, maximumRetryBackoffMillis: retryCap), sample: { clock.sample() },
                 sleep: { clock.advance($0) }, send: { probe, token in
+                    try beforeSend()
                     if let sender { return try await sender.send(probe, accessToken: token) }
                     return try await provider.send(at: clock.sample().moment.milliseconds)
                 }, wakePolicy: wakePolicy, sendWake: wakeSend, validateAuthority: validateAuthority, schedulerSleep: { milliseconds in
@@ -256,6 +257,31 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     }
     private enum FixtureFailure: Error { case timeout }
 
+    func testLeaseExpiryAfterProbeDispatchFinalizesAttemptWithoutProviderOrRestart() async throws {
+        let fixture = try Fixture(), provider = Provider([]), clock = fixture.clock, root = UUID()
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        try lease.renew(rootEpoch: root, sequence: 1, observedAt: 100, deadline: 500)
+        let coordinator = try fixture.coordinator(provider, validateAuthority: { try lease.validate() }, beforeSend: {
+            clock.advance(500)
+            try lease.validate()
+        })
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        do { _ = try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)); XCTFail("Expired lease dispatched") }
+        catch { XCTAssertEqual(error as? GatewayServiceError, .unavailable) }
+        let progress = try await coordinator.progress(operationID: id(1)), times = await provider.times
+        XCTAssertEqual(progress?.status, .terminal)
+        XCTAssertEqual(progress?.number, 1)
+        XCTAssertTrue(times.isEmpty)
+        let now = clock.sample().moment.milliseconds
+        try lease.renew(rootEpoch: root, sequence: 2, observedAt: now, deadline: now + 500)
+        do {
+            let result = try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6))
+            XCTAssertEqual(result?.status, .terminal)
+        } catch { XCTFail("A renewed lease must not leave the attempt in flight: \(error)") }
+        try await coordinator.shutdown()
+    }
+
     func testAuthorityLossDuringOAuthPreventsProviderHandoff() async throws {
         let fixture = try Fixture(), provider = Provider([]), gate = OAuthGate()
         let source = try FCMTokenSource(now: { .now }, refresh: { try await gate.refresh() })
@@ -275,6 +301,28 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         let times = await provider.times, progress = try await coordinator.progress(operationID: id(1))
         XCTAssertTrue(times.isEmpty)
         XCTAssertNil(progress)
+        try await coordinator.shutdown()
+    }
+
+    func testLeaseLossDuringProviderWaitCannotRecordAcceptanceOrLeaveAttemptInFlight() async throws {
+        let fixture = try Fixture(), provider = Provider([]), clock = fixture.clock, root = UUID()
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        try lease.renew(rootEpoch: root, sequence: 1, observedAt: 100, deadline: 500)
+        let coordinator = try fixture.coordinator(provider, validateAuthority: { try lease.validate() })
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        await provider.hold(honorCancellation: false)
+        let operation = id(1), phone = id(6)
+        let task = Task { try await coordinator.deliverProbe(operationID: operation, phoneID: phone) }
+        defer { task.cancel() }
+        try await until { await provider.times.count == 1 }
+        lease.retire()
+        await provider.release()
+        do { _ = try await task.value; XCTFail("Acceptance requires current authority") }
+        catch { XCTAssertEqual(error as? GatewayServiceError, .unavailable) }
+        let progress = try await coordinator.progress(operationID: operation)
+        XCTAssertEqual(progress?.status, .terminal)
+        XCTAssertEqual(progress?.number, 1)
         try await coordinator.shutdown()
     }
 
