@@ -75,6 +75,12 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
     }
     func invalidateCurrentJobQuery() { session.invalidateCurrentJobQuery() }
     func pollStreamEvent(timeoutMilliseconds: UInt32, nonblocking: Bool) throws -> CommandExecutionStreamEvent? {
+        let previousPhase = nestedPhase
+        defer {
+            if mode == "nested" && previousPhase != nestedPhase {
+                FileHandle.standardError.write(Data("Owned nested fixture reached phase \(nestedPhase).\n".utf8))
+            }
+        }
         if historicalStop == nil && !buffered.isEmpty { return buffered.removeFirst() }
         let event = try session.pollStreamEvent(timeoutMilliseconds: timeoutMilliseconds, nonblocking: nonblocking)
         if case .jobState(let observation)? = event, case .stopped = observation.state { originalStopEvents += 1 }
@@ -298,7 +304,8 @@ private struct Probe {
         defer { host.close() }
         var supervisorPID: pid_t = -1, output: Int32 = -1
         let marker = root.appendingPathComponent("target-resumed").path
-        let arguments = [supervisor, CommandLine.arguments[0], "frontend", mode, target, marker, nestedTarget].map { strdup($0)! }
+        let arguments = [supervisor, CommandLine.arguments[0], "frontend", mode, target, marker, nestedTarget]
+            .map { value in value.withCString { strdup($0)! } }
         defer { arguments.forEach { free($0) } }
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { $0 } + [nil]
         try require(remozio_fixture_spawn_supervisor(supervisor, &argv, port, marker, &supervisorPID, &output) == 0, "spawn owned supervisor")

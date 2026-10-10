@@ -22,9 +22,9 @@ static int nested(void) {
     if (sigaction(SIGCONT, &action, NULL) || write(STDOUT_FILENO, "NESTED_RUNNING\n", 15) != 15) return 71;
     unsigned long long deadline = milliseconds() + 30000;
     while (!continued && milliseconds() < deadline) {
-        struct pollfd input = {.fd = STDIN_FILENO, .events = POLLIN};
-        int result = poll(&input, 1, 100);
-        if (result > 0 || (result < 0 && errno != EINTR)) return 72;
+        /* Foreground restoration can wake terminal polling. Only SIGCONT completes this barrier. */
+        int result = poll(NULL, 0, 100);
+        if (result < 0 && errno != EINTR) return 72;
     }
     if (!continued || write(STDOUT_FILENO, "NESTED_RESUMED\n", 15) != 15) return 73;
     while (milliseconds() < deadline) {

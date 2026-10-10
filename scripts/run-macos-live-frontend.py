@@ -8,6 +8,11 @@ from pathlib import Path
 import platform
 import signal
 import subprocess
+import sys
+import tempfile
+import time
+
+from macos_fixture_cleanup import retire_owned_tree
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "experiments/command-frontend"
@@ -50,34 +55,48 @@ def build():
     return binary, helpers
 
 
-def invoke(binary, helpers, mode):
+def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_forced_cleanup=None):
     target = "/bin/bash" if mode == "nested" else str(helpers["target"])
+    environment = {"PATH": "/usr/bin:/bin"}
+    if stop_barrier is not None:
+        environment["REMOZIO_FIXTURE_STOP_BARRIER"] = str(stop_barrier)
     process = subprocess.Popen([str(binary), "authority", mode, str(helpers["supervisor"]), str(helpers["monitor"]),
                                 str(helpers["child"]), target, str(helpers["target"])], cwd="/private/tmp",
-                               env={"PATH": "/usr/bin:/bin"}, stdin=subprocess.DEVNULL,
+                               env=environment, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     try:
-        output, errors = process.communicate(timeout=60)
+        if stop_barrier is not None:
+            deadline = time.monotonic() + 10
+            while not stop_barrier.exists():
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("The real frontend did not reach its owned stop barrier")
+                time.sleep(0.001)
+            if stop_barrier.read_bytes() != b"READY":
+                raise RuntimeError("The owned stop barrier has the wrong content")
+            process.send_signal(signal.SIGSTOP)
+        output, errors = process.communicate(timeout=timeouts[0])
     except (subprocess.TimeoutExpired, KeyboardInterrupt):
         # The authority remains alive to supervise cancellation and reap the actual monitor and target.
         process.send_signal(signal.SIGTERM)
-        output, errors = process.communicate(timeout=20)
+        output, errors = process.communicate(timeout=timeouts[1])
         raise
     finally:
         try:
             if process.poll() is None:
-                # This still-owned runner has its own session. Never signal a reaped or borrowed PID.
-                try:
+                if sys.platform == "darwin":
+                    retired = retire_owned_tree(process)
+                    if on_forced_cleanup is not None:
+                        on_forced_cleanup(retired)
+                else:
+                    # The portable single-process regression owns this private group.
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=10)
+                    process.wait(timeout=10)
         finally:
             # Independent native owners observe channel loss and retire their own children.
             process.stdout.close()
             process.stderr.close()
     if process.returncode:
-        raise RuntimeError(f"Live frontend returned {process.returncode}: {errors.decode(errors='replace')}")
+        raise RuntimeError(f"Live frontend {mode} returned {process.returncode}: {errors.decode(errors='replace')}")
     observations = json.loads(output)
     if observations.get("nativeSupervisorStatus") != 13 << 8 or observations.get("oneOriginalAdmission") is not True:
         raise RuntimeError(f"Incomplete native result: {observations!r}")
@@ -98,8 +117,25 @@ def invoke(binary, helpers, mode):
     return observations
 
 
+def measure_forced_cleanup(binary, helpers):
+    retired = []
+    with tempfile.TemporaryDirectory(prefix="remozio-owned-timeout-") as directory:
+        try:
+            invoke(binary, helpers, "job", stop_barrier=Path(directory) / "stopped", timeouts=(0.1, 0.1),
+                   on_forced_cleanup=retired.append)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise RuntimeError("The stopped authority did not force the runner's second timeout")
+    if retired != [{"trackedDescendants": 4, "observedExits": 4}]:
+        raise RuntimeError(f"The actual helper topology did not retire: {retired!r}")
+    return {"stoppedAuthority": True, "secondTimeoutExercised": True,
+            "allFourDescendantExitsObserved": True, "ownedAuthorityReaped": True}
+
+
 def source_files():
-    files = [Path(__file__), PACKAGE / "Sources/LiveCommandFixture/Main.swift", PACKAGE / "Sources/OwnedTTY/Supervisor.c",
+    files = [Path(__file__), ROOT / "scripts/macos_fixture_cleanup.py",
+             PACKAGE / "Sources/LiveCommandFixture/Main.swift", PACKAGE / "Sources/OwnedTTY/Supervisor.c",
              PACKAGE / "job-supervisor.c", PACKAGE / "live-monitor.c", PACKAGE / "live-child.c", PACKAGE / "live-target.c",
              ROOT / "macos/app/CommandMonitor/MonitorMain.c", ROOT / "macos/app/CommandChild/ChildMain.c",
              NATIVE / "CommandProcess.c", NATIVE / "CommandMonitor.c", NATIVE / "CommandMonitorProtocol.c",
@@ -133,6 +169,7 @@ def main():
         if any(value != observations[0] for value in observations[1:]):
             raise RuntimeError(f"Live frontend observations changed between {mode} trials: {observations!r}")
         cases[mode] = {"trials": TRIALS, "allTrialsMatch": True, "observations": observations[0]}
+    forced_cleanup = measure_forced_cleanup(binary, helpers)
     if files != source_files():
         raise RuntimeError("The live frontend source set changed during measurement")
     for path in files:
@@ -143,6 +180,7 @@ def main():
                 "privilegedExecution": False, "biometricsTested": False, "bootstrapDiscoveryTested": False,
                 "credentialOperations": "same-user fixture seams",
                 "cases": cases, "sourceHashes": hashes}
+    evidence["forcedCleanup"] = forced_cleanup
     evidence_path.write_text(json.dumps(evidence, indent=2) + "\n")
     print(f"Live frontend, authority and target passed. Evidence: {evidence_path}")
 

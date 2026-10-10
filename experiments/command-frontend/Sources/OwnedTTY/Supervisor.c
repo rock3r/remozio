@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t cancelled;
@@ -50,7 +51,13 @@ int remozio_fixture_spawn_supervisor(const char *path, char *const arguments[],
     char marker[PATH_MAX + 64];
     int count = snprintf(marker, sizeof(marker), "REMOZIO_FIXTURE_RESUME_MARKER=%s", resume_marker);
     if (!error && (count < 0 || (size_t)count >= sizeof(marker))) error = EINVAL;
-    char *environment[] = {"PATH=/usr/bin:/bin", marker, NULL};
+    const char *barrier_path = getenv("REMOZIO_FIXTURE_STOP_BARRIER");
+    char barrier[PATH_MAX + 64];
+    if (!error && barrier_path) {
+        count = snprintf(barrier, sizeof(barrier), "REMOZIO_FIXTURE_STOP_BARRIER=%s", barrier_path);
+        if (barrier_path[0] != '/' || count < 0 || (size_t)count >= sizeof(barrier)) error = EINVAL;
+    }
+    char *environment[] = {"PATH=/usr/bin:/bin", marker, barrier_path ? barrier : NULL, NULL};
     if (!error) error = posix_spawn(child, path, &actions, &attributes, arguments, environment);
     if (actions_ready) posix_spawn_file_actions_destroy(&actions);
     if (attributes_ready) posix_spawnattr_destroy(&attributes);

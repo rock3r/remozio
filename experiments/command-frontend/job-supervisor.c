@@ -87,6 +87,23 @@ int main(int argc, char **argv) {
         usleep(1000);
     }
     if (!error && (!stopped || tcgetattr(slave, &seen) || !same(&original, &seen))) error = 74;
+    const char *stop_barrier = getenv("REMOZIO_FIXTURE_STOP_BARRIER");
+    if (!error && stop_barrier) {
+        int descriptor = open(stop_barrier, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (descriptor < 0) error = 87;
+        else {
+            if (write(descriptor, "READY", 5) != 5) error = 87;
+            if (close(descriptor)) error = 87;
+        }
+        deadline = now() + 30000;
+        while (!error && !cancelled && now() < deadline) {
+            pid_t found = waitpid(child, &status, WNOHANG);
+            if (found == child) { reaped = true; break; }
+            if (found < 0 && errno != EINTR) error = 88;
+            usleep(1000);
+        }
+        goto cleanup;
+    }
     struct winsize size = {.ws_row = 79, .ws_col = 121};
     if (!error && (tcsetpgrp(slave, getpgrp()) || ioctl(slave, TIOCSWINSZ, &size) || kill(child, SIGCONT))) error = 75;
     const char *resume_marker = getenv("REMOZIO_FIXTURE_RESUME_MARKER");

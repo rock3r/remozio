@@ -53,9 +53,22 @@ The nested target waits for an actual continuation and an explicit keyboard rele
 It cannot finish because a short sleep expires before the query completes.
 Cancellation asks the supervisor to retire its own frontend.
 The authority stays alive while the product owner cancels and reaps its monitor and target.
-If graceful cancellation stalls, the runner kills only its still-owned private process group and waits for its child.
-Native owners observe the lost channels and retire their own children.
+If graceful cancellation stalls twice, the runner freezes its own authority child before collecting descendants.
+It freezes each parent before enumerating that parent's children, so a captured child cannot be reaped and reused.
+Signals to descendants use kernel-checked audit tokens. No descendant is signalled through a borrowed PID or group.
+Cleanup proceeds from children to parents. Native owners receive time to reap their children before forced termination.
+The runner requires exit events for every captured descendant before resuming and reaping its own authority child.
+A partial snapshot restores cooperative cleanup and reports failure. It grants no authority over unobserved processes.
+This cleanup belongs to the unprivileged fixture. It does not change product cancellation or elevate the runner.
 Source hashes cover compilation inputs before the build and are checked after compilation and the trials.
+
+The runner also forces a second timeout after the real frontend has stopped and restored terminal attributes.
+The authority remains stopped while its supervisor, frontend, monitor and target occupy their original sessions.
+Retained evidence requires all four descendant exit events and the runner's actual authority wait.
+This failure case cannot claim that the runner reaped grandchildren. Each direct child's parent owns that wait.
+Independent tests verify a real child-wait boundary and reject a changed audit-token incarnation.
+The [Apple signal wrapper](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c)
+and [kernel implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c) define the audit-token path.
 
 The overtaken-stop case delays an already authenticated frontend observation.
 It does not replace the authority's current-job callback.
