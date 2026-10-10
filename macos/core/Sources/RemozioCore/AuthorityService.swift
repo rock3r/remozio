@@ -67,7 +67,7 @@ public final class AuthorityService: @unchecked Sendable {
         }
     }
 
-    private static func openJournal(configuration: AuthorityServiceConfiguration) throws -> AuthorityJournal {
+    static func openJournal(configuration: AuthorityServiceConfiguration) throws -> AuthorityJournal {
         let journal: AuthorityJournal
         if configuration.continuityDirectory != nil {
             journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration),
@@ -118,6 +118,7 @@ public final class AuthorityService: @unchecked Sendable {
          pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
          exchangeRequest: AuthorityRequestExchangeProvider? = nil,
          requestProviders: AuthorityRequestProviders? = nil,
+         wakeHintFeed: AuthorityWakeHintFeed? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
          onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
         self.journal = journal
@@ -151,6 +152,9 @@ public final class AuthorityService: @unchecked Sendable {
             if let selectedExchange {
                 exchangeHandler = { owner, binding, id, decision in try selectedExchange(owner, binding, id, decision, frameClock) }
             } else { exchangeHandler = nil }
+            let hintHandler: (@Sendable () throws -> AuthorityWakeHints)?
+            if let wakeHintFeed { hintHandler = { try wakeHintFeed.current() } }
+            else { hintHandler = nil }
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,
                 peerPolicy: configuration.transportPolicy, macID: configuration.macID,
                 accountID: configuration.accountID, journal: journal,
@@ -159,7 +163,8 @@ public final class AuthorityService: @unchecked Sendable {
                 auditVersions: configuration.auditVersions,
                 maximumConnections: configuration.maximumConnections,
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
-                maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler)
+                maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
+                exchangeRequest: exchangeHandler, wakeHints: hintHandler)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)
             if let requestProviders, let reconcileExpired {

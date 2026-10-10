@@ -5,13 +5,21 @@ import RemozioCore
 @main
 struct TransportMain {
     static func main() async {
-        guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--configuration" else {
-            fail("Usage: RemozioTransport --configuration /absolute/protected/transport.cbor", code: EX_USAGE)
+        guard CommandLine.arguments.count == 3, ["--configuration", "--wake-configuration"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioTransport --configuration PATH or --wake-configuration PATH", code: EX_USAGE)
         }
         let configuration: ApprovalTransportConfiguration
-        do { configuration = try ApprovalTransportConfiguration.load(path: CommandLine.arguments[2]) }
+        let wake: TransportWakeStartupConfiguration?
+        do {
+            if CommandLine.arguments[1] == "--wake-configuration" {
+                let value = try TransportWakeStartupConfiguration.load(path: CommandLine.arguments[2])
+                configuration = value.transport; wake = value
+            } else {
+                configuration = try ApprovalTransportConfiguration.load(path: CommandLine.arguments[2]); wake = nil
+            }
+        }
         catch { fail("Transport startup requires protected configuration and the configured service account.", code: EX_CONFIG) }
-        let task = Task { try await run(configuration) }
+        let task = Task { try await run(configuration, wake: wake) }
         signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -29,16 +37,33 @@ struct TransportMain {
         }
     }
 
-    private static func run(_ configuration: ApprovalTransportConfiguration) async throws {
+    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?) async throws {
         try Task.checkCancellation()
+        let runtime: TransportWakeRuntime?
+        if let wake {
+            do { runtime = try wake.makeRuntime() }
+            catch {
+                log("Wake delivery is unavailable. Direct approvals remain available.")
+                runtime = nil
+            }
+        } else { runtime = nil }
         let identity = try ApprovalTransportIdentity.load(configuration: configuration)
         let service = try DirectApprovalTransportService(macID: configuration.macID, accountID: configuration.accountID,
             identity: identity, authorityServiceName: configuration.authorityServiceName, authorityPolicy: configuration.authorityPolicy,
             maximumConnections: configuration.maximumConnections, timeoutMilliseconds: configuration.timeoutMilliseconds,
             refreshMilliseconds: configuration.refreshMilliseconds, requestDeliveryTimeoutMilliseconds: configuration.timeoutMilliseconds,
             requestRefreshMilliseconds: configuration.refreshMilliseconds)
+        var wakeTask: Task<Void, Never>?
         do {
             try await service.start()
+            if let runtime, let wake {
+                wakeTask = Task {
+                    do { try await runtime.run(intervalMilliseconds: wake.pollMilliseconds) }
+                    catch {
+                        if !Task.isCancelled { log("Wake delivery stopped. Direct approvals remain available.") }
+                    }
+                }
+            }
             var previous: DirectHostState?
             while true {
                 try Task.checkCancellation()
@@ -51,6 +76,9 @@ struct TransportMain {
                 try await Task.sleep(for: .milliseconds(250))
             }
         } catch {
+            wakeTask?.cancel()
+            await runtime?.close()
+            await wakeTask?.value
             await service.close()
             if Task.isCancelled { throw CancellationError() }
             throw error

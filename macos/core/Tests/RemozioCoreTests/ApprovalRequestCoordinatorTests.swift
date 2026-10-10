@@ -45,9 +45,11 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             eventID: id(30), receiptTimeMs: 900, writer: writer, expectedAuditHead: 0) }
         return (db, writer)
     }
-    private func owner(_ db: JournalDatabase, _ writer: AuditEpochWriter, maximum: Int = 8, bytes: Int = 32768) throws -> ApprovalRequestCoordinator {
+    private func owner(_ db: JournalDatabase, _ writer: AuditEpochWriter, maximum: Int = 8, bytes: Int = 32768,
+                       wakes: Int = 1024) throws -> ApprovalRequestCoordinator {
         try .init(database: db, writer: writer, clockEpoch: clock, maximumRequests: maximum, maximumRetainedBytes: bytes,
-            requestLimits: limits, captureLimits: limits, decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+            requestLimits: limits, captureLimits: limits, decisionLimits: limits, signingLimits: limits, auditLimits: limits,
+            maximumWakeDeliveries: wakes)
     }
     private func journalOwner(_ fixture: Fixture, enrollment: StoredApprovalEnrollment? = nil) throws -> AuthorityJournal {
         let limits = try limits, capabilities = try capabilities, contract = try contract
@@ -628,6 +630,68 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let queued = try owner.reconcileDelivery(requestID: request.requestID, delivery: delivery,
             routing: routing(), now: now(), receiptTimeMs: nil) { _ in true }
         return (request, delivery, try XCTUnwrap(queued.active.first))
+    }
+
+    func testWakePublicationDoesNotDispatchOrDisableSignedFrameRetrieval() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let initial = try owner.reconcileWakePublications(routing: routing(), now: now(120), receiptTimeMs: nil)
+        let grant = try XCTUnwrap(initial.registrations.first)
+        XCTAssertEqual(grant.requestID, request.requestID); XCTAssertTrue(initial.readyDeliveryIDs.isEmpty)
+        XCTAssertTrue(try owner.acknowledgeWakeRegistration(grant, routing: routing(), now: now(130), receiptTimeMs: nil))
+        let registered = try owner.reconcileWakePublications(routing: routing(), now: now(140), receiptTimeMs: nil)
+        XCTAssertTrue(registered.registrations.isEmpty); XCTAssertEqual(registered.readyDeliveryIDs, [grant.id])
+        let frame = try XCTUnwrap(owner.retainedDeliveryFrame(binding: frameBinding(db), requestID: request.requestID,
+            authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 4096,
+            now: { self.now(150) }, routing: { try self.routing() }, receiptTimeMs: nil,
+            signer: { try self.key.signature(for: $0).rawRepresentation }))
+        let message = try ApprovalMessage.decode(frame, maximumBodyBytes: 4096)
+        XCTAssertEqual(try IssuedRequestPayload.decode(message.body, bodyLimits: limits, captureLimits: limits,
+            localCapabilities: capabilities).requestID, request.requestID)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .queued)
+    }
+    func testWakeWithdrawalSurvivesTerminalForgetAndBlocksStaleRegistrationAcknowledgment() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let grant = try XCTUnwrap(owner.reconcileWakePublications(routing: routing(), now: now(120), receiptTimeMs: nil).registrations.first)
+        _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: now(130), receiptTimeMs: nil)
+        try owner.forgetTerminal(requestID: request.requestID)
+        XCTAssertFalse(try owner.acknowledgeWakeRegistration(grant, routing: routing(), now: now(140), receiptTimeMs: nil))
+        let pending = try owner.reconcileWakePublications(routing: routing(), now: now(150), receiptTimeMs: nil)
+        XCTAssertEqual(pending.withdrawals, [grant]); XCTAssertTrue(pending.readyDeliveryIDs.isEmpty)
+        XCTAssertTrue(pending.registrations.isEmpty)
+        XCTAssertTrue(try owner.acknowledgeWakeWithdrawal(grant)); XCTAssertFalse(try owner.acknowledgeWakeWithdrawal(grant))
+        XCTAssertTrue(try owner.reconcileWakePublications(routing: routing(), now: now(160), receiptTimeMs: nil).withdrawals.isEmpty)
+    }
+    func testWakeExpiryDuringRegistrationRetainsOriginalGrantForWithdrawal() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let grant = try XCTUnwrap(owner.reconcileWakePublications(routing: routing(), now: now(120), receiptTimeMs: nil).registrations.first)
+        XCTAssertEqual(grant.deadlineMilliseconds, 200)
+        XCTAssertFalse(try owner.acknowledgeWakeRegistration(grant, routing: routing(), now: now(201), receiptTimeMs: nil))
+        let expired = try owner.reconcileWakePublications(routing: routing(), now: now(202), receiptTimeMs: nil)
+        XCTAssertEqual(expired.withdrawals, [grant]); XCTAssertTrue(expired.readyDeliveryIDs.isEmpty)
+        XCTAssertEqual(try owner.state(requestID: request.requestID).phase, .expired)
+    }
+    func testWakePresenceAndBoundedWithdrawalQueuePreserveIndependentOriginalRequests() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer, wakes: 1)
+        let first = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let grant = try XCTUnwrap(owner.reconcileWakePublications(routing: routing(), now: now(120), receiptTimeMs: nil).registrations.first)
+        XCTAssertTrue(try owner.acknowledgeWakeRegistration(grant, routing: routing(), now: now(125), receiptTimeMs: nil))
+        let local = try owner.reconcileWakePublications(routing: routing(.present), now: now(130), receiptTimeMs: nil)
+        XCTAssertTrue(local.readyDeliveryIDs.isEmpty); XCTAssertTrue(local.withdrawals.isEmpty)
+        XCTAssertEqual(try owner.reconcileWakePublications(routing: routing(), now: now(135), receiptTimeMs: nil).readyDeliveryIDs, [grant.id])
+        _ = try owner.retirePending(requestID: first.requestID, reason: .cancelled, now: now(140), receiptTimeMs: nil)
+        try owner.forgetTerminal(requestID: first.requestID)
+        let second = try owner.admitFixture(draft(), now: now(150), receiptTimeMs: nil)
+        let full = try owner.reconcileWakePublications(routing: routing(), now: now(155), receiptTimeMs: nil)
+        XCTAssertTrue(full.registrations.isEmpty); XCTAssertEqual(full.withdrawals, [grant]); XCTAssertEqual(full.capacityLimitedRecipients, 1)
+        XCTAssertTrue(try owner.acknowledgeWakeWithdrawal(grant))
+        let resumed = try owner.reconcileWakePublications(routing: routing(), now: now(160), receiptTimeMs: nil)
+        let next = try XCTUnwrap(resumed.registrations.first)
+        XCTAssertEqual(next.requestID, second.requestID); XCTAssertEqual(next.deadlineMilliseconds, 200)
+        XCTAssertNotEqual(next.id, grant.id); XCTAssertEqual(resumed.capacityLimitedRecipients, 0)
+        XCTAssertTrue(resumed.withdrawals.isEmpty)
     }
 
     func testHandoffBackpressureKeepsOriginalIdentityAndAcceptsOnlyOnce() throws {

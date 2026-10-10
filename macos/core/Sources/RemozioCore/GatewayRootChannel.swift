@@ -84,6 +84,20 @@ public actor GatewayRootChannel {
         }
         guard accepted else { throw GatewayRootChannelError.rejected }
     }
+    /// Registration creates no provider work. Only a separately authenticated transport wake can start it.
+    public func registerWake(_ delivery: PhoneRequestDelivery) async throws {
+        try await requireAcceptance(.registerWake(delivery))
+    }
+    public func withdrawWake(_ deliveryID: UUID) async throws {
+        try await requireAcceptance(.withdraw(deliveryID))
+    }
+    private func requireAcceptance(_ command: GatewayRootCommand) async throws {
+        let fields = try await self.command(command)
+        guard fields.count == 2, case .boolean(let accepted) = fields[1] else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        guard accepted else { throw GatewayRootChannelError.rejected }
+    }
     /// Recovery replies remain unverified data until GatewayHeadQueryOwner accepts the fresh query response.
     public func head(query: Data) async throws -> GatewayHeadReply {
         let fields = try await command(.head(query))

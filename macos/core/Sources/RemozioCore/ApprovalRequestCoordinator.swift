@@ -90,6 +90,7 @@ public final class ApprovalRequestCoordinator {
     private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
     private var deliveryBytes = 0
+    private let wakePublication: RetainedWakePublication
     private struct Entry {
         var state: ApprovalRequestState
         let contract: RequestContract
@@ -112,8 +113,10 @@ public final class ApprovalRequestCoordinator {
 
     public init(database: JournalDatabase, writer: AuditEpochWriter, clockEpoch: UUID,
                 maximumRequests: Int, maximumRetainedBytes: Int, requestLimits: CBORLimits, captureLimits: CBORLimits,
-                decisionLimits: CBORLimits, signingLimits: CBORLimits, auditLimits: CBORLimits) throws {
+                decisionLimits: CBORLimits, signingLimits: CBORLimits, auditLimits: CBORLimits,
+                maximumWakeDeliveries: Int = 1024) throws {
         guard (1...4096).contains(maximumRequests), (1...67_108_864).contains(maximumRetainedBytes),
+              (1...AuthorityWakeHints.maximumDeliveries).contains(maximumWakeDeliveries),
               requestLimits.maxBytes <= maximumRetainedBytes else { throw ApprovalCoordinatorError.invalidConfiguration }
         let scope = try database.read { tx -> ApprovalTrustSnapshot in
             let trust = try tx.approvalTrustSnapshot()
@@ -124,6 +127,7 @@ public final class ApprovalRequestCoordinator {
         self.database = database; self.writer = writer; self.clockEpoch = clockEpoch
         mac = scope.macID; account = scope.accountID
         self.maximumRequests = maximumRequests; self.maximumRetainedBytes = maximumRetainedBytes
+        wakePublication = RetainedWakePublication(maximumDeliveries: maximumWakeDeliveries)
         self.requestLimits = requestLimits; self.captureLimits = captureLimits; self.decisionLimits = decisionLimits
         self.signingLimits = signingLimits; self.auditLimits = auditLimits
     }
@@ -151,6 +155,7 @@ public final class ApprovalRequestCoordinator {
             entry.command?.close()
         }
         entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
+        wakePublication.close()
     }
 
     /// Transfers the command once. Callers cannot reuse the command or its aliases after this call.
@@ -413,6 +418,45 @@ public final class ApprovalRequestCoordinator {
             reason: receipt.event.outcome == .noDispatch ? .declined : .none, now: now, decisionPhoneID: receipt.decision.phoneID)
         return receipt
     }
+
+    /// Prepare bounded wake registrations and withdrawals from current retained requests and journal trust.
+    /// The host serializes this operation with authority changes. No asynchronous work or gateway call belongs in this method.
+    public func reconcileWakePublications(routing: PresenceRouting, now: AuthorityMoment,
+                                          receiptTimeMs: UInt64?) throws -> RetainedWakePublicationSnapshot {
+        try checkClock(now)
+        let trust = try wakeDeliveryTrust()
+        return try reconcileWakePublications(routing: routing, now: now, receiptTimeMs: receiptTimeMs, trust: trust)
+    }
+    func wakeDeliveryTrust() throws -> RequestDeliveryTrust {
+        try running()
+        return try read { try $0.requestDeliveryTrust() }
+    }
+    func reconcileWakePublications(routing: PresenceRouting, now: AuthorityMoment, receiptTimeMs: UInt64?,
+                                   trust: RequestDeliveryTrust) throws -> RetainedWakePublicationSnapshot {
+        try checkClock(now)
+        var limited = 0
+        for id in entries.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            let state = try deliveryState(requestID: id, now: now, receiptTimeMs: receiptTimeMs)
+            guard state.phase == .queued || state.phase == .presented, let retained = entries[id]?.retained else { continue }
+            limited += try wakePublication.reconcile(retained, trust: trust, routing: routing, now: now)
+        }
+        return try wakePublication.snapshot(routing: routing, capacityLimitedRecipients: limited)
+    }
+
+    /// A gateway acknowledgment may arrive after the request changes. Recheck before exposing an opaque transport hint.
+    public func acknowledgeWakeRegistration(_ delivery: PhoneRequestDelivery, routing: PresenceRouting,
+                                            now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> Bool {
+        _ = try reconcileWakePublications(routing: routing, now: now, receiptTimeMs: receiptTimeMs)
+        return wakePublication.acknowledgeRegistration(delivery)
+    }
+    /// Clear only the exact retained withdrawal accepted by the gateway. Terminal entry removal does not clear this queue.
+    public func acknowledgeWakeWithdrawal(_ delivery: PhoneRequestDelivery) throws -> Bool {
+        try running()
+        _ = try read { try head($0) }
+        return wakePublication.acknowledgeWithdrawal(delivery)
+    }
+    /// Losing the Root control channel retires this wake incarnation without retiring signed phone-frame retrieval.
+    func retireWakePublications() { wakePublication.close() }
 
     /// Reconcile queue ownership from current owner state, including terminal states whose capture was released.
     public func reconcileDelivery(requestID: Data, delivery: PendingRequestDelivery, routing: PresenceRouting,
@@ -761,6 +805,7 @@ public final class ApprovalRequestCoordinator {
             requestID: id, phase: phase, revision: entry.state.revision + 1,
             firstObservedAt: entry.state.firstObservedAt, deadlineMilliseconds: entry.state.deadlineMilliseconds)
         if phase != .queued && phase != .presented {
+            wakePublication.retire(entry.state, now: now)
             deliveryBytes -= entry.frame?.count ?? 0
             entry.frame = nil; entry.frameKey = nil; entry.delivery = nil
         }

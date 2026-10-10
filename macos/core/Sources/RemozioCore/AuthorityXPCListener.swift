@@ -98,6 +98,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
     private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private let wakeHints: (@Sendable () throws -> AuthorityWakeHints)?
     private var running = false
     private var closed = false
 
@@ -109,7 +110,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
                 requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                 pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
-                exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil) throws {
+                exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+                wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
         guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
@@ -118,6 +120,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         listener = NSXPCListener(machServiceName: serviceName)
         policy = peerPolicy; self.macID = macID; self.accountID = accountID
         self.verifyHandshakePolicy = verifyHandshakePolicy; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
+        self.wakeHints = wakeHints
         super.init()
         policy.configure(listener)
         listener.delegate = self
@@ -130,7 +133,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                             maximumOperations: Int = 8,
                             requestFrame: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pendingRequestIDs: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding) throws -> [Data])? = nil,
-                            exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil) throws {
+                            exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+                            wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
         let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peerPolicy, macID: macID, accountID: accountID,
             maximumPayloadBytes: maximumPayloadBytes, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
         let frameHandler: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
@@ -151,7 +155,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             maximumConnections: maximumConnections, handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds,
             maximumOperations: maximumOperations, verifyHandshakePolicy: { try access.verifyCurrent() },
             snapshot: { try access.snapshot() }, validate: { try access.validate($0) },
-            requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler)
+            requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler, wakeHints: wakeHints)
     }
     deinit { listener.invalidate(); registry.close() }
     public func start() throws {
@@ -170,7 +174,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             do {
                 let endpoint = try AuthorityXPCEndpoint(connection: connection, peerPolicy: policy, macID: macID, accountID: accountID,
                     budget: budget, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
-                    onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate, requestFrame: frame, pendingRequestIDs: pendingRequests, exchangeRequest: exchange)
+                    onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate, requestFrame: frame,
+                    pendingRequestIDs: pendingRequests, exchangeRequest: exchange, wakeHints: wakeHints)
                 let owner = NativeAuthorityConnection(connection: connection, endpoint: endpoint)
                 guard registry.install(owner, id: id) else { return false }
                 return true
