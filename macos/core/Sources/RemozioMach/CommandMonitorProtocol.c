@@ -23,6 +23,7 @@ static int valid(const remozio_monitor_record_t *record) {
     if (!record || !record->sequence || record->target_pid > INT_MAX || record->detail > INT_MAX ||
         (record->flags & ~(REMOZIO_MONITOR_STOPPED | REMOZIO_MONITOR_TRACING_KNOWN | REMOZIO_MONITOR_TRACED | REMOZIO_MONITOR_BIRTH_KNOWN | REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED))) return EPROTO;
     if ((record->flags & REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED) && !record->target_pid) return EPROTO;
+    if (record->tag != REMOZIO_MONITOR_CONTROL_APPLIED && record->applied_control_sequence) return EPROTO;
     if (record->flags & REMOZIO_MONITOR_BIRTH_KNOWN) {
         if (!record->target_pid || !record->birth_seconds || record->birth_microseconds >= 1000000) return EPROTO;
     } else if (record->birth_seconds || record->birth_microseconds) return EPROTO;
@@ -45,6 +46,11 @@ static int valid(const remozio_monitor_record_t *record) {
     case REMOZIO_MONITOR_FAILURE:
         if (!record->detail || record->stop_code || record->job_revision || (record->flags & ~(REMOZIO_MONITOR_BIRTH_KNOWN | REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED))) return EPROTO;
         break;
+    case REMOZIO_MONITOR_CONTROL_APPLIED:
+        if (!record->target_pid || record->detail || record->stop_code || record->job_revision ||
+            !record->applied_control_sequence || !(record->flags & REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED) ||
+            (record->flags & ~(REMOZIO_MONITOR_BIRTH_KNOWN | REMOZIO_MONITOR_TARGET_RELEASE_ATTEMPTED))) return EPROTO;
+        break;
     default: return EPROTO;
     }
     return 0;
@@ -55,7 +61,9 @@ int remozio_monitor_record_encode(const remozio_monitor_record_t *record, unsign
     memset(bytes, 0, REMOZIO_MONITOR_RECORD_BYTES);
     put_word(bytes, 0x524d4d31); put_word(bytes + 4, REMOZIO_MONITOR_WIRE_VERSION); put_word(bytes + 8, record->tag);
     put_word(bytes + 12, record->flags); put_word(bytes + 16, record->target_pid); put_word(bytes + 20, record->detail); put_word(bytes + 24, record->stop_code);
-    put_wide(bytes + 32, record->sequence); put_wide(bytes + 40, record->job_revision); put_wide(bytes + 48, record->birth_seconds); put_wide(bytes + 56, record->birth_microseconds);
+    put_wide(bytes + 32, record->sequence);
+    put_wide(bytes + 40, record->tag == REMOZIO_MONITOR_CONTROL_APPLIED ? record->applied_control_sequence : record->job_revision);
+    put_wide(bytes + 48, record->birth_seconds); put_wide(bytes + 56, record->birth_microseconds);
     return 0;
 }
 int remozio_monitor_record_decode(const void *input, size_t count, remozio_monitor_record_t *record) {
@@ -67,6 +75,10 @@ int remozio_monitor_record_decode(const void *input, size_t count, remozio_monit
     remozio_monitor_record_t candidate = {.tag = word(bytes + 8), .flags = word(bytes + 12), .target_pid = word(bytes + 16),
         .detail = word(bytes + 20), .stop_code = word(bytes + 24), .sequence = wide(bytes + 32), .job_revision = wide(bytes + 40),
         .birth_seconds = wide(bytes + 48), .birth_microseconds = wide(bytes + 56)};
+    if (candidate.tag == REMOZIO_MONITOR_CONTROL_APPLIED) {
+        candidate.applied_control_sequence = candidate.job_revision;
+        candidate.job_revision = 0;
+    }
     int error = valid(&candidate); if (error) return error;
     *record = candidate; return 0;
 }
@@ -111,6 +123,15 @@ int remozio_monitor_stream_accept(remozio_monitor_stream_t *stream, const remozi
         next.failed = true;
         next.failure_error = record->detail;
         break;
+    case REMOZIO_MONITOR_CONTROL_APPLIED:
+        if (!stream->prepared || stream->failed || !stream->release_attempted ||
+            record->applied_control_sequence <= stream->last_applied_control_sequence) return EPROTO;
+        next.last_applied_control_sequence = record->applied_control_sequence;
+        /* Retain the last lifecycle record. An acknowledgment is not a job transition. */
+        next.latest.sequence = record->sequence;
+        next.target_release_attempted = target_release;
+        *stream = next;
+        return 0;
     default: return EPROTO;
     }
     next.latest = *record;

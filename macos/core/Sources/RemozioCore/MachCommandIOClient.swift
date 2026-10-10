@@ -19,11 +19,23 @@ public struct VerifiedCommandExecutionJobObservation: Equatable, Sendable {
     }
 }
 
+/// Authenticated response to this session's outstanding fresh query. Local controls can invalidate it before consumption.
+/// The state describes the query point. A frontend must also reconcile local continuation and current terminal ownership.
+public struct VerifiedCommandCurrentJobObservation: Equatable, Sendable {
+    public let state: CommandCurrentJobState
+    public let request: CommandAdmittedRequest
+    public let submission: CapturedSubmission
+    fileprivate init(state: CommandCurrentJobState, request: CommandAdmittedRequest, submission: CapturedSubmission) {
+        self.state = state; self.request = request; self.submission = submission
+    }
+}
+
 /// Ordered stream observations grant no execution or retry permission.
 public enum CommandExecutionStreamEvent {
     case opened, output(Data), outputEnded, inputCapacity(Int)
     case terminal(VerifiedCommandTerminalResult)
     case jobState(VerifiedCommandExecutionJobObservation)
+    case currentJob(VerifiedCommandCurrentJobObservation)
 }
 
 /// A local signal interrupted a receive before any message was consumed. It permits another poll of the same channel.
@@ -33,6 +45,7 @@ public enum CommandExecutionStreamPollError: Error, Equatable { case interrupted
 public final class RetainedCommandExecutionSession {
     public static let maximumInputChunk = CommandStreamFrame.maximumChunk
     public let admission: VerifiedCommandAdmissionResult
+    public var supportsCurrentJobQueries: Bool { handshake.profile.supportsCurrentJob }
     /// The authenticated profile determines local relay routing. Unsupported legacy profiles return nil.
     public var executionIOMode: CommandIOMode? {
         if handshake.profile.supportsStreamingExecution { return .pty }
@@ -54,6 +67,15 @@ public final class RetainedCommandExecutionSession {
     private var inputCapacity = 0
     private var outputAcknowledged = false
     private var lastJobRevision: UInt64 = 0
+    private var preparedJobQuery: Data?
+    private var outstandingJobQuery: Data?
+    private var jobQueryInvalidated = false
+    private var jobQueryStarted: UInt64 = 0
+    private var jobQueryDeadline: UInt64 = 0
+    func borrowedResultPort() throws -> mach_port_t {
+        guard !closed, endpoint.port != 0 else { throw MachCommandHandshakeError.retired }
+        return endpoint.port
+    }
     private var streamBinding: CommandStreamBinding {
         get throws {
             guard case .admitted(let request) = admission.outcome else { throw CommandStreamError.binding }
@@ -109,7 +131,8 @@ public final class RetainedCommandExecutionSession {
     /// Polls PTY stream events or pipe control readiness and terminal results. Each wait is finite; the command lifetime is not.
     /// A zero-consumption local interruption throws CommandExecutionStreamPollError.interrupted and retains this channel.
     /// Reconcile pending local signals before polling again. Every new poll authenticates the original authority.
-    public func pollStreamEvent(timeoutMilliseconds: UInt32 = 250) throws -> CommandExecutionStreamEvent? {
+    /// Nonblocking mode previews without waiting. The positive timeout still bounds authentication and packet validation.
+    public func pollStreamEvent(timeoutMilliseconds: UInt32 = 250, nonblocking: Bool = false) throws -> CommandExecutionStreamEvent? {
         guard handshake.profile.supportsExecutionControls, (1...60_000).contains(timeoutMilliseconds) else {
             throw MachCommandHandshakeError.incompatible
         }
@@ -124,7 +147,7 @@ public final class RetainedCommandExecutionSession {
         do {
             try handshake.authenticateReplyAuthority(expression: expression, userID: userID, auditSessionID: auditSessionID)
             let event: ReceivedMachCommandExecutionEvent
-            do { event = try receiver.receiveExecutionEvent(timeoutMilliseconds: remaining()) }
+            do { event = try receiver.receiveExecutionEvent(timeoutMilliseconds: remaining(), nonblocking: nonblocking) }
             catch MachCommandCallerError.timeout { return nil }
             catch MachCommandCallerError.mach(let status) where status == MACH_RCV_INTERRUPTED {
                 throw CommandExecutionStreamPollError.interrupted
@@ -146,7 +169,19 @@ public final class RetainedCommandExecutionSession {
                 case .jobState(let value):
                     guard value.revision > lastJobRevision, case .admitted(let request) = admission.outcome else { throw CommandStreamError.sequence }
                     lastJobRevision = value.revision
+                    if value.state == .continued { jobQueryInvalidated = true }
                     observation = .jobState(.init(value: value, request: request, submission: original.binding))
+                case .currentJob(let value):
+                    guard value.nonce == outstandingJobQuery, case .admitted(let request) = admission.outcome else {
+                        throw CommandStreamError.binding
+                    }
+                    if case .stopped(_, let revision) = value.state, revision < lastJobRevision { throw CommandStreamError.sequence }
+                    let receivedAt = try clock.now().milliseconds
+                    let stale = receivedAt < jobQueryStarted || receivedAt >= jobQueryDeadline
+                    outstandingJobQuery = nil
+                    observation = .currentJob(.init(state: jobQueryInvalidated || stale ? .unknown : value.state,
+                        request: request, submission: original.binding))
+                    jobQueryInvalidated = false
                 case .output(let bytes): observation = .output(bytes)
                 case .outputEnd: observation = .outputEnded
                 case .inputCredit(let count):
@@ -191,6 +226,24 @@ public final class RetainedCommandExecutionSession {
         return try sendControl(.inputEnd)
     }
     public func forwardSignal(_ signal: UInt32) throws -> Bool { try sendControl(.signal(signal)) }
+    /// One query can be in flight. Zero progress retains the unsent nonce; it never repeats a command submission.
+    /// The positive budget limits reply freshness. Expiry returns unknown and does not cancel the command.
+    public func requestCurrentJob(timeoutMilliseconds: UInt32 = 250) throws -> Bool {
+        guard handshake.profile.supportsCurrentJob else { throw MachCommandHandshakeError.incompatible }
+        guard (1...60_000).contains(timeoutMilliseconds) else { throw MachCommandHandshakeError.invalidConfiguration }
+        guard outstandingJobQuery == nil else { return false }
+        let started = try AuthorityClock().now().milliseconds
+        let (deadline, overflow) = started.addingReportingOverflow(UInt64(timeoutMilliseconds))
+        guard !overflow else { throw MachCommandHandshakeError.invalidConfiguration }
+        let nonce = try preparedJobQuery ?? MachCommandWire.random(32)
+        preparedJobQuery = nonce
+        guard try sendControl(.queryCurrentJob(nonce)) else { return false }
+        preparedJobQuery = nil; outstandingJobQuery = nonce; jobQueryInvalidated = false
+        jobQueryStarted = started; jobQueryDeadline = deadline
+        return true
+    }
+    /// Local continuation can invalidate a pending query even before its control reaches Root.
+    public func invalidateCurrentJobQuery() { if outstandingJobQuery != nil { jobQueryInvalidated = true } }
     public func resizeTerminal(rows: UInt16, columns: UInt16, pixelWidth: UInt16 = 0, pixelHeight: UInt16 = 0) throws -> Bool {
         guard handshake.profile.supportsStreamingExecution else { throw MachCommandHandshakeError.incompatible }
         return try sendControl(.resize(rows, columns, pixelWidth, pixelHeight))
@@ -212,11 +265,22 @@ public final class RetainedCommandExecutionSession {
         do {
             try handshake.authenticateReplyAuthority(expression: expression, userID: userID, auditSessionID: auditSessionID)
             let queued = try MachCommandWire.sendStream(bytes, destination: control.borrowed(), toAuthority: true)
-            if queued { try outgoing.accept(frame) }
+            if queued {
+                try outgoing.accept(frame)
+                switch body {
+                case .signal, .input, .inputEnd, .resize, .cancel: invalidateCurrentJobQuery()
+                default: break
+                }
+            }
             return queued
         } catch { close(); throw error }
     }
-    public func close() { if !closed { closed = true; control?.close(); control = nil; endpoint.close(); handshake.close() } }
+    public func close() {
+        if !closed {
+            closed = true; preparedJobQuery = nil; outstandingJobQuery = nil
+            control?.close(); control = nil; endpoint.close(); handshake.close()
+        }
+    }
     deinit { close() }
 }
 

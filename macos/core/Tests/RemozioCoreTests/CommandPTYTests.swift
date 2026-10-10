@@ -40,6 +40,14 @@ final class CommandPTYTests: XCTestCase {
         }
         XCTAssertEqual((0...2).map { fcntl(Int32($0), F_GETFL) }, before)
     }
+    func testForegroundQueryHasNoGroupBeforePrivateSessionOwnershipAndCannotReuseAClosedOwner() throws {
+        let pty = try rawPTY()
+        let before = (0...2).map { fcntl(Int32($0), F_GETFL) }
+        XCTAssertNil(try pty.foregroundGroup())
+        XCTAssertEqual((0...2).map { fcntl(Int32($0), F_GETFL) }, before)
+        pty.close()
+        XCTAssertThrowsError(try pty.foregroundGroup()) { XCTAssertEqual($0 as? RetainedCommandPTYError, .closed) }
+    }
     func testBoundedReadWaitsWithoutBlockingAndPreservesRawOutput() throws {
         let pty = try rawPTY(); defer { pty.close() }
         let start = DispatchTime.now().uptimeNanoseconds

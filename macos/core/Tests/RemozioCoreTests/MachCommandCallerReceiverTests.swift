@@ -5506,7 +5506,7 @@ extension MachCommandCallerReceiverTests {
                 case .inputCapacity(let capacity): XCTAssertEqual(capacity, 32768)
                 case .terminal(let terminal): XCTAssertTrue(ended); exit = terminal.outcome
                 case .opened: XCTFail("The stream must open once")
-                case .jobState: XCTFail("A legacy PTY profile must not report job state")
+                case .jobState, .currentJob: XCTFail("A legacy PTY profile must not report job state")
                 }
             }
             guard Date() < deadline else { throw MachCommandCallerError.timeout }
@@ -7382,6 +7382,7 @@ extension MachCommandCallerReceiverTests {
                 sawJob = true; XCTAssertEqual(job.revision, 1)
                 XCTAssertEqual(job.submission, submission.binding)
                 XCTAssertTrue(terminal.needsRestore)
+            case .currentJob: XCTFail("A historical profile must not report a current job query")
             case .suspended, .foregroundRequired, .interrupted: XCTFail("Historical job metadata must not suspend this foreground relay")
             case .waiting, .progress: break
             }
@@ -7495,5 +7496,185 @@ extension MachCommandCallerReceiverTests {
         XCTAssertFalse(relay.needsTerminalRestoration)
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
         try result.withLock { try XCTUnwrap($0).get() }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    func testFrontendNonblockingPreviewKeepsAuthenticationBudgetAndQueuedBinaryPackets() throws {
+        let endpoint = try Endpoint(), receive = try receiver(endpoint, maximum: 8192)
+        XCTAssertThrowsError(try receive.receiveExecutionEvent(timeoutMilliseconds: 5000, nonblocking: true)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        let first = Data([0, 255, 13, 10]), second = Data([3, 0, 128])
+        XCTAssertTrue(try MachCommandWire.sendStream(first, destination: endpoint.port))
+        XCTAssertTrue(try MachCommandWire.sendStream(second, destination: endpoint.port))
+        XCTAssertThrowsError(try receive.receiveExecutionEvent(timeoutMilliseconds: 0, nonblocking: true)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .configuration)
+        }
+        for expected in [first, second] {
+            guard case .stream(let reply, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 5000, nonblocking: true) else {
+                return XCTFail("The original authenticated packet must remain queued")
+            }
+            defer { reply.caller.close(); carried?.close() }
+            XCTAssertNil(carried); XCTAssertEqual(reply.payload, expected)
+        }
+        XCTAssertThrowsError(try receive.receiveExecutionEvent(timeoutMilliseconds: 5000, nonblocking: true)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    private func runCurrentJobQuery(wire: UInt64, mode: String = "valid") throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 5, wire: wire)
+        let submission = try commandSubmission(ioMode: wire == 10 ? .pty : .pipes)
+        let profile = handshake.profile, binding = streamBinding(profile, submission), payloads = try ioPayloads(profile: profile, submission: submission)
+        let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+        let receivedQuery = DispatchSemaphore(value: 0), allowReply = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let full = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
+        let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { output in output = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user,
+                    auditSessionID: nil, maxPayloadBytes: 8192)
+                let received = try receiver.receiveMappedIOInput(timeoutMilliseconds: 5000)
+                defer { received.closeIfUnclaimed() }
+                let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                let channel = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                defer { channel.close(); terminal.close() }
+                try received.sendAdmissionReply(payloads.0); try Self.waitQueued { try channel.send(.opened) }
+                var nonce: Data?
+                let deadline = Date().addingTimeInterval(5)
+                while nonce == nil {
+                    if let body = try channel.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                        guard case .queryCurrentJob(let value) = body else { throw CommandStreamError.malformed }
+                        nonce = value
+                    }
+                    guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+                }
+                receivedQuery.signal()
+                guard allowReply.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                if mode == "continue" {
+                    var continued = false
+                    while !continued {
+                        if let body = try channel.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                            XCTAssertEqual(body, .signal(UInt32(SIGCONT))); continued = true
+                        }
+                        guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+                    }
+                }
+                if mode == "regression" {
+                    try Self.waitQueued { try channel.send(.jobState(.init(revision: 4,
+                        state: .stopped(signal: UInt32(SIGSTOP), rawStopCode: UInt32(CLD_STOPPED), tracing: .untraced)))) }
+                }
+                if mode == "wrongNonce" {
+                    var wrong = try XCTUnwrap(nonce); wrong[0] ^= 1
+                    try Self.waitQueued { try channel.send(.currentJob(.init(nonce: wrong,
+                        state: .stopped(signal: UInt32(SIGSTOP), revision: 3)))) }
+                } else if mode == "backpressure" {
+                    for revision: UInt64 in 1...4 {
+                        XCTAssertTrue(try channel.send(.jobState(.init(revision: revision,
+                            state: .stopped(signal: UInt32(SIGSTOP), rawStopCode: UInt32(CLD_STOPPED), tracing: .untraced)))))
+                    }
+                    var reads = 0, checks = 0
+                    try channel.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
+                        checkPolicy: { checks += 1 }, currentState: { reads += 1; return .stopped(signal: UInt32(SIGSTOP), revision: 5) })
+                    full.signal()
+                    guard drained.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                    try channel.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
+                        checkPolicy: { checks += 1 }, currentState: { reads += 1; return .running })
+                    XCTAssertEqual(reads, 2); XCTAssertEqual(checks, 4)
+                } else {
+                    var checks = 0
+                    try channel.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
+                        checkPolicy: { checks += 1 }, currentState: { .stopped(signal: UInt32(SIGSTOP), revision: 3) })
+                    XCTAssertEqual(checks, 2)
+                    try channel.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
+                        checkPolicy: { throw CommandExecutionError.policyChanged }, currentState: { throw CommandExecutionError.unavailable })
+                    if mode == "replay" {
+                        try Self.waitQueued { try channel.send(.currentJob(.init(nonce: XCTUnwrap(nonce),
+                            state: .stopped(signal: UInt32(SIGSTOP), revision: 3)))) }
+                    }
+                    if mode == "expired" {
+                        var second: Data?
+                        while second == nil {
+                            if let body = try channel.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                                guard case .queryCurrentJob(let value) = body else { throw CommandStreamError.malformed }
+                                second = value
+                            }
+                            guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+                        }
+                        XCTAssertNotEqual(second, nonce)
+                        try channel.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
+                            checkPolicy: {}, currentState: { .running })
+                    }
+                }
+            } }
+        }
+        defer { allowReply.signal(); drained.signal() }
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let response = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192, mapped: true)
+        guard case .admitted(let session) = response else { return XCTFail("The current job session must be admitted") }
+        defer { session.close() }
+        guard case .opened? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The original controls must open") }
+        XCTAssertTrue(try session.requestCurrentJob(timeoutMilliseconds: mode == "expired" ? 10 : 1000))
+        XCTAssertFalse(try session.requestCurrentJob())
+        guard receivedQuery.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+        if mode == "continue" { try Self.waitQueued { try session.forwardSignal(UInt32(SIGCONT)) } }
+        if mode == "local" { session.invalidateCurrentJobQuery() }
+        if mode == "expired" { usleep(20000) }
+        allowReply.signal()
+        if mode == "backpressure" {
+            guard full.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+            for _ in 0..<4 {
+                guard case .jobState? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The full queue must drain") }
+            }
+            drained.signal()
+        }
+        if mode == "regression" {
+            guard case .jobState? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The newer job revision must arrive") }
+        }
+        if mode == "wrongNonce" || mode == "regression" {
+            XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 1000)) {
+                XCTAssertEqual($0 as? CommandStreamError, mode == "regression" ? .sequence : .binding)
+            }
+            XCTAssertThrowsError(try session.requestCurrentJob())
+        } else {
+            guard case .currentJob(let value)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else { return XCTFail("The bound query must receive a response") }
+            XCTAssertEqual(value.state, mode == "backpressure" ? .running :
+                mode == "continue" || mode == "local" || mode == "expired" ? .unknown : .stopped(signal: UInt32(SIGSTOP), revision: 3))
+            XCTAssertEqual(value.submission, submission.binding)
+            XCTAssertEqual(value.request, binding.request)
+            if mode == "expired" {
+                XCTAssertTrue(try session.requestCurrentJob(timeoutMilliseconds: 1000))
+                guard case .currentJob(let second)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else {
+                    return XCTFail("An expired query must retain the original channel")
+                }
+                XCTAssertEqual(second.state, .running); XCTAssertEqual(second.request, value.request)
+            }
+            if mode == "replay" {
+                XCTAssertThrowsError(try session.pollStreamEvent(timeoutMilliseconds: 1000)) { XCTAssertEqual($0 as? CommandStreamError, .binding) }
+            }
+        }
+        guard completed.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+        try XCTUnwrap(result.withLock { $0 }).get()
+    }
+    func testCurrentJobQueryUsesTheOriginalAuthenticatedMappedChannelForBothModes() throws {
+        for wire: UInt64 in [10, 11] { try runCurrentJobQuery(wire: wire) }
+    }
+    func testCurrentJobQueryBecomesUnknownAfterQueuedOrLocalContinuation() throws {
+        for wire: UInt64 in [10, 11] { for mode in ["continue", "local"] { try runCurrentJobQuery(wire: wire, mode: mode) } }
+    }
+    func testCurrentJobQueryRejectsWrongNonceReplayAndRegressedJobRevision() throws {
+        for mode in ["wrongNonce", "replay", "regression"] { try runCurrentJobQuery(wire: 11, mode: mode) }
+    }
+    func testCurrentJobQueryRecomputesTheReplyAfterActualMachBackpressure() throws {
+        for wire: UInt64 in [10, 11] { try runCurrentJobQuery(wire: wire, mode: "backpressure") }
+    }
+    func testCurrentJobQueryExpiryReturnsUnknownWithoutCancelingTheOriginalCommand() throws {
+        for wire: UInt64 in [10, 11] { try runCurrentJobQuery(wire: wire, mode: "expired") }
     }
 }

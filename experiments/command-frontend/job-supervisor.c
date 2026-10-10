@@ -1,0 +1,90 @@
+/* Debug-only supervisor for a frontend in its own non-orphaned job group and private terminal. */
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
+#include <util.h>
+static uint64_t now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+static bool same(const struct termios *a, const struct termios *b) {
+    return a->c_iflag == b->c_iflag && a->c_oflag == b->c_oflag && a->c_cflag == b->c_cflag &&
+        (a->c_lflag & ~PENDIN) == (b->c_lflag & ~PENDIN) && a->c_ispeed == b->c_ispeed && a->c_ospeed == b->c_ospeed &&
+        !memcmp(a->c_cc, b->c_cc, sizeof(a->c_cc));
+}
+static int export_descriptor(const char *name, int descriptor) {
+    char text[32]; snprintf(text, sizeof(text), "%d", descriptor);
+    return setenv(name, text, 1);
+}
+int main(int argc, char **argv) {
+    if (argc < 3 || geteuid() == 0 || getsid(0) != getpid() || signal(SIGCHLD, SIG_DFL) == SIG_ERR) return 64;
+    int master, slave, report[2], start[2];
+    if (openpty(&master, &slave, NULL, NULL, NULL) || ioctl(slave, TIOCSCTTY, 0) ||
+        signal(SIGTTOU, SIG_IGN) == SIG_ERR || pipe(report) || pipe(start) ||
+        fcntl(master, F_SETFL, O_NONBLOCK) || fcntl(report[0], F_SETFL, O_NONBLOCK)) return 65;
+    struct termios original, seen; if (tcgetattr(slave, &original)) return 66;
+    pid_t child = fork(); if (child < 0) return 67;
+    if (!child) {
+        close(start[1]); close(report[0]); char ready;
+        if (setpgid(0, 0) || read(start[0], &ready, 1) != 1 || ready != 'F') _exit(68);
+        close(start[0]);
+        if (export_descriptor("REMOZIO_FIXTURE_TTY_MASTER", master) || export_descriptor("REMOZIO_FIXTURE_TTY_SLAVE", slave) ||
+            export_descriptor("REMOZIO_FIXTURE_JOB_REPORT", report[1])) _exit(69);
+        execv(argv[1], argv + 1); _exit(70);
+    }
+    close(start[0]); close(report[1]);
+    int error = 0, status = 0; bool reaped = false, stopped = false;
+    if ((setpgid(child, child) && errno != EACCES) || tcsetpgrp(slave, child) || write(start[1], "F", 1) != 1) error = 71;
+    close(start[1]);
+    uint64_t deadline = now() + 15000;
+    while (!error && !stopped && now() < deadline) {
+        pid_t found = waitpid(child, &status, WNOHANG | WUNTRACED);
+        if (found == child) {
+            stopped = WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP;
+            if (!stopped) {
+                reaped = WIFEXITED(status) || WIFSIGNALED(status); error = 72;
+                fprintf(stderr, "Frontend before expected stop: exited=%d status=%d signalled=%d signal=%d stopped=%d stop=%d\n",
+                    WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                    WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : -1,
+                    WIFSTOPPED(status), WIFSTOPPED(status) ? WSTOPSIG(status) : -1);
+            }
+        } else if (found < 0 && errno != EINTR) error = 73;
+        usleep(1000);
+    }
+    if (!error && (!stopped || tcgetattr(slave, &seen) || !same(&original, &seen))) error = 74;
+    struct winsize size = {.ws_row = 79, .ws_col = 121};
+    if (!error && (tcsetpgrp(slave, getpgrp()) || ioctl(slave, TIOCSWINSZ, &size) || kill(child, SIGCONT))) error = 75;
+    bool background = false; deadline = now() + 5000;
+    while (!error && !background && now() < deadline) {
+        char marker; ssize_t count = read(report[0], &marker, 1);
+        if (count == 1) { if (marker != 'B') error = 76; else background = true; }
+        else if (!count || (errno != EAGAIN && errno != EINTR)) error = 77;
+        usleep(1000);
+    }
+    if (!error && (!background || tcgetattr(slave, &seen) || !same(&original, &seen) || tcsetpgrp(slave, child))) error = 78;
+    deadline = now() + 5000;
+    while (!error && !reaped && now() < deadline) {
+        pid_t found = waitpid(child, &status, WNOHANG);
+        if (found == child) { reaped = true; if (!WIFEXITED(status) || WEXITSTATUS(status) != 13) error = 79; }
+        else if (found < 0 && errno != EINTR) error = 80;
+        usleep(1000);
+    }
+    if (!error && (!reaped || tcgetattr(slave, &seen) || !same(&original, &seen))) error = 81;
+    if (!reaped) {
+        kill(child, SIGKILL);
+        pid_t found; do { found = waitpid(child, &status, 0); } while (found < 0 && errno == EINTR);
+        if (found != child) error = 82;
+    }
+    /* The last master close hangs up this supervisor's own controlling terminal. */
+    if (signal(SIGHUP, SIG_IGN) == SIG_ERR && !error) error = 83;
+    close(master); close(slave); close(report[0]);
+    if (error) fprintf(stderr, "Owned frontend job supervisor failed at stage %d\n", error);
+    return error ? error : 13;
+}

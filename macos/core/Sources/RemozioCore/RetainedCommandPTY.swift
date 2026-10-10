@@ -80,6 +80,13 @@ final class RetainedCommandPTY {
         let status = remozio_command_pty_signal(handle, number)
         if status != 0 { throw RetainedCommandPTYError.native(status) }
     }
+    func foregroundGroup() throws -> pid_t? {
+        guard let handle else { throw RetainedCommandPTYError.closed }
+        var group: Int32 = 0
+        let status = remozio_command_pty_foreground_group(handle, &group)
+        if status != 0 { throw RetainedCommandPTYError.native(status) }
+        return group > 0 ? group : nil
+    }
     /// Raw mode has no terminal EOF character. This never changes the application's terminal attributes.
     func currentCanonicalEOFSequence() throws -> Data? {
         guard let handle else { throw RetainedCommandPTYError.closed }

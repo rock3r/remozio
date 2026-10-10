@@ -18,6 +18,13 @@ struct remozio_frontend_terminal {
     bool active;
 };
 
+int remozio_frontend_terminal_descriptor(remozio_frontend_terminal_t *terminal, int *output) {
+    if (!terminal || !output) return EINVAL;
+    if (getpid() != terminal->process) return EPERM;
+    *output = terminal->descriptor;
+    return 0;
+}
+
 static int foreground(remozio_frontend_terminal_t *terminal) {
     if (getpid() != terminal->process) return EPERM;
     pid_t session = tcgetsid(terminal->descriptor);

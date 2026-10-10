@@ -43,6 +43,29 @@ def check(configuration):
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(child))
     child_original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioCommandChild'
     require(child.read_bytes() == child_original.read_bytes(), 'Embedding changed the signed command child')
+    frontend = app / 'Contents/Helpers/remozio'
+    frontend_identity = 'dev.remozio.command-frontend.debug' if configuration == 'Debug' else 'dev.remozio.command-frontend'
+    require(frontend.is_file(), 'Missing embedded command frontend')
+    verify_executable(frontend, frontend_identity)
+    run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(frontend))
+    frontend_original = BUILD / f'DerivedData/Build/Products/{configuration}/remozio'
+    require(frontend.read_bytes() == frontend_original.read_bytes(), 'Embedding changed the signed command frontend')
+    for arguments, status in (([], 64), (['--help'], 0), (['run', '--pipes', '/usr/bin/true'], 64),
+                              (['sudo', '--unknown', '--', '/usr/bin/true'], 64),
+                              (['run', b'private-argument-\xff'], 64)):
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            original_input = b'unread frontend input\x00\xff'
+            os.write(write_descriptor, original_input); os.close(write_descriptor); write_descriptor = -1
+            refused = subprocess.run([str(frontend), *arguments], stdin=read_descriptor, capture_output=True, timeout=5)
+            require(refused.returncode == status and b'Usage:' in refused.stderr, 'Frontend syntax/help result changed')
+            require(os.read(read_descriptor, 64) == original_input, 'Frontend syntax/help consumed command stdin')
+            require(not refused.stdout and b'/usr/bin/true' not in refused.stderr,
+                    'Frontend syntax/help wrote command output or logged command arguments')
+            require(b'private-argument' not in refused.stderr, 'Frontend logged a raw private argument')
+        finally:
+            os.close(read_descriptor)
+            if write_descriptor >= 0: os.close(write_descriptor)
     require(subprocess.run([str(child)], timeout=5).returncode == 64, 'Command child must reject public command arguments')
     if os.geteuid() != 0:
         for mode in ('--execute', '--execute-in-session'):

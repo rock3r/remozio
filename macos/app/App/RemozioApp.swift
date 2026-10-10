@@ -1,4 +1,5 @@
 import AppKit
+import RemozioCore
 import SwiftUI
 
 @main
@@ -28,9 +29,59 @@ struct RemozioApp: App {
                     Text("Routing, device pairing, and background services are still being built.")
                         .foregroundStyle(.secondary)
                 }
+                CommandCallerSettingsForm()
             }
             .formStyle(.grouped)
             .frame(minWidth: 440, idealWidth: 500, minHeight: 240)
+        }
+    }
+}
+
+private struct CommandCallerSettingsForm: View {
+    @AppStorage(CommandFrontendCallerSettings.modeKey) private var mode = "pty"
+    @AppStorage(CommandFrontendCallerSettings.disconnectKey) private var disconnect = "terminate"
+    @AppStorage(CommandFrontendCallerSettings.timeoutKey) private var timeout = "30000"
+    @AppStorage(CommandFrontendCallerSettings.initialBackoffKey) private var initial = "250"
+    @AppStorage(CommandFrontendCallerSettings.maximumBackoffKey) private var maximum = "2000"
+    @AppStorage(CommandFrontendCallerSettings.controlTimeoutKey) private var control = "5000"
+    @AppStorage(CommandFrontendCallerSettings.controlRetryKey) private var retry = "50"
+    @AppStorage(CommandFrontendCallerSettings.foregroundRetryKey) private var foreground = "250"
+
+    private var valid: Bool {
+        do {
+            _ = try CommandFrontendCallerSettings(preferences: [
+                CommandFrontendCallerSettings.modeKey: mode, CommandFrontendCallerSettings.disconnectKey: disconnect,
+                CommandFrontendCallerSettings.timeoutKey: timeout, CommandFrontendCallerSettings.initialBackoffKey: initial,
+                CommandFrontendCallerSettings.maximumBackoffKey: maximum, CommandFrontendCallerSettings.controlTimeoutKey: control,
+                CommandFrontendCallerSettings.controlRetryKey: retry, CommandFrontendCallerSettings.foregroundRetryKey: foreground],
+                defaultIOMode: .pty, defaultDisconnectBehavior: .terminate,
+                defaultReadiness: .init(timeoutMilliseconds: 30000))
+            return true
+        } catch { return false }
+    }
+    var body: some View {
+        Section("Command caller") {
+            Picker("Default command I/O", selection: $mode) {
+                Text("Terminal (PTY)").tag("pty")
+                Text("Pipes").tag("pipes")
+            }
+            Picker("If the caller disconnects", selection: $disconnect) {
+                Text("Terminate the command").tag("terminate")
+                Text("Let the command continue").tag("continue")
+            }
+            TextField("Readiness wait (ms)", text: $timeout)
+            TextField("Initial connection backoff (ms)", text: $initial)
+            TextField("Maximum connection backoff (ms)", text: $maximum)
+            TextField("Control validation timeout (ms)", text: $control)
+            TextField("Control retry interval (ms)", text: $retry)
+            TextField("Foreground retry interval (ms)", text: $foreground)
+            Text("These settings apply to new CLI invocations. They do not limit command runtime or change approval expiry.")
+                .foregroundStyle(.secondary)
+            if !valid {
+                Label("Use positive whole milliseconds. Intervals must not exceed 60000, and maximum backoff must be at least initial backoff.",
+                      systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            }
         }
     }
 }

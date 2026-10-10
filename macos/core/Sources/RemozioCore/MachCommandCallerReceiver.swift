@@ -114,8 +114,9 @@ public final class MachCommandCallerReceiver {
         let packet = try receivePacket(timeoutMilliseconds: 0, kind: .streamControl)
         return ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller)
     }
-    func receiveExecutionEvent(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandExecutionEvent {
-        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil)
+    func receiveExecutionEvent(timeoutMilliseconds: UInt32, nonblocking: Bool = false) throws -> sending ReceivedMachCommandExecutionEvent {
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil,
+            previewTimeoutMilliseconds: nonblocking ? 0 : nil, allowNonblockingPreview: nonblocking)
         switch packet.kind {
         case .streamOpened: return .stream(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller), packet.reply)
         case .streamOutput: return .stream(ReceivedMachCommandSubmission(payload: packet.payload, caller: packet.caller), nil)
@@ -175,10 +176,12 @@ public final class MachCommandCallerReceiver {
         let controlTerminal: RetainedCommandInputDescriptor?
     }
 
-    private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?, previewTimeoutMilliseconds: UInt32? = nil) throws -> sending Packet {
+    private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?, previewTimeoutMilliseconds: UInt32? = nil,
+                               allowNonblockingPreview: Bool = false) throws -> sending Packet {
         let previewWait = previewTimeoutMilliseconds ?? timeoutMilliseconds
         guard (timeoutMilliseconds > 0 || requestedKind == .streamControl),
-              (previewWait > 0 || requestedKind == .streamControl), previewWait <= timeoutMilliseconds else { throw MachCommandCallerError.configuration }
+              (previewWait > 0 || requestedKind == .streamControl || allowNonblockingPreview),
+              previewWait <= timeoutMilliseconds else { throw MachCommandCallerError.configuration }
         let started = DispatchTime.now().uptimeNanoseconds
         var preview = remozio_mach_preview_t()
         let previewResult = remozio_preview_audit(port, previewWait, &preview)

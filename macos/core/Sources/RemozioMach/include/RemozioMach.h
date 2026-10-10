@@ -12,6 +12,7 @@
 #include "RemozioCommandCaller.h"
 #include "RemozioCommandPTY.h"
 #include "RemozioFrontendTerminal.h"
+#include "RemozioFrontendRuntime.h"
 #include "RemozioCommandStreamSource.h"
 #include "RemozioCommandTerminalContext.h"
 typedef struct {

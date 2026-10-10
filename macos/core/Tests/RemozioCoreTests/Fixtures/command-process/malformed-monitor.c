@@ -9,7 +9,7 @@ int main(int argc,char **argv){
  remozio_monitor_record_t record={.tag=REMOZIO_MONITOR_PREPARED,.target_pid=(uint32_t)getpid(),.sequence=1};
  unsigned char bytes[REMOZIO_MONITOR_RECORD_BYTES];if(remozio_monitor_record_encode(&record,bytes))return 65;
  size_t count=sizeof(bytes);
- if(strstr(argv[2],"bad_version")||strstr(argv[2],"blocked_bad_status"))bytes[7]=2;
+ if(strstr(argv[2],"bad_version")||strstr(argv[2],"blocked_bad_status"))bytes[7]=1;
  if(strstr(argv[2],"partial"))count=63;
  if(strstr(argv[2],"bad_sequence")){record.sequence=2;if(remozio_monitor_record_encode(&record,bytes))return 66;}
  if(write(5,bytes,count)!=(ssize_t)count)return 67;

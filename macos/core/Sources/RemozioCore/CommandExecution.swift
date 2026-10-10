@@ -207,7 +207,8 @@ final class CommandExecution {
                         auditSessionID: validation.callerSessionID, allowInput: releaseSucceeded,
                         checkCaller: { try self.resources.recheckCaller(expression: validation.callerExpression,
                             userID: validation.callerUserID, auditSessionID: validation.callerSessionID) },
-                        checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) })
+                        checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) },
+                        currentJob: { try self.queryCurrentJob() })
                 } catch {
                     pump.detach()
                     if !released || resources.capture.disconnectBehavior == .terminate { cancelOwned() }
@@ -227,7 +228,8 @@ final class CommandExecution {
                         auditSessionID: validation.callerSessionID,
                         checkCaller: { try self.resources.recheckCaller(expression: validation.callerExpression,
                             userID: validation.callerUserID, auditSessionID: validation.callerSessionID) },
-                        checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) })
+                        checkControlPolicy: checkStreamPolicy, applyControl: { try self.applyControl($0) },
+                        currentJob: { try self.queryCurrentJob() })
                 } catch {
                     pipeControls.detach()
                     if !released || resources.capture.disconnectBehavior == .terminate { cancelOwned() }
@@ -265,6 +267,23 @@ final class CommandExecution {
         guard resources.reportsJobState, releaseSucceeded, targetActive, !observationUncertain,
               observation.status.latest.tag == UInt32(REMOZIO_MONITOR_JOB_STATE.rawValue) else { return nil }
         return try CommandJobStatePayload(nativeRecord: observation.status.latest)
+    }
+    private func queryCurrentJob() throws -> CommandCurrentJobState {
+        guard releaseSucceeded, targetActive, monitorOwned, !observationUncertain, !disposed, let monitor else { return .unknown }
+        var observation = remozio_command_monitor_observation_t()
+        guard remozio_command_monitor_poll(monitor, &observation) == 0 else { return .unknown }
+        let before = try pump?.foregroundGroup()
+        var job = remozio_command_current_job_t()
+        guard remozio_command_monitor_current_job(monitor, &job) == 0, job.known, !job.traced, job.original_group else { return .unknown }
+        let after = try pump?.foregroundGroup()
+        if pump != nil {
+            guard let before, before == after, UInt32(exactly: before) == observation.status.latest.target_pid else { return .unknown }
+        }
+        if job.stopped {
+            guard observation.status.latest.stop_code == UInt32(CLD_STOPPED) else { return .unknown }
+            return .stopped(signal: job.stop_signal, revision: job.job_revision)
+        }
+        return .running
     }
     private func flushPendingSignals(validation: Validation, checkPolicy: () throws -> Void) throws {
         guard releaseSucceeded, !pendingSignals.isEmpty else { return }
