@@ -6,6 +6,7 @@ import SQLite3
 public enum GatewayAuthorityError: Error, Equatable {
     case disabled, invalidConfiguration, unconfigured, wrongScope, unavailableEnrollment, unavailableRegistration, invalidToken
     case headMismatch, capacityExceeded, corruptData, invalidSignature, invalidClock, expired, superseded, alreadyConsumed
+    case unsupportedSubmissionControl
 }
 
 /// Protected host state. Neither candidate nor proof fields establish this trust.
@@ -186,8 +187,7 @@ final class GatewayAuthorityJournal {
         if local > 0 {
             guard let boundary = missing.first, boundary.revision == local,
                   let retained = try envelope(boundary.operationID, identity: identity) else { return result(.conflictingLocalHistory) }
-            let kind: UInt64
-            switch boundary { case .candidate: kind = 1; case .recipient(let value): kind = value.kind.rawValue }
+            let kind = boundary.kind
             guard retained.revision == local, retained.kind == kind, retained.canonicalPayload == boundary.canonicalPayload else {
                 return result(.conflictingLocalHistory)
             }
@@ -201,6 +201,7 @@ final class GatewayAuthorityJournal {
             }
             let binding: GatewayTokenBinding
             switch record {
+            case .submission: return result(.requiresTrustRecovery)
             case .candidate(let value): binding = value.candidate.binding
             case .recipient(let value):
                 switch value.control {
@@ -230,7 +231,7 @@ final class GatewayAuthorityJournal {
         for (record, candidate) in zip(missing, candidates) {
             if let candidate {
                 let kind: UInt64
-                switch record { case .candidate: kind = 1; case .recipient: kind = 2 }
+                switch record { case .candidate: kind = 1; case .recipient: kind = 2; case .submission: throw GatewayAuthorityError.corruptData }
                 try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",
                     [record.operationID, uint(record.revision), candidate, record.canonicalPayload, record.signature]) { try done($0) }
             } else {
@@ -412,8 +413,7 @@ final class GatewayAuthorityJournal {
             guard let retained = try envelope(receipt.operationID, identity: identity) else {
                 return result(.missingLocalHistory, previous)
             }
-            let kind: UInt64
-            switch receipt { case .candidate: kind = 1; case .recipient(let value): kind = value.kind.rawValue }
+            let kind = receipt.kind
             guard retained.revision == evidence.revision, retained.kind == kind,
                   retained.canonicalPayload == receipt.canonicalPayload else {
                 return result(.conflictingLocalHistory, previous)

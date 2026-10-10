@@ -636,6 +636,7 @@ public final class JournalTransaction {
                 let eventID = withUnsafeBytes(of: &eventUUID) { Data($0) }
                 let next: UUID, phone: Data
                 switch record {
+                case .submission: throw GatewayAuthorityError.unsupportedSubmissionControl
                 case .candidate(let receipt):
                     phone = receipt.candidate.binding.phoneID
                     next = try restrictUnknownGatewayTrust(kind: .candidate, canonicalPayload: record.canonicalPayload,

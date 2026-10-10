@@ -235,7 +235,7 @@ final class GatewayDatabaseTests: XCTestCase {
         fails(.incompatibleStore) { try open(fixture, initialize: true) }
         try fixture.sql("PRAGMA user_version=99")
         fails(.incompatibleStore) { try open(fixture) }
-        try fixture.sql("PRAGMA user_version=3")
+        try fixture.sql("PRAGMA user_version=4")
         let reopened = try open(fixture)
         XCTAssertEqual(try reopened.head(), 1); try reopened.close()
         try fixture.sql("DROP TABLE gateway_candidates_v1")
@@ -509,11 +509,11 @@ final class GatewayDatabaseTests: XCTestCase {
     func testExplicitLegacyMigrationPreservesCandidateReceiptAndHead() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         let receipt = try admit(db).receipt; try db.close()
-        try fixture.sql("DROP TABLE gateway_probes_v3; DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1")
+        try fixture.sql("DROP TABLE gateway_submission_controls_v4; DROP TABLE gateway_probes_v3; DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1")
         fails(.incompatibleStore) { try open(fixture) }
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 1)
         let migrated = try open(fixture, migrate: true)
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 3)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 4)
         XCTAssertEqual(try migrated.head(), 1)
         XCTAssertEqual(try migrated.receipt(operationID: id(1))?.canonicalPayload, receipt.canonicalPayload)
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
@@ -525,7 +525,7 @@ final class GatewayDatabaseTests: XCTestCase {
     func testLegacyMigrationFailureRollsBackWithoutResettingHistory() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true)
         _ = try admit(db); try db.close()
-        try fixture.sql("DROP TABLE gateway_probes_v3; DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1; CREATE TABLE gateway_mappings_v2(block INTEGER)")
+        try fixture.sql("DROP TABLE gateway_submission_controls_v4; DROP TABLE gateway_probes_v3; DROP TABLE gateway_mappings_v2; DROP TABLE gateway_recipients_v2; PRAGMA user_version=1; CREATE TABLE gateway_mappings_v2(block INTEGER)")
         XCTAssertThrowsError(try open(fixture, migrate: true))
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 1)
         XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM sqlite_schema WHERE name='gateway_recipients_v2'"), 0)
@@ -755,10 +755,10 @@ final class GatewayDatabaseTests: XCTestCase {
     func testSchemaTwoMigrationKeepsActiveMappingAndStartsWithNoProbeAttempts() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true), candidate = try candidate()
         _ = try admit(db, candidate); _ = try activate(db, activation(candidate), head: 1); try db.close()
-        try fixture.sql("DROP TABLE gateway_probes_v3; PRAGMA user_version=2")
+        try fixture.sql("DROP TABLE gateway_submission_controls_v4; DROP TABLE gateway_probes_v3; PRAGMA user_version=2")
         fails(.incompatibleStore) { try open(fixture) }
         let migrated = try open(fixture, migrate: true, probePolicy: probePolicy())
-        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 3)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 4)
         XCTAssertEqual(try migrated.head(), 2)
         XCTAssertEqual(try migrated.activeMapping(trust: trust(head: 2))?.activation.binding, candidate.binding)
         XCTAssertNil(try migrated.probeProgress(candidateOperationID: id(1)))
@@ -798,6 +798,7 @@ final class GatewayDatabaseTests: XCTestCase {
             switch accepted.evidence.receipt {
             case .candidate: XCTAssertEqual(kind, 1)
             case .recipient(let receipt): XCTAssertEqual(receipt.kind.rawValue, kind)
+            case .submission(let receipt): XCTAssertEqual(receipt.control.kind.rawValue, kind)
             case nil: XCTAssertEqual(kind, 0)
             }
             XCTAssertNil(reply.canonicalPayload.range(of: Data(token.utf8)))
@@ -1207,6 +1208,209 @@ final class GatewayDatabaseTests: XCTestCase {
         let page = try owner.acceptHistory(reply, now: headMoment(2)).page
         XCTAssertEqual(page.records.map(\.revision), [UInt64.max]); XCTAssertTrue(page.coversRequestedRange)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
+    }
+
+    private func submission(_ kind: GatewaySubmissionKind = .rotation, credential: UInt8 = 30, operation: UInt8 = 31,
+                            revision: UInt64 = 1, publicKey: Data? = nil, issued: UInt64 = 1000, expires: UInt64 = 2000) throws -> GatewaySubmissionControl {
+        try GatewaySubmissionControl(kind: kind,
+            binding: GatewaySubmissionBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5)),
+            revision: revision, operationID: id(operation), issuedAtUnixMillis: issued, expiresAtUnixMillis: expires,
+            credentialID: id(credential), publicKey: kind == .rotation ? publicKey ?? P256.Signing.PrivateKey().publicKey.x963Representation : nil)
+    }
+    private func submissionTrust(_ head: UInt64, active: Bool = true) throws -> GatewaySubmissionTrust {
+        GatewaySubmissionTrust(registration: try identity(), active: active, revision: UUID(), appliedControlRevision: head)
+    }
+    private func applySubmission(_ db: GatewayDatabase, _ control: GatewaySubmissionControl, head: UInt64 = 0,
+                                 wall: UInt64 = 1000, monotonic: UInt64 = 100, signingKey: P256.Signing.PrivateKey? = nil) throws -> GatewaySubmissionApplication {
+        let payload = try control.encode(limits: limits)
+        let input = try GatewaySubmissionSigningInput.make(wireVersion: 1, kind: control.kind, canonicalPayload: payload,
+            payloadLimits: limits, inputLimits: limits)
+        return try db.applySubmission(canonicalPayload: payload, signature: (signingKey ?? key).signature(for: input).rawRepresentation,
+            wireVersion: 1, trust: submissionTrust(head), nowUnixMillis: wall, now: AuthorityMoment(epoch: epoch, milliseconds: monotonic))
+    }
+
+    func testSubmissionRotationRetiresOldIdentityAndLateRevocationLeavesReplacementActive() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let first = try submission(), replacement = try submission(credential: 40, operation: 41, revision: 2)
+        _ = try applySubmission(db, first)
+        XCTAssertEqual(try db.activeSubmissionCredential(trust: submissionTrust(1))?.publicKey, first.publicKey)
+        _ = try applySubmission(db, replacement, head: 1)
+        _ = try applySubmission(db, submission(.revocation, operation: 42, revision: 3), head: 2)
+        XCTAssertEqual(try db.activeSubmissionCredential(trust: submissionTrust(3))?.credentialID, id(40))
+        fails(.revokedCredential) { try applySubmission(db, submission(operation: 43, revision: 4), head: 3) }
+        fails(.retiredCredential) { try applySubmission(db, submission(credential: 40, operation: 44, revision: 4), head: 3) }
+        _ = try applySubmission(db, submission(.revocation, credential: 40, operation: 45, revision: 4), head: 3)
+        XCTAssertNil(try db.activeSubmissionCredential(trust: submissionTrust(4)))
+        XCTAssertEqual(try db.head(), 4)
+        XCTAssertFalse(try applySubmission(db, first, head: 4, wall: 99_999).inserted)
+        XCTAssertNil(try db.activeSubmissionCredential(trust: submissionTrust(4)))
+        try db.close()
+        let reopened = try open(fixture)
+        XCTAssertFalse(try applySubmission(reopened, replacement, head: 4, wall: 99_999, monotonic: 0).inserted)
+        XCTAssertNil(try reopened.activeSubmissionCredential(trust: submissionTrust(4)))
+        XCTAssertEqual(try reopened.submissionReceipt(operationID: id(31))?.canonicalPayload, try first.encode(limits: limits))
+    }
+
+    func testSubmissionUnknownRevocationIsRetainedAndCannotBeReenrolled() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        _ = try applySubmission(db, submission(.revocation))
+        XCTAssertNil(try db.activeSubmissionCredential(trust: submissionTrust(1)))
+        fails(.revokedCredential) { try applySubmission(db, submission(operation: 32, revision: 2), head: 1) }
+        XCTAssertEqual(try db.head(), 1)
+        _ = try applySubmission(db, submission(credential: 40, operation: 41, revision: 2), head: 1)
+        XCTAssertEqual(try db.activeSubmissionCredential(trust: submissionTrust(2))?.credentialID, id(40))
+    }
+
+    func testSubmissionSharesOperationIdentityAndCapacityWithOtherControls() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true, maximum: 3)
+        _ = try admit(db)
+        fails(.operationConflict) { try applySubmission(db, submission(operation: 1, revision: 2), head: 1) }
+        _ = try applySubmission(db, submission(revision: 2), head: 1)
+        fails(.operationConflict) { try admit(db, candidate(2, revision: 3, operation: 31), head: 2) }
+        fails(.operationConflict) { try revoke(db, revision: 3, head: 2, operation: 31) }
+        _ = try revoke(db, revision: 3, head: 2)
+        fails(.operationConflict) { try applySubmission(db, submission(.revocation, operation: 60, revision: 4), head: 3) }
+        fails(.capacityExceeded) { try applySubmission(db, submission(.revocation, operation: 42, revision: 4), head: 3) }
+        fails(.capacityExceeded) { try admit(db, candidate(3, revision: 4, phone: 8), head: 3) }
+        XCTAssertFalse(try applySubmission(db, submissionReceiptControl(db, operation: 31), head: 3).inserted)
+        XCTAssertEqual(try db.head(), 3)
+    }
+    private func submissionReceiptControl(_ db: GatewayDatabase, operation: UInt8) throws -> GatewaySubmissionControl {
+        try XCTUnwrap(db.submissionReceipt(operationID: id(operation))).control
+    }
+
+    func testSubmissionFailuresDoNotMutateCredentialOrCounter() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let first = try submission(), intruder = P256.Signing.PrivateKey()
+        XCTAssertThrowsError(try applySubmission(db, first, signingKey: intruder))
+        XCTAssertThrowsError(try applySubmission(db, first, wall: 999))
+        XCTAssertThrowsError(try applySubmission(db, first, wall: 2000))
+        XCTAssertThrowsError(try applySubmission(db, submission(expires: 2001)))
+        XCTAssertThrowsError(try applySubmission(db, submission(publicKey: Data([4]) + Data(repeating: 0, count: 64))))
+        fails(.headMismatch) { try applySubmission(db, first, head: 1) }
+        XCTAssertEqual(try db.head(), 0); XCTAssertNil(try db.activeSubmissionCredential(trust: submissionTrust(0)))
+        _ = try applySubmission(db, first)
+        fails(.operationConflict) { try applySubmission(db, submission(.revocation), head: 1) }
+        XCTAssertThrowsError(try applySubmission(db, submission(operation: 32), head: 1))
+        fails(.wrongScope) { try db.activeSubmissionCredential(trust: submissionTrust(1, active: false)) }
+        XCTAssertEqual(try db.activeSubmissionCredential(trust: submissionTrust(1))?.publicKey, first.publicKey)
+    }
+
+    func testSubmissionTransactionFailureRollsBackCredentialAndHeadTogether() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let first = try submission(); _ = try applySubmission(db, first)
+        try fixture.sql("CREATE TRIGGER fail_submission_head BEFORE UPDATE ON gateway_identity_v1 BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
+        XCTAssertThrowsError(try applySubmission(db, submission(credential: 40, operation: 41, revision: 2), head: 1))
+        XCTAssertEqual(try db.head(), 1)
+        XCTAssertNil(try db.submissionReceipt(operationID: id(41)))
+        XCTAssertEqual(try db.activeSubmissionCredential(trust: submissionTrust(1))?.credentialID, id(30))
+        try fixture.sql("DROP TRIGGER fail_submission_head")
+        _ = try applySubmission(db, submission(credential: 40, operation: 41, revision: 2), head: 1)
+    }
+
+    func testSubmissionStoredSignatureAndMetadataCorruptionStopTheOwner() throws {
+        for sql in ["UPDATE gateway_submission_controls_v4 SET signature=zeroblob(64)",
+                    "UPDATE gateway_submission_controls_v4 SET credential=zeroblob(16)",
+                    "UPDATE gateway_submission_controls_v4 SET kind=zeroblob(8)",
+                    "UPDATE gateway_submission_controls_v4 SET revision=zeroblob(8)"] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true)
+            _ = try applySubmission(db, submission())
+            try fixture.sql(sql)
+            fails(.corruptData) { try db.activeSubmissionCredential(trust: submissionTrust(1)) }
+            fails(.unavailable) { try db.head() }
+        }
+    }
+
+    func testSubmissionFreshHeadAndHistoryIncludeBothKindsAlongsideRecipientControls() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db)
+        _ = try applySubmission(db, submission(revision: 2), head: 1)
+        _ = try revoke(db, revision: 3, head: 2)
+        _ = try applySubmission(db, submission(.revocation, operation: 32, revision: 4), head: 3)
+        try db.close()
+        let reopened = try open(fixture), owner = try headOwner(gateway)
+        let head = try collectedHead(reopened, owner: owner, key: gateway)
+        XCTAssertEqual(head.evidence.receipt?.kind, 5)
+        let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+        let first = try owner.acceptHistory(historyReply(reopened, owner: owner, key: gateway, after: 0, through: 4, maximum: 2), now: headMoment(1))
+        XCTAssertNil(try collector.accept(first))
+        let second = try owner.acceptHistory(historyReply(reopened, owner: owner, key: gateway, after: 2, through: 4), now: headMoment(1))
+        XCTAssertEqual(try collector.accept(second)?.records.map(\.kind), [1, 4, 3, 5])
+        XCTAssertNil(try reopened.activeSubmissionCredential(trust: submissionTrust(4)))
+        let receipt = try XCTUnwrap(reopened.submissionReceipt(operationID: id(32)))
+        XCTAssertEqual(String(reflecting: receipt), "GatewaySubmissionReceipt(redacted)")
+    }
+
+    func testSubmissionCorruptRevocationMetadataCannotRestoreRetiredCredential() throws {
+        for sql in ["UPDATE gateway_submission_controls_v4 SET credential=zeroblob(16) WHERE kind=x'0000000000000005'",
+                    "UPDATE gateway_submission_controls_v4 SET kind=zeroblob(8) WHERE kind=x'0000000000000005'"] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true)
+            _ = try applySubmission(db, submission())
+            _ = try applySubmission(db, submission(.revocation, operation: 32, revision: 2), head: 1)
+            try fixture.sql(sql)
+            fails(.corruptData) { try db.activeSubmissionCredential(trust: submissionTrust(2)) }
+            fails(.unavailable) { try db.head() }
+        }
+    }
+
+    func testSubmissionActiveCredentialSurvivesRestartAndHistoricalExpiry() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), control = try submission(revision: .max)
+        let applied = try applySubmission(db, control); try db.close()
+        let reopened = try open(fixture)
+        XCTAssertFalse(try applySubmission(reopened, control, head: .max, wall: 99_999, monotonic: 0).inserted)
+        let active = try XCTUnwrap(reopened.activeSubmissionCredential(trust: submissionTrust(.max)))
+        XCTAssertEqual(active.publicKey, control.publicKey); XCTAssertEqual(active.receipt.signature, applied.receipt.signature)
+        XCTAssertEqual(try reopened.headEvidence().revision, .max)
+        XCTAssertEqual(String(reflecting: active), "GatewayActiveSubmissionCredential(redacted)")
+    }
+
+    func testGatewayReplySignatureCannotSubstituteForCredentialRootSignature() throws {
+        for kind in [GatewaySubmissionKind.rotation, .revocation] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true), gateway = P256.Signing.PrivateKey()
+            _ = try applySubmission(db, submission(kind))
+            for mutation in 0..<3 {
+                let owner = try headOwner(gateway), query = try owner.makeQuery(now: headMoment(1))
+                let original = try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation }
+                let forged = try resignHead(original, key: gateway) {
+                    switch mutation {
+                    case 0: $0[7] = .bytes(Data(repeating: 0, count: 64))
+                    case 1: $0[5] = .unsigned(kind == .rotation ? 5 : 4)
+                    default: $0[4] = .unsigned(2)
+                    }
+                }
+                headFails(.invalidReceipt) { try owner.accept(forged, now: headMoment(2)) }
+            }
+            let owner = try headOwner(gateway)
+            let original = try historyReply(db, owner: owner, key: gateway, after: 0, through: 1)
+            let forged = try changeHistory(original, key: gateway) {
+                guard case var .array(records) = $0[6], case var .map(record) = records[0] else { return XCTFail("Expected receipt") }
+                record[2] = .bytes(Data(repeating: 0, count: 64)); records[0] = .map(record); $0[6] = .array(records)
+            }
+            headFails(.invalidReceipt) { try owner.acceptHistory(forged, now: headMoment(2)) }
+            XCTAssertEqual(try db.head(), 1)
+        }
+    }
+
+    func testSchemaThreeCredentialMigrationIsExplicitAndAtomic() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        let original = try admit(db).receipt; try db.close()
+        try fixture.sql("DROP TABLE gateway_submission_controls_v4; PRAGMA user_version=3")
+        fails(.incompatibleStore) { try open(fixture) }
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 3)
+        let migrated = try open(fixture, migrate: true)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 4)
+        XCTAssertEqual(try migrated.head(), 1)
+        XCTAssertEqual(try migrated.receipt(operationID: id(1))?.signature, original.signature)
+        _ = try applySubmission(migrated, submission(revision: 2), head: 1)
+        try migrated.close()
+        XCTAssertEqual(try open(fixture).activeSubmissionCredential(trust: submissionTrust(2))?.credentialID, id(30))
+
+        let blockedFixture = try Fixture(), blocked = try open(blockedFixture, initialize: true)
+        _ = try admit(blocked); try blocked.close()
+        try blockedFixture.sql("DROP TABLE gateway_submission_controls_v4; PRAGMA user_version=3; CREATE TABLE gateway_submission_controls_v4(block INTEGER)")
+        XCTAssertThrowsError(try open(blockedFixture, migrate: true))
+        XCTAssertEqual(try blockedFixture.scalar("PRAGMA user_version"), 3)
+        XCTAssertEqual(try blockedFixture.scalar("SELECT count(*) FROM gateway_candidates_v1"), 1)
     }
 
     private final class Fixture {

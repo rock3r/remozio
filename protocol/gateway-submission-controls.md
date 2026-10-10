@@ -13,7 +13,7 @@ flowchart LR
     M --> F[Opaque provider wake]
 ```
 
-The diagram defines the remaining integration contract. The journal and submission endpoint do not yet apply these controls.
+The macOS core journal applies these controls. The restricted submission endpoint still requires integration.
 The Root control key, transport credential, and provider credential have separate purposes.
 The credential control contains only a public key. Shared setup exports must exclude the corresponding private key and credential identity.
 
@@ -90,5 +90,20 @@ They verify unsigned boundaries, exact fields, wrong keys, purpose substitution,
 Kotlin also verifies stable constructor and getter copies. Descriptions redact values.
 The fixture generator used disposable private keys and retained only public fixtures.
 
-Durable credential storage, Root issuance, authenticated native submission, protected provisioning, rotation delivery, and provider tests remain required.
-These protocol tests contact no provider or device and install no credential.
+The macOS core authenticates the Root claim and the actual P-256 point before application.
+It commits the signed receipt and shared revision together. Signed receipts define credential state; there is no separate unsigned active-key cache.
+Rotation requires a fresh ID. Revocation retains a tombstone, including for an unknown ID.
+A late revocation of an older ID leaves its replacement active. Exact retries return the retained receipt after expiry or restart without restoring state.
+Credential reads authenticate every retained credential row before filtering. This prevents altered index columns from hiding a signed revocation.
+The shared operation limit bounds those reads. Cost grows with retained credential history.
+
+Gateway store schema 4 requires explicit protected migration from schemas 1, 2, or 3.
+Runtime opening does not migrate or recreate an older store. Migration preserves existing receipts and rolls back on failure.
+Head and history replies include kinds 4 and 5 and retain their Root signatures.
+Older decoders reject these kinds. Existing query shape and signature domains remain unchanged.
+
+Root issuance and local credential history remain pending.
+Until that integration exists, Root recovery rejects unknown credential controls and leaves its head and phone trust unchanged.
+It must not treat credential authority as phone enrollment repair.
+Authenticated native submission, protected provisioning, rotation delivery, and provider tests also remain required.
+These core tests contact no provider or device and install no runtime credential.

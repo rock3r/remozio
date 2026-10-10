@@ -7,7 +7,7 @@ import SQLite3
 public enum GatewayDatabaseError: Error, Equatable {
     case invalidConfiguration, incompatibleStore, wrongScope, closed, unavailable, transactionActive
     case headMismatch, operationConflict, capacityExceeded, invalidClock, corruptData
-    case revokedEnrollment, unavailableCandidate
+    case revokedEnrollment, unavailableCandidate, retiredCredential, revokedCredential
     case storage(Int32)
 }
 
@@ -84,12 +84,13 @@ public final class GatewayDatabase {
                   try scalar("PRAGMA fullfsync") == 1, try scalar("PRAGMA foreign_keys") == 1,
                   try scalar("PRAGMA trusted_schema") == 0 else { throw GatewayDatabaseError.invalidConfiguration }
             if initialize { try transaction(write: true) { try create() } }
-            else if try scalar("PRAGMA user_version") < 3 {
+            else if try scalar("PRAGMA user_version") < 4 {
                 try transaction(write: true) {
                     try validateIdentity(allowLegacy: true)
                     if try scalar("PRAGMA user_version") == 1 { try createRecipientTables() }
-                    try createProbeTable()
-                    try exec("PRAGMA user_version=3")
+                    if try scalar("PRAGMA user_version") < 3 { try createProbeTable() }
+                    try createSubmissionTable()
+                    try exec("PRAGMA user_version=4")
                 }
             }
             try validateIdentity()
@@ -112,6 +113,7 @@ public final class GatewayDatabase {
                     SELECT 1 AS source,operation,revision FROM gateway_candidates_v1
                     UNION ALL
                     SELECT 2 AS source,operation,revision FROM gateway_recipients_v2
+                    UNION ALL SELECT 3 AS source,operation,revision FROM gateway_submission_controls_v4
                 ) ORDER BY revision DESC LIMIT 2
                 """) { stmt in
                 var rows: [(Int64, Data, UInt64)] = []
@@ -130,16 +132,7 @@ public final class GatewayDatabase {
             guard head > 0, row.2 == head, latest.count == 1 || latest[1].2 < head else {
                 throw GatewayDatabaseError.corruptData
             }
-            let receipt: GatewayControlReceipt
-            if row.0 == 1 {
-                guard let value = try storedReceipt(operationID: row.1),
-                      try storedRecipient(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
-                receipt = .candidate(value)
-            } else {
-                guard let value = try storedRecipient(operationID: row.1),
-                      try storedReceipt(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
-                receipt = .recipient(value)
-            }
+            let receipt = try storedControl(source: row.0, operationID: row.1)
             guard receipt.revision == head else { throw GatewayDatabaseError.corruptData }
             return GatewayHeadEvidence(registration: identity, revision: head, receipt: receipt)
         }
@@ -154,6 +147,7 @@ public final class GatewayDatabase {
                 SELECT source,operation,revision FROM (
                     SELECT 1 AS source,operation,revision FROM gateway_candidates_v1
                     UNION ALL SELECT 2 AS source,operation,revision FROM gateway_recipients_v2
+                    UNION ALL SELECT 3 AS source,operation,revision FROM gateway_submission_controls_v4
                 ) WHERE revision>? AND revision<=? ORDER BY revision LIMIT \(maximumRecords + 1)
                 """, [uint(afterRevision), uint(throughRevision)]) { stmt in
                 var result: [(Int64, Data, UInt64)] = []
@@ -168,16 +162,7 @@ public final class GatewayDatabase {
             var receipts: [GatewayControlReceipt] = []
             for row in rows {
                 guard row.2 > previous else { throw GatewayDatabaseError.corruptData }
-                let receipt: GatewayControlReceipt
-                if row.0 == 1 {
-                    guard let candidate = try storedReceipt(operationID: row.1),
-                          try storedRecipient(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
-                    receipt = .candidate(candidate)
-                } else {
-                    guard let recipient = try storedRecipient(operationID: row.1),
-                          try storedReceipt(operationID: row.1) == nil else { throw GatewayDatabaseError.corruptData }
-                    receipt = .recipient(recipient)
-                }
+                let receipt = try storedControl(source: row.0, operationID: row.1)
                 guard receipt.revision == row.2 else { throw GatewayDatabaseError.corruptData }
                 receipts.append(receipt); previous = row.2
             }
@@ -204,7 +189,8 @@ public final class GatewayDatabase {
                 guard previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
                 return GatewayCandidateAdmission(receipt: previous, inserted: false)
             }
-            guard try storedRecipient(operationID: candidate.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+            guard try storedRecipient(operationID: candidate.operationID) == nil,
+                  try storedSubmission(operationID: candidate.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
             guard try !isRevoked(phone: candidate.binding.phoneID, enrollment: candidate.binding.enrollmentEpoch) else {
                 throw GatewayDatabaseError.revokedEnrollment
             }
@@ -263,7 +249,8 @@ public final class GatewayDatabase {
                 guard previous.kind == kind, previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
                 return GatewayRecipientApplication(receipt: previous, inserted: false)
             }
-            guard try storedReceipt(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+            guard try storedReceipt(operationID: control.operationID) == nil,
+                  try storedSubmission(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
             guard control.revision > trust.appliedControlRevision else { throw GatewayCandidateVerificationError.staleRevision }
             guard control.issued <= nowUnixMillis else { throw GatewayCandidateVerificationError.futureIssue }
             guard nowUnixMillis < control.expires else { throw GatewayCandidateVerificationError.expired }
@@ -297,6 +284,113 @@ public final class GatewayDatabase {
             try advanceHead(control.revision, from: trust.appliedControlRevision)
             return GatewayRecipientApplication(receipt: GatewayRecipientReceipt(control: control, canonicalPayload: canonicalPayload, signature: signature), inserted: true)
         }
+    }
+
+    /// Commits a Root credential control and the shared head together. A historical retry cannot restore credential state.
+    public func applySubmission(canonicalPayload: Data, signature: Data, wireVersion: UInt64,
+                                trust: GatewaySubmissionTrust, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewaySubmissionApplication {
+        try transaction(write: true) {
+            try checkClock(now)
+            guard trust.registration == identity, trust.active else { throw GatewayDatabaseError.wrongScope }
+            guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            let control = try GatewaySubmissionVerifier.authenticate(canonicalPayload: canonicalPayload, signature: signature,
+                wireVersion: wireVersion, registration: identity, payloadLimits: payloadLimits, signingLimits: signingLimits)
+            guard try storedReceipt(operationID: control.operationID) == nil,
+                  try storedRecipient(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+            if let previous = try storedSubmission(operationID: control.operationID) {
+                guard previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
+                return GatewaySubmissionApplication(receipt: previous, inserted: false)
+            }
+            _ = try GatewaySubmissionVerifier.verify(canonicalPayload: canonicalPayload, signature: signature, wireVersion: wireVersion,
+                trust: trust, nowUnixMillis: nowUnixMillis, now: now, maximumLifetimeMillis: maximumLifetimeMillis,
+                payloadLimits: payloadLimits, signingLimits: signingLimits)
+            if control.kind == .rotation {
+                if try submissionReceipt(credential: control.credentialID, kind: .revocation) != nil { throw GatewayDatabaseError.revokedCredential }
+                if try submissionReceipt(credential: control.credentialID, kind: .rotation) != nil { throw GatewayDatabaseError.retiredCredential }
+            }
+            try requireCapacity()
+            try statement("INSERT INTO gateway_submission_controls_v4 VALUES(?,?,?,?,?,?)",
+                [control.operationID, uint(control.kind.rawValue), control.credentialID, canonicalPayload, signature, uint(control.revision)]) { try done($0) }
+            try advanceHead(control.revision, from: trust.appliedControlRevision)
+            return GatewaySubmissionApplication(receipt: GatewaySubmissionReceipt(control: control, canonicalPayload: canonicalPayload, signature: signature), inserted: true)
+        }
+    }
+
+    public func submissionReceipt(operationID: Data) throws -> GatewaySubmissionReceipt? {
+        guard operationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
+        return try transaction(write: false) { try storedSubmission(operationID: operationID) }
+    }
+
+    /// Reads current credential evidence under current registration trust. This does not grant provider dispatch authority.
+    public func activeSubmissionCredential(trust: GatewaySubmissionTrust) throws -> GatewayActiveSubmissionCredential? {
+        try transaction(write: false) {
+            guard trust.registration == identity, trust.active else { throw GatewayDatabaseError.wrongScope }
+            guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            guard let latest = try submissionReceipt(credential: nil, kind: .rotation) else { return nil }
+            if try submissionReceipt(credential: latest.control.credentialID, kind: .revocation) != nil { return nil }
+            return GatewayActiveSubmissionCredential(receipt: latest)
+        }
+    }
+
+    private func storedControl(source: Int64, operationID: Data) throws -> GatewayControlReceipt {
+        let candidate = try storedReceipt(operationID: operationID), recipient = try storedRecipient(operationID: operationID)
+        let submission = try storedSubmission(operationID: operationID)
+        switch (source, candidate, recipient, submission) {
+        case (1, let value?, nil, nil): return .candidate(value)
+        case (2, nil, let value?, nil): return .recipient(value)
+        case (3, nil, nil, let value?): return .submission(value)
+        default: throw GatewayDatabaseError.corruptData
+        }
+    }
+
+    private func storedSubmission(operationID: Data) throws -> GatewaySubmissionReceipt? {
+        try statement("SELECT kind,credential,payload,signature,revision FROM gateway_submission_controls_v4 WHERE operation=?", [operationID]) { stmt in
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+            let payload = try blob(stmt, 2, maximum: payloadLimits.maxBytes), signature = try blob(stmt, 3, maximum: 64)
+            let control: GatewaySubmissionControl
+            do {
+                control = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+                    registration: identity, payloadLimits: payloadLimits, signingLimits: signingLimits)
+            } catch { throw GatewayDatabaseError.corruptData }
+            guard control.operationID == operationID, control.kind.rawValue == (try unsigned(blob(stmt, 0, maximum: 8))),
+                  control.credentialID == (try blob(stmt, 1, maximum: 16)), control.revision == (try unsigned(blob(stmt, 4, maximum: 8))),
+                  control.revision <= (try storedHead()) else { throw GatewayDatabaseError.corruptData }
+            return GatewaySubmissionReceipt(control: control, canonicalPayload: payload, signature: signature)
+        }
+    }
+
+    private func submissionReceipt(credential: Data?, kind: GatewaySubmissionKind) throws -> GatewaySubmissionReceipt? {
+        // Authenticate every retained row before filtering. Unsigned columns cannot hide an older revocation.
+        let operations: [Data] = try statement("SELECT operation FROM gateway_submission_controls_v4 ORDER BY revision DESC") {
+            var result: [Data] = []
+            while true {
+                let rc = sqlite3_step($0)
+                if rc == SQLITE_DONE { return result }
+                guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+                guard result.count < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+                result.append(try blob($0, 0, maximum: 16))
+            }
+        }
+        var match: GatewaySubmissionReceipt?
+        for operation in operations {
+            guard let receipt = try storedSubmission(operationID: operation) else { throw GatewayDatabaseError.corruptData }
+            if match == nil, receipt.control.kind == kind, credential == nil || receipt.control.credentialID == credential { match = receipt }
+        }
+        return match
+    }
+
+    private func createSubmissionTable() throws {
+        try exec("""
+            CREATE TABLE gateway_submission_controls_v4 (
+                operation BLOB PRIMARY KEY CHECK(length(operation)=16), kind BLOB NOT NULL CHECK(length(kind)=8),
+                credential BLOB NOT NULL CHECK(length(credential)=16), payload BLOB NOT NULL,
+                signature BLOB NOT NULL CHECK(length(signature)=64), revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8)
+            ) STRICT, WITHOUT ROWID
+            """)
+        try exec("CREATE INDEX gateway_submission_identity_v4 ON gateway_submission_controls_v4(credential,kind,revision)")
+        try exec("CREATE INDEX gateway_submission_kind_v4 ON gateway_submission_controls_v4(kind,revision)")
     }
 
     /// Returns stored mapping evidence only for the caller's current active enrollment. It does not authorize a send.
@@ -419,8 +513,9 @@ public final class GatewayDatabase {
               receipt.phoneID == phone, receipt.enrollmentEpoch == enrollment else { throw GatewayDatabaseError.corruptData }
         return true
     }
-    private func operationCount() throws -> Int64 {
-        try scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)")
+    private func operationCount(includeSubmission: Bool = true) throws -> Int64 {
+        let extra = includeSubmission ? "+(SELECT count(*) FROM gateway_submission_controls_v4)" : ""
+        return try scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)" + extra)
     }
     private func requireCapacity() throws {
         guard try operationCount() < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
@@ -701,12 +796,12 @@ public final class GatewayDatabase {
             ) STRICT, WITHOUT ROWID
             """)
         try exec("CREATE INDEX gateway_pending_v1 ON gateway_candidates_v1(phone,enrollment) WHERE token IS NOT NULL")
-        try createRecipientTables(); try createProbeTable()
-        try exec("PRAGMA application_id=\(Self.applicationID)"); try exec("PRAGMA user_version=3")
+        try createRecipientTables(); try createProbeTable(); try createSubmissionTable()
+        try exec("PRAGMA application_id=\(Self.applicationID)"); try exec("PRAGMA user_version=4")
     }
     private func validateIdentity(allowLegacy: Bool = false) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, version == 3 || (allowLegacy && (version == 1 || version == 2)) else {
+        guard try scalar("PRAGMA application_id") == Self.applicationID, version == 4 || (allowLegacy && (1...3).contains(version)) else {
             throw GatewayDatabaseError.incompatibleStore
         }
         try statement("SELECT id,identity,head FROM gateway_identity_v1") {
@@ -723,7 +818,7 @@ public final class GatewayDatabase {
                         "SELECT phone,enrollment,operation,token FROM gateway_mappings_v2 LIMIT 0"] {
                 try statement(sql) { guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore } }
             }
-            if version == 3 {
+            if version >= 3 {
                 try statement("SELECT operation,attempt,number,status,run,trust,started,retry FROM gateway_probes_v3 LIMIT 0") {
                     guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
                 }
@@ -731,7 +826,12 @@ public final class GatewayDatabase {
                     throw GatewayDatabaseError.corruptData
                 }
             }
-            guard try operationCount() <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+            if version >= 4 {
+                try statement("SELECT operation,kind,credential,payload,signature,revision FROM gateway_submission_controls_v4 LIMIT 0") {
+                    guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
+                }
+            }
+            guard try operationCount(includeSubmission: version >= 4) <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
         } else {
             guard try scalar("SELECT count(*) FROM gateway_candidates_v1") <= maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
         }
