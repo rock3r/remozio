@@ -74,7 +74,7 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
     }
     func testRechecksInvocationAfterHelloBeforeAsynchronousWork() async throws {
         let state = State(), endpoint = try endpoint(state)
-        endpoint.hello { XCTAssertEqual($0, 2) }
+        endpoint.hello { XCTAssertEqual($0, 3) }
         let done = expectation(description: "synchronized")
         endpoint.synchronize(try snapshot().canonicalBytes) { XCTAssertTrue($0); done.fulfill() }
         await fulfillment(of: [done], timeout: 2)
@@ -98,7 +98,7 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
         let started = expectation(description: "started"), late = expectation(description: "no late success")
         late.isInverted = true
         let endpoint = try endpoint(state, budget: budget, execute: { _ in await gate.run(started: started) })
-        endpoint.hello { XCTAssertEqual($0, 2) }
+        endpoint.hello { XCTAssertEqual($0, 3) }
         endpoint.command(try GatewayRootCommand.head(Data([1])).encode()) { _ in late.fulfill() }
         await fulfillment(of: [started], timeout: 2)
         XCTAssertFalse(budget.acquire())
@@ -120,6 +120,21 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
             [.unsigned(2), .unsigned(7), .bytes(payload), .bytes(Data(repeating: 2, count: 63)), .unsigned(1)],
             [.unsigned(2), .unsigned(7), .bytes(payload), .bytes(signature), .unsigned(1), .null]
         ] {
+            XCTAssertThrowsError(try GatewayRootCommand.decode(DeterministicCBOR.encode(.array(fields), limits: GatewayRootCommand.limits)))
+        }
+    }
+
+    func testRootDeliveryRegistrationRequiresVersionThree() throws {
+        let delivery = PhoneRequestDelivery(id: UUID(), recipient: DeliveryRecipient(phoneID: Data(repeating: 1, count: 16),
+            enrollmentEpoch: Data(repeating: 2, count: 16)), requestID: Data(repeating: 3, count: 16),
+            admittedAt: AuthorityMoment(epoch: UUID(), milliseconds: 100), deadlineMilliseconds: 200)
+        let command = GatewayRootCommand.registerWake(delivery)
+        XCTAssertEqual(command.protocolVersion, 3)
+        guard case .registerWake(let decoded) = try GatewayRootCommand.decode(command.encode()) else { return XCTFail() }
+        XCTAssertEqual(decoded, delivery)
+        guard case .array(var fields) = try DeterministicCBOR.decode(command.encode(), limits: GatewayRootCommand.limits) else { return XCTFail() }
+        for version: UInt64 in [0, 1, 2, 4] {
+            fields[0] = .unsigned(version)
             XCTAssertThrowsError(try GatewayRootCommand.decode(DeterministicCBOR.encode(.array(fields), limits: GatewayRootCommand.limits)))
         }
     }

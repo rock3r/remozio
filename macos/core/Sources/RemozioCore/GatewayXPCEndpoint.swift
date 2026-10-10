@@ -55,7 +55,7 @@ final class GatewayXPCEndpoint: NSObject, GatewayRootXPCProtocol, @unchecked Sen
             try verify()
             try lock.withLock {
                 guard !closed, !ready, !busy else { throw GatewayServiceError.unavailable }
-                ready = true; onHandshake(); reply(2)
+                ready = true; onHandshake(); reply(3)
             }
         } catch { close(); reply(0) }
     }
