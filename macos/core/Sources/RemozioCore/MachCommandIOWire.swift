@@ -6,13 +6,31 @@ enum MachCommandIOWire {
     static func send(_ bytes: Data, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
                      destination: mach_port_t, admissionReply: mach_port_t, terminalReply: mach_port_t,
                      maximumPayloadBytes: Int, timeoutMilliseconds: UInt32) throws {
+        try send(bytes, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor,
+            controlTerminalDescriptor: nil, mapped: false, destination: destination, admissionReply: admissionReply,
+            terminalReply: terminalReply, maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
+    /// The separate terminal remains an untrusted source until Root checks the original caller's kernel context.
+    static func sendMapped(_ bytes: Data, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
+                           controlTerminalDescriptor: Int32?, destination: mach_port_t, admissionReply: mach_port_t,
+                           terminalReply: mach_port_t, maximumPayloadBytes: Int, timeoutMilliseconds: UInt32) throws {
+        try send(bytes, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor,
+            controlTerminalDescriptor: controlTerminalDescriptor, mapped: true, destination: destination, admissionReply: admissionReply,
+            terminalReply: terminalReply, maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: timeoutMilliseconds)
+    }
+
+    private static func send(_ bytes: Data, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
+                             controlTerminalDescriptor: Int32?, mapped: Bool, destination: mach_port_t,
+                             admissionReply: mach_port_t, terminalReply: mach_port_t,
+                             maximumPayloadBytes: Int, timeoutMilliseconds: UInt32) throws {
         guard [destination, admissionReply, terminalReply].allSatisfy({ $0 != MACH_PORT_NULL && $0 != UInt32.max }),
               maximumPayloadBytes > 0, maximumPayloadBytes <= Int(UInt32.max) - 1024,
               !bytes.isEmpty, bytes.count <= maximumPayloadBytes, (1...60_000).contains(timeoutMilliseconds) else {
             throw MachCommandHandshakeError.invalidConfiguration
         }
         var fileports: [mach_port_t] = []
-        defer { for port in fileports { _ = mach_port_deallocate(mach_task_self_, port) } }
+        defer { for port in fileports where port != MACH_PORT_NULL { _ = mach_port_deallocate(mach_task_self_, port) } }
         for (index, descriptor) in [inputDescriptor, outputDescriptor, errorDescriptor].enumerated() {
             let flags = fcntl(descriptor, F_GETFL)
             guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
@@ -27,6 +45,20 @@ enum MachCommandIOWire {
             }
             fileports.append(port)
         }
+        if mapped {
+            if let descriptor = controlTerminalDescriptor {
+                var port: mach_port_t = 0
+                try CommandStreamSource.withRetainedDescriptor(descriptor) { stable in
+                    let flags = fcntl(stable, F_GETFL)
+                    guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
+                    guard flags & O_ACCMODE == O_RDWR, flags & O_EVTONLY == 0, isatty(stable) == 1 else {
+                        throw MachCommandCallerError.malformed
+                    }
+                    guard fileport_makeport(stable, &port) == 0 else { throw RetainedCommandInputError.system(errno) }
+                }
+                fileports.append(port)
+            } else { fileports.append(0) }
+        }
         let ports = fileports + [admissionReply, terminalReply]
         let headerBytes = MemoryLayout<mach_msg_header_t>.size, bodyBytes = MemoryLayout<mach_msg_body_t>.size
         let descriptorBytes = MemoryLayout<mach_msg_port_descriptor_t>.size
@@ -38,14 +70,15 @@ enum MachCommandIOWire {
         let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
         header.pointee.msgh_bits = UInt32(MACH_MSG_TYPE_COPY_SEND) | MACH_MSGH_BITS_COMPLEX
         header.pointee.msgh_size = UInt32(size); header.pointee.msgh_remote_port = destination
-        header.pointee.msgh_id = MachCommandCallerReceiver.ioInputMessageID
+        header.pointee.msgh_id = mapped ? MachCommandCallerReceiver.mappedIOInputMessageID : MachCommandCallerReceiver.ioInputMessageID
         storage.storeBytes(of: mach_msg_body_t(msgh_descriptor_count: UInt32(ports.count)), toByteOffset: headerBytes, as: mach_msg_body_t.self)
         for (index, port) in ports.enumerated() {
             var descriptor = mach_msg_port_descriptor_t()
             descriptor.name = port; descriptor.disposition = UInt32(MACH_MSG_TYPE_COPY_SEND); descriptor.type = UInt32(MACH_MSG_PORT_DESCRIPTOR)
             storage.storeBytes(of: descriptor, toByteOffset: headerBytes + bodyBytes + index * descriptorBytes, as: mach_msg_port_descriptor_t.self)
         }
-        storage.storeBytes(of: MachCommandCallerReceiver.ioInputCarrierVersion.bigEndian, toByteOffset: metadata, as: UInt32.self)
+        let carrier = mapped ? MachCommandCallerReceiver.mappedIOInputCarrierVersion : MachCommandCallerReceiver.ioInputCarrierVersion
+        storage.storeBytes(of: carrier.bigEndian, toByteOffset: metadata, as: UInt32.self)
         storage.storeBytes(of: UInt32(bytes.count).bigEndian, toByteOffset: metadata + 4, as: UInt32.self)
         bytes.withUnsafeBytes { storage.advanced(by: metadata + 8).copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
         let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT | MACH_SEND_INTERRUPT, UInt32(size), 0, 0, timeoutMilliseconds, 0)

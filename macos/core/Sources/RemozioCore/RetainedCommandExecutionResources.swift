@@ -8,6 +8,8 @@ final class RetainedCommandExecutionResources {
     let request: CommandAdmittedRequest
     private let caller: RetainedCommandCaller
     private let input: RetainedCommandInputDescriptor
+    private let controlTerminal: RetainedCommandInputDescriptor?
+    private let stdioObservation: RetainedCommandStdioObservation?
     private let filesystem: CommandFilesystemCapture
     private let outputs: RetainedCommandOutputChannels
     private let terminal: MachCommandReplyRight
@@ -25,9 +27,10 @@ final class RetainedCommandExecutionResources {
 
     init(capture: CommandCapture, caller: RetainedCommandCaller, input: RetainedCommandInputDescriptor,
          filesystem: CommandFilesystemCapture, outputs: RetainedCommandOutputChannels, terminal: MachCommandReplyRight,
-         profile: CommandHandshakeProfile, submissionDigest: Data, request: CommandAdmittedRequest) {
+         profile: CommandHandshakeProfile, submissionDigest: Data, request: CommandAdmittedRequest,
+         controlTerminal: RetainedCommandInputDescriptor? = nil, stdioObservation: RetainedCommandStdioObservation? = nil) {
         self.capture = capture; self.caller = caller; self.input = input; self.filesystem = filesystem
-        self.outputs = outputs; self.terminal = terminal; self.profile = profile
+        self.outputs = outputs; self.terminal = terminal; self.profile = profile; self.controlTerminal = controlTerminal; self.stdioObservation = stdioObservation
         self.submissionDigest = submissionDigest; self.request = request
     }
     deinit { close() }
@@ -54,6 +57,10 @@ final class RetainedCommandExecutionResources {
             try filesystem.recheck(checkCancellation: checkCancellation)
             try input.withBorrowedDescriptor { _ in () }
             try outputs.recheckStreams(); try terminal.recheck()
+            if let stdioObservation {
+                try stdioObservation.recheck(input: input, outputs: outputs, controlTerminal: controlTerminal)
+                try caller.recheckTerminalContext(stdioObservation.context, expression: expression, userID: userID, auditSessionID: auditSessionID)
+            }
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
         } catch { retireExecutionResources(); throw error }
     }
@@ -116,6 +123,6 @@ final class RetainedCommandExecutionResources {
     private func retireExecutionResources() {
         guard !executionRetired else { return }
         executionRetired = true
-        filesystem.close(); outputs.close(); caller.close(); input.close()
+        filesystem.close(); outputs.close(); caller.close(); input.close(); controlTerminal?.close()
     }
 }

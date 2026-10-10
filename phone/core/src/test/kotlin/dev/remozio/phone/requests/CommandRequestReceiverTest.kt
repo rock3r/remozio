@@ -73,7 +73,8 @@ class CommandRequestReceiverTest {
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), emptySet(), ChannelRole.MAC, listOf(offer(2u))) }
         assertEquals(setOf(2uL), commandChannelSchemas(listOf(offer(2u)), emptySet(), ChannelRole.MAC, listOf(offer(2u, setOf(1u)))))
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(2u, setOf(1u))), emptySet(), ChannelRole.MAC, listOf(offer(2u))) }
-        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(3u)), emptySet(), ChannelRole.MAC, listOf(offer(3u))) }
+        assertEquals(setOf(3uL), commandChannelSchemas(listOf(offer(3u)), emptySet(), ChannelRole.MAC, listOf(offer(3u))))
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(4u)), emptySet(), ChannelRole.MAC, listOf(offer(4u))) }
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), setOf(1u), ChannelRole.MAC, listOf(offer(1u))) }
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), emptySet(), ChannelRole.PHONE, listOf(offer(1u))) }
     }

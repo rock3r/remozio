@@ -14,6 +14,17 @@ enum class EnvironmentSource(override val wireValue: ULong) : CommandWireTag { M
 data class CapturedEnvironmentEntry(val name: CborValue.Bytes, val value: CborValue.Bytes, val source: EnvironmentSource)
 enum class CommandInputKind(override val wireValue: ULong) : CommandWireTag { NULL(0u), PIPE(1u), FILE(2u), TTY(3u), PTY(4u), SOCKET(5u), DIRECTORY(6u), DEVICE(7u), OTHER(8u) }
 data class CapturedCommandInput(val kind: CommandInputKind, val streamBinding: CborValue.Bytes?, val observedPath: CborValue.Bytes?, val identity: CapturedFileIdentity?)
+enum class CommandStreamAccess(override val wireValue: ULong) : CommandWireTag { READ_ONLY(0u), WRITE_ONLY(1u), READ_WRITE(2u) }
+data class CommandStreamFlags(val wireValue: ULong) {
+    val append: Boolean get() = wireValue and 1uL != 0uL
+    val nonblocking: Boolean get() = wireValue and 2uL != 0uL
+    val asynchronous: Boolean get() = wireValue and 4uL != 0uL
+    val synchronous: Boolean get() = wireValue and 8uL != 0uL
+}
+data class CapturedCommandStream(val source: CapturedCommandInput, val access: CommandStreamAccess, val flags: CommandStreamFlags)
+data class CapturedCommandTerminal(val stream: CapturedCommandStream, val sessionID: UInt, val terminalDevice: UInt)
+data class CapturedCommandStdioLayout(val input: CapturedCommandStream, val output: CapturedCommandStream,
+    val error: CapturedCommandStream, val terminal: CapturedCommandTerminal?, val ptyMask: UInt)
 enum class CommandIOMode(override val wireValue: ULong) : CommandWireTag { PIPES(0u), PTY(1u) }
 enum class StartedCommandDisconnect(override val wireValue: ULong) : CommandWireTag { TERMINATE(0u), CONTINUE_RUNNING(1u) }
 enum class CapturedSigningStatus(override val wireValue: ULong) : CommandWireTag { UNSIGNED(0u), AD_HOC(1u), VALIDATED(2u), INVALID(3u), UNAVAILABLE(4u) }
@@ -28,7 +39,7 @@ data class CapturedSubmission(val id: CborValue.Bytes, val nonce: CborValue.Byte
 
 /** Parses claims only. OS capture, authenticated issuance, and execution are separate responsibilities. */
 class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong = 1u) {
-    companion object { val supportedSchemaVersions: Set<ULong> = Collections.unmodifiableSet(setOf(1u, 2u)) }
+    companion object { val supportedSchemaVersions: Set<ULong> = Collections.unmodifiableSet(setOf(1u, 2u, 3u)) }
     val schemaVersion: ULong
     private val original: CborValue.Bytes
     val canonicalBytes: ByteArray get() = original.copyBytes()
@@ -40,6 +51,7 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
     val environment: List<CapturedEnvironmentEntry>
     val input: CapturedCommandInput
     val ioMode: CommandIOMode
+    val stdioLayout: CapturedCommandStdioLayout?
     val disconnectBehavior: StartedCommandDisconnect
     val requester: CapturedRequester
     val ancestry: CapturedAncestry
@@ -50,7 +62,8 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
         // Bound input before retaining another copy.
         if (canonicalBytes.size > limits.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
         original = CborValue.Bytes(canonicalBytes)
-        val root = CaptureFields(DeterministicCbor.decode(original.copyBytes(), limits), 13)
+        ensure(expectedSchemaVersion in supportedSchemaVersions, CommandCaptureFailure.VERSION)
+        val root = CaptureFields(DeterministicCbor.decode(original.copyBytes(), limits), if (expectedSchemaVersion == 3uL) 14 else 13)
         schemaVersion = root.uint(0u)
         ensure(expectedSchemaVersion in supportedSchemaVersions && schemaVersion == expectedSchemaVersion, CommandCaptureFailure.VERSION)
         val executable = CaptureFields(root[1u], 3)
@@ -72,15 +85,18 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
             previous = bytes
             CapturedEnvironmentEntry(name, CaptureFields.cString(entry[1u]), entry.tag(2u, EnvironmentSource.entries))
         })
-        val input = CaptureFields(root[6u], 4)
-        val kind = input.tag(0u, CommandInputKind.entries)
-        ensure(schemaVersion == 2uL || kind.wireValue <= 4uL, CommandCaptureFailure.ENUMERATION)
-        val binding = input.optionalBytes(1u, 16)
-        val path = input.optionalPath(2u)
-        val identity = input.optionalIdentity(3u)
-        if (kind == CommandInputKind.NULL) ensure(binding == null && path == null && identity == null, CommandCaptureFailure.FIELDS)
-        else ensure(binding != null, CommandCaptureFailure.BYTES)
-        this.input = CapturedCommandInput(kind, binding, path, identity)
+        fun source(value: CborValue): CapturedCommandInput {
+            val fields = CaptureFields(value, 4)
+            val kind = fields.tag(0u, CommandInputKind.entries)
+            ensure(schemaVersion >= 2uL || kind.wireValue <= 4uL, CommandCaptureFailure.ENUMERATION)
+            val binding = fields.optionalBytes(1u, 16)
+            val path = fields.optionalPath(2u)
+            val identity = fields.optionalIdentity(3u)
+            if (kind == CommandInputKind.NULL) ensure(binding == null && path == null && identity == null, CommandCaptureFailure.FIELDS)
+            else ensure(binding != null, CommandCaptureFailure.BYTES)
+            return CapturedCommandInput(kind, binding, path, identity)
+        }
+        input = source(root[6u])
         ioMode = root.tag(7u, CommandIOMode.entries)
         disconnectBehavior = root.tag(8u, StartedCommandDisconnect.entries)
         val requester = CaptureFields(root[9u], 8)
@@ -101,6 +117,40 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
         unverifiedRationale = root.optionalText(11u)
         val submission = CaptureFields(root[12u], 3)
         this.submission = CapturedSubmission(submission.bytes(0u, 16), submission.bytes(1u, 32), submission.bytes(2u, 16))
+        stdioLayout = if (schemaVersion == 3uL) {
+            fun stream(value: CborValue): CapturedCommandStream {
+                val fields = CaptureFields(value, 3)
+                val flags = fields.uint(2u)
+                ensure(flags <= 15uL, CommandCaptureFailure.ENUMERATION)
+                return CapturedCommandStream(source(fields[0u]), fields.tag(1u, CommandStreamAccess.entries), CommandStreamFlags(flags))
+            }
+            val fields = CaptureFields(root[13u], 5)
+            val input = stream(fields[0u])
+            val output = stream(fields[1u])
+            val error = stream(fields[2u])
+            val terminal = if (fields[3u] == CborValue.Null) null else {
+                val value = CaptureFields(fields[3u], 3)
+                val control = stream(value[0u])
+                val session = value.pid(1u)
+                val device = value.uint32(2u)
+                ensure(control.access == CommandStreamAccess.READ_WRITE &&
+                    control.source.kind in listOf(CommandInputKind.TTY, CommandInputKind.PTY) && control.source.identity != null &&
+                    device != UInt.MAX_VALUE && this.requester.sessionID == session, CommandCaptureFailure.FIELDS)
+                CapturedCommandTerminal(control, session, device)
+            }
+            val mask = fields.uint32(4u)
+            ensure(mask <= 7u && input.source == this.input && input.access != CommandStreamAccess.WRITE_ONLY &&
+                output.access != CommandStreamAccess.READ_ONLY && error.access != CommandStreamAccess.READ_ONLY &&
+                (ioMode == CommandIOMode.PTY || (mask == 0u && terminal == null)) &&
+                (terminal != null || mask == 0u), CommandCaptureFailure.FIELDS)
+            listOf(input, output, error).forEachIndexed { index, value ->
+                if (mask and (1u shl index) != 0u) {
+                    ensure(value.source.kind in listOf(CommandInputKind.TTY, CommandInputKind.PTY) &&
+                        value.source.identity != null && value.source.identity == terminal?.stream?.source?.identity, CommandCaptureFailure.FIELDS)
+                }
+            }
+            CapturedCommandStdioLayout(input, output, error, terminal, mask)
+        } else null
     }
 }
 
