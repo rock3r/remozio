@@ -126,8 +126,8 @@ The adapter must establish each mapping from authenticated kernel observations, 
 It must recheck the original caller, terminal, retained stream identities, and semantic flags before dispatch.
 
 These codecs validate the representation. The [retained layout adapter](../docs/macos-command-stdio-layout.md) implements the separate descriptor carrier and OS rechecks.
-Mapped execution remains integration work.
-The Android connection still advertises schemas 1 and 2 until the complete schema 3 inspection UI is integrated.
+The native adapter supports mapped execution. Production frontend integration remains required.
+The Android connection advertises schemas 1, 2, and 3 and shows the complete schema 3 stream layout.
 
 ## Requester observations
 
@@ -154,7 +154,7 @@ Submission bindings are `{0: ID16, 1: nonce32, 2: caller-channel binding16}`. Th
 
 Verify the issued request and its exact command/wire/schema contract before selecting this parser. Preserve its bytes in the request digest. Successful parsing must not itself enable an unsupported contract.
 
-The Android command connection advertises implemented schemas 1 and 2, with no optional features. The receiver retains their intersection with the authenticated Mac offer. Each new request must use that connection's shared schema. The signed outer schema and inner capture schema must match before inbox admission. Unknown peer contracts remain opaque. Unsupported local advertisements fail.
+The Android command connection advertises implemented schemas 1, 2, and 3, with no optional features. The receiver retains their intersection with the authenticated Mac offer. Each new request must use that connection's shared schema. The signed outer schema and inner capture schema must match before inbox admission. Unknown peer contracts remain opaque. Unsupported local advertisements fail.
 
 Existing authenticated request owners survive reconnects. Status messages refer to their retained request digests and do not introduce another capture. A duplicate request still needs a supported contract on the current connection. Direct `open` and `accept` callers keep schema 1 by default.
 
