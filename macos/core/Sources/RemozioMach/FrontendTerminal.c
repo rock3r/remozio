@@ -15,6 +15,7 @@ struct remozio_frontend_terminal {
     pid_t process;
     struct termios saved;
     bool needs_restore;
+    bool active;
 };
 
 static int foreground(remozio_frontend_terminal_t *terminal) {
@@ -27,13 +28,13 @@ static int foreground(remozio_frontend_terminal_t *terminal) {
     return group == getpgrp() ? 0 : EAGAIN;
 }
 
-static int signal_route(void) {
+static int signal_route(int number) {
     struct sigaction action;
     sigset_t mask;
-    if (sigaction(SIGTTOU, NULL, &action) < 0) return errno;
+    if (sigaction(number, NULL, &action) < 0) return errno;
     int error = pthread_sigmask(SIG_SETMASK, NULL, &mask);
     if (error) return error;
-    if (sigismember(&mask, SIGTTOU) || action.sa_handler == SIG_IGN ||
+    if (sigismember(&mask, number) || action.sa_handler == SIG_IGN ||
         action.sa_handler == SIG_DFL || (action.sa_flags & SA_RESTART)) return ENOTSUP;
     return 0;
 }
@@ -77,7 +78,7 @@ int remozio_frontend_terminal_activate(remozio_frontend_terminal_t *terminal) {
     if (getpid() != terminal->process) return EPERM;
     if (terminal->needs_restore) return EALREADY;
     int error = foreground(terminal);
-    if (!error) error = signal_route();
+    if (!error) error = signal_route(SIGTTOU);
     if (error) return error;
     if (tcgetattr(terminal->descriptor, &terminal->saved) < 0) return errno;
     struct termios raw = terminal->saved;
@@ -85,6 +86,7 @@ int remozio_frontend_terminal_activate(remozio_frontend_terminal_t *terminal) {
     /* An interrupted ioctl can have an uncertain outcome. Keep the saved settings. */
     terminal->needs_restore = true;
     if (tcsetattr(terminal->descriptor, TCSANOW, &raw) < 0) return errno;
+    terminal->active = true;
     return 0;
 }
 
@@ -92,11 +94,13 @@ int remozio_frontend_terminal_restore(remozio_frontend_terminal_t *terminal) {
     if (!terminal) return EINVAL;
     if (getpid() != terminal->process) return EPERM;
     if (!terminal->needs_restore) return 0;
+    terminal->active = false;
     int error = foreground(terminal);
-    if (!error) error = signal_route();
+    if (!error) error = signal_route(SIGTTOU);
     if (error) return error;
     if (tcsetattr(terminal->descriptor, TCSANOW, &terminal->saved) < 0) return errno;
     terminal->needs_restore = false;
+    terminal->active = false;
     return 0;
 }
 
@@ -116,4 +120,49 @@ void remozio_frontend_terminal_abandon(remozio_frontend_terminal_t *terminal) {
     if (!terminal) return;
     close(terminal->descriptor);
     free(terminal);
+}
+
+static int io_ready(remozio_frontend_terminal_t *terminal, int number) {
+    if (!terminal) return EINVAL;
+    if (getpid() != terminal->process) return EPERM;
+    if (!terminal->active) return ENOTCONN;
+    int error = foreground(terminal);
+    return error ? error : signal_route(number);
+}
+
+int remozio_frontend_terminal_read(remozio_frontend_terminal_t *terminal,
+                                  void *bytes, size_t capacity, size_t *count) {
+    if (!count) return EINVAL;
+    *count = 0;
+    if (!bytes || !capacity || capacity > REMOZIO_FRONTEND_TERMINAL_MAX_CHUNK) return EINVAL;
+    int error = io_ready(terminal, SIGTTIN);
+    if (error) return error;
+    ssize_t result = read(terminal->descriptor, bytes, capacity);
+    if (result < 0) return errno;
+    *count = (size_t)result;
+    return 0;
+}
+
+int remozio_frontend_terminal_write(remozio_frontend_terminal_t *terminal,
+                                   const void *bytes, size_t length, size_t *count) {
+    if (!count) return EINVAL;
+    *count = 0;
+    if (!bytes || !length || length > REMOZIO_FRONTEND_TERMINAL_MAX_CHUNK) return EINVAL;
+    int error = io_ready(terminal, SIGTTOU);
+    if (error) return error;
+    ssize_t result = write(terminal->descriptor, bytes, length);
+    if (result < 0) return errno;
+    *count = (size_t)result;
+    return 0;
+}
+
+int remozio_frontend_terminal_dimensions(remozio_frontend_terminal_t *terminal, struct winsize *size) {
+    if (!terminal || !size) return EINVAL;
+    int error = foreground(terminal);
+    if (error) return error;
+    return ioctl(terminal->descriptor, TIOCGWINSZ, size) < 0 ? errno : 0;
+}
+
+int remozio_frontend_terminal_check_foreground(remozio_frontend_terminal_t *terminal) {
+    return terminal ? foreground(terminal) : EINVAL;
 }

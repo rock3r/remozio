@@ -2,7 +2,8 @@
 
 The native frontend lease owns an independent descriptor for the calling terminal.
 It changes terminal attributes only when the frontend explicitly activates or restores it.
-It does not read input, take foreground, install signal handlers, or grant command authority.
+Explicit bounded IO uses that independent descriptor after successful activation.
+The owner never takes foreground, installs signal handlers, or grants command authority.
 
 ```mermaid
 stateDiagram-v2
@@ -53,9 +54,20 @@ It does not retry with a stale foreground observation.
 A later foreground restore clears the cleanup obligation.
 Each subsequent activation captures the current settings again.
 
+## Explicit terminal IO
+
+Read and write calls accept chunks from 1 through 4096 bytes after successful raw activation.
+They use the independently retained nonblocking descriptor and preserve original stream flags.
+Reads require a safe `SIGTTIN` route, including protection against foreground loss after the preliminary check.
+Writes require a safe `SIGTTOU` route. Kernel enforcement also depends on the existing `TOSTOP` setting.
+Partial writes retain their byte count. `EAGAIN` and `EINTR` consume no additional bytes.
+A restoration attempt disables IO, even when restoration fails or is interrupted.
+The caller must restore the retained settings before a fresh activation.
+Dimension reads and fresh foreground checks change no terminal state.
+
 ## Measured evidence
 
-Six native tests pass on macOS 27.0.1 with an arm64 macOS 26 deployment target.
+Seven existing lifecycle tests and two new native IO tests pass on macOS 27.0.1 with an arm64 macOS 26 deployment target.
 Each test uses an unprivileged fixture, a private terminal and children owned by the fixture.
 The private fixture shell alone changes foreground groups.
 The product never calls `tcsetpgrp`.
@@ -79,5 +91,6 @@ Mixed redirected streams must keep their separate destinations.
 
 This lease cannot restore after `SIGKILL`, whole-process loss or terminal revocation.
 A background restore retains its obligation instead of overwriting another foreground user's settings.
-The signal-loop and failure-recovery behavior still need integration and physical validation.
+The [Swift frontend relay](macos-command-frontend-relay.md) now consumes the authenticated session and this owner.
+The packaged signal loop and physical recovery still need validation.
 No installed frontend, physical terminal, privileged service or macOS 26 runtime was tested here.
