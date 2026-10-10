@@ -1080,6 +1080,44 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     }
 
 
+    func testRootSubmissionRecoveryRejectsCredentialReuseWithinMissingBatchAtomically() throws {
+        for priorKind in [GatewaySubmissionKind.rotation, .revocation] {
+            let fixture = try Fixture(), db = try setup(fixture)
+            try installSubmissionFeatures(db)
+            let first = try rotateSubmission(db), registration = try trust().registration
+            let revision = try enrollForRecovery(db)
+            let publicKey = P256.Signing.PrivateKey().publicKey.x963Representation
+            var receipts: [GatewayControlReceipt] = [.submission(GatewaySubmissionReceipt(
+                control: try submissionValue(first), canonicalPayload: first.canonicalPayload, signature: first.signature))]
+            var last: GatewayAuthorityEnvelope?
+            for (number, kind) in [(UInt64(2), priorKind), (UInt64(3), GatewaySubmissionKind.rotation)] {
+                let value = try GatewaySubmissionControl(kind: kind,
+                    binding: GatewaySubmissionBinding(ownerID: registration.ownerID, macID: registration.macID,
+                        accountID: registration.accountID, gatewayID: registration.gatewayID, lifecycleEpoch: registration.lifecycleEpoch),
+                    revision: number, operationID: id(UInt8(30 + number)), issuedAtUnixMillis: 1000,
+                    expiresAtUnixMillis: 2000, credentialID: id(40), publicKey: kind == .rotation ? publicKey : nil)
+                let payload = try value.encode(limits: limits), signature = try signSubmission(value)
+                _ = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+                    registration: registration, payloadLimits: limits, signingLimits: limits)
+                receipts.append(.submission(GatewaySubmissionReceipt(control: value, canonicalPayload: payload, signature: signature)))
+                last = GatewayAuthorityEnvelope(kind: kind.rawValue, operationID: value.operationID, revision: number,
+                    canonicalPayload: payload, signature: signature, registrationToken: nil)
+            }
+            let head = try verifiedHead([XCTUnwrap(last)])
+            let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+            let page = GatewayControlHistoryPage(registration: registration, afterRevision: 0, throughRevision: 3,
+                records: receipts, hasMore: false)
+            let history = try XCTUnwrap(collector.accept(VerifiedGatewayControlHistory(page: page,
+                receivedAt: moment(120), queryOwnerID: head.queryOwnerID)))
+            let before = try db.read { try $0.continuityDigests() }
+            XCTAssertEqual(try db.write { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: true,
+                expectedTrustRevision: revision, expectedLocalRevision: 1, now: moment(120)) }.disposition, .conflictingLocalHistory)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, 1)
+            XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+            XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_submission_outbox_v1"), "1")
+        }
+    }
+
     private final class EndpointDriver: GatewayRootDriver {
         let endpoint: GatewayXPCEndpoint
         init(_ endpoint: GatewayXPCEndpoint) { self.endpoint = endpoint }

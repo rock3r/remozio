@@ -193,6 +193,11 @@ final class GatewayAuthorityJournal {
             }
             missing = missing.dropFirst()
         }
+        var submissionCredentials = Set<Data>()
+        if missing.contains(where: { if case .submission = $0 { true } else { false } }) {
+            guard try submissionHistoryInstalled() else { return result(.requiresTrustRecovery) }
+            submissionCredentials = Set(try submissionEntries(identity).map { $0.receipt.control.credentialID })
+        }
         var candidates: [Data?] = []
         for record in missing {
             if let recovered = try recoveredRevocation(operation: record.operationID, identity: identity) {
@@ -202,10 +207,10 @@ final class GatewayAuthorityJournal {
             let binding: GatewayTokenBinding
             switch record {
             case .submission(let receipt):
-                guard try submissionHistoryInstalled() else { return result(.requiresTrustRecovery) }
                 guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
-                if receipt.control.kind == .rotation,
-                   try submissionEntries(identity).contains(where: { $0.receipt.control.credentialID == receipt.control.credentialID }) {
+                let value = receipt.control
+                let freshCredential = submissionCredentials.insert(value.credentialID).inserted
+                if value.kind == .rotation, !freshCredential {
                     return result(.conflictingLocalHistory)
                 }
                 guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
