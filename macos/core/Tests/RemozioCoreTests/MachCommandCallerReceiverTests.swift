@@ -3244,6 +3244,57 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testRealMappedHandshakeNegotiatesBothProfilesAndTheHighestUnderstoodPair() throws {
+        let mixed = try CommandHandshakeCapabilities(wireVersions: [6, 7, 8, 9], submissionSchemaVersions: [1], inputCarrierVersions: [4, 5])
+        for (wire, capabilities): (UInt64, CommandHandshakeCapabilities) in [
+            (8, .mappedTerminalJobExecution), (9, .mappedPipeJobExecutionControls), (9, mixed),
+        ] {
+            let endpoint = try Endpoint(), port = endpoint.port, expression = try selfExpression(), uid = geteuid()
+            let mac = handshakeMac, account = handshakeAccount, result = HandshakeResult()
+            DispatchQueue.global().async {
+                result.finish(Result {
+                    let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
+                        userID: uid, auditSessionID: nil, maxPayloadBytes: 4096)
+                    return try RetainedCommandHandshake(hello: receiver.receiveHello(timeoutMilliseconds: 5000),
+                        capabilities: mixed, macID: mac, accountID: account, expression: expression, userID: uid, auditSessionID: nil)
+                })
+            }
+            let client = try MachCommandHandshakeClient.negotiate(authorityPort: port, expression: expression, userID: uid,
+                auditSessionID: nil, macID: mac, accountID: account, capabilities: capabilities)
+            let server = try result.take()
+            defer { client.close(); server.close() }
+            XCTAssertEqual(client.profile, server.profile)
+            XCTAssertEqual(server.profile.wireVersion, wire)
+            XCTAssertEqual(server.profile.submissionSchemaVersion, 1)
+            XCTAssertEqual(server.profile.inputCarrierVersion, 5)
+            XCTAssertTrue(server.profile.supportsMappedLayout)
+        }
+    }
+
+    func testMappedHandshakeRejectsWrongCarriersAndLegacyOnlyPeers() throws {
+        for mapped: CommandHandshakeCapabilities in [.mappedTerminalJobExecution, .mappedPipeJobExecutionControls] {
+            let wrongCarrier = try CommandHandshakeCapabilities(wireVersions: mapped.wireVersions,
+                submissionSchemaVersions: [1], inputCarrierVersions: [4])
+            for (offered, server) in [(wrongCarrier, mapped), (mapped, wrongCarrier),
+                (mapped, CommandHandshakeCapabilities.streamingJobExecution),
+                (CommandHandshakeCapabilities.pipeJobExecutionControls, mapped)] {
+                let endpoint = try Endpoint(), reply = try Endpoint()
+                XCTAssertThrowsError(try RetainedCommandHandshake(hello: hello(endpoint, reply: reply, capabilities: offered),
+                    capabilities: server, macID: handshakeMac, accountID: handshakeAccount,
+                    expression: selfExpression(), userID: geteuid(), auditSessionID: nil)) {
+                    XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+                }
+                let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+                defer { response.caller.close() }
+                XCTAssertThrowsError(try CommandHandshakeReply.decode(response.payload,
+                    offer: CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: offered),
+                    macID: handshakeMac, accountID: handshakeAccount)) {
+                    XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+                }
+            }
+        }
+    }
+
     func testHandshakeReplyRightOwnershipClosesOnDiscardAndNegotiationFailure() throws {
         let endpoint = try Endpoint(), reply = try Endpoint(), baseline = try sendReferences(reply.port)
         var packet: MachCommandHello? = try hello(endpoint, reply: reply)
@@ -4138,7 +4189,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
 extension MachCommandCallerReceiverTests {
     // Same-process fixtures exercise actual kernel carriers. They do not prove privileged child execution.
     private func serveIO(_ port: mach_port_t, admission: Data?, terminal: Data?, release: DispatchSemaphore,
-                         writeOutput: Bool = false, expectClosed: Bool = false) throws -> (DispatchSemaphore, OSAllocatedUnfairLock<Result<Void, Error>?>) {
+                         writeOutput: Bool = false, expectClosed: Bool = false, mapped: Bool = false) throws -> (DispatchSemaphore, OSAllocatedUnfairLock<Result<Void, Error>?>) {
         let expression = try selfExpression(), user = geteuid(), completed = DispatchSemaphore(value: 0)
         let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
         DispatchQueue.global().async {
@@ -4146,7 +4197,7 @@ extension MachCommandCallerReceiverTests {
             result.withLock { output in output = Result {
                 let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
                     userID: user, auditSessionID: nil, maxPayloadBytes: 8192)
-                let input = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                let input = mapped ? try receiver.receiveMappedIOInput(timeoutMilliseconds: 5000) : try receiver.receiveIOInput(timeoutMilliseconds: 5000)
                 defer { input.closeIfUnclaimed() }
                 let channels = try XCTUnwrap(input.outputs)
                 try channels.recheck()
@@ -7017,5 +7068,234 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .signalled(UInt32(SIGKILL)))
         try awaitDispatchCleanup(authority)
         XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    private func ownerMappedCommand(admission: Endpoint, terminal: Endpoint, input: Int32, output: Int32, error: Int32,
+                                    path: String = "/usr/bin/true", arguments: [Data]? = nil, wire: UInt64 = 8,
+                                    ioMode: CommandIOMode = .pty, schema: UInt64 = 3) throws ->
+        (RetainedCommandCapture, CommandSubmission, CommandHandshakeProfile) {
+        let endpoint = try Endpoint()
+        let submission = try commandSubmission(executablePath: path, arguments: arguments, ioMode: ioMode)
+        let profile = CommandHandshakeProfile(wireVersion: wire, submissionSchemaVersion: 1, inputCarrierVersion: 5,
+            callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+        try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: input, outputDescriptor: output,
+            errorDescriptor: error, controlTerminalDescriptor: nil, destination: endpoint.port, admissionReply: admission.port,
+            terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        let received = try receiver(endpoint, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 1000)
+        return (try assemble(received, schema: schema, admissionProfile: profile), submission, profile)
+    }
+
+    func testMappedProfileRejectsWrongCaptureSchemaAndIOModeBeforeAdmission() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        for (wire, mode, schema): (UInt64, CommandIOMode, UInt64) in [(8, .pty, 1), (8, .pty, 2), (8, .pipes, 3), (9, .pty, 3)] {
+            let admission = try Endpoint(), terminal = try Endpoint()
+            XCTAssertThrowsError(try ownerMappedCommand(admission: admission, terminal: terminal, input: input,
+                output: output, error: output, wire: wire, ioMode: mode, schema: schema)) {
+                XCTAssertEqual($0 as? RetainedCommandCaptureError, .invalidContext)
+            }
+            XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0)
+            XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+        }
+    }
+
+    func testMappedNativeDispatchUsesEveryAuthenticatedCallerRoutingMask() throws {
+        for mask in 0...7 {
+            let fixture = try CommandRequestFixture(owned: true, commandSchema: 3)
+            let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
+            let report = fixture.root.appendingPathComponent("mapped-report")
+            let submission = try commandSubmission(executablePath: launcher,
+                arguments: [Data("mapped-program".utf8), Data("mapped-probe".utf8), Data(String(mask).utf8), Data(report.path.utf8)], ioMode: .pty)
+            let endpoint = try Endpoint()
+            let peer = try Peer(endpoint: endpoint, submission: submission.canonicalBytes, mappedTerminalMask: mask)
+            let received = try receiver(endpoint, expression: peer.expression, maximum: 8192).receiveMappedIOInput(timeoutMilliseconds: 5000)
+            let profile = CommandHandshakeProfile(wireVersion: 8, submissionSchemaVersion: 1, inputCarrierVersion: 5,
+                callerBinding: submission.binding.callerBinding, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+            let command = try assemble(received, schema: 3, admissionProfile: profile, callerExpression: peer.expression)
+            XCTAssertEqual(command.capture.stdioLayout?.ptyMask, UInt32(mask))
+            let request = try admitOwnedCommand(command, fixture: fixture, callerExpression: peer.expression)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            try beginDispatch(fixture, request: request, launcher: launcher, callerExpression: peer.expression)
+            let deadline = Date().addingTimeInterval(8)
+            while try authority.withRequests({ try $0.historicalOutcome(requestID: request.requestID) })?.revision != 2 {
+                guard Date() < deadline else { throw MachCommandCallerError.timeout }; usleep(1000)
+            }
+            let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+            XCTAssertEqual(outcome?.phase, .failed, "Exit 7, mask \(mask)")
+            XCTAssertEqual(String(decoding: try Data(contentsOf: report), as: UTF8.self), "7", "mask \(mask)")
+            // This fixture closes its owned channels after the target result. It never sends a synthetic drain acknowledgment.
+            try peer.stop()
+            try awaitDispatchCleanup(authority)
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher, callerExpression: peer.expression))
+        }
+    }
+
+    func testMappedNativeDispatchPreservesDirectBinaryInputAndSeparateOutputsWithoutCallerTTY() throws {
+        for wire: UInt64 in [8, 9] {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandSchema: 3)
+            let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
+            let admissionPort = try Endpoint(), terminal = try Endpoint()
+            let source = fixture.root.appendingPathComponent("input"), stdout = fixture.root.appendingPathComponent("stdout"), stderr = fixture.root.appendingPathComponent("stderr")
+            let binary = Data([0, 255, 10, 13, 128, 65])
+            try binary.write(to: source)
+            let input = Darwin.open(source.path, O_RDONLY | O_CLOEXEC)
+            let output = Darwin.open(stdout.path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC, 0o600)
+            let error = Darwin.open(stderr.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+            defer { for descriptor in [input, output, error] { _ = Darwin.close(descriptor) } }
+            let originalFlags = [input, output, error].map { fcntl($0, F_GETFL) }
+            let (command, submission, profile) = try ownerMappedCommand(admission: admissionPort, terminal: terminal,
+                input: input, output: output, error: error, path: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
+                    Data("/bin/cat; printf ERR >&2; exit 7".utf8)], wire: wire, ioMode: wire == 8 ? .pty : .pipes)
+            XCTAssertNil(command.capture.stdioLayout?.terminal)
+            XCTAssertEqual(command.capture.stdioLayout?.ptyMask, 0)
+            XCTAssertEqual(command.capture.stdioLayout?.output.flags, [.append])
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The exact schema-3 request must be admitted") }
+            let binding = CommandStreamBinding(profile: profile, submission: submission.binding, submissionDigest: admission.submissionDigest, request: admitted)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            XCTAssertEqual(lseek(input, 0, SEEK_CUR), 0)
+            try beginDispatch(fixture, request: request, launcher: launcher)
+            let receive = try receiver(terminal, maximum: 8192)
+            var control: MachCommandAuthorityPort?, outputEnded = false, result: VerifiedCommandTerminalResult?
+            defer { control?.close() }
+            while result == nil {
+                switch try receive.receiveExecutionEvent(timeoutMilliseconds: 5000) {
+                case .stream(let reply, let right):
+                    defer { reply.caller.close(); right?.close() }
+                    let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                    switch frame.body {
+                    case .opened: control = try XCTUnwrap(right).takeControlRight()
+                    case .outputEnd:
+                        outputEnded = true
+                        let ack = try CommandStreamFrame(sequence: 0, body: .outputDrained).encode(binding: binding)
+                        try Self.waitQueued { try MachCommandWire.sendStream(ack, destination: XCTUnwrap(control).borrowed(), toAuthority: true) }
+                    case .output: XCTFail("Direct outputs must not be copied into the terminal stream")
+                    case .inputCredit, .jobState: break
+                    default: XCTFail("Unexpected mapped execution event")
+                    }
+                case .terminal(let reply):
+                    defer { reply.caller.close() }
+                    result = try CommandTerminalResultPayload.decode(reply.payload, profile: profile, original: submission, admission: admission)
+                }
+            }
+            XCTAssertEqual(result?.outcome, .exited(7))
+            XCTAssertEqual(outputEnded, wire == 8)
+            try awaitDispatchCleanup(authority)
+            XCTAssertEqual(try Data(contentsOf: stdout), binary)
+            XCTAssertEqual(try Data(contentsOf: stderr), Data("ERR".utf8))
+            // Darwin may add its write-history bit. Portable flags and access modes must stay unchanged.
+            for (index, descriptor) in [input, output, error].enumerated() {
+                XCTAssertEqual(fcntl(descriptor, F_GETFL) & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_ASYNC | O_SYNC),
+                    originalFlags[index] & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_ASYNC | O_SYNC))
+            }
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testMappedClientRequiresItsExplicitCarrierPathAndMatchingModeWithoutFallback() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        for (wire, mapped, mode): (UInt64, Bool, CommandIOMode) in [(8, false, .pty), (9, false, .pipes),
+            (6, true, .pty), (7, true, .pipes), (8, true, .pipes), (9, true, .pty)] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: wire >= 8 ? 5 : 4, wire: wire)
+            let submission = try commandSubmission(ioMode: mode)
+            do {
+                _ = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                    handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil,
+                    maximumPayloadBytes: 8192, mapped: mapped)
+                XCTFail("An incompatible carrier or mode must fail before sending")
+            } catch { XCTAssertEqual(error as? MachCommandHandshakeError, .incompatible) }
+            XCTAssertThrowsError(try receiver(endpoint).receiveExecutionEvent(timeoutMilliseconds: 10)) {
+                XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+            }
+        }
+    }
+    func testMappedClientSubmitsTheExplicitCarrierAndKeepsOriginalDescriptorsOnRejection() throws {
+        for wire: UInt64 in [8, 9] {
+            let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 5, wire: wire)
+            let submission = try commandSubmission(ioMode: wire == 8 ? .pty : .pipes)
+            let payloads = try ioPayloads(profile: handshake.profile, submission: submission, outcome: .notAdmitted(.policyRejected, .never))
+            let release = DispatchSemaphore(value: 0)
+            release.signal()
+            let server = try serveIO(endpoint.port, admission: payloads.0, terminal: nil, release: release, mapped: true)
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let inputFlags = fcntl(input, F_GETFL), outputFlags = fcntl(output, F_GETFL)
+            let result = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                handshake: handshake, expression: selfExpression(), userID: geteuid(), auditSessionID: nil, maximumPayloadBytes: 8192, mapped: true)
+            guard case .result(let admission) = result else { return XCTFail("The mapped rejection must have no execution session") }
+            XCTAssertEqual(admission.outcome, .notAdmitted(.policyRejected, .never))
+            XCTAssertEqual(admission.submission, submission.binding)
+            XCTAssertEqual(server.0.wait(timeout: .now() + 5), .success)
+            try server.1.withLock { try XCTUnwrap($0).get() }
+            XCTAssertEqual(fcntl(input, F_GETFL), inputFlags)
+            XCTAssertEqual(fcntl(output, F_GETFL), outputFlags)
+        }
+    }
+}
+
+
+extension MachCommandCallerReceiverTests {
+    func testMappedFinalStreamFlagChangeAfterDispatchCommitPreventsTheApprovedEffect() throws {
+        for wire: UInt64 in [8, 9] {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandSchema: 3)
+            let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
+            let marker = fixture.root.appendingPathComponent("must-not-execute")
+            let admissionPort = try Endpoint(), terminal = try Endpoint()
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            let originalFlags = fcntl(output, F_GETFL)
+            let (command, submission, profile) = try ownerMappedCommand(admission: admissionPort, terminal: terminal,
+                input: input, output: output, error: output, path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)],
+                wire: wire, ioMode: wire == 8 ? .pty : .pipes)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            let checks = OSAllocatedUnfairLock(initialState: 0)
+            let finalCheck = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+            defer { resume.signal() }
+            try beginDispatch(fixture, request: request, launcher: launcher, elevation: { _ in
+                let check = checks.withLock { count in count += 1; return count }
+                if check == 3 {
+                    finalCheck.signal()
+                    guard resume.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                    XCTAssertEqual(fcntl(output, F_SETFL, originalFlags | O_APPEND), 0)
+                }
+            })
+            XCTAssertEqual(finalCheck.wait(timeout: .now() + 5), .success)
+            let receive = try receiver(terminal, maximum: 8192)
+            guard case .stream(let opened, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 1000) else {
+                return XCTFail("The private control grant must precede the final release check")
+            }
+            opened.caller.close()
+            let control = try XCTUnwrap(carried).takeControlRight(); carried?.close(); defer { control.close() }
+            resume.signal()
+            try awaitDispatchCleanup(authority)
+            XCTAssertEqual(checks.withLock { $0 }, 3)
+            var terminalResult: VerifiedCommandTerminalResult?
+            while terminalResult == nil {
+                switch try receive.receiveExecutionEvent(timeoutMilliseconds: 1000) {
+                case .stream(let reply, let right): reply.caller.close(); right?.close()
+                case .terminal(let reply):
+                    defer { reply.caller.close() }
+                    terminalResult = try CommandTerminalResultPayload.decode(reply.payload, profile: profile, original: submission, admission: admission)
+                }
+            }
+            XCTAssertEqual(terminalResult?.outcome, .failedBeforeStart)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+            let outcome = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
+            XCTAssertEqual(outcome?.revision, 2)
+            XCTAssertEqual(outcome?.phase, .failed)
+            XCTAssertEqual(fcntl(output, F_GETFL) & O_APPEND, O_APPEND)
+            XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0)
+            XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
+        }
     }
 }

@@ -2,6 +2,7 @@
 #include "RemozioCommandChild.h"
 #include <errno.h>
 #include <limits.h>
+#include <libproc.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,6 +25,25 @@ static int exact(int fd, void *value, size_t count) {
     }
     return 0;
 }
+static int mapped_probe(const char *mask_word) {
+        char *end=NULL; long mask=strtol(mask_word, &end, 10);
+        if(!end || *end || mask<0 || mask>7)return 110;
+        for(int fd=3;fd<256;fd++)if(fcntl(fd,F_GETFD)>=0)return 111;
+        int terminal=open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+        struct proc_bsdinfo context;
+        if(terminal<0 || proc_pidinfo(getpid(),PROC_PIDTBSDINFO,0,&context,sizeof(context))!=(int)sizeof(context) ||
+            tcgetsid(terminal)!=getsid(0) || tcgetpgrp(terminal)!=getpgrp())return 112;
+        for(int fd=0;fd<3;fd++) {
+            struct stat stream;
+            if(fstat(fd,&stream))return 113;
+            int same=S_ISCHR(stream.st_mode) && (uint32_t)stream.st_rdev==context.e_tdev;
+            if(same != !!(mask & (1<<fd)))return 114;
+            if(same && ((fcntl(fd,F_GETFL)&O_ACCMODE)!=O_RDWR || tcgetsid(fd)!=getsid(0)))return 115;
+        }
+        close(terminal);
+        if(write(1,"OUT",3)!=3 || write(2,"ERR",3)!=3)return 116;
+        return 7;
+}
 int main(int argc, char **argv) {
     if(argc==2 && (!strcmp(argv[1],"--execute") || !strcmp(argv[1],"--execute-in-session"))) {
         bool in_session = !strcmp(argv[1],"--execute-in-session");
@@ -42,7 +62,13 @@ int main(int argc, char **argv) {
         remozio_child_spec_t spec={0};if(remozio_child_spec_decode(bytes,count,&spec))return 70;free(bytes);
         if(fchdir(4))return 70;close(4);
         if(in_session && (getsid(0)==getpid() || getsid(0)!=getsid(getppid()) || getpgrp()!=getpid()))return 70;
-        if(spec.io_mode==1 && (in_session ? (tcgetsid(0)!=getsid(0) || tcgetpgrp(0)!=getpgrp()) : (getsid(0)!=getpid() || ioctl(0,TIOCSCTTY,0))))return 70;
+        if(spec.io_mode != 0) {
+            int terminal = spec.io_mode == 2 ? 7 : 0;
+            int streams[3] = {0, 1, 2};
+            if(spec.io_mode == 2 && remozio_child_spec_validate_stdio(&spec, terminal, streams))return 70;
+            if(in_session ? (tcgetsid(terminal)!=getsid(0) || tcgetpgrp(terminal)!=getpgrp()) : (getsid(0)!=getpid() || ioctl(terminal,TIOCSCTTY,0)))return 70;
+        }
+        close(7);
         if(fcntl(5,F_SETFD,FD_CLOEXEC))return 70;
         unsigned char ready[12]={0x52,0x4d,0x52,0x31,0,0,0,1,0,0,0,0};
         if(strstr(argv[0],"malformed-child")) {ready[0]=0;write(5,ready,12);return 70;}
@@ -56,6 +82,13 @@ int main(int argc, char **argv) {
         int error=errno;unsigned char failed[12]={0x52,0x4d,0x52,0x31,0,0,0,2,0,0,0,0};
         for(unsigned i=0;i<4;i++)failed[8+i]=(unsigned char)((uint32_t)error>>((3U-i)*8));
         (void)write(5,failed,sizeof failed);return 70;
+    }
+    if(argc==4 && !strcmp(argv[1], "mapped-probe")) {
+        int result=mapped_probe(argv[2]);
+        int report=open(argv[3],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+        char value[16];int length=snprintf(value,sizeof(value),"%d",result);
+        if(report<0 || length<=0 || write(report,value,(size_t)length)!=length)return 117;
+        close(report);return result;
     }
     if(argc!=4 || (unsigned char)argv[0][0]!=0xff || argv[0][1] || argv[1][0] ||
         (unsigned char)argv[2][0]!=0xfe || argv[2][1])return 91;

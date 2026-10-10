@@ -114,4 +114,35 @@ final class CommandHandshakeCodecTests: XCTestCase {
         XCTAssertEqual(CommandHandshakeCapabilities.admissionResults.inputCarrierVersions, [3])
     }
 
+    func testMappedProfilesRequireTheExactCarrierAndExplicitOffer() throws {
+        for (wire, capabilities): (UInt64, CommandHandshakeCapabilities) in [
+            (8, .mappedTerminalJobExecution), (9, .mappedPipeJobExecutionControls),
+        ] {
+            let selected = profile(wire: wire, input: 5)
+            let offer = try CommandHandshakeOffer(nonce: nonce, capabilities: capabilities)
+            let bytes = try CommandHandshakeReply(nonce: nonce, profile: selected).bytes
+            XCTAssertEqual(try CommandHandshakeReply.decode(bytes, offer: offer, macID: mac, accountID: account), selected)
+            XCTAssertTrue(selected.supportsMappedLayout)
+            XCTAssertTrue(selected.supportsAdmissionResults)
+            XCTAssertTrue(selected.supportsExecutionChannels)
+            XCTAssertTrue(selected.supportsExecutionControls)
+            XCTAssertTrue(selected.supportsJobState)
+            for old: CommandHandshakeCapabilities in [.current, .executionChannels, .streamingJobExecution, .pipeJobExecutionControls] {
+                XCTAssertThrowsError(try CommandHandshakeReply.decode(bytes,
+                    offer: CommandHandshakeOffer(nonce: nonce, capabilities: old), macID: mac, accountID: account))
+            }
+            for carrier: UInt64 in [2, 3, 4] {
+                let wrong = profile(wire: wire, input: carrier)
+                let loose = try CommandHandshakeCapabilities(wireVersions: [wire], submissionSchemaVersions: [1], inputCarrierVersions: [carrier])
+                XCTAssertFalse(wrong.supported(by: loose))
+                XCTAssertFalse(wrong.supportsExecutionControls)
+                XCTAssertThrowsError(try CommandHandshakeReply.decode(CommandHandshakeReply(nonce: nonce, profile: wrong).bytes,
+                    offer: CommandHandshakeOffer(nonce: nonce, capabilities: loose), macID: mac, accountID: account))
+            }
+            for legacyWire: UInt64 in 1...7 { XCTAssertFalse(profile(wire: legacyWire, input: 5).supportsExecutionChannels) }
+        }
+        XCTAssertEqual(CommandHandshakeCapabilities.current.wireVersions, [1])
+        XCTAssertEqual(CommandHandshakeCapabilities.current.inputCarrierVersions, [2])
+    }
+
 }

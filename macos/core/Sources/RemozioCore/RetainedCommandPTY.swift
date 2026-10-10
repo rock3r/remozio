@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RemozioMach
+import RemozioProtocol
 
 /// Owns one private terminal inside the serialized command controller. This grants no execution or caller control permission.
 final class RetainedCommandPTY {
@@ -27,6 +28,23 @@ final class RetainedCommandPTY {
         if status != 0 { throw RetainedCommandPTYError.native(status) }
         return try body(descriptor)
     }
+    /// Selected roles use independent private descriptions. Direct roles keep their original retained descriptors.
+    func withBorrowedMappedStreams<Value>(layout: CapturedCommandStdioLayout, direct: [Int32],
+                                         _ body: ([Int32], Int32) throws -> Value) throws -> Value {
+        guard let handle else { throw RetainedCommandPTYError.closed }
+        guard direct.count == 3, layout.ptyMask <= 7 else { throw RetainedCommandPTYError.invalidLayout }
+        var descriptors = direct, owned: [Int32] = []
+        defer { for descriptor in owned { _ = Darwin.close(descriptor) } }
+        for (index, stream) in [layout.input, layout.output, layout.error].enumerated() where layout.ptyMask & (1 << index) != 0 {
+            guard let flags = UInt32(exactly: stream.flags.rawValue) else { throw RetainedCommandPTYError.invalidLayout }
+            var descriptor: Int32 = -1
+            let status = remozio_command_pty_copy_stream(handle, UInt32(stream.access.rawValue), flags, &descriptor)
+            guard status == 0 else { throw RetainedCommandPTYError.native(status) }
+            owned.append(descriptor); descriptors[index] = descriptor
+        }
+        return try withBorrowedSlave { try body(descriptors, $0) }
+    }
+
     func sealSlave() {
         if let handle { remozio_command_pty_seal_slave(handle) }
     }
@@ -74,4 +92,4 @@ final class RetainedCommandPTY {
     func close() { remozio_command_pty_close(handle); handle = nil }
 }
 
-enum RetainedCommandPTYError: Error, Equatable { case closed, invalidChunk, native(Int32) }
+enum RetainedCommandPTYError: Error, Equatable { case closed, invalidChunk, invalidLayout, native(Int32) }

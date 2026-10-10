@@ -34,6 +34,7 @@ final class RetainedCommandExecutionResources {
         self.submissionDigest = submissionDigest; self.request = request
     }
     deinit { close() }
+    var requiresMappedLayout: Bool { profile.supportsMappedLayout }
     var requiresStreamPump: Bool { profile.supportsStreamingExecution }
     var reportsJobState: Bool { profile.supportsJobState }
     var requiresPipeControls: Bool { profile.supportsPipeExecutionControls }
@@ -52,6 +53,10 @@ final class RetainedCommandExecutionResources {
     func recheck(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCancellation: () throws -> Void = {}) throws {
         guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
         do {
+            if requiresMappedLayout {
+                guard capture.schemaVersion == 3, let stdioObservation, stdioObservation.layout == capture.stdioLayout,
+                      capture.ioMode == (requiresStreamPump ? .pty : .pipes) else { throw RetainedCommandCaptureError.invalidContext }
+            }
             try checkCancellation()
             try caller.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
             try filesystem.recheck(checkCancellation: checkCancellation)
@@ -83,6 +88,13 @@ final class RetainedCommandExecutionResources {
                 }
             }
         }
+    }
+
+    /// Borrow the original caller terminal only for reading preparation attributes, never for command stdio replacement.
+    func withBorrowedCallerTerminal<Value>(_ body: (Int32?) throws -> Value) throws -> Value {
+        guard !closed, !executionRetired else { throw RetainedCommandCaptureError.closed }
+        if let controlTerminal { return try controlTerminal.withBorrowedDescriptor { try body($0) } }
+        return try body(nil)
     }
 
     /// Only the trusted controller supplies an established result after the required durable transition.

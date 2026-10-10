@@ -214,15 +214,29 @@ public enum MachCommandIOClient {
             handshake: handshake, expression: authorityPolicy.requirement, userID: 0, auditSessionID: authorityPolicy.expectedAuditSessionID,
             maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: timeoutMilliseconds, checkCancellation: checkCancellation)
     }
+    /// Uses the explicitly negotiated mapped carrier. The optional terminal is independent of the three stdio roles.
+    public static func submitMapped(_ submission: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
+                                    controlTerminalDescriptor: Int32?, handshake: sending VerifiedCommandHandshake,
+                                    authorityPolicy: XPCPeerPolicy, maximumPayloadBytes: Int,
+                                    timeoutMilliseconds: UInt32 = 5000, checkCancellation: () throws -> Void = {}) throws -> sending CommandIOAdmission {
+        guard authorityPolicy.expectedUserID == 0 else { handshake.close(); throw MachCommandHandshakeError.invalidConfiguration }
+        return try submit(submission, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor,
+            handshake: handshake, expression: authorityPolicy.requirement, userID: 0, auditSessionID: authorityPolicy.expectedAuditSessionID,
+            maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: timeoutMilliseconds, checkCancellation: checkCancellation,
+            mapped: true, controlTerminalDescriptor: controlTerminalDescriptor)
+    }
     static func submit(_ submission: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
                        handshake: sending VerifiedCommandHandshake, expression: String, userID: uid_t, auditSessionID: au_asid_t?,
                        maximumPayloadBytes: Int, timeoutMilliseconds: UInt32 = 5000,
-                       checkCancellation: () throws -> Void = {}) throws -> sending CommandIOAdmission {
+                       checkCancellation: () throws -> Void = {}, mapped: Bool = false,
+                       controlTerminalDescriptor: Int32? = nil) throws -> sending CommandIOAdmission {
         do {
             let admissionEndpoint = try MachCommandPrivateReplyPort()
             defer { admissionEndpoint.close() }
             let terminalEndpoint = try MachCommandPrivateReplyPort(queueLimit: handshake.profile.supportsExecutionControls ? 4 : nil)
-            guard handshake.profile.supportsExecutionChannels, submission.schemaVersion == handshake.profile.submissionSchemaVersion,
+            guard handshake.profile.supportsExecutionChannels, handshake.profile.supportsMappedLayout == mapped,
+                  !mapped || submission.ioMode == (handshake.profile.supportsStreamingExecution ? .pty : .pipes),
+                  submission.schemaVersion == handshake.profile.submissionSchemaVersion,
                   submission.binding.callerBinding == handshake.profile.callerBinding, (1...60_000).contains(timeoutMilliseconds) else {
                 throw MachCommandHandshakeError.incompatible
             }
@@ -236,9 +250,16 @@ public enum MachCommandIOClient {
             try handshake.authenticateReplyAuthority(expression: expression, userID: userID, auditSessionID: auditSessionID)
             let receiver = try MachCommandCallerReceiver(receivePort: admissionEndpoint.port, expression: expression,
                 userID: userID, auditSessionID: auditSessionID, maxPayloadBytes: 4096)
-            try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor,
-                errorDescriptor: errorDescriptor, destination: handshake.borrowedAuthorityPort(), admissionReply: admissionEndpoint.port,
-                terminalReply: terminalEndpoint.port, maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: remaining())
+            if mapped {
+                try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor,
+                    errorDescriptor: errorDescriptor, controlTerminalDescriptor: controlTerminalDescriptor,
+                    destination: handshake.borrowedAuthorityPort(), admissionReply: admissionEndpoint.port,
+                    terminalReply: terminalEndpoint.port, maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: remaining())
+            } else {
+                try MachCommandIOWire.send(submission.canonicalBytes, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor,
+                    errorDescriptor: errorDescriptor, destination: handshake.borrowedAuthorityPort(), admissionReply: admissionEndpoint.port,
+                    terminalReply: terminalEndpoint.port, maximumPayloadBytes: maximumPayloadBytes, timeoutMilliseconds: remaining())
+            }
             func receive() throws -> sending ReceivedMachCommandSubmission {
                 while true {
                     try checkCancellation()

@@ -77,28 +77,43 @@ final class CommandExecution {
         let status = try resources.withBorrowedDescriptors { input, output, error, directory in
             let pty: RetainedCommandPTY?
             if resources.requiresStreamPump {
-                var attributes = termios(), size = winsize()
-                let hasTerminal = isatty(input) == 1
-                if hasTerminal {
-                    guard tcgetattr(input, &attributes) == 0, ioctl(input, TIOCGWINSZ, &size) == 0 else {
-                        throw RetainedCommandPTYError.native(errno)
+                let privatePTY = try resources.withBorrowedCallerTerminal { callerTerminal in
+                    let source = resources.requiresMappedLayout ? callerTerminal : input
+                    var attributes = termios(), size = winsize()
+                    let hasTerminal = source.map { isatty($0) == 1 } ?? false
+                    if hasTerminal, let source {
+                        guard tcgetattr(source, &attributes) == 0, ioctl(source, TIOCGWINSZ, &size) == 0 else {
+                            throw RetainedCommandPTYError.native(errno)
+                        }
                     }
+                    return try RetainedCommandPTY(attributes: hasTerminal ? attributes : nil, size: hasTerminal ? size : nil)
                 }
-                let privatePTY = try RetainedCommandPTY(attributes: hasTerminal ? attributes : nil, size: hasTerminal ? size : nil)
                 pty = privatePTY
                 pump = try CommandPTYStreamPump(pty: privatePTY, channel: resources.makeStreamAuthority())
             } else { pty = nil }
             defer { pty?.sealSlave() }
-            func spawn(_ input: Int32, _ output: Int32, _ error: Int32) -> Int32 {
+            func spawn(_ input: Int32, _ output: Int32, _ error: Int32, terminal: Int32? = nil) -> Int32 {
                 frame.withUnsafeBytes { bytes in
                     monitorPath.withCString { monitorPath in
                         childPath.withCString { childPath in
-                            remozio_command_monitor_spawn(monitorPath, childPath, bytes.baseAddress, bytes.count, input, output, error, directory, &monitor)
+                            if let terminal {
+                                return remozio_command_monitor_spawn_with_terminal(monitorPath, childPath, bytes.baseAddress, bytes.count,
+                                    input, output, error, directory, terminal, &monitor)
+                            }
+                            return remozio_command_monitor_spawn(monitorPath, childPath, bytes.baseAddress, bytes.count, input, output, error, directory, &monitor)
                         }
                     }
                 }
             }
-            if let pty { return try pty.withBorrowedSlave { spawn($0, $0, $0) } }
+            if let pty {
+                if resources.requiresMappedLayout {
+                    guard let layout = resources.capture.stdioLayout else { throw CommandExecutionError.unavailable }
+                    return try pty.withBorrowedMappedStreams(layout: layout, direct: [input, output, error]) { streams, terminal in
+                        spawn(streams[0], streams[1], streams[2], terminal: terminal)
+                    }
+                }
+                return try pty.withBorrowedSlave { spawn($0, $0, $0) }
+            }
             return spawn(input, output, error)
         }
         monitorOwned = monitor != nil
