@@ -7299,3 +7299,201 @@ extension MachCommandCallerReceiverTests {
         }
     }
 }
+
+extension MachCommandCallerReceiverTests {
+    func testFrontendRelayUsesAuthenticatedSessionAndDrainsPartialOutputBeforeResult() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 6)
+        let submission = try commandSubmission(), profile = handshake.profile, binding = streamBinding(profile, submission)
+        let payloads = try ioPayloads(profile: profile, submission: submission)
+        let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+        let allowOpen = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let inputWhileBlocked = DispatchSemaphore(value: 0)
+        let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        let binaryInput = Data([0, 255, 10, 13])
+        let binaryOutput = Data((0..<4096).map { UInt8($0 % 251) }) + Data([255, 0, 13])
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { outcome in outcome = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user,
+                    auditSessionID: nil, maxPayloadBytes: 8192)
+                let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                defer { received.closeIfUnclaimed() }
+                let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                let stream = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                defer { stream.close(); terminal.close() }
+                try received.sendAdmissionReply(payloads.0)
+                guard allowOpen.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                try Self.waitQueued { try stream.send(.opened) }
+                var controls: [CommandStreamFrame.Body] = []
+                let inputDeadline = Date().addingTimeInterval(5)
+                while controls.count < 1 {
+                    if let control = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                        controls.append(control)
+                    }
+                    guard Date() < inputDeadline else { throw MachCommandCallerError.timeout }
+                    usleep(1000)
+                }
+                XCTAssertEqual(controls, [.resize(53, 143, 0, 0)])
+                try Self.waitQueued { try stream.send(.output(Data(binaryOutput.prefix(4096)))) }
+                while controls.count < 3 {
+                    if let control = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                        controls.append(control)
+                    }
+                    guard Date() < inputDeadline else { throw MachCommandCallerError.timeout }
+                    usleep(1000)
+                }
+                XCTAssertEqual(controls, [.resize(53, 143, 0, 0), .input(binaryInput), .inputEnd])
+                inputWhileBlocked.signal()
+                try Self.waitQueued { try stream.send(.output(Data(binaryOutput.dropFirst(4096)))) }
+                try Self.waitQueued { try stream.send(.outputEnd) }
+                let outputDeadline = Date().addingTimeInterval(5)
+                while !stream.outputDrained {
+                    if let control = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                        XCTAssertEqual(control, .outputDrained)
+                    }
+                    guard Date() < outputDeadline else { throw MachCommandCallerError.timeout }
+                    usleep(1000)
+                }
+                try Self.waitQueued { try stream.send(.jobState(.init(revision: 1,
+                    state: .stopped(signal: UInt32(SIGSTOP), rawStopCode: UInt32(CLD_STOPPED), tracing: .unknown)))) }
+                try terminal.sendTerminalNonblocking(payloads.1)
+            } }
+        }
+        defer { allowOpen.signal() }
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let io = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+            handshake: handshake, expression: expression, userID: user, auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = io else { return XCTFail("The original authenticated channel must remain owned") }
+        defer { session.close() }
+        let terminal = FrontendRelayTestTerminal()
+        terminal.writeBlocked = true; terminal.writeCounts = [0, 3, 0, 71]
+        let relay = try CommandFrontendRelay(channel: session, terminal: terminal)
+        defer { try? relay.close() }
+        guard case .waiting = try relay.advance(timeoutMilliseconds: 1000) else { return XCTFail("Admission must not open the stream") }
+        XCTAssertEqual(terminal.activateCalls, 0); XCTAssertEqual(terminal.readCalls, 0)
+        allowOpen.signal()
+        var final: VerifiedCommandTerminalResult?, sawJob = false, suppliedInput = false, receivedBlockedInput = false
+        let deadline = Date().addingTimeInterval(10)
+        while final == nil {
+            switch try relay.advance(timeoutMilliseconds: 1000) {
+            case .terminal(let value): final = value
+            case .jobState(let job):
+                sawJob = true; XCTAssertEqual(job.revision, 1)
+                XCTAssertEqual(job.submission, submission.binding)
+                XCTAssertTrue(terminal.needsRestore)
+            case .suspended, .foregroundRequired, .interrupted: XCTFail("Historical job metadata must not suspend this foreground relay")
+            case .waiting, .progress: break
+            }
+            if !suppliedInput, terminal.writeCalls > 0 {
+                XCTAssertTrue(terminal.written.isEmpty)
+                terminal.reads = [.bytes(binaryInput), .end]; suppliedInput = true
+            }
+            if !receivedBlockedInput, inputWhileBlocked.wait(timeout: .now()) == .success {
+                XCTAssertTrue(terminal.written.isEmpty)
+                terminal.writeBlocked = false; receivedBlockedInput = true
+            }
+            guard Date() < deadline else { throw MachCommandCallerError.timeout }
+            usleep(1000)
+        }
+        XCTAssertEqual(final?.outcome, .exited(7)); XCTAssertEqual(terminal.written, binaryOutput)
+        XCTAssertTrue(suppliedInput); XCTAssertTrue(receivedBlockedInput); XCTAssertTrue(terminal.reads.isEmpty)
+        XCTAssertGreaterThanOrEqual(terminal.readCalls, 2); XCTAssertTrue(sawJob)
+        XCTAssertFalse(relay.needsTerminalRestoration); XCTAssertGreaterThan(terminal.closeCalls, 0)
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+        try result.withLock { try XCTUnwrap($0).get() }
+    }
+}
+
+// The receiver stays alive until the signal worker joins. This wrapper never transfers thread ownership.
+private struct FrontendSignalTestThread: @unchecked Sendable {
+    let thread: pthread_t
+    func signalResize() { _ = pthread_kill(thread, SIGWINCH) }
+}
+
+extension MachCommandCallerReceiverTests {
+    func testFrontendRelayKeepsAuthenticatedChannelAfterActualLocalSignalInterruptsReceive() throws {
+        let endpoint = try Endpoint(), handshake = try admissionClientFixture(endpoint.port, input: 4, wire: 6)
+        let submission = try commandSubmission(), profile = handshake.profile, binding = streamBinding(profile, submission)
+        let payloads = try ioPayloads(profile: profile, submission: submission)
+        let expression = try selfExpression(), user = geteuid(), port = endpoint.port
+        let allowOpen = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+        DispatchQueue.global().async {
+            defer { completed.signal() }
+            result.withLock { outcome in outcome = Result {
+                let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression, userID: user,
+                    auditSessionID: nil, maxPayloadBytes: 8192)
+                let received = try receiver.receiveIOInput(timeoutMilliseconds: 5000)
+                defer { received.closeIfUnclaimed() }
+                let terminal = try XCTUnwrap(received.outputs).takeTerminalReply()
+                let stream = try MachCommandStreamAuthority(binding: binding, original: received.caller, terminal: terminal)
+                defer { stream.close(); terminal.close() }
+                try received.sendAdmissionReply(payloads.0)
+                guard allowOpen.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                try Self.waitQueued { try stream.send(.opened) }
+                try Self.waitQueued { try stream.send(.outputEnd) }
+                let deadline = Date().addingTimeInterval(5)
+                while !stream.outputDrained {
+                    if let control = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                        switch control {
+                        case .resize, .outputDrained: break
+                        default: XCTFail("The interruption must not invent input or execution")
+                        }
+                    }
+                    guard Date() < deadline else { throw MachCommandCallerError.timeout }
+                    usleep(1000)
+                }
+                try terminal.sendTerminalNonblocking(payloads.1)
+            } }
+        }
+        defer { allowOpen.signal() }
+        let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+        defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+        let response = try MachCommandIOClient.submit(submission, inputDescriptor: input, outputDescriptor: output,
+            errorDescriptor: output, handshake: handshake, expression: expression, userID: user,
+            auditSessionID: nil, maximumPayloadBytes: 8192)
+        guard case .admitted(let session) = response else { return XCTFail("The original admission must remain retained") }
+        defer { session.close() }
+        let terminal = FrontendRelayTestTerminal(), relay = try CommandFrontendRelay(channel: session, terminal: terminal)
+        defer { try? relay.close() }
+        var action = sigaction(), previous = sigaction()
+        action.__sigaction_u.__sa_handler = { _ in }
+        sigemptyset(&action.sa_mask)
+        XCTAssertEqual(sigaction(SIGWINCH, &action, &previous), 0)
+        defer { _ = sigaction(SIGWINCH, &previous, nil) }
+        var mask = sigset_t(), oldMask = sigset_t()
+        sigemptyset(&mask); sigaddset(&mask, SIGWINCH)
+        XCTAssertEqual(pthread_sigmask(SIG_UNBLOCK, &mask, &oldMask), 0)
+        defer { _ = pthread_sigmask(SIG_SETMASK, &oldMask, nil) }
+        let receiverThread = FrontendSignalTestThread(thread: pthread_self())
+        let stopSignals = DispatchSemaphore(value: 0), signalsComplete = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            defer { signalsComplete.signal() }
+            for _ in 0..<200 {
+                if stopSignals.wait(timeout: .now() + .milliseconds(10)) == .success { break }
+                receiverThread.signalResize()
+            }
+        }
+        var signalsJoined = false
+        defer { stopSignals.signal(); if !signalsJoined { _ = signalsComplete.wait(timeout: .now() + 5) } }
+        guard case .interrupted = try relay.advance(timeoutMilliseconds: 1000) else {
+            return XCTFail("An actual zero-consumption Mach interruption must yield without closing")
+        }
+        XCTAssertEqual(terminal.activateCalls, 0); XCTAssertEqual(terminal.readCalls, 0)
+        stopSignals.signal()
+        let joined = signalsComplete.wait(timeout: .now() + 5)
+        signalsJoined = joined == .success; XCTAssertEqual(joined, .success)
+        allowOpen.signal()
+        var final: VerifiedCommandTerminalResult?
+        let deadline = Date().addingTimeInterval(5)
+        while final == nil {
+            if case .terminal(let value) = try relay.advance(timeoutMilliseconds: 1000) { final = value }
+            guard Date() < deadline else { throw MachCommandCallerError.timeout }
+        }
+        XCTAssertEqual(final?.outcome, .exited(7)); XCTAssertEqual(final?.submission, submission.binding)
+        XCTAssertFalse(relay.needsTerminalRestoration)
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+        try result.withLock { try XCTUnwrap($0).get() }
+    }
+}

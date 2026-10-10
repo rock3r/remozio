@@ -1,6 +1,8 @@
 #ifndef REMOZIO_FRONTEND_TERMINAL_H
 #define REMOZIO_FRONTEND_TERMINAL_H
 #include <stdbool.h>
+#include <stddef.h>
+#include <sys/ioctl.h>
 
 typedef struct remozio_frontend_terminal remozio_frontend_terminal_t;
 /* Reopens the supplied terminal independently and checks its device and session.
@@ -20,6 +22,21 @@ int remozio_frontend_terminal_restore(remozio_frontend_terminal_t * _Nonnull ter
 bool remozio_frontend_terminal_needs_restore(const remozio_frontend_terminal_t * _Nonnull terminal);
 /* Restore and free. On error, ownership remains with the caller for retry. */
 int remozio_frontend_terminal_close(remozio_frontend_terminal_t * _Nonnull terminal);
+enum { REMOZIO_FRONTEND_TERMINAL_MAX_CHUNK = 4096 };
+/* Serialized, nonblocking IO on the independently retained terminal. Successful
+ * activation is required. The read also requires a safe SIGTTIN route, and the
+ * write requires a safe SIGTTOU route. EINTR and EAGAIN consume no bytes.
+ * Each call accepts 1..4096 bytes. A successful zero-byte read means EOF.
+ * Keep the unsent suffix after a partial write. No shared flags change. */
+int remozio_frontend_terminal_read(remozio_frontend_terminal_t * _Nonnull terminal,
+    void * _Nonnull bytes, size_t capacity, size_t * _Nonnull count);
+int remozio_frontend_terminal_write(remozio_frontend_terminal_t * _Nonnull terminal,
+    const void * _Nonnull bytes, size_t length, size_t * _Nonnull count);
+/* A fresh foreground check grants no foreground takeover or execution authority. */
+int remozio_frontend_terminal_check_foreground(remozio_frontend_terminal_t * _Nonnull terminal);
+/* Copies current dimensions without changing them or taking foreground. */
+int remozio_frontend_terminal_dimensions(remozio_frontend_terminal_t * _Nonnull terminal,
+    struct winsize * _Nonnull size);
 /* Close without changing terminal attributes. Use only when restoration cannot be
  * completed, and report that fact. This grants no signal or execution authority. */
 void remozio_frontend_terminal_abandon(remozio_frontend_terminal_t * _Nullable terminal);

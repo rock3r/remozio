@@ -26,10 +26,19 @@ public enum CommandExecutionStreamEvent {
     case jobState(VerifiedCommandExecutionJobObservation)
 }
 
+/// A local signal interrupted a receive before any message was consumed. It permits another poll of the same channel.
+public enum CommandExecutionStreamPollError: Error, Equatable { case interrupted }
+
 /// Owns the original Root handshake and private terminal endpoint after admission. The caller serializes all operations.
 public final class RetainedCommandExecutionSession {
     public static let maximumInputChunk = CommandStreamFrame.maximumChunk
     public let admission: VerifiedCommandAdmissionResult
+    /// The authenticated profile determines local relay routing. Unsupported legacy profiles return nil.
+    public var executionIOMode: CommandIOMode? {
+        if handshake.profile.supportsStreamingExecution { return .pty }
+        if handshake.profile.supportsPipeExecutionControls { return .pipes }
+        return nil
+    }
     private let original: CommandSubmission
     private let handshake: VerifiedCommandHandshake
     private let endpoint: MachCommandPrivateReplyPort
@@ -98,6 +107,8 @@ public final class RetainedCommandExecutionSession {
         } catch { close(); throw error }
     }
     /// Polls PTY stream events or pipe control readiness and terminal results. Each wait is finite; the command lifetime is not.
+    /// A zero-consumption local interruption throws CommandExecutionStreamPollError.interrupted and retains this channel.
+    /// Reconcile pending local signals before polling again. Every new poll authenticates the original authority.
     public func pollStreamEvent(timeoutMilliseconds: UInt32 = 250) throws -> CommandExecutionStreamEvent? {
         guard handshake.profile.supportsExecutionControls, (1...60_000).contains(timeoutMilliseconds) else {
             throw MachCommandHandshakeError.incompatible
@@ -115,6 +126,9 @@ public final class RetainedCommandExecutionSession {
             let event: ReceivedMachCommandExecutionEvent
             do { event = try receiver.receiveExecutionEvent(timeoutMilliseconds: remaining()) }
             catch MachCommandCallerError.timeout { return nil }
+            catch MachCommandCallerError.mach(let status) where status == MACH_RCV_INTERRUPTED {
+                throw CommandExecutionStreamPollError.interrupted
+            }
             switch event {
             case .stream(let reply, let right):
                 defer { reply.caller.close(); right?.close() }
@@ -158,6 +172,8 @@ public final class RetainedCommandExecutionSession {
                 terminal = result; close()
                 return .terminal(result)
             }
+        } catch CommandExecutionStreamPollError.interrupted {
+            throw CommandExecutionStreamPollError.interrupted
         } catch { close(); throw error }
     }
     /// Returns the accepted count. Keep the entire unsent input when this returns zero.
