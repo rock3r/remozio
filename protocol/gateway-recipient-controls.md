@@ -79,7 +79,8 @@ Re-enrollment needs fresh administrative authorization and a new phone epoch.
 
 Root desired state and its idempotent outbox must survive restart. Reconciliation must verify retained signed receipts against local trust history.
 A gateway reporting a larger counter does not establish trust or solve whole-backup rollback detection.
-Gateway uninstall, submission-credential rotation, acknowledgement and reconciliation message schemas are not defined here.
+Gateway uninstall, acknowledgement and reconciliation schemas are not defined here.
+[Submission controls](gateway-submission-controls.md) define credential rotation and revocation claims separately.
 
 ## Evidence
 
