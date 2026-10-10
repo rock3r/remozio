@@ -31,6 +31,7 @@ public actor GatewayDeliveryCoordinator {
     private let identity: GatewayRegistrationIdentity
     private let tokens: FCMTokenSource
     private let policy: GatewayDeliveryPolicy
+    private let validateAuthority: @Sendable () throws -> Void
     private let sample: @Sendable () throws -> Sample
     private let sleep: @Sendable (UInt64) async throws -> Void
     private let send: @Sendable (FCMTokenProbe, FCMAccessToken) async throws -> FCMDeliveryResult
@@ -44,6 +45,7 @@ public actor GatewayDeliveryCoordinator {
     private var presenceCancelledSchedules: Set<WakeScope> = []
     private var schedulerInterval: UInt64 = 0
     private var lastScheduledScope: WakeScope?
+    private var synchronizingHost = false
 
     private struct WakeScope: Hashable { let phone: Data; let epoch: Data }
     private struct WakeEntry {
@@ -88,9 +90,10 @@ public actor GatewayDeliveryCoordinator {
     }
 
     public init(database: sending GatewayDatabase, identity: GatewayRegistrationIdentity, tokens: FCMTokenSource,
-                sender: FCMWakeSender, policy: GatewayDeliveryPolicy, clockEpoch: UUID, wakePolicy: GatewayWakePolicy? = nil) throws {
+                sender: FCMWakeSender, policy: GatewayDeliveryPolicy, clockEpoch: UUID, wakePolicy: GatewayWakePolicy? = nil,
+                validateAuthority: @escaping @Sendable () throws -> Void = {}) throws {
         let wakeSender: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)?
-        if wakePolicy != nil { wakeSender = { try await sender.send($0, accessToken: $1) } }
+        if wakePolicy != nil { wakeSender = { try validateAuthority(); return try await sender.send($0, accessToken: $1) } }
         else { wakeSender = nil }
         let clock = try AuthorityClock(epoch: clockEpoch)
         try self.init(database: database, identity: identity, tokens: tokens, policy: policy, sample: {
@@ -99,8 +102,9 @@ public actor GatewayDeliveryCoordinator {
             let moment: AuthorityMoment
             do { moment = try clock.now() } catch { throw GatewayDeliveryError.invalidClock }
             return Sample(wall: UInt64(wall), moment: moment)
-        }, sleep: { try await Task.sleep(for: .milliseconds($0)) }, send: { try await sender.send($0, accessToken: $1) },
-            wakePolicy: wakePolicy, sendWake: wakeSender)
+        }, sleep: { try await Task.sleep(for: .milliseconds($0)) }, send: {
+            try validateAuthority(); return try await sender.send($0, accessToken: $1)
+        }, wakePolicy: wakePolicy, sendWake: wakeSender, validateAuthority: validateAuthority)
     }
 
     init(database: sending GatewayDatabase, identity: GatewayRegistrationIdentity, tokens: FCMTokenSource,
@@ -109,6 +113,7 @@ public actor GatewayDeliveryCoordinator {
          send: @escaping @Sendable (FCMTokenProbe, FCMAccessToken) async throws -> FCMDeliveryResult,
          wakePolicy: GatewayWakePolicy? = nil,
          sendWake: (@Sendable (FCMWake, FCMAccessToken) async throws -> FCMDeliveryResult)? = nil,
+         validateAuthority: @escaping @Sendable () throws -> Void = {},
          schedulerSleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(for: .milliseconds($0)) }) throws {
         guard (wakePolicy == nil) == (sendWake == nil) else { throw GatewayDeliveryError.invalidConfiguration }
         self.wakePolicy = wakePolicy; self.sendWake = sendWake; self.schedulerSleep = schedulerSleep
@@ -116,6 +121,7 @@ public actor GatewayDeliveryCoordinator {
         let (next, overflow) = first.moment.milliseconds.addingReportingOverflow(policy.minimumSendIntervalMillis)
         guard !overflow else { throw GatewayDeliveryError.invalidClock }
         self.database = database; self.identity = identity; self.tokens = tokens; self.policy = policy
+        self.validateAuthority = validateAuthority
         self.sample = sample; self.sleep = sleep; self.send = send; lastMoment = first.moment; nextSend = next
     }
 
@@ -143,6 +149,25 @@ public actor GatewayDeliveryCoordinator {
         enrollments = next; self.active = active; trustRevision = UUID()
         schedulingRetryAt = schedulingRetryAt.filter { next[$0.key.phone]?.epoch == $0.key.epoch }
         pumpWakeScheduling()
+    }
+
+    /// The native host seals the old lease before replacing state. Activation and routing share one actor turn.
+    func synchronizeHost(_ snapshot: GatewayHostSnapshot, lease: GatewayAuthorityLease) throws {
+        try running()
+        guard snapshot.registration == identity else { throw GatewayServiceError.invalidMessage }
+        synchronizingHost = true
+        defer { synchronizingHost = false; pumpWakeScheduling() }
+        try lease.renew(rootEpoch: snapshot.rootEpoch, sequence: snapshot.sequence,
+            observedAt: snapshot.observedAtMilliseconds, deadline: snapshot.leaseDeadlineMilliseconds) {
+            try replaceTrustedEnrollments(snapshot.enrollments, active: snapshot.active)
+            try setPhoneRouting(snapshot.phoneRouting)
+        }
+    }
+
+    func authorityUnavailable() {
+        for task in scheduledWakes.values { task.cancel() }
+        for flight in flights.values { flight.task.cancel() }
+        for flight in wakeFlights.values { flight.task.cancel() }
     }
 
     public func admitCandidate(canonicalPayload: Data, signature: Data, wireVersion: UInt64,
@@ -198,7 +223,17 @@ public actor GatewayDeliveryCoordinator {
 
     /// Runs bounded retries for an admitted candidate. Acceptance still requires a separate phone proof and root control.
     public func deliverProbe(operationID: Data, phoneID: Data) async throws -> GatewayProbeProgress? {
+        let task = try beginProbe(operationID: operationID, phoneID: phoneID)
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    /// Accept bounded service-owned work without occupying the Root control connection during provider I/O.
+    public func startProbe(operationID: Data, phoneID: Data) throws {
+        _ = try beginProbe(operationID: operationID, phoneID: phoneID)
+    }
+    private func beginProbe(operationID: Data, phoneID: Data) throws -> Task<GatewayProbeProgress?, any Error> {
         try running(); try Task.checkCancellation()
+        _ = try current()
         guard operationID.count == 16 else { throw GatewayDatabaseError.wrongScope }
         guard flights[operationID] == nil else { throw GatewayDeliveryError.alreadyRunning }
         guard flights.count + wakeFlights.count < policy.maximumFlights else { throw GatewayDeliveryError.capacityExceeded }
@@ -206,13 +241,15 @@ public actor GatewayDeliveryCoordinator {
         guard let receipt = try database.receipt(operationID: operationID), receipt.candidate.binding.phoneID == phoneID,
               receipt.candidate.binding.enrollmentEpoch == enrollment.epoch else { throw GatewayDatabaseError.wrongScope }
         let id = UUID()
-        let task = Task { try await self.run(operationID: operationID, phoneID: phoneID) }
-        flights[operationID] = Flight(id: id, phone: phoneID, enrollmentEpoch: enrollment.epoch, task: task)
-        defer {
-            if flights[operationID]?.id == id { flights.removeValue(forKey: operationID) }
-            pumpWakeScheduling()
+        let task = Task {
+            defer {
+                if flights[operationID]?.id == id { flights.removeValue(forKey: operationID) }
+                pumpWakeScheduling()
+            }
+            return try await self.run(operationID: operationID, phoneID: phoneID)
         }
-        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        flights[operationID] = Flight(id: id, phone: phoneID, enrollmentEpoch: enrollment.epoch, task: task)
+        return task
     }
 
     public func cancel(operationID: Data) { flights[operationID]?.task.cancel() }
@@ -275,6 +312,7 @@ public actor GatewayDeliveryCoordinator {
     }
 
     private func pumpWakeScheduling() {
+        guard !synchronizingHost else { return }
         guard schedulerTask != nil, !stopped else { return }
         let now: UInt64
         do { now = try current().moment.milliseconds }
@@ -573,7 +611,7 @@ public actor GatewayDeliveryCoordinator {
                 // A lost response does not establish receipt. The original candidate remains the only retry scope.
                 let retry = !Task.isCancelled && !stopped && (error as? FCMError) == .network
                 try database.finishProbe(reservation, outcome: retry ? .retry(minimumDelayMillis: backoff(reservation.number)) : .terminal,
-                    now: current().moment)
+                    now: clockSample().moment)
                 if !retry { throw error }
             }
         }
@@ -598,6 +636,12 @@ public actor GatewayDeliveryCoordinator {
 
     private func running() throws { guard !stopped else { throw GatewayDeliveryError.stopped } }
     private func current() throws -> Sample {
+        do { try validateAuthority() }
+        catch { authorityUnavailable(); throw error }
+        return try clockSample()
+    }
+    /// Finish an existing reservation after authority loss while retaining clock epoch and regression checks.
+    private func clockSample() throws -> Sample {
         let result = try sample()
         guard result.moment.epoch == lastMoment.epoch, result.moment.milliseconds >= lastMoment.milliseconds else {
             stopped = true

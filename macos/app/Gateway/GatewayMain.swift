@@ -1,0 +1,46 @@
+import Darwin
+import Foundation
+import RemozioCore
+
+@main
+struct GatewayMain {
+    static func main() async {
+        guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--configuration" else {
+            fail("Usage: RemozioGateway --configuration /absolute/protected/gateway.cbor", code: EX_USAGE)
+        }
+        let configuration: GatewayServiceConfiguration
+        do { configuration = try GatewayServiceConfiguration.load(path: CommandLine.arguments[2]) }
+        catch { fail("Gateway startup requires protected configuration and the configured service account.", code: EX_CONFIG) }
+        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
+        let task = Task { try await run(configuration) }
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        termination.setEventHandler { task.cancel() }; interruption.setEventHandler { task.cancel() }
+        termination.resume(); interruption.resume()
+        defer { termination.cancel(); interruption.cancel() }
+        do { try await task.value }
+        catch is CancellationError { exit(EX_OK) }
+        catch { fail("Gateway is unavailable. Restart requires fresh configuration and Root authentication.", code: EX_TEMPFAIL) }
+    }
+    private static func run(_ configuration: GatewayServiceConfiguration) async throws {
+        let service = try await GatewayService.open(configuration: configuration)
+        do {
+            try Task.checkCancellation()
+            try service.start()
+            FileHandle.standardError.write(Data("Gateway is waiting for authenticated Root state.\n".utf8))
+            while !service.isRetired {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            throw GatewayServiceError.unavailable
+        } catch {
+            let failure = error
+            try await service.close()
+            if Task.isCancelled { throw CancellationError() }
+            throw failure
+        }
+    }
+    private static func fail(_ message: String, code: Int32) -> Never {
+        FileHandle.standardError.write(Data((message + "\n").utf8)); exit(code)
+    }
+}

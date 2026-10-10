@@ -157,3 +157,48 @@ Startup validates the private key, certificate and installation pin without a ke
 Lookup failures never switch custody paths. Authority and credential recipient loaders do not use the file format.
 Disposable tests verify native signatures after reload; dedicated-account isolation and pre-login TLS remain activation gates for either path.
 Setup, protected activation, service registration and real-device tests remain required before deployment.
+
+## Embedded push gateway
+
+`RemozioGateway` is embedded at `Contents/Library/LaunchServices/RemozioGateway`.
+It owns the existing SQLite gateway journal, OAuth client, token cache, and bounded delivery scheduler.
+The gateway runs in a dedicated account. It requires matching real and effective UIDs before reading private files.
+
+```mermaid
+flowchart LR
+    R[Root authority] <-->|Signed local IPC, version 1| G[Dedicated gateway process]
+    C[Root-owned public configuration] --> G
+    K[Private provider credential and receipt key] --> G
+    G --> J[Existing private gateway journal]
+    G -->|Fixed HTTPS endpoints| F[Google OAuth and FCM]
+    F -.->|Opaque wake, phone integration pending| P[Enrolled phone]
+```
+
+The process accepts only `--configuration /absolute/protected/gateway.cbor`.
+Public configuration pins the registration, Root code, receipt key, service account, provider project, and local limits.
+It contains no private keys or provider credentials.
+Startup opens an existing journal. It never initializes, migrates, resets, or replaces one.
+
+The private receipt key has a separate purpose and matches its configured public key.
+Its public point must also match the private scalar. This software key cannot grant approval or certify recipients.
+The key remains local to this Mac. Shared setup exports must exclude it.
+Root and credential recipient keys retain their separate hardware custody requirements.
+
+The listener admits one signed Root connection. Each invocation checks the kernel peer attributes before starting asynchronous work.
+A harmless version handshake precedes snapshots and commands.
+Snapshots carry the full registration, Root incarnation, increasing sequence, retained enrollment state, presence routing, and a short lease.
+Lease expiry blocks provider handoff. Heartbeats preserve current flights and original request deadlines.
+Connection loss retires the lease immediately. Shutdown cancels and drains work before closing the journal.
+A replacement process needs fresh configuration, authentication, recovery, and Root state.
+
+Root can read signed recovery pages before delivery becomes active.
+The Root client returns unverified recovery data. Its query owner must verify signatures and reconcile retained history.
+Candidate and recipient controls still need valid Root signatures and durable revision checks.
+Token probes run as bounded service-owned tasks, so provider I/O does not occupy the control connection.
+Provider acceptance does not prove phone delivery or user approval.
+
+The bundle check verifies both build configurations, signatures, security generation, byte-identical embedding, and refusal without provisioning.
+Unit tests use disposable files, keys, clocks, and provider fixtures. They do not install accounts or contact Google.
+Native signed IPC, protected provisioning, launchd registration, restart behavior, and provider delivery remain activation gates.
+The restricted transport submission endpoint and its credential are still pending. Root control does not replace that endpoint.
+The app still shows its unconfigured state. This change does not activate push or register services.

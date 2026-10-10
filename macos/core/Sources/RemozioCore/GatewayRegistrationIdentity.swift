@@ -31,4 +31,13 @@ public struct GatewayRegistrationIdentity: Equatable, Sendable {
             (UInt64($0.offset), CBORValue.bytes($0.element))
         })), limits: CBORLimits(maxBytes: 512, maxDepth: 2, maxItems: 16))
     }
+    static func decode(_ bytes: Data) throws -> Self {
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes,
+                limits: CBORLimits(maxBytes: 512, maxDepth: 2, maxItems: 16)),
+              Set(fields.keys) == Set(UInt64(0)...5) else { throw GatewayServiceError.invalidMessage }
+        func blob(_ key: UInt64) throws -> Data {
+            guard case .bytes(let value) = fields[key] else { throw GatewayServiceError.invalidMessage }; return value
+        }
+        return try Self(ownerID: blob(0), macID: blob(1), accountID: blob(2), gatewayID: blob(3), lifecycleEpoch: blob(4), rootPublicKey: blob(5))
+    }
 }

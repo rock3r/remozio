@@ -56,6 +56,26 @@ def check(configuration):
         finally:
             os.close(read_descriptor)
             if write_descriptor >= 0: os.close(write_descriptor)
+    gateway = app / 'Contents/Library/LaunchServices/RemozioGateway'
+    gateway_identity = 'dev.remozio.gateway.debug' if configuration == 'Debug' else 'dev.remozio.gateway'
+    require(gateway.is_file(), 'Missing embedded push gateway')
+    verify_executable(gateway, gateway_identity)
+    run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(gateway))
+    gateway_original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioGateway'
+    require(gateway.read_bytes() == gateway_original.read_bytes(), 'Embedding changed the signed gateway')
+    for arguments, status in (([], 64), (['--configuration', '/nonexistent/remozio-gateway.cbor'], 78)):
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            original_input = b'unread gateway input\x00\xff'
+            os.write(write_descriptor, original_input); os.close(write_descriptor); write_descriptor = -1
+            refused = subprocess.run([str(gateway), *arguments], stdin=read_descriptor, capture_output=True, timeout=5)
+            require(refused.returncode == status, 'Gateway must refuse incomplete provisioning')
+            require(os.read(read_descriptor, 64) == original_input and not refused.stdout,
+                    'Refused gateway consumed stdin or wrote command output')
+            require(b'/nonexistent' not in refused.stderr, 'Gateway startup disclosed a private path')
+        finally:
+            os.close(read_descriptor)
+            if write_descriptor >= 0: os.close(write_descriptor)
     child = app / 'Contents/Helpers/RemozioCommandChild'
     child_identity = 'dev.remozio.command-child.debug' if configuration == 'Debug' else 'dev.remozio.command-child'
     require(child.is_file(), 'Missing embedded command child')
