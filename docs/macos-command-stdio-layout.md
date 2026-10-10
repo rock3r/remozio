@@ -127,7 +127,7 @@ They retain exact legacy bytes and reject malformed nested layouts.
 Signed phone-session tests bind routing to the issued request and reject changed layouts under the original signature.
 These tests prove parsing and authentication, not the Android inspection UI.
 
-New mapped execution tests run locally on macOS 27.0.1.
+Mapped execution tests pass locally on macOS 27.0.1 and in [macOS 26 CI](https://github.com/rock3r/remozio/actions/runs/38018582425/job/114114369697).
 They exercise authenticated submission, schema-3 phone approval, the journal dispatch commit, and actual native targets with all eight masks.
 The private launcher grants no privilege. Its monitor fixture substitutes only the Root UID guard.
 Targets check selected stream identities and access, direct streams, their private controlling terminal, and descriptor cleanup.
@@ -135,7 +135,7 @@ Separate tests preserve binary redirected input, separate outputs, and portable 
 They check terminal drain acknowledgment with no caller terminal and prevent replay after cleanup.
 Native copy tests cover all three access modes and all 16 portable flag combinations without changing the private control description.
 
-The new execution paths still require supported macOS 26 CI evidence.
+The CI run uses macOS 26.6.2, build 25G83, arm64. All 1,384 core tests pass, including both real mapped handshakes.
 The Android app still advertises capture schemas 1 and 2. It must show the complete layout before advertising schema 3.
 Production frontend integration must use the separate caller terminal for interactive traffic and preserve redirected stdin.
 Installed Root deployment, elevation policy, and physical-device tests remain unperformed.

@@ -49,19 +49,21 @@ final class CommandCallerReadinessTests: XCTestCase {
         return "cdhash H\"" + hash.map { String(format: "%02x", $0) }.joined() + "\""
     }
     private func limits() throws -> CBORLimits { try .init(maxBytes: 8192, maxDepth: 16, maxItems: 1024) }
-    private func template() throws -> CommandSubmission {
+    private func template(ioMode: CommandIOMode = .pipes) throws -> CommandSubmission {
         try .init(schemaVersion: 1, executablePath: Data("/usr/bin/true".utf8),
             arguments: [Data("raw argv0".utf8), Data(), Data([0xff, 0x0a])], directoryPath: Data("/tmp".utf8),
             requestedTargetUID: 1234, environmentAdditions: [.init(name: Data("RAW".utf8), value: Data([0xfe, 0x22]))],
-            ioMode: .pipes, disconnectBehavior: .terminate, unverifiedRationale: "original rationale",
+            ioMode: ioMode, disconnectBehavior: .terminate, unverifiedRationale: "original rationale",
             binding: .init(id: Data(repeating: 9, count: 16), nonce: Data(repeating: 8, count: 32),
                 callerBinding: Data(repeating: 7, count: 16)), limits: limits())
     }
     private func busy(_ reason: CommandAdmissionRejectionReason) -> Reply {
         .result(.notAdmitted(reason, CommandAdmissionRetryClass(rawValue: reason.rawValue)!))
     }
-    private func serve(_ endpoint: Endpoint, replies: [Reply], io: Bool = false,
-                       capabilities: CommandHandshakeCapabilities? = nil) throws -> Server {
+    private func serve(_ endpoint: Endpoint, replies: [Reply], io: Bool = false, mapped: Bool = false,
+                       capabilities: CommandHandshakeCapabilities? = nil,
+                       terminalOutcome: CommandTerminalOutcome = .exited(13),
+                       inspect: @escaping @Sendable (ReceivedMachCommandInputSubmission, CommandHandshakeProfile) throws -> Void = { _, _ in }) throws -> Server {
         let port = endpoint.port, expression = try expression(), user = geteuid(), mac = mac, account = account
         let completed = DispatchSemaphore(value: 0), results = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
         let submissions = OSAllocatedUnfairLock(initialState: [CommandSubmission]())
@@ -75,11 +77,13 @@ final class CommandCallerReadinessTests: XCTestCase {
                         capabilities: capabilities ?? (io ? .executionChannels : .admissionResults), macID: mac, accountID: account, expression: expression,
                         userID: user, auditSessionID: nil)
                     defer { session.close() }
-                    let input = try io ? receiver.receiveIOInput(timeoutMilliseconds: 5000) : receiver.receiveAdmissionInput(timeoutMilliseconds: 5000)
+                    let input = try mapped ? receiver.receiveMappedIOInput(timeoutMilliseconds: 5000) :
+                        (io ? receiver.receiveIOInput(timeoutMilliseconds: 5000) : receiver.receiveAdmissionInput(timeoutMilliseconds: 5000))
                     defer { input.closeIfUnclaimed() }
                     let submission = try CommandSubmission(canonicalBytes: input.payload,
                         limits: CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024), expectedSchemaVersion: 1)
                     submissions.withLock { $0.append(submission) }
+                    try inspect(input, session.profile)
                     let outcome: CommandAdmissionOutcome
                     switch reply {
                     case .lost: continue
@@ -94,7 +98,7 @@ final class CommandCallerReadinessTests: XCTestCase {
                     try input.sendAdmissionReply(payload.canonicalBytes)
                     if io, case .admitted(let request) = outcome {
                         try XCTUnwrap(input.outputs).sendTerminalResult(CommandTerminalResultPayload(profile: session.profile,
-                            original: submission, request: request, outcome: .exited(13)).canonicalBytes, timeoutMilliseconds: 1000)
+                            original: submission, request: request, outcome: terminalOutcome).canonicalBytes, timeoutMilliseconds: 1000)
                     }
                 }
             }
@@ -404,5 +408,204 @@ extension CommandCallerReadinessTests {
             }
             XCTAssertEqual(try server.finish().count, 1); try assertNoNextAttempt(endpoint)
         }
+    }
+}
+
+
+extension CommandCallerReadinessTests {
+    private struct DescriptorSnapshot: Equatable, Sendable {
+        let device: dev_t, inode: ino_t, mode: mode_t, terminalDevice: dev_t
+        let flags: Int32
+        let attributes: Data?
+    }
+    private static func snapshot(_ fd: Int32) throws -> DescriptorSnapshot {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { throw RetainedCommandInputError.system(errno) }
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
+        var attributes: Data?
+        if isatty(fd) == 1 {
+            var value = termios()
+            guard tcgetattr(fd, &value) == 0 else { throw RetainedCommandInputError.system(errno) }
+            attributes = withUnsafeBytes(of: value) { Data($0) }
+        }
+        return .init(device: info.st_dev, inode: info.st_ino, mode: info.st_mode,
+            terminalDevice: info.st_rdev, flags: flags, attributes: attributes)
+    }
+    private func privateOutput() throws -> Int32 {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("remozio-readiness-" + UUID().uuidString).path
+        let descriptor = Darwin.open(path, O_CREAT | O_EXCL | O_WRONLY | O_APPEND | O_NONBLOCK | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw RetainedCommandOutputError.system(errno) }
+        _ = unlink(path)
+        return descriptor
+    }
+    private func mapped(_ endpoint: Endpoint, mode: CommandIOMode, input: Int32, output: Int32, error: Int32,
+                        control: Int32? = nil, configuration: CommandCallerReadinessConfiguration? = nil,
+                        cancellation: () throws -> Void = {}, status: (CommandCallerReadinessStatus) -> Void = { _ in },
+                        clock: (() throws -> UInt64)? = nil,
+                        wait: ((UInt32, () throws -> Void) throws -> Void)? = nil) throws -> sending CommandIOAdmission {
+        try CommandCallerReadiness.submitMappedIO(template(ioMode: mode), inputDescriptor: input, outputDescriptor: output, errorDescriptor: error,
+            controlTerminalDescriptor: control, authorityPort: { endpoint.port }, expression: expression(), userID: geteuid(), auditSessionID: nil,
+            macID: mac, accountID: account, submissionLimits: limits(),
+            configuration: configuration ?? .init(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1,
+                maximumBackoffMilliseconds: 4, controlTimeoutMilliseconds: 1000),
+            checkCancellation: cancellation, onStatus: status, clock: clock, wait: wait)
+    }
+    private func mappedCapabilities(_ mode: CommandIOMode) -> CommandHandshakeCapabilities {
+        mode == .pty ? .mappedTerminalJobExecution : .mappedPipeJobExecutionControls
+    }
+
+    func testMappedReadinessRetainsEverySourceAcrossAllBusyClassesAndTheAdmittedChannel() throws {
+        let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
+        let request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
+            requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+        let mixed = try CommandHandshakeCapabilities(wireVersions: [8, 9], submissionSchemaVersions: [1], inputCarrierVersions: [5])
+        for mode: CommandIOMode in [.pty, .pipes] {
+            for hasTerminal in [false, true] {
+                let terminal = try RetainedCommandPTY()
+                defer { terminal.close() }
+                try terminal.withBorrowedSlave { terminalDescriptor in
+                    let control: Int32? = hasTerminal ? terminalDescriptor : nil
+                    let endpoint = try Endpoint(), output = try privateOutput(), error = try privateOutput()
+                    var input: [Int32] = [-1, -1]; XCTAssertEqual(pipe(&input), 0)
+                    defer { for fd in input + [output, error] { _ = Darwin.close(fd) } }
+                    let data = Data([0, 0xff, 0x0a, 0x0d, 0x80, 0x41])
+                    XCTAssertEqual(data.withUnsafeBytes { Darwin.write(input[1], $0.baseAddress, $0.count) }, data.count)
+                    let descriptors = [input[0], output, error] + (control.map { [$0] } ?? [])
+                    let expected = try descriptors.map(Self.snapshot), descriptorFlags = descriptors.map { fcntl($0, F_GETFD) }
+                    let observations = OSAllocatedUnfairLock(initialState: [[DescriptorSnapshot]]())
+                    let wire: UInt64 = mode == .pty ? 8 : 9
+                    let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.admitted(request))], io: true, mapped: true,
+                        capabilities: mixed, terminalOutcome: .cancelledBeforeStart, inspect: { receipt, profile in
+                            XCTAssertEqual(profile.wireVersion, wire); XCTAssertEqual(profile.inputCarrierVersion, 5)
+                            XCTAssertEqual(receipt.carrierVersion, 5)
+                            let outputs = try XCTUnwrap(receipt.outputs)
+                            var values = [try receipt.input.withBorrowedDescriptor(Self.snapshot),
+                                try outputs.output.withBorrowedDescriptor(Self.snapshot), try outputs.error.withBorrowedDescriptor(Self.snapshot)]
+                            if let terminal = receipt.controlTerminal { values.append(try terminal.withBorrowedDescriptor(Self.snapshot)) }
+                            observations.withLock { [values] in $0.append(values) }
+                        })
+                    var statuses: [CommandCallerReadinessStatus] = [], delays: [UInt32] = []
+                    let admission = try mapped(endpoint, mode: mode, input: input[0], output: output, error: error, control: control,
+                        status: { statuses.append($0) }, wait: { delay, check in delays.append(delay); try check() })
+                    guard case .admitted(let session) = admission else { return XCTFail("Expected the original admitted channel") }
+                    defer { session.close() }
+                    let attempts = try server.finish(), original = try template(ioMode: mode)
+                    XCTAssertEqual(attempts.count, 5)
+                    XCTAssertEqual(Set(attempts.map(\.binding.id)).count, 5)
+                    XCTAssertEqual(Set(attempts.map(\.binding.nonce)).count, 5)
+                    XCTAssertEqual(Set(attempts.map(\.binding.callerBinding)).count, 5)
+                    for attempt in attempts {
+                        XCTAssertEqual(attempt.executablePath, original.executablePath); XCTAssertEqual(attempt.arguments, original.arguments)
+                        XCTAssertEqual(attempt.directoryPath, original.directoryPath); XCTAssertEqual(attempt.requestedTargetUID, original.requestedTargetUID)
+                        XCTAssertEqual(attempt.environmentAdditions, original.environmentAdditions); XCTAssertEqual(attempt.ioMode, mode)
+                        XCTAssertEqual(attempt.disconnectBehavior, original.disconnectBehavior); XCTAssertEqual(attempt.unverifiedRationale, original.unverifiedRationale)
+                    }
+                    let receipts = observations.withLock { $0 }
+                    XCTAssertEqual(receipts.count, 5)
+                    for receipt in receipts { XCTAssertEqual(receipt, expected) }
+                    guard case .terminal(let result)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else {
+                        return XCTFail("Expected the verified before-start terminal result")
+                    }
+                    XCTAssertEqual(result.outcome, .cancelledBeforeStart); XCTAssertEqual(result.request, request)
+                    XCTAssertEqual(result.submission, attempts.last?.binding)
+                    XCTAssertEqual(statuses, reasons.map(CommandCallerReadinessStatus.waiting)); XCTAssertEqual(delays, [1, 2, 4, 4])
+                    XCTAssertEqual(try descriptors.map(Self.snapshot), expected)
+                    XCTAssertEqual(descriptors.map { fcntl($0, F_GETFD) }, descriptorFlags)
+                    XCTAssertEqual(lseek(output, 0, SEEK_CUR), 0); XCTAssertEqual(lseek(error, 0, SEEK_CUR), 0)
+                    var bytes = Data(count: data.count)
+                    XCTAssertEqual(bytes.withUnsafeMutableBytes { Darwin.read(input[0], $0.baseAddress, $0.count) }, data.count)
+                    XCTAssertEqual(bytes, data); try assertNoNextAttempt(endpoint)
+                }
+            }
+        }
+    }
+
+    func testMappedReadinessNeverRetriesPermanentUncertainOrInvalidReplies() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY), output = try privateOutput(), error = try privateOutput()
+        defer { for fd in [input, output, error] { _ = Darwin.close(fd) } }
+        for mode: CommandIOMode in [.pty, .pipes] {
+            for reply: Reply in [.result(.notAdmitted(.policyRejected, .never)), .result(.uncertain(.storageFailure)), .malformed, .wrongDigest, .lost] {
+                let endpoint = try Endpoint(), server = try serve(endpoint, replies: [reply], io: true, mapped: true, capabilities: mappedCapabilities(mode))
+                let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1,
+                    maximumBackoffMilliseconds: 4, controlTimeoutMilliseconds: 100)
+                switch reply {
+                case .result(let expected):
+                    guard case .result(let result) = try mapped(endpoint, mode: mode, input: input, output: output, error: error,
+                        configuration: configuration) else { return XCTFail("Only admission can retain a session") }
+                    XCTAssertEqual(result.outcome, expected)
+                default:
+                    do {
+                        let result = try mapped(endpoint, mode: mode, input: input, output: output, error: error, configuration: configuration)
+                        if case .admitted(let session) = result { session.close() }
+                        XCTFail("Invalid or lost replies must throw")
+                    } catch { }
+                }
+                XCTAssertEqual(try server.finish().count, 1); try assertNoNextAttempt(endpoint)
+            }
+        }
+    }
+
+    func testMappedReadinessSharesTheDeadlineAndCancellationAcrossBusyReplies() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY), output = try privateOutput(), error = try privateOutput()
+        defer { for fd in [input, output, error] { _ = Darwin.close(fd) } }
+        for mode: CommandIOMode in [.pty, .pipes] {
+            do {
+                let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateInstalling), busy(.storageUnavailable)],
+                    io: true, mapped: true, capabilities: mappedCapabilities(mode))
+                var now: UInt64 = 1000
+                let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 30, initialBackoffMilliseconds: 10,
+                    maximumBackoffMilliseconds: 20, controlTimeoutMilliseconds: 1000)
+                do {
+                    let result = try mapped(endpoint, mode: mode, input: input, output: output, error: error, configuration: configuration,
+                        clock: { now }, wait: { delay, check in now += UInt64(delay); try check() })
+                    if case .admitted(let session) = result { session.close() }
+                    XCTFail("Reason changes must not reset the deadline")
+                } catch { XCTAssertEqual(error as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: .storageUnavailable)) }
+                XCTAssertEqual(try server.finish().count, 2); try assertNoNextAttempt(endpoint)
+            }
+            do {
+                let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateWaiting)], io: true, mapped: true,
+                    capabilities: mappedCapabilities(mode))
+                var cancelled = false
+                do {
+                    let result = try mapped(endpoint, mode: mode, input: input, output: output, error: error,
+                        cancellation: { if cancelled { throw Cancelled.stopped } }, status: { _ in cancelled = true })
+                    if case .admitted(let session) = result { session.close() }
+                    XCTFail("Cancellation must stop the busy retry")
+                } catch { XCTAssertTrue(error is Cancelled) }
+                XCTAssertEqual(try server.finish().count, 1); try assertNoNextAttempt(endpoint)
+            }
+        }
+    }
+
+    func testMappedReadinessDoesNotFallbackToALegacyPeer() throws {
+        let input = Darwin.open("/dev/null", O_RDONLY), output = try privateOutput(), error = try privateOutput()
+        defer { for fd in [input, output, error] { _ = Darwin.close(fd) } }
+        for mode: CommandIOMode in [.pty, .pipes] {
+            let endpoint = try Endpoint(), server = try serve(endpoint, replies: [.lost], io: true, capabilities: .executionChannels)
+            do {
+                let result = try mapped(endpoint, mode: mode, input: input, output: output, error: error)
+                if case .admitted(let session) = result { session.close() }
+                XCTFail("An incompatible peer must not receive the invocation")
+            } catch { XCTAssertEqual(error as? MachCommandHandshakeError, .incompatible) }
+            XCTAssertEqual(server.completed.wait(timeout: .now() + 5), .success)
+            XCTAssertThrowsError(try server.results.withLock { try XCTUnwrap($0).get() }) {
+                XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+            }
+            XCTAssertTrue(server.submissions.withLock { $0.isEmpty }); try assertNoNextAttempt(endpoint)
+        }
+    }
+
+    func testMappedPublicReadinessRequiresRootPolicyBeforeAnyEndpointOrDescriptorUse() throws {
+        let policy = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+            approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: geteuid())
+        do {
+            let result = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: -1, outputDescriptor: -1, errorDescriptor: -1,
+                controlTerminalDescriptor: -1, authorityPort: { XCTFail("Must not look up an authority"); return 0 }, authorityPolicy: policy,
+                macID: mac, accountID: account, submissionLimits: limits(), configuration: .init(timeoutMilliseconds: 5000))
+            if case .admitted(let session) = result { session.close() }
+            XCTFail("A non-root policy must be rejected")
+        } catch { XCTAssertEqual(error as? MachCommandHandshakeError, .invalidConfiguration) }
     }
 }
