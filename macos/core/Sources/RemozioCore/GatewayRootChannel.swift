@@ -73,7 +73,7 @@ public actor GatewayRootChannel {
         state = .opening
         driver.start { [weak self] in Task { await self?.close() } }
         do {
-            guard case .version(let version) = try await perform(.hello), (1...2).contains(version), state == .opening else { throw GatewayRootChannelError.invalidMessage }
+            guard case .version(let version) = try await perform(.hello), (1...3).contains(version), state == .opening else { throw GatewayRootChannelError.invalidMessage }
             peerVersion = version
             state = .open
         } catch { close(); throw error }

@@ -97,6 +97,7 @@ public struct GatewayServiceConfiguration: Sendable {
     public let ownerUID: uid_t
     public let serviceName: String
     public let authorityPolicy: XPCPeerPolicy
+    public let wakeEndpoint: GatewayWakeEndpointConfiguration?
     public let project: String
     public let packageName: String
     public let settings: GatewayServiceSettings
@@ -105,7 +106,8 @@ public struct GatewayServiceConfiguration: Sendable {
     public init(registration: GatewayRegistrationIdentity, receiptPublicKey: Data, directoryPath: String,
                 providerPath: String, receiptKeyPath: String, serviceUID: uid_t, ownerUID: uid_t,
                 serviceName: String, teamID: String, authorityIdentifier: String, authorityHashes: Set<Data>,
-                project: String, packageName: String, settings: GatewayServiceSettings) throws {
+                project: String, packageName: String, settings: GatewayServiceSettings,
+                wakeEndpoint: GatewayWakeEndpointConfiguration? = nil) throws {
         guard serviceUID > 0, serviceUID < UInt32.max, ownerUID > 0, ownerUID < UInt32.max, serviceUID != ownerUID,
               receiptPublicKey.count == 65, receiptPublicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: receiptPublicKey)) != nil,
@@ -117,17 +119,25 @@ public struct GatewayServiceConfiguration: Sendable {
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
             throw GatewayServiceError.invalidConfiguration
         }
+        if let wakeEndpoint {
+            guard wakeEndpoint.serviceName != serviceName, wakeEndpoint.transportUID != serviceUID,
+                  wakeEndpoint.transportUID != ownerUID, wakeEndpoint.teamID == teamID,
+                  wakeEndpoint.componentIdentifier != authorityIdentifier else { throw GatewayServiceError.invalidConfiguration }
+        }
+        self.wakeEndpoint = wakeEndpoint
         authorityPolicy = try XPCPeerPolicy(teamID: teamID, componentIdentifier: authorityIdentifier,
             approvedCodeDirectoryHashes: authorityHashes, expectedUserID: 0)
         _ = try FCMWakeSender(project: project, packageName: packageName, timeoutSeconds: Double(settings.providerTimeoutSeconds))
         self.registration = registration; self.receiptPublicKey = receiptPublicKey; self.directoryPath = directoryPath
         self.providerPath = providerPath; self.receiptKeyPath = receiptKeyPath; self.serviceUID = serviceUID; self.ownerUID = ownerUID
         self.serviceName = serviceName; self.project = project; self.packageName = packageName; self.settings = settings
-        canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(registration.encode()),
+        var fields: [UInt64: CBORValue] = [0: .unsigned(wakeEndpoint == nil ? 1 : 2), 1: .bytes(try registration.encode()),
             2: .bytes(receiptPublicKey), 3: .text(directoryPath), 4: .text(providerPath), 5: .text(receiptKeyPath),
             6: .unsigned(UInt64(serviceUID)), 7: .unsigned(UInt64(ownerUID)), 8: .text(serviceName),
             9: .array([.text(teamID), .text(authorityIdentifier), .array(authorityHashes.sorted { $0.lexicographicallyPrecedes($1) }.map(CBORValue.bytes))]),
-            10: settings.value, 11: .text(project), 12: .text(packageName)]), limits: Self.limits)
+            10: settings.value, 11: .text(project), 12: .text(packageName)]
+        if let wakeEndpoint { fields[13] = wakeEndpoint.value }
+        canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
 
     public static func load(path: String) throws -> Self {
@@ -139,7 +149,8 @@ public struct GatewayServiceConfiguration: Sendable {
     /// Decoding alone does not authenticate provisioning. Native startup must call load(path:).
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
-              Set(fields.keys) == Set(UInt64(0)...12), fields[0] == .unsigned(1), case .bytes(let identityBytes) = fields[1],
+              ((fields[0] == .unsigned(1) && Set(fields.keys) == Set(UInt64(0)...12)) ||
+               (fields[0] == .unsigned(2) && Set(fields.keys) == Set(UInt64(0)...13))), case .bytes(let identityBytes) = fields[1],
               case .bytes(let receiptKey) = fields[2], case .array(let peer) = fields[9], peer.count == 3,
               case .text(let team) = peer[0], case .text(let component) = peer[1], case .array(let hashes) = peer[2],
               let settingsValue = fields[10], case .map(let identity) = try DeterministicCBOR.decode(identityBytes, limits: limits),
@@ -160,7 +171,8 @@ public struct GatewayServiceConfiguration: Sendable {
                 gatewayID: blob(3), lifecycleEpoch: blob(4), rootPublicKey: blob(5)), receiptPublicKey: receiptKey,
             directoryPath: text(3), providerPath: text(4), receiptKeyPath: text(5), serviceUID: uid(6), ownerUID: uid(7),
             serviceName: text(8), teamID: team, authorityIdentifier: component, authorityHashes: Set(hashValues),
-            project: text(11), packageName: text(12), settings: GatewayServiceSettings.decode(settingsValue))
+            project: text(11), packageName: text(12), settings: GatewayServiceSettings.decode(settingsValue),
+            wakeEndpoint: fields[13].map { try GatewayWakeEndpointConfiguration.decode($0) })
         guard result.canonicalBytes == bytes else { throw GatewayServiceError.invalidConfiguration }
         return result
     }

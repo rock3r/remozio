@@ -42,7 +42,7 @@ final class GatewayRootChannelTests: XCTestCase, @unchecked Sendable {
         let driver = Driver(), channel = GatewayRootChannel(driver: driver)
         do { try await channel.synchronize(snapshot()); XCTFail() } catch {}
         XCTAssertEqual(driver.value.withLock { $0.calls.count }, 0)
-        driver.value.withLock { $0.version = 3 }
+        driver.value.withLock { $0.version = 4 }
         do { try await channel.start(); XCTFail() } catch {}
         do { try await channel.synchronize(snapshot()); XCTFail() } catch {}
         XCTAssertEqual(driver.value.withLock { $0.calls.count }, 1)
@@ -143,6 +143,27 @@ final class GatewayRootChannelTests: XCTestCase, @unchecked Sendable {
             do { _ = try await channel.head(query: Data([1])); XCTFail() }
             catch { XCTAssertEqual(error as? GatewayRootChannelError, .closed) }
             XCTAssertEqual(driver.value.withLock { $0.calls.count }, 2)
+        }
+    }
+
+    func testRegistrationRejectsLegacyPeersBeforeSendingSensitiveFields() async throws {
+        let delivery = PhoneRequestDelivery(id: UUID(), recipient: DeliveryRecipient(phoneID: Data(repeating: 1, count: 16),
+            enrollmentEpoch: Data(repeating: 2, count: 16)), requestID: Data(repeating: 3, count: 16),
+            admittedAt: AuthorityMoment(epoch: UUID(), milliseconds: 100), deadlineMilliseconds: 200)
+        for version: UInt64 in [1, 2, 3] {
+            let driver = Driver(), channel = GatewayRootChannel(driver: driver)
+            driver.value.withLock { $0.version = version; $0.response = try? GatewayRootCommand.reply([.boolean(true)], version: 3) }
+            try await channel.start()
+            if version < 3 {
+                do { _ = try await channel.command(.registerWake(delivery)); XCTFail("Legacy peer received a grant") }
+                catch { XCTAssertEqual(error as? GatewayRootChannelError, .unsupportedVersion) }
+                XCTAssertEqual(driver.value.withLock { $0.calls.count }, 1)
+            } else {
+                let reply = try await channel.command(.registerWake(delivery))
+                XCTAssertEqual(reply, [.unsigned(3), .boolean(true)])
+                XCTAssertEqual(driver.value.withLock { $0.calls.count }, 2)
+            }
+            await channel.close()
         }
     }
 

@@ -717,6 +717,258 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         return (body["message"] as? [String: Any])?["token"] as? String
     }
 
+    private func submissionControl(_ f: Fixture, _ c: GatewayDeliveryCoordinator, key: P256.Signing.PrivateKey,
+                                   revision: UInt64, credential: UInt8, revoke: Bool = false) async throws {
+        let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
+        let control = try GatewaySubmissionControl(kind: revoke ? .revocation : .rotation,
+            binding: GatewaySubmissionBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5)),
+            revision: revision, operationID: id(UInt8(revision + 160)), issuedAtUnixMillis: 1000, expiresAtUnixMillis: 11_000,
+            credentialID: id(credential), publicKey: revoke ? nil : key.publicKey.x963Representation)
+        let payload = try control.encode(limits: limits)
+        let input = try GatewaySubmissionSigningInput.make(wireVersion: 1, kind: control.kind,
+            canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
+        _ = try await c.applySubmission(canonicalPayload: payload, signature: f.key.signature(for: input).rawRepresentation, wireVersion: 1)
+    }
+    @discardableResult
+    private func submitWake(_ c: GatewayDeliveryCoordinator, _ delivery: PhoneRequestDelivery,
+                            key: P256.Signing.PrivateKey, credential: UInt8 = 20) async throws -> GatewayWakeProgress {
+        let challenge = id(30, 32)
+        let submission = try GatewayWakeSubmission(binding: GatewaySubmissionBinding(ownerID: id(1), macID: id(2),
+            accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5)), credentialID: id(credential),
+            deliveryID: GatewayHostSnapshot.bytes(delivery.id), challenge: challenge)
+        return try await c.submitWake(submission, signature: key.signature(for: submission.signingInput()).rawRepresentation,
+            challenge: GatewayWakeChallenge(bytes: challenge, issuedAt: 100, deadline: 11_100))
+    }
+
+    private final class WakeEndpointDriver: GatewayWakeDriver, @unchecked Sendable {
+        let endpoint: GatewayWakeXPCEndpoint
+        init(_ endpoint: GatewayWakeXPCEndpoint) { self.endpoint = endpoint }
+        func start(closed: @escaping @Sendable () -> Void) {}
+        func invoke(_ call: GatewayWakeCall, reply: @escaping @Sendable (GatewayWakeResponse) -> Void) {
+            switch call {
+            case .hello: endpoint.hello { reply(.version($0)) }
+            case .challenge: endpoint.challenge { reply(.challenge($0)) }
+            case .wake(let payload, let signature): endpoint.wake(payload, signature: signature) { reply(.accepted($0)) }
+            }
+        }
+        func close() { endpoint.close() }
+    }
+
+    func testRestrictedNativeChannelRechecksChallengeAtCoordinatorAdmission() async throws {
+        let f = try Fixture(), provider = Provider([]), key = P256.Signing.PrivateKey(), delayed = Counter()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        try await submissionControl(f, c, key: key, revision: 3, credential: 20)
+        let delivery = try f.delivery()
+        try await c.registerWake(delivery)
+        let clock = f.clock
+        let endpoint = try GatewayWakeXPCEndpoint(verify: {}, budget: AuthorityXPCWorkBudget(maximum: 1),
+            sample: { clock.sample().moment.milliseconds }, challengeLifetimeMillis: 100, invalidate: {},
+            execute: { submission, signature, challenge in
+                let first = delayed.value.withLock { value in value += 1; return value == 1 }
+                if first { clock.advance(100) }
+                _ = try await c.submitWake(submission, signature: signature, challenge: challenge)
+            })
+        let channel = GatewayWakeChannel(driver: WakeEndpointDriver(endpoint))
+        try await channel.start()
+        let binding = try GatewaySubmissionBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4), lifecycleEpoch: id(5))
+        do {
+            try await channel.wake(binding: binding, credentialID: id(20), deliveryID: delivery.id,
+                sign: { try key.signature(for: $0).rawRepresentation })
+            XCTFail("Expired challenge survived actor admission")
+        } catch { XCTAssertEqual(error as? GatewayWakeChannelError, .rejected) }
+        let untouched = try await wakeState(c, delivery)
+        XCTAssertEqual(untouched.status, .queued); XCTAssertEqual(untouched.attempts, 0)
+        try await channel.wake(binding: binding, credentialID: id(20), deliveryID: delivery.id,
+            sign: { try key.signature(for: $0).rawRepresentation })
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first?.status, .accepted); XCTAssertEqual(result.first?.attempts, 1)
+        await channel.close(); try await c.shutdown()
+    }
+
+    func testRestrictedWakeRechecksAllAuthorityChangesDuringOAuth() async throws {
+        for mode in 0...4 {
+            let f = try Fixture(), provider = Provider([]), oauth = OAuthGate(), key = P256.Signing.PrivateKey(), invalid = Counter()
+            let tokens = try FCMTokenSource(now: { .now }, refresh: { try await oauth.refresh() })
+            let c = try f.coordinator(provider, tokenSource: tokens, wakePolicy: wakePolicy(), validateAuthority: {
+                guard invalid.value.withLock({ $0 }) == 0 else { throw GatewayServiceError.unavailable }
+            })
+            try await prepareWakes(f, c)
+            try await submissionControl(f, c, key: key, revision: 3, credential: 20)
+            let delivery = try f.delivery(deadline: 500)
+            try await c.registerWake(delivery); try await submitWake(c, delivery, key: key)
+            let flight = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+            try await until { await oauth.started }
+            switch mode {
+            case 0: try await c.cancelWake(deliveryID: delivery.id)
+            case 1: try await c.setPhoneRouting(false)
+            case 2: f.clock.advance(400)
+            case 3: try await submissionControl(f, c, key: key, revision: 4, credential: 20, revoke: true)
+            default: invalid.value.withLock { $0 = 1 }
+            }
+            try await oauth.release()
+            _ = await flight.result
+            let wakes = await provider.wakes
+            XCTAssertTrue(wakes.isEmpty, "An authority change leaked a provider handoff")
+            try await c.shutdown()
+        }
+    }
+
+    func testRootRegistrationDoesNotScheduleAndCannotRenewOrChangeOrigin() async throws {
+        let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer(), key = P256.Signing.PrivateKey()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)
+        try await prepareWakes(f, c)
+        try await submissionControl(f, c, key: key, revision: 3, credential: 20)
+        try await c.startWakeScheduling(retryIntervalMillis: 100)
+        let delivery = try f.delivery()
+        try await c.registerWake(delivery)
+        _ = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        let before = await provider.wakes
+        XCTAssertTrue(before.isEmpty)
+        do { try await submitWake(c, f.delivery(), key: key); XCTFail("Unknown grant") }
+        catch { XCTAssertEqual(error as? GatewayWakeSubmissionError, .unknownDelivery) }
+        do { try await c.registerWake(f.delivery(deadline: 11_100, identifier: delivery.id)); XCTFail("Renewed grant") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .conflictingDelivery) }
+        do { try await c.enqueueWake(delivery); XCTFail("Changed grant origin") }
+        catch { XCTAssertEqual(error as? GatewayWakeError, .conflictingDelivery) }
+        try await submitWake(c, delivery, key: key)
+        try await until { (try? await c.wakeProgress(deliveryID: delivery.id)?.status) == .accepted }
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 1)
+        XCTAssertEqual(try wakeToken(XCTUnwrap(wakes.first)), "synthetic")
+        let state = try await c.registerWake(delivery)
+        XCTAssertEqual(state.status, .accepted); XCTAssertEqual(state.attempts, 1)
+        f.clock.advance(10_000)
+        do { try await submitWake(c, delivery, key: key); XCTFail("Accepted grant outlived its original deadline") }
+        catch { XCTAssertEqual(error as? GatewayWakeSubmissionError, .unknownDelivery) }
+        try await c.shutdown()
+    }
+
+    func testWithdrawnAndExpiredRootGrantsCannotResumeWithFreshProof() async throws {
+        for expired in [false, true] {
+            let f = try Fixture(), provider = Provider([]), key = P256.Signing.PrivateKey()
+            let c = try f.coordinator(provider, wakePolicy: wakePolicy())
+            try await prepareWakes(f, c)
+            try await submissionControl(f, c, key: key, revision: 3, credential: 20)
+            let delivery = try f.delivery(deadline: 200)
+            try await c.registerWake(delivery)
+            if expired { f.clock.advance(100) } else { try await c.cancelWake(deliveryID: delivery.id) }
+            do { try await submitWake(c, delivery, key: key); XCTFail("Retired grant resumed") }
+            catch { XCTAssertEqual(error as? GatewayWakeSubmissionError, .unknownDelivery) }
+            let repeated = try await c.registerWake(delivery)
+            XCTAssertEqual(repeated.status, expired ? .expired : .withdrawn)
+            let wakes = await provider.wakes
+            XCTAssertTrue(wakes.isEmpty)
+            try await c.shutdown()
+        }
+    }
+
+    func testCredentialRotationDuringOAuthRequiresNewProofBeforeProviderHandoff() async throws {
+        let f = try Fixture(), provider = Provider([]), oauth = OAuthGate(), old = P256.Signing.PrivateKey(), fresh = P256.Signing.PrivateKey()
+        let refreshes = Counter()
+        let tokens = try FCMTokenSource(now: { .now }, refresh: {
+            let first = refreshes.value.withLock { value in value += 1; return value == 1 }
+            if first { return try await oauth.refresh() }
+            return FCMTokenLease(value: try FCMAccessToken("synthetic"), expiresAt: .now.advanced(by: .seconds(3600)))
+        })
+        let c = try f.coordinator(provider, tokenSource: tokens, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        try await submissionControl(f, c, key: old, revision: 3, credential: 20)
+        let delivery = try f.delivery()
+        try await c.registerWake(delivery)
+        try await submitWake(c, delivery, key: old)
+        let flight = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        try await until { await oauth.started }
+        try await submissionControl(f, c, key: fresh, revision: 4, credential: 21)
+        try await oauth.release()
+        do { _ = try await flight.value; XCTFail("Old credential dispatched") } catch {}
+        let before = await provider.wakes
+        XCTAssertTrue(before.isEmpty)
+        do { try await submitWake(c, delivery, key: old); XCTFail("Old proof accepted") }
+        catch { XCTAssertEqual(error as? GatewayWakeSubmissionError, .unavailableCredential) }
+        try await submitWake(c, delivery, key: fresh, credential: 21)
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first?.status, .accepted); XCTAssertEqual(result.first?.attempts, 1)
+        try await c.shutdown()
+    }
+
+    func testRotationPreservesFrozenWakeAndAttemptBudgetWhileNewDeliveriesProceed() async throws {
+        let f = try Fixture(), provider = Provider([]), old = P256.Signing.PrivateKey(), fresh = P256.Signing.PrivateKey()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy(attempts: 2))
+        try await prepareWakes(f, c)
+        try await submissionControl(f, c, key: old, revision: 3, credential: 20)
+        let first = try f.delivery()
+        try await c.registerWake(first); try await submitWake(c, first, key: old)
+        await provider.hold()
+        let flight = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        try await until { await provider.wakes.count == 1 }
+        try await submissionControl(f, c, key: fresh, revision: 4, credential: 21)
+        do { _ = try await flight.value; XCTFail("Rotated credential continued") } catch {}
+        await provider.release()
+        let second = try f.delivery(2)
+        try await c.registerWake(second); try await submitWake(c, second, key: fresh, credential: 21)
+        let secondResult = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(secondResult.first?.deliveryID, second.id); XCTAssertEqual(secondResult.first?.attempts, 1)
+        try await submitWake(c, first, key: fresh, credential: 21)
+        await provider.hold()
+        let resumed = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        try await until { await provider.wakes.count == 3 }
+        await provider.release(result: .retryable(minimumDelaySeconds: 0))
+        let result = try await resumed.value
+        XCTAssertEqual(result.first?.status, .exhausted); XCTAssertEqual(result.first?.attempts, 2)
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 3); XCTAssertEqual(wakes[0].identifier, wakes[2].identifier)
+        XCTAssertNotEqual(wakes[0].identifier, wakes[1].identifier)
+        XCTAssertLessThanOrEqual(wakes[2].ttlSeconds, wakes[0].ttlSeconds)
+        try await c.shutdown()
+    }
+
+    func testOldCredentialRevocationDoesNotInterruptCurrentWake() async throws {
+        let f = try Fixture(), provider = Provider([]), old = P256.Signing.PrivateKey(), fresh = P256.Signing.PrivateKey()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        try await submissionControl(f, c, key: old, revision: 3, credential: 20)
+        try await submissionControl(f, c, key: fresh, revision: 4, credential: 21)
+        let delivery = try f.delivery()
+        try await c.registerWake(delivery); try await submitWake(c, delivery, key: fresh, credential: 21)
+        await provider.hold()
+        let flight = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        try await until { await provider.wakes.count == 1 }
+        try await submissionControl(f, c, key: old, revision: 5, credential: 20, revoke: true)
+        await provider.release()
+        let result = try await flight.value
+        XCTAssertEqual(result.first?.status, .accepted); XCTAssertEqual(result.first?.attempts, 1)
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 1)
+        try await c.shutdown()
+    }
+
+    func testPartialCoalescedResumeDoesNotAcceptAnUnauthorizedSibling() async throws {
+        let f = try Fixture(), provider = Provider([]), old = P256.Signing.PrivateKey(), fresh = P256.Signing.PrivateKey()
+        let c = try f.coordinator(provider, wakePolicy: wakePolicy())
+        try await prepareWakes(f, c)
+        try await submissionControl(f, c, key: old, revision: 3, credential: 20)
+        let first = try f.delivery(), second = try f.delivery(2)
+        for delivery in [first, second] { try await c.registerWake(delivery); try await submitWake(c, delivery, key: old) }
+        await provider.hold()
+        let flight = Task { try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)) }
+        try await until { await provider.wakes.count == 1 }
+        try await submissionControl(f, c, key: fresh, revision: 4, credential: 21)
+        do { _ = try await flight.value; XCTFail("Old batch continued") } catch {}
+        await provider.release()
+        try await submitWake(c, first, key: fresh, credential: 21)
+        do { _ = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7)); XCTFail("Sibling lacks current proof") } catch {}
+        let firstState = try await wakeState(c, first), secondState = try await wakeState(c, second)
+        XCTAssertEqual(firstState.status, .accepted); XCTAssertEqual(firstState.attempts, 2)
+        XCTAssertEqual(secondState.status, .queued); XCTAssertEqual(secondState.attempts, 1)
+        try await submitWake(c, second, key: fresh, credential: 21)
+        let result = try await c.deliverWakeBatch(phoneID: id(6), enrollmentEpoch: id(7))
+        XCTAssertEqual(result.first(where: { $0.deliveryID == second.id })?.attempts, 2)
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 3); XCTAssertEqual(Set(wakes.map(\.identifier)).count, 1)
+        try await c.shutdown()
+    }
+
     func testWakeSchedulerDrainsNewArrivalsWithoutWaitingForTimer() async throws {
         let f = try Fixture(), provider = Provider([]), timer = SchedulerTimer()
         let c = try f.coordinator(provider, wakePolicy: wakePolicy(), schedulerTimer: timer)

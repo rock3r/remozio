@@ -48,8 +48,10 @@ public actor GatewayDeliveryCoordinator {
     private var synchronizingHost = false
 
     private struct WakeScope: Hashable { let phone: Data; let epoch: Data }
+    private enum WakeOrigin: Equatable { case root, transport(Data?) }
     private struct WakeEntry {
         let delivery: PhoneRequestDelivery
+        var origin: WakeOrigin = .root
         var status: GatewayWakeStatus = .queued
         var attempts = 0
         var providerResult: FCMDeliveryResult?
@@ -70,6 +72,7 @@ public actor GatewayDeliveryCoordinator {
     }
     private var wakes: [UUID: WakeEntry] = [:]
     private var wakeBatches: [WakeScope: WakeBatch] = [:]
+    private var parkedWakeBatches: [WakeScope: [WakeBatch]] = [:]
     private var wakeFlights: [WakeScope: WakeFlight] = [:]
     private var nextEnrollmentSend: [WakeScope: UInt64] = [:]
     private var enrollments: [Data: GatewayPhoneEnrollment] = [:]
@@ -182,9 +185,22 @@ public actor GatewayDeliveryCoordinator {
     public func applySubmission(canonicalPayload: Data, signature: Data, wireVersion: UInt64) throws -> GatewaySubmissionApplication {
         try running()
         let time = try current()
-        return try database.applySubmission(canonicalPayload: canonicalPayload, signature: signature, wireVersion: wireVersion,
+        let result = try database.applySubmission(canonicalPayload: canonicalPayload, signature: signature, wireVersion: wireVersion,
             trust: GatewaySubmissionTrust(registration: identity, active: active, revision: trustRevision, appliedControlRevision: database.head()),
             nowUnixMillis: time.wall, now: time.moment)
+        if result.inserted {
+            // A fresh proof may resume retained work, but cannot reset its deadline or attempt count.
+            let credential = try currentWakeCredential()?.credentialID
+            for (scope, flight) in wakeFlights {
+                if let batch = wakeBatches[scope], wakeMembers(batch).contains(where: {
+                    $0.origin != .root && !wakeAuthorized($0, credential: credential)
+                }) {
+                    flight.task.cancel()
+                }
+            }
+            pumpWakeScheduling()
+        }
+        return result
     }
 
     public func applyRecipient(canonicalPayload: Data, signature: Data, wireVersion: UInt64,
@@ -331,7 +347,9 @@ public actor GatewayDeliveryCoordinator {
             if let batch = wakeBatches[scope], wakeMembers(batch).isEmpty { flight.task.cancel() }
         }
         guard phoneRouting else { return }
-        let scopes = Set(wakes.values.filter { $0.status == .queued }.map(wakeScope)).sorted(by: scopePrecedes)
+        let credential = try? currentWakeCredential()?.credentialID
+        let scopes = Set(wakes.values.filter { $0.status == .queued && wakeAuthorized($0, credential: credential) }
+            .map(wakeScope)).sorted(by: scopePrecedes)
         let ordered: [WakeScope]
         if let lastScheduledScope {
             ordered = scopes.filter { scopePrecedes(lastScheduledScope, $0) } + scopes.filter { !scopePrecedes(lastScheduledScope, $0) }
@@ -370,12 +388,48 @@ public actor GatewayDeliveryCoordinator {
     /// Repeating an unchanged identity returns its current state. A conflicting reuse cannot renew its deadline.
     @discardableResult
     public func enqueueWake(_ delivery: PhoneRequestDelivery) throws -> GatewayWakeProgress {
+        try retainWake(delivery, origin: .root)
+    }
+
+    /// Root registers a retained delivery over its authenticated channel. Registration alone schedules nothing.
+    @discardableResult
+    public func registerWake(_ delivery: PhoneRequestDelivery) throws -> GatewayWakeProgress {
+        try retainWake(delivery, origin: .transport(nil))
+    }
+
+    /// The restricted endpoint consumes its fresh challenge before calling this method.
+    /// All recipient and deadline fields come from the Root-owned registry, never the submission.
+    @discardableResult
+    func submitWake(_ submission: GatewayWakeSubmission, signature: Data, challenge: GatewayWakeChallenge) throws -> GatewayWakeProgress {
+        try running(); try Task.checkCancellation()
+        let now = try current().moment
+        expireWakes(now.milliseconds)
+        guard challenge.issuedAt <= now.milliseconds, now.milliseconds < challenge.deadline,
+              challenge.deadline > challenge.issuedAt, challenge.deadline - challenge.issuedAt <= 60_000 else {
+            throw GatewayWakeSubmissionError.invalidMessage
+        }
+        guard let credential = try currentWakeCredential() else { throw GatewayWakeSubmissionError.unavailableCredential }
+        try submission.authenticate(signature: signature, expectedChallenge: challenge.bytes, registration: identity, credential: credential)
+        let id = try GatewayHostSnapshot.uuid(submission.deliveryID)
+        guard var entry = wakes[id], case .transport = entry.origin,
+              entry.status != .withdrawn, entry.status != .expired,
+              now.milliseconds < entry.delivery.deadlineMilliseconds else { throw GatewayWakeSubmissionError.unknownDelivery }
+        guard phoneRouting else { throw GatewayWakeError.localRouting }
+        _ = try wakeMapping(wakeScope(entry))
+        entry.origin = .transport(credential.credentialID)
+        wakes[id] = entry
+        pumpWakeScheduling()
+        return entry.progress
+    }
+
+    private func retainWake(_ delivery: PhoneRequestDelivery, origin: WakeOrigin) throws -> GatewayWakeProgress {
         try running()
         guard let wakePolicy else { throw GatewayWakeError.unavailable }
         let now = try current().moment
         expireWakes(now.milliseconds)
         if let entry = wakes[delivery.id] {
-            guard entry.delivery == delivery else { throw GatewayWakeError.conflictingDelivery }
+            guard entry.delivery == delivery,
+                  (entry.origin == .root) == (origin == .root) else { throw GatewayWakeError.conflictingDelivery }
             return entry.progress
         }
         guard delivery.recipient.phoneID.count == 16, delivery.recipient.enrollmentEpoch.count == 16,
@@ -387,10 +441,10 @@ public actor GatewayDeliveryCoordinator {
         _ = try wakeMapping(WakeScope(phone: delivery.recipient.phoneID, epoch: delivery.recipient.enrollmentEpoch))
         // Expired identities cannot be retried with their original deadlines. Live identities retain deduplication state.
         discardFinishedWakeBatches()
-        let retained = Set(wakeBatches.values.flatMap(\.members))
+        let retained = Set(wakeBatches.values.flatMap(\.members) + parkedWakeBatches.values.flatMap { $0.flatMap(\.members) })
         wakes = wakes.filter { $0.value.delivery.deadlineMilliseconds > now.milliseconds || retained.contains($0.key) }
         guard wakes.count < wakePolicy.maximumEntries else { throw GatewayDeliveryError.capacityExceeded }
-        let entry = WakeEntry(delivery: delivery)
+        let entry = WakeEntry(delivery: delivery, origin: origin)
         wakes[delivery.id] = entry
         pumpWakeScheduling()
         return entry.progress
@@ -414,8 +468,20 @@ public actor GatewayDeliveryCoordinator {
         guard wakeFlights[scope] == nil else { throw GatewayDeliveryError.alreadyRunning }
         guard flights.count + wakeFlights.count < policy.maximumFlights else { throw GatewayDeliveryError.capacityExceeded }
         expireWakes(try current().moment.milliseconds)
+        discardFinishedWakeBatches()
+        let credential = try currentWakeCredential()?.credentialID
+        if let batch = wakeBatches[scope], authorizedWakeMembers(batch, credential: credential).isEmpty {
+            parkedWakeBatches[scope, default: []].append(batch)
+            wakeBatches.removeValue(forKey: scope)
+        }
+        if wakeBatches[scope] == nil,
+           let index = parkedWakeBatches[scope]?.firstIndex(where: { !authorizedWakeMembers($0, credential: credential).isEmpty }) {
+            wakeBatches[scope] = parkedWakeBatches[scope]?.remove(at: index)
+        }
         if wakeBatches[scope] == nil {
-            let members = wakes.values.filter { $0.status == .queued && wakeScope($0) == scope }
+            let retained = Set(parkedWakeBatches[scope, default: []].flatMap(\.members))
+            let members = wakes.values.filter { $0.status == .queued && wakeScope($0) == scope &&
+                wakeAuthorized($0, credential: credential) && !retained.contains($0.delivery.id) }
                 .map { $0.delivery.id }.sorted { $0.uuidString < $1.uuidString }
             guard !members.isEmpty else { return [] }
             wakeBatches[scope] = WakeBatch(id: UUID(), identifier: SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }, members: members)
@@ -440,9 +506,12 @@ public actor GatewayDeliveryCoordinator {
                 let now = try current().moment
                 expireWakes(now.milliseconds)
                 guard var batch = wakeBatches[scope], batch.id == initial.id else { throw GatewayWakeError.invalidDelivery }
-                let live = wakeMembers(batch)
-                if live.isEmpty { break }
-                if batch.attempts >= wakePolicy.maximumAttempts { finishWakeMembers(batch, status: .exhausted); break }
+                for entry in wakeMembers(batch) where entry.attempts >= wakePolicy.maximumAttempts {
+                    wakes[entry.delivery.id]?.status = .exhausted
+                }
+                if wakeMembers(batch).isEmpty { break }
+                let live = authorizedWakeMembers(batch, credential: try currentWakeCredential()?.credentialID)
+                guard !live.isEmpty else { throw GatewayWakeSubmissionError.unavailableCredential }
                 _ = try wakeMapping(scope)
                 let earliestDeadline = live.map { $0.delivery.deadlineMilliseconds }.min()!
                 let due = max(batch.retryAt, max(nextSend, nextEnrollmentSend[scope] ?? 0))
@@ -456,8 +525,9 @@ public actor GatewayDeliveryCoordinator {
                 guard phoneRouting else { throw GatewayWakeError.localRouting }
                 let time = try current().moment
                 expireWakes(time.milliseconds)
-                let ready = wakeMembers(batch)
-                if ready.isEmpty { break }
+                if wakeMembers(batch).isEmpty { break }
+                let ready = authorizedWakeMembers(batch, credential: try currentWakeCredential()?.credentialID)
+                guard !ready.isEmpty else { throw GatewayWakeSubmissionError.unavailableCredential }
                 let currentDue = max(batch.retryAt, max(nextSend, nextEnrollmentSend[scope] ?? 0))
                 if time.milliseconds < currentDue { continue }
                 let mapping = try wakeMapping(scope)
@@ -471,25 +541,27 @@ public actor GatewayDeliveryCoordinator {
                 batch.attempts += 1; wakeBatches[scope] = batch
                 for entry in ready {
                     wakes[entry.delivery.id]?.status = .dispatching
-                    wakes[entry.delivery.id]?.attempts = batch.attempts
+                    wakes[entry.delivery.id]?.attempts += 1
                 }
                 nextSend = globalNext; nextEnrollmentSend[scope] = enrollmentNext
+                let dispatched = WakeBatch(id: batch.id, identifier: batch.identifier, members: ready.map { $0.delivery.id },
+                    attempts: batch.attempts, retryAt: batch.retryAt)
                 let result: FCMDeliveryResult
                 do { result = try await sendWake(wake, bearer) }
                 catch {
                     try Task.checkCancellation()
-                    guard (error as? FCMError) == .network else { finishWakeMembers(batch, status: .failed); throw error }
-                    markWakeRetry(batch, result: nil)
+                    guard (error as? FCMError) == .network else { finishWakeMembers(dispatched, status: .failed); throw error }
+                    markWakeRetry(dispatched, result: nil)
                     try scheduleWakeRetry(scope, batch: batch, minimum: 0)
                     continue
                 }
                 try running(); try Task.checkCancellation()
                 expireWakes(try current().moment.milliseconds)
-                for entry in wakeMembers(batch) { wakes[entry.delivery.id]?.providerResult = result }
+                for entry in wakeMembers(dispatched) { wakes[entry.delivery.id]?.providerResult = result }
                 switch result {
-                case .accepted: finishWakeMembers(batch, status: .accepted)
+                case .accepted: finishWakeMembers(dispatched, status: .accepted)
                 case .authenticationRequired:
-                    markWakeRetry(batch, result: result)
+                    markWakeRetry(dispatched, result: result)
                     await tokens.invalidate(grant)
                     try Task.checkCancellation()
                     try scheduleWakeRetry(scope, batch: batch, minimum: 0)
@@ -497,17 +569,17 @@ public actor GatewayDeliveryCoordinator {
                 case .retryable(let seconds):
                     let delay = (seconds * 1000).rounded(.up)
                     guard seconds.isFinite, seconds >= 0, delay.isFinite, delay < Double(UInt64.max) else {
-                        finishWakeMembers(batch, status: .rejected); break
+                        finishWakeMembers(dispatched, status: .rejected); break
                     }
-                    markWakeRetry(batch, result: result)
+                    markWakeRetry(dispatched, result: result)
                     try scheduleWakeRetry(scope, batch: batch, minimum: UInt64(delay))
                     continue
                 case .registrationInvalid:
                     _ = try database.invalidateMapping(mapping, trust: trust(scope.phone))
-                    finishWakeMembers(batch, status: .rejected)
-                case .validated, .senderMismatch, .rejected: finishWakeMembers(batch, status: .rejected)
+                    finishWakeMembers(dispatched, status: .rejected)
+                case .validated, .senderMismatch, .rejected: finishWakeMembers(dispatched, status: .rejected)
                 }
-                break
+                if wakeMembers(batch).isEmpty { break }
             }
         } catch {
             // Cancellation or preparation failure keeps the frozen batch for an explicit host retry, without extending any deadline.
@@ -523,6 +595,26 @@ public actor GatewayDeliveryCoordinator {
         for (scope, batch) in wakeBatches where wakeFlights[scope] == nil && wakeMembers(batch).isEmpty {
             wakeBatches.removeValue(forKey: scope)
         }
+        for (scope, batches) in parkedWakeBatches {
+            let retained = batches.filter { !wakeMembers($0).isEmpty }
+            if retained.isEmpty { parkedWakeBatches.removeValue(forKey: scope) }
+            else { parkedWakeBatches[scope] = retained }
+        }
+    }
+
+    private func currentWakeCredential() throws -> GatewayActiveSubmissionCredential? {
+        guard active else { return nil }
+        return try database.activeSubmissionCredential(trust: GatewaySubmissionTrust(registration: identity,
+            active: active, revision: trustRevision, appliedControlRevision: database.head()))
+    }
+    private func wakeAuthorized(_ entry: WakeEntry, credential: Data?) -> Bool {
+        switch entry.origin {
+        case .root: return true
+        case .transport(let submitted): return submitted != nil && submitted == credential
+        }
+    }
+    private func authorizedWakeMembers(_ batch: WakeBatch, credential: Data?) -> [WakeEntry] {
+        wakeMembers(batch).filter { wakeAuthorized($0, credential: credential) }
     }
 
     private func scheduleWakeRetry(_ scope: WakeScope, batch: WakeBatch, minimum: UInt64) throws {

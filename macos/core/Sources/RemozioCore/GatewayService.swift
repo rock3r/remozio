@@ -46,6 +46,9 @@ private actor GatewayRootDispatcher {
         case .wake(let delivery):
             _ = try await coordinator.enqueueWake(lease.normalize(delivery))
             return try GatewayRootCommand.reply([.boolean(true)])
+        case .registerWake(let delivery):
+            _ = try await coordinator.registerWake(lease.normalize(delivery))
+            return try GatewayRootCommand.reply([.boolean(true)], version: 3)
         case .withdraw(let id):
             try lease.validate()
             try await coordinator.cancelWake(deliveryID: id)
@@ -61,10 +64,11 @@ public final class GatewayService: Sendable {
     private let coordinator: GatewayDeliveryCoordinator
     private let lease: GatewayAuthorityLease
     private let listener: GatewayXPCListener
+    private let wakeListener: GatewayWakeXPCListener?
     private let retired: GatewayRetirementSignal
     private init(coordinator: GatewayDeliveryCoordinator, lease: GatewayAuthorityLease,
-                 listener: GatewayXPCListener, retired: GatewayRetirementSignal) {
-        self.coordinator = coordinator; self.lease = lease; self.listener = listener; self.retired = retired
+                 listener: GatewayXPCListener, wakeListener: GatewayWakeXPCListener?, retired: GatewayRetirementSignal) {
+        self.coordinator = coordinator; self.lease = lease; self.listener = listener; self.wakeListener = wakeListener; self.retired = retired
     }
     public var isRetired: Bool { retired.value.withLock { $0 } }
 
@@ -98,15 +102,22 @@ public final class GatewayService: Sendable {
                 lease.retire(); retired.value.withLock { $0 = true }
                 Task { await coordinator.authorityUnavailable() }
             }, synchronize: { try await dispatcher.synchronize($0) }, execute: { try await dispatcher.execute($0) })
-            return GatewayService(coordinator: coordinator, lease: lease, listener: listener, retired: retired)
+            let wakeListener = try configuration.wakeEndpoint.map { endpoint in
+                try GatewayWakeXPCListener(configuration: endpoint, serviceUID: configuration.serviceUID, clock: clock,
+                    handshakeTimeoutMillis: settings.handshakeTimeoutMillis, execute: { submission, signature, challenge in
+                        _ = try await coordinator.submitWake(submission, signature: signature, challenge: challenge)
+                    })
+            }
+            return GatewayService(coordinator: coordinator, lease: lease, listener: listener, wakeListener: wakeListener, retired: retired)
         } catch { lease.retire(); try await coordinator.shutdown(); throw error }
     }
     public func start() throws {
         guard !isRetired else { throw GatewayServiceError.unavailable }
-        try listener.start()
+        do { try listener.start(); try wakeListener?.start() }
+        catch { lease.retire(); retired.value.withLock { $0 = true }; listener.close(); wakeListener?.close(); throw error }
     }
     public func close() async throws {
-        lease.retire(); retired.value.withLock { $0 = true }; listener.close()
+        lease.retire(); retired.value.withLock { $0 = true }; listener.close(); wakeListener?.close()
         try await coordinator.shutdown()
     }
 }
