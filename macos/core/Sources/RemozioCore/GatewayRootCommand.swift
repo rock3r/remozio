@@ -1,7 +1,7 @@
 import Foundation
 import RemozioProtocol
 
-/// Version-one local IPC commands. Only the signed Root process may send these commands.
+/// Versioned local IPC commands. Only the signed Root process may send these commands.
 /// This version is independent of the phone envelope and signed control versions.
 public enum GatewayRootCommand: Sendable {
     case head(Data)
@@ -11,6 +11,9 @@ public enum GatewayRootCommand: Sendable {
     case probe(operationID: Data, phoneID: Data)
     case wake(PhoneRequestDelivery)
     case withdraw(UUID)
+    case submission(payload: Data, signature: Data, wireVersion: UInt64)
+
+    public var protocolVersion: UInt64 { if case .submission = self { 2 } else { 1 } }
 
     public func encode() throws -> Data {
         let value: CBORValue
@@ -27,6 +30,8 @@ public enum GatewayRootCommand: Sendable {
                 .bytes(delivery.recipient.phoneID), .bytes(delivery.recipient.enrollmentEpoch), .bytes(delivery.requestID),
                 .bytes(GatewayHostSnapshot.bytes(delivery.admittedAt.epoch)), .unsigned(delivery.admittedAt.milliseconds),
                 .unsigned(delivery.deadlineMilliseconds)])
+        case .submission(let payload, let signature, let version):
+            value = .array([.unsigned(2), .unsigned(7), .bytes(payload), .bytes(signature), .unsigned(version)])
         case .withdraw(let id): value = .array([.unsigned(1), .unsigned(6), .bytes(GatewayHostSnapshot.bytes(id))])
         }
         let bytes = try DeterministicCBOR.encode(value, limits: Self.limits)
@@ -35,7 +40,8 @@ public enum GatewayRootCommand: Sendable {
     }
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .array(let values) = try DeterministicCBOR.decode(bytes, limits: limits), values.count >= 3,
-              values[0] == .unsigned(1), case .unsigned(let kind) = values[1] else { throw GatewayServiceError.invalidMessage }
+              case .unsigned(let version) = values[0], case .unsigned(let kind) = values[1],
+              (version == 1 && kind <= 6) || (version == 2 && kind == 7) else { throw GatewayServiceError.invalidMessage }
         func blob(_ i: Int, count: Int? = nil, maximum: Int = 65536) throws -> Data {
             guard i < values.count, case .bytes(let bytes) = values[i], !bytes.isEmpty, bytes.count <= maximum,
                   count == nil || bytes.count == count else { throw GatewayServiceError.invalidMessage }; return bytes
@@ -65,6 +71,9 @@ public enum GatewayRootCommand: Sendable {
                 recipient: DeliveryRecipient(phoneID: blob(3, count: 16), enrollmentEpoch: blob(4, count: 16)),
                 requestID: blob(5, count: 16), admittedAt: AuthorityMoment(epoch: GatewayHostSnapshot.uuid(blob(6, count: 16)),
                     milliseconds: number(7)), deadlineMilliseconds: number(8)))
+        case 7:
+            guard values.count == 5 else { throw GatewayServiceError.invalidMessage }
+            return try .submission(payload: blob(2), signature: blob(3, count: 64), wireVersion: number(4))
         case 6:
             guard values.count == 3 else { throw GatewayServiceError.invalidMessage }
             return try .withdraw(GatewayHostSnapshot.uuid(blob(2, count: 16)))
@@ -72,7 +81,8 @@ public enum GatewayRootCommand: Sendable {
         }
     }
     static var limits: CBORLimits { get throws { try CBORLimits(maxBytes: 131072, maxDepth: 1, maxItems: 16) } }
-    static func reply(_ fields: [CBORValue]) throws -> Data {
-        try DeterministicCBOR.encode(.array([.unsigned(1)] + fields), limits: CBORLimits(maxBytes: 1_100_128, maxDepth: 1, maxItems: 8))
+    static func reply(_ fields: [CBORValue], version: UInt64 = 1) throws -> Data {
+        guard version == 1 || version == 2 else { throw GatewayServiceError.invalidMessage }
+        return try DeterministicCBOR.encode(.array([.unsigned(version)] + fields), limits: CBORLimits(maxBytes: 1_100_128, maxDepth: 1, maxItems: 8))
     }
 }

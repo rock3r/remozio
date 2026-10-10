@@ -102,8 +102,47 @@ Runtime opening does not migrate or recreate an older store. Migration preserves
 Head and history replies include kinds 4 and 5 and retain their Root signatures.
 Older decoders reject these kinds. Existing query shape and signature domains remain unchanged.
 
-Root issuance and local credential history remain pending.
-Until that integration exists, Root recovery rejects unknown credential controls and leaves its head and phone trust unchanged.
-It must not treat credential authority as phone enrollment repair.
-Authenticated native submission, protected provisioning, rotation delivery, and provider tests also remain required.
-These core tests contact no provider or device and install no runtime credential.
+## Root issuance and native delivery
+
+Root store schema 16 adds signed credential history to the shared control head and capacity limit.
+Protected setup installs it explicitly after the code policy, history recovery, and command replay schemas exist.
+Installation changes the authority continuity digest. Setup must checkpoint that change before runtime activation.
+Runtime opening does not install or recreate the table.
+
+Root assigns each rotation a fresh credential ID, operation ID, and revision.
+The caller supplies a staged public key and the protected Root signer. The journal stores no private key.
+Publication requires the original process run and both original deadlines.
+After restart, explicit renewal uses only current retained intent and creates a fresh operation and credential ID.
+Renewal may retain the public key. It cannot restore a superseded or revoked rotation.
+Revocation can retain an unknown credential tombstone without changing phone pairing.
+
+```mermaid
+sequenceDiagram
+    participant R as Root journal
+    participant X as Authenticated local channel
+    participant G as Gateway journal
+    R->>R: Commit signed control and shared revision
+    R->>R: Recheck original publication deadline
+    R->>X: Send credential control using IPC version 2
+    X->>G: Recheck Root peer, host lease, and registration
+    G->>G: Commit receipt and credential state together
+    G-->>R: Return retained Root receipt
+    R->>G: Query fresh signed head
+    G-->>R: Bind reply to query and current head
+    R->>R: Record matching acknowledgment
+```
+
+The native gateway advertises IPC version 2. The new Root client supports peers advertising versions 1 and 2.
+Existing commands retain version 1. Credential command 7 uses version 2 and a version 2 reply.
+The Root client rejects credential delivery to a version 1 peer before sending. Unknown versions fail closed.
+An older Root client cannot connect to the upgraded gateway; bundled components must update together.
+IPC compatibility does not change credential schema or signing wire version 1.
+
+Root schema 16 can reconcile authenticated missing credential receipts from gateway history.
+Recovered receipts retain historical intent. They restore neither a private key nor a fresh publication deadline.
+Credential recovery leaves phone trust unchanged. Older Root stores still reject unsupported credential recovery.
+
+The in-process test covers issuance, endpoint checks, coordinator application, retry, and a fresh acknowledgment.
+It contacts no provider or device and installs no runtime credential.
+It does not prove OS peer credentials or service-account installation.
+Protected provisioning, continuity checkpoint integration, transport key custody, runtime delivery, and provider tests remain required.

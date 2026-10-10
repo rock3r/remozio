@@ -258,7 +258,7 @@ public final class JournalDatabase {
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
         let version = try integer("PRAGMA user_version")
         guard try integer("PRAGMA application_id") == Self.applicationID,
-              expectedVersion.map({ version == $0 }) ?? (12...15).contains(version) else {
+              expectedVersion.map({ version == $0 }) ?? (12...16).contains(version) else {
             throw JournalDatabaseError.incompatibleStore
         }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
@@ -297,6 +297,7 @@ public final class JournalDatabase {
         if version >= 14 { queries.append("SELECT epoch,evidence FROM main.history_recoveries_v1 LIMIT 0") }
         if version >= 13 { queries.append("SELECT id,revision,policy FROM main.authority_code_policy_v1 LIMIT 0") }
         if version >= 15 { queries.append("SELECT mac,account,submission,nonce,caller,capture FROM main.command_submissions_v1 LIMIT 0") }
+        if version >= 16 { queries.append("SELECT operation,revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 LIMIT 0") }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -636,7 +637,12 @@ public final class JournalTransaction {
                 let eventID = withUnsafeBytes(of: &eventUUID) { Data($0) }
                 let next: UUID, phone: Data
                 switch record {
-                case .submission: throw GatewayAuthorityError.unsupportedSubmissionControl
+                case .submission:
+                    guard try withGateway(write: false, { try $0.submissionHistoryInstalled() }) else {
+                        throw GatewayAuthorityError.unsupportedSubmissionControl
+                    }
+                    // Credential history belongs to reconciliation. It must not change a phone enrollment or restore a private key.
+                    continue
                 case .candidate(let receipt):
                     phone = receipt.candidate.binding.phoneID
                     next = try restrictUnknownGatewayTrust(kind: .candidate, canonicalPayload: record.canonicalPayload,
@@ -830,6 +836,44 @@ public final class JournalTransaction {
     public func configureGatewayAuthority(_ identity: GatewayRegistrationIdentity) throws {
         try withGateway(write: true) { try $0.configure(identity) }
     }
+
+    /// Protected setup only. Update the continuity checkpoint for the new authority digest before runtime activation.
+    public func installGatewaySubmissionHistory(_ registration: GatewayRegistrationIdentity) throws {
+        try withGateway(write: true) { try $0.installSubmissionHistory(identity: registration) }
+    }
+
+    public func rotateGatewaySubmission(publicKey: Data, registration: GatewayRegistrationIdentity, registrationActive: Bool,
+                                        expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                        sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) { try $0.rotateSubmission(publicKey: publicKey, identity: registration, active: registrationActive,
+            expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign) }
+    }
+
+    public func revokeGatewaySubmission(credentialID: Data, registration: GatewayRegistrationIdentity, registrationActive: Bool,
+                                        expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                        sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) { try $0.revokeSubmission(credentialID: credentialID, identity: registration, active: registrationActive,
+            expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign) }
+    }
+
+    /// Retained Root intent only. This does not prove current gateway state or grant possession of a private credential.
+    public func desiredGatewaySubmission(_ registration: GatewayRegistrationIdentity) throws -> GatewaySubmissionReceipt? {
+        try withGateway(write: false) { try $0.desiredSubmission(identity: registration) }
+    }
+
+    public func pendingGatewaySubmission(operationID: Data, registration: GatewayRegistrationIdentity, registrationActive: Bool,
+                                         nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        try withGateway(write: false) { try $0.pendingSubmission(operationID: operationID, identity: registration, active: registrationActive,
+            wall: nowUnixMillis, now: now) }
+    }
+
+    public func renewGatewaySubmission(operationID: Data, registration: GatewayRegistrationIdentity, registrationActive: Bool,
+                                       expectedHead: UInt64, nowUnixMillis: UInt64, now: AuthorityMoment,
+                                       sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try withGateway(write: true) { try $0.renewSubmission(operationID: operationID, identity: registration, active: registrationActive,
+            expectedHead: expectedHead, wall: nowUnixMillis, now: now, sign: sign) }
+    }
+
     public func gatewayAuthorityHead(_ identity: GatewayRegistrationIdentity) throws -> UInt64 {
         try withGateway(write: false) { try $0.head(identity) }
     }

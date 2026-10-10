@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import RemozioProtocol
 
-public enum GatewayRootChannelError: Error, Equatable { case invalidConfiguration, closed, busy, timedOut, rejected, invalidMessage }
+public enum GatewayRootChannelError: Error, Equatable { case invalidConfiguration, closed, busy, timedOut, rejected, invalidMessage, unsupportedVersion }
 enum GatewayRootCall: Sendable { case hello, synchronize(Data), command(Data) }
 enum GatewayRootResponse: Sendable { case version(UInt64), synchronized(Bool), command(Data?), failed }
 protocol GatewayRootDriver: Sendable {
@@ -48,6 +48,7 @@ public actor GatewayRootChannel {
     private let timeout: UInt64
     private let verifyAccount: @Sendable () throws -> Void
     private var state = State.new
+    private var peerVersion: UInt64?
     private var pending: (id: UUID, continuation: CheckedContinuation<GatewayRootResponse, any Error>)?
     private var timer: Task<Void, Never>?
     public init(serviceName: String, gatewayPolicy: XPCPeerPolicy, timeoutMilliseconds: UInt64 = 5000) throws {
@@ -72,7 +73,8 @@ public actor GatewayRootChannel {
         state = .opening
         driver.start { [weak self] in Task { await self?.close() } }
         do {
-            guard case .version(1) = try await perform(.hello), state == .opening else { throw GatewayRootChannelError.invalidMessage }
+            guard case .version(let version) = try await perform(.hello), (1...2).contains(version), state == .opening else { throw GatewayRootChannelError.invalidMessage }
+            peerVersion = version
             state = .open
         } catch { close(); throw error }
     }
@@ -97,14 +99,38 @@ public actor GatewayRootChannel {
         }
         return GatewayControlHistoryReply(canonicalPayload: payload, signature: signature)
     }
+    /// Submit only a retained Root control. A receipt does not replace a fresh head query or grant wake authority.
+    public func applySubmission(_ envelope: GatewayAuthorityEnvelope, registration: GatewayRegistrationIdentity) async throws -> GatewaySubmissionApplication {
+        guard GatewaySubmissionKind(rawValue: envelope.kind) != nil, envelope.registrationToken == nil else {
+            throw GatewayRootChannelError.invalidMessage
+        }
+        let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 8, maxItems: 128)
+        let signing = try CBORLimits(maxBytes: 131_072, maxDepth: 8, maxItems: 128)
+        let sent = try GatewaySubmissionVerifier.authenticate(canonicalPayload: envelope.canonicalPayload, signature: envelope.signature,
+            wireVersion: 1, registration: registration, payloadLimits: limits, signingLimits: signing)
+        guard sent.kind.rawValue == envelope.kind, sent.revision == envelope.revision, sent.operationID == envelope.operationID else {
+            throw GatewayRootChannelError.invalidMessage
+        }
+        let fields = try await command(.submission(payload: envelope.canonicalPayload, signature: envelope.signature, wireVersion: 1))
+        do {
+            guard fields.count == 4, case .bytes(let payload) = fields[1], case .bytes(let signature) = fields[2],
+                  case .boolean(let inserted) = fields[3], payload == envelope.canonicalPayload else { throw GatewayRootChannelError.invalidMessage }
+            let received = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+                registration: registration, payloadLimits: limits, signingLimits: signing)
+            return GatewaySubmissionApplication(receipt: GatewaySubmissionReceipt(control: received, canonicalPayload: payload, signature: signature), inserted: inserted)
+        } catch { close(); throw error }
+    }
+
     public func command(_ command: GatewayRootCommand) async throws -> [CBORValue] {
+        guard state == .open else { throw GatewayRootChannelError.closed }
+        guard let peerVersion, command.protocolVersion <= peerVersion else { throw GatewayRootChannelError.unsupportedVersion }
         guard case .command(let bytes) = try await perform(.command(command.encode())) else {
             close(); throw GatewayRootChannelError.invalidMessage
         }
         guard let bytes else { throw GatewayRootChannelError.rejected }
         do {
             guard case .array(let fields) = try DeterministicCBOR.decode(bytes,
-                    limits: CBORLimits(maxBytes: 1_100_128, maxDepth: 1, maxItems: 8)), fields.first == .unsigned(1) else {
+                    limits: CBORLimits(maxBytes: 1_100_128, maxDepth: 1, maxItems: 8)), fields.first == .unsigned(command.protocolVersion) else {
                 throw GatewayRootChannelError.invalidMessage
             }
             return fields
