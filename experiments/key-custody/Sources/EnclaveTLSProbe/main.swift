@@ -3,14 +3,19 @@ import Darwin
 import Foundation
 import LocalAuthentication
 import Network
+#if DEBUG
+@testable import RemozioCore
+#else
 import RemozioCore
+#endif
+import RemozioProtocol
 import Security
 
-// Disposable, memory-only identities and a loopback exchange. Never package this probe in the app.
+// Disposable identities and a loopback exchange. Never package this probe in the app.
 enum ProbeError: Error { case key, certificate, identity, payload, listener, wrongPinAccepted }
 
 struct Report: Encodable {
-    let experiment = "secure-enclave-tls"
+    var experiment = "secure-enclave-tls"
     let schemaVersion = 1
     let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
     let authenticationUIAllowed = false
@@ -23,6 +28,13 @@ struct Report: Encodable {
     var wrongServerPinRejected = false
     var wrongPinPolicyRejectionObserved = false
     var wrongPinChannelOutcome: String?
+    var fileIdentityLoaded = false
+    var nativeSignatureVerified = false
+    var fileFixtureAnchorUsed = false
+    var fileLoadRefusal: String?
+    let productionRootAncestryTested = false
+    let dedicatedAccountIsolationTested = false
+    let preloginTested = false
     var stage = "availability"
     var status = "blocked"
     var errorDomain: String?
@@ -86,6 +98,46 @@ func key(enclave: Bool, context: LAContext) throws -> SecKey {
     }
     return key
 }
+
+#if DEBUG
+func createFileFixture(directory: String) throws {
+    let directoryFD = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard directoryFD >= 0 else { throw ProbeError.identity }
+    defer { _ = close(directoryFD) }
+    var info = stat()
+    guard fstat(directoryFD, &info) == 0, info.st_mode & 0o077 == 0 else { throw ProbeError.identity }
+    try ProtectedStorageMetadata.validate(directoryFD, info, directory: true, privateObject: false,
+                                         owner: getuid(), ancestorOwner: getuid())
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    defer { context.invalidate() }
+    let serverKey = try key(enclave: false, context: context)
+    guard let privateBytes = SecKeyCopyExternalRepresentation(serverKey, nil) as Data?, privateBytes.count == 97,
+          try P256.Signing.PrivateKey(x963Representation: privateBytes).x963Representation == privateBytes else { throw ProbeError.key }
+    let server = try identity(serverKey, name: "synthetic-remozio-file-server")
+    var certificate: SecCertificate?
+    guard SecIdentityCopyCertificate(server, &certificate) == errSecSuccess, let certificate else { throw ProbeError.certificate }
+    let envelope = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("remozio-transport-identity"),
+        2: .bytes(privateBytes), 3: .bytes(SecCertificateCopyData(certificate) as Data)]),
+        limits: CBORLimits(maxBytes: 16384, maxDepth: 1, maxItems: 9))
+    func writeFixture(_ name: String, _ bytes: Data) throws {
+        let fd = openat(directoryFD, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw ProbeError.identity }
+        defer { _ = close(fd) }
+        var offset = 0
+        while offset < bytes.count {
+            let count = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), bytes.count - offset) }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw ProbeError.identity }
+            offset += count
+        }
+        guard fsync(fd) == 0 else { throw ProbeError.identity }
+    }
+    try writeFixture("identity.cbor", envelope)
+    try writeFixture("pin.spki", publicKey(serverKey).derRepresentation)
+    try writeFixture("wrong-pin.spki", P256.Signing.PrivateKey().publicKey.derRepresentation)
+}
+#endif
 
 final class RejectionEvidence: @unchecked Sendable {
     private let lock = NSLock()
@@ -248,6 +300,65 @@ func admitted(_ connection: NWConnection) -> Bool {
         finish()
     }
 
+    #if DEBUG
+    func runFileFixture(directory: String) async {
+        report.experiment = "transport-file-tls"
+        report.fileFixtureAnchorUsed = true
+        report.stage = "read-file-fixture"
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        defer { context.invalidate() }
+        var assertionsPassed = false
+        do {
+            let encoded = try ProtectedServiceConfiguration.read(anchor: directory, relativePath: "identity.cbor", owner: getuid())
+            let pin = try ProtectedServiceConfiguration.read(anchor: directory, relativePath: "pin.spki", owner: getuid())
+            report.stage = "load-file-identity"
+            let server = try TransportFileIdentity.load(bytes: encoded, publicKeyInfo: pin)
+            report.fileIdentityLoaded = true
+            var serverKey: SecKey?
+            guard SecIdentityCopyPrivateKey(server, &serverKey) == errSecSuccess, let serverKey else { throw ProbeError.identity }
+            let message = Data("Remozio disposable file identity signature".utf8)
+            guard let signature = SecKeyCreateSignature(serverKey, .ecdsaSignatureMessageX962SHA256,
+                                                       message as CFData, nil) as Data?,
+                  try P256.Signing.PublicKey(derRepresentation: pin).isValidSignature(
+                    P256.Signing.ECDSASignature(derRepresentation: signature), for: message) else { throw ProbeError.key }
+            report.nativeSignatureVerified = true
+            let clientKey = try key(enclave: false, context: context)
+            let client = try identity(clientKey, name: "synthetic-remozio-file-client")
+            report.stage = "mutual-tls"
+            try await exchange(server: server, client: client, serverPin: pin, clientPin: publicKey(clientKey).derRepresentation)
+            report.mutualTLS13Exchange = true
+            await cleanup()
+            report.stage = "wrong-pin-control"
+            let rejection = RejectionEvidence()
+            do {
+                try await exchange(server: server, client: client, serverPin: publicKey(clientKey).derRepresentation,
+                                   clientPin: publicKey(clientKey).derRepresentation, wrongPinControl: true, rejection: rejection)
+                throw ProbeError.wrongPinAccepted
+            } catch let error as NetworkChannelError {
+                report.wrongPinPolicyRejectionObserved = rejection.observed
+                guard rejection.observed else { throw error }
+                switch error {
+                case .failed: report.wrongPinChannelOutcome = "failed"
+                case .timedOut: report.wrongPinChannelOutcome = "timedOut"
+                case .closed: report.wrongPinChannelOutcome = "closed"
+                default: throw error
+                }
+                report.wrongServerPinRejected = true
+            }
+            assertionsPassed = true
+        } catch {
+            if error as? JournalLeaseError == .unsafeMetadata { report.fileLoadRefusal = "unsafeMetadata" }
+            if error as? ApprovalTransportStartupError == .invalidIdentity { report.fileLoadRefusal = "invalidIdentity" }
+            let failure = error as NSError
+            report.errorDomain = failure.domain; report.errorCode = failure.code
+        }
+        await cleanup()
+        if assertionsPassed { report.stage = "complete"; report.status = "passed" }
+        finish()
+    }
+    #endif
+
     func timedOut() {
         report.stage = "timeout"
         report.status = "blocked"
@@ -278,12 +389,21 @@ func admitted(_ connection: NWConnection) -> Bool {
 #if !DEBUG
 fatalError("The enclave TLS probe is available only in debug builds.")
 #else
-guard getuid() != 0 else { fatalError("Run the disposable probe as an ordinary user.") }
+guard getuid() != 0, getuid() == geteuid() else { fatalError("Run the disposable probe as an ordinary user.") }
 let probe = Probe()
 if CommandLine.arguments.dropFirst() == ["--timeout-control"] {
     probe.report.stage = "complete"
     probe.report.status = "passed"
     probe.timedOut()
+}
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--create-file-fixture" {
+    do { try createFileFixture(directory: CommandLine.arguments[2]); exit(0) }
+    catch { exit(77) }
+}
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--file-fixture" {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { probe.timedOut() }
+    await probe.runFileFixture(directory: CommandLine.arguments[2])
+    exit(77)
 }
 guard CommandLine.arguments.count == 1 else { exit(64) }
 DispatchQueue.main.asyncAfter(deadline: .now() + 15) { probe.timedOut() }

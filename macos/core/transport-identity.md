@@ -68,9 +68,14 @@ An injected file reader supplies the same disposable envelope twice; native Secu
 Protected-reader fixtures cover owner checks, ancestor checks, unsafe modes, symlinks, hard links, FIFOs and directories.
 The production reader refuses the ordinary-user fixture because its ancestors are not Root-owned.
 
+The [file TLS experiment](../../docs/experiments/transport-file-tls.md) reloads one disposable identity in two fresh processes.
+Each process signs test data and completes pinned mutual TLS 1.3 over loopback.
+Its controls reject unsafe file permissions, an incorrect identity pin, and an incorrect TLS peer pin.
+It uses the ordinary-user fixture anchor, not production Root-owned ancestry.
+
 These results do not prove dedicated-account deployment, TLS signing in a LaunchDaemon, or availability before login.
-They do not establish cross-process persistence or same-user isolation against a provisioned production identity.
-No account, registration, production credential or network listener is installed by these tests.
+They do not establish same-user isolation against a provisioned production identity.
+No account, registration or production credential is installed by these tests.
 Setup must record custody and validate those gates before selecting and activating the file path.
 The current app has no custody-selection UI or service activation flow.
 

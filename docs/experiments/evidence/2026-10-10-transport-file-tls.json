@@ -1,0 +1,23 @@
+{
+  "dedicatedAccountIsolationTested": false,
+  "experiment": "transport-file-cross-process-tls",
+  "fixtureDirectoryRemoved": true,
+  "freshTLSProcesses": 2,
+  "mutualTLS13Exchange": true,
+  "nativeSignaturesVerified": true,
+  "osVersion": "Version 27.0.1 (Build 26A434)",
+  "preloginTested": false,
+  "productionRootAncestryTested": false,
+  "recordedAt": "2026-10-10T16:24:51.634351+00:00",
+  "sameIdentityRetained": true,
+  "schemaVersion": 1,
+  "sourceBaseCommit": "a18cf35369e0f044ece2dcfb82060448720eb419",
+  "sourceSHA256": {
+    "experiments/key-custody/Sources/EnclaveTLSProbe/main.swift": "b426c23b9426c3f57142341bab3c1ae56f430b3464a553fdd53d201a25918aa6",
+    "scripts/run-transport-file-tls-experiment.py": "d7432dc6dc753b35983a80297fde97ce5689eff140a9b3834de7ec3d8e8e145b"
+  },
+  "status": "passed",
+  "unsafeModeRejected": true,
+  "wrongIdentityPinRejected": true,
+  "wrongServerPinPolicyRejectionObserved": true
+}
