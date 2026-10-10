@@ -64,7 +64,9 @@ static int target(int slave, int start, const char *mode) {
     struct termios original;
     if (tcgetattr(slave, &original)) return 34;
     remozio_frontend_terminal_t *terminal = NULL;
-    if (remozio_frontend_terminal_open(0, &terminal) || !terminal) return 35;
+    int source = !strcmp(mode, "terminal-alias") ? open("/dev/tty", O_RDWR | O_CLOEXEC | O_NOCTTY) : 0;
+    if (source < 0 || remozio_frontend_terminal_open(source, &terminal) || !terminal) return 35;
+    if (source != 0) close(source);
     if (remozio_frontend_terminal_needs_restore(terminal) || remozio_frontend_terminal_restore(terminal)) return 36;
     for (int i = 0; i < 3; ++i) if (fcntl(i, F_GETFL) != original_flags) return 37;
     struct termios seen;

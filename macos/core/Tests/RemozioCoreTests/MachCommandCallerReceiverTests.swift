@@ -1523,14 +1523,17 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         private var control: Int32 = -1
         var pid: pid_t { child }
 
-        init(endpoint: Endpoint, submission: Data? = nil, controlFrame: Data? = nil) throws {
+        init(endpoint: Endpoint, submission: Data? = nil, controlFrame: Data? = nil, terminalRole: Int? = nil, bindTerminal: Bool = false) throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
             do {
                 let binary = directory.appendingPathComponent("peer")
                 let source = try XCTUnwrap(Bundle.module.url(forResource: "MachCommandCallerPeer", withExtension: "c", subdirectory: "Fixtures"))
+                let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                let native = core.appendingPathComponent("Sources/RemozioMach")
                 try Self.run("/usr/bin/xcrun", ["clang", "-arch", "arm64", "-mmacosx-version-min=26.0",
-                    "-Wall", "-Wextra", "-Werror", source.path, "-o", binary.path])
+                    "-Wall", "-Wextra", "-Werror", "-I", native.appendingPathComponent("include").path,
+                    source.path, native.appendingPathComponent("CommandStreamSource.c").path, "-o", binary.path])
                 try Self.run("/usr/bin/codesign", ["--force", "--sign", "-", "--options", "runtime",
                     "--identifier", "dev.remozio.command-caller.fixture", binary.path])
                 var code: SecStaticCode?, information: CFDictionary?
@@ -1565,6 +1568,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     let payload = directory.appendingPathComponent("submission")
                     try submission.write(to: payload)
                     launchArguments.append(payload.path)
+                    if let terminalRole { launchArguments.append("\(bindTerminal ? "bound" : "raw")-terminal-\(terminalRole)") }
                 }
                 let words = launchArguments.map { strdup($0) }
                 defer { words.forEach { free($0) } }
@@ -1625,6 +1629,51 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             if control >= 0 { Darwin.close(control) }
             if child > 0 { kill(child, SIGKILL); while waitpid(child, nil, 0) < 0 && errno == EINTR {} }
             try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
+    func testRawTerminalAliasesAreRejectedInEveryRoleAndTheReceiverKeepsWorking() throws {
+        for role in 0..<3 {
+            let endpoint = try Endpoint(), reply = try Endpoint(), result = try Endpoint()
+            let peer = try Peer(endpoint: endpoint, submission: Data([0xa0]), terminalRole: role)
+            let expression = "(\(try selfExpression())) or (\(peer.expression))"
+            let context = try registryContext(expression: expression)
+            let host = try host(endpoint, wait: 5000, context: { context })
+            defer { host.close() }
+            XCTAssertEqual(try host.poll { $0.closeIfUnclaimed(); XCTFail("Raw alias reached the handler") }, .rejected(.malformed))
+            try peer.stop()
+            let input = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC), output = Darwin.open("/dev/null", O_WRONLY | O_CLOEXEC)
+            defer { _ = Darwin.close(input); _ = Darwin.close(output) }
+            try MachCommandIOWire.send(Data([0xa1]), inputDescriptor: input, outputDescriptor: output, errorDescriptor: output,
+                destination: endpoint.port, admissionReply: reply.port, terminalReply: result.port,
+                maximumPayloadBytes: 64, timeoutMilliseconds: 1000)
+            XCTAssertEqual(try host.poll { next in
+                XCTAssertEqual(next.payload, Data([0xa1]))
+                next.closeIfUnclaimed()
+            }, .inputHandled)
+        }
+    }
+
+    func testBoundTerminalAliasesAreAcceptedInEveryRoleWithTheOriginalCallerSession() throws {
+        for role in 0..<3 {
+            let endpoint = try Endpoint(), peer = try Peer(endpoint: endpoint, submission: Data([0xa0]), terminalRole: role, bindTerminal: true)
+            let received = try receiver(endpoint, expression: peer.expression).receiveIOInput(timeoutMilliseconds: 5000)
+            defer { received.closeIfUnclaimed() }
+            let check: (Int32) throws -> Void = { descriptor in
+                XCTAssertEqual(tcgetsid(descriptor), peer.pid)
+                var alias = true
+                XCTAssertEqual(remozio_command_stream_source_is_terminal_alias(descriptor, &alias), 0)
+                XCTAssertFalse(alias)
+            }
+            if role == 0 {
+                try received.input.withBorrowedDescriptor(check)
+                XCTAssertEqual(try received.input.capture(streamBinding: Data(repeating: 1, count: 16)).kind, .tty)
+            } else {
+                let channels = try XCTUnwrap(received.outputs)
+                try (role == 1 ? channels.output : channels.error).withBorrowedDescriptor(check)
+            }
+            received.closeIfUnclaimed()
+            try peer.stop()
         }
     }
 

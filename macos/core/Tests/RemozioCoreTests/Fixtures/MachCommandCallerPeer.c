@@ -1,3 +1,6 @@
+#include "RemozioCommandStreamSource.h"
+#include <sys/ioctl.h>
+#include <util.h>
 #include <mach/mach.h>
 #include <mach/message.h>
 #include <arpa/inet.h>
@@ -8,15 +11,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/fileport.h>
-static int send_io(mach_port_t endpoint, const char *path) {
+static int send_io(mach_port_t endpoint, const char *path, int terminal_role, int bind_terminal) {
     FILE *file = fopen(path, "rb");
     if (!file || fseek(file, 0, SEEK_END)) return 20;
     long count = ftell(file);
     if (count <= 0 || count > 8192 || fseek(file, 0, SEEK_SET)) return 21;
     mach_port_t ports[5] = {0};
     int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-    if (output < 0 || fileport_makeport(STDIN_FILENO, &ports[0]) ||
-        fileport_makeport(output, &ports[1]) || fileport_makeport(output, &ports[2])) return 22;
+    int master = -1, slave = -1, alias = -1, stable = -1;
+    if (terminal_role >= 0) {
+        if (openpty(&master, &slave, NULL, NULL, NULL) || setsid() < 0 || ioctl(slave, TIOCSCTTY, 0)) return 35;
+        alias = open("/dev/tty", O_RDWR | O_CLOEXEC | O_NOCTTY);
+        if (alias < 0) return 36;
+        if (bind_terminal && remozio_command_stream_source_retain(alias, &stable)) return 37;
+    }
+    int sources[3] = { STDIN_FILENO, output, output };
+    if (terminal_role >= 0) sources[terminal_role] = bind_terminal ? stable : alias;
+    if (output < 0) return 22;
+    for (int index = 0; index < 3; index++) if (fileport_makeport(sources[index], &ports[index])) return 22;
+    if (stable >= 0) close(stable);
+    if (alias >= 0) close(alias);
+    if (slave >= 0) close(slave);
+    /* Keep the private master open until the caller exits after its control pipe closes. */
     close(output);
     for (int index = 3; index < 5; index++) {
         if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &ports[index]) != KERN_SUCCESS ||
@@ -68,10 +84,17 @@ int main(int argc, char **argv) {
     mach_port_t endpoint = MACH_PORT_NULL;
     if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &endpoint) != KERN_SUCCESS) return 3;
     if (argc == 4) {
-        if (strcmp(argv[3], "control")) return 34;
-        int error = send_control(endpoint, argv[2]); if (error) return error;
+        int error;
+        if (!strcmp(argv[3], "control")) error = send_control(endpoint, argv[2]);
+        else if (!strncmp(argv[3], "raw-terminal-", 13) || !strncmp(argv[3], "bound-terminal-", 15)) {
+            int bound = argv[3][0] == 'b';
+            const char *role = argv[3] + (bound ? 15 : 13);
+            if (strlen(role) != 1 || *role < '0' || *role > '2') return 34;
+            error = send_io(endpoint, argv[2], *role - '0', bound);
+        } else return 34;
+        if (error) return error;
     } else if (argc == 3) {
-        int error = send_io(endpoint, argv[2]);
+        int error = send_io(endpoint, argv[2], -1, 0);
         if (error) return error;
     } else {
         struct { mach_msg_header_t header; uint32_t version, length; char payload[8]; } message = {0};

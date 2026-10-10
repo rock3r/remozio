@@ -23,7 +23,7 @@ final class FrontendTerminalTests: XCTestCase {
         """.write(to: wrapper, atomically: false, encoding: .utf8)
         let compiler = Process(); compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
         compiler.arguments = ["clang", "-target", "arm64-apple-macos26.0", "-Wall", "-Wextra", "-Werror",
-            "-I", native.appendingPathComponent("include").path, wrapper.path, fixture.path, "-o", driver.path]
+            "-I", native.appendingPathComponent("include").path, wrapper.path, fixture.path, native.appendingPathComponent("CommandStreamSource.c").path, "-o", driver.path]
         try compiler.run(); compiler.waitUntilExit()
         XCTAssertEqual(compiler.terminationStatus, 0)
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
@@ -42,6 +42,7 @@ final class FrontendTerminalTests: XCTestCase {
         XCTAssertEqual(record["sessionOwnerReaped"] as? Bool, true)
     }
     func testIndependentOwnerRestoresFreshSettingsAndPreservesUnreadInput() throws { try run("lifecycle") }
+    func testDynamicTerminalAliasUsesAnIndependentPhysicalTerminalOwner() throws { try run("terminal-alias") }
     func testBackgroundResumeWaitsWithoutTakingForeground() throws { try run("background") }
     func testKernelRejectsForegroundLossDuringRawActivation() throws { try run("kernel-race") }
     func testIgnoredBlockedDefaultAndRestartingSignalsPreventRawMode() throws { try run("signal-guards") }

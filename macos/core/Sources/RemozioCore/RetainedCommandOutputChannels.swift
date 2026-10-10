@@ -14,6 +14,7 @@ final class RetainedCommandOutputDescriptor {
         guard imported >= 0 else { throw RetainedCommandOutputError.system(errno) }
         var completed = false
         defer { if !completed { _ = Darwin.close(imported) } }
+        try CommandStreamSource.rejectTerminalAlias(imported)
         let descriptorFlags = fcntl(imported, F_GETFD), flags = fcntl(imported, F_GETFL)
         guard descriptorFlags >= 0, flags >= 0 else { throw RetainedCommandOutputError.system(errno) }
         guard flags & O_ACCMODE != O_RDONLY, flags & O_EVTONLY == 0 else { throw RetainedCommandOutputError.notWritable }

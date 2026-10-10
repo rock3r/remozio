@@ -1,4 +1,5 @@
 #include "include/RemozioFrontendTerminal.h"
+#include "include/RemozioCommandStreamSource.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -40,8 +41,9 @@ static int signal_route(void) {
 int remozio_frontend_terminal_open(int source, remozio_frontend_terminal_t **output) {
     if (!output) return EINVAL;
     *output = NULL;
-    int retained = fcntl(source, F_DUPFD_CLOEXEC, 3);
-    if (retained < 0) return errno;
+    int retained = -1;
+    int source_error = remozio_command_stream_source_retain(source, &retained);
+    if (source_error) return source_error;
     struct stat original, reopened;
     char path[PATH_MAX];
     int descriptor = -1, error = 0;
