@@ -83,6 +83,15 @@ int remozio_command_pty_signal(remozio_command_pty_t *pty, int number) {
     if (pty->eof) return EPIPE;
     return ioctl(pty->master, TIOCSIG, number) < 0 ? errno : 0;
 }
+int remozio_command_pty_foreground_group(remozio_command_pty_t *pty, int *group) {
+    if (!pty || !group) return EINVAL;
+    *group = 0;
+    if (pty->eof) return 0;
+    pid_t observed = tcgetpgrp(pty->master);
+    if (observed < 0) return errno == EIO || errno == ENXIO || errno == ENOTTY ? 0 : errno;
+    if (observed > 0) *group = observed;
+    return 0;
+}
 int remozio_command_pty_eof_sequence(remozio_command_pty_t *pty, unsigned char bytes[2], size_t *count) {
     if (!pty || !bytes || !count) return EINVAL;
     *count = 0;

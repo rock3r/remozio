@@ -54,6 +54,9 @@ final class FrontendRelayTestTerminal: CommandFrontendTerminalIO {
 
 private final class FrontendRelayTestChannel: CommandFrontendExecutionChannel {
     var executionIOMode: CommandIOMode? = .pty
+    var supportsCurrentJobQueries = false
+    func requestCurrentJob(timeoutMilliseconds: UInt32) throws -> Bool { throw MachCommandHandshakeError.incompatible }
+    func invalidateCurrentJobQuery() {}
     var events: [CommandExecutionStreamEvent] = []
     var inputCounts: [Int] = []
     var acceptedInput = Data(), attemptedInput: [Data] = []
@@ -63,7 +66,7 @@ private final class FrontendRelayTestChannel: CommandFrontendExecutionChannel {
     var pollCalls = 0, closeCalls = 0
     var controlError: Error?
     var pollError: Error?
-    func pollStreamEvent(timeoutMilliseconds: UInt32) throws -> CommandExecutionStreamEvent? {
+    func pollStreamEvent(timeoutMilliseconds: UInt32, nonblocking: Bool) throws -> CommandExecutionStreamEvent? {
         pollCalls += 1
         if let pollError { throw pollError }
         return events.isEmpty ? nil : events.removeFirst()
@@ -162,6 +165,8 @@ final class CommandFrontendRelayTests: XCTestCase {
         XCTAssertEqual(terminal.written, bytes.prefix(2)); XCTAssertEqual(channel.ackCalls, 0)
         let polls = channel.pollCalls
         guard case .waiting = try relay.advance() else { return XCTFail("Blocked output must retain its suffix") }
+        XCTAssertFalse(relay.waitInterests.result); XCTAssertTrue(relay.waitInterests.write)
+        XCTAssertTrue(relay.waitInterests.read)
         XCTAssertEqual(channel.pollCalls, polls); XCTAssertEqual(channel.ackCalls, 0)
         _ = try relay.advance(); XCTAssertEqual(terminal.written, bytes); XCTAssertEqual(channel.ackCalls, 0)
         _ = try relay.advance(); _ = try relay.advance(); _ = try relay.advance(); _ = try relay.advance()
@@ -180,6 +185,8 @@ final class CommandFrontendRelayTests: XCTestCase {
         _ = try relay.advance()
         XCTAssertEqual(channel.attemptedInput, [input])
         XCTAssertTrue(channel.acceptedInput.isEmpty); XCTAssertTrue(terminal.written.isEmpty)
+        XCTAssertTrue(relay.waitInterests.controlRetry); XCTAssertFalse(relay.waitInterests.read)
+        XCTAssertFalse(relay.waitInterests.result); XCTAssertTrue(relay.waitInterests.write)
         XCTAssertEqual(channel.pollCalls, polls); XCTAssertEqual(channel.ackCalls, 0)
         _ = try relay.advance()
         XCTAssertEqual(channel.attemptedInput, [input, input]); XCTAssertEqual(channel.acceptedInput, input)
@@ -196,10 +203,16 @@ final class CommandFrontendRelayTests: XCTestCase {
         let relay = try CommandFrontendRelay(channel: channel, terminal: terminal)
         _ = try relay.advance()
         guard case .foregroundRequired = try relay.advance() else { return XCTFail("The owner must not take foreground") }
+        XCTAssertFalse(relay.waitInterests.result); XCTAssertFalse(relay.waitInterests.read)
+        XCTAssertFalse(relay.waitInterests.write); XCTAssertTrue(relay.waitInterests.foregroundRetry)
         XCTAssertEqual(terminal.activateCalls, 0); XCTAssertEqual(terminal.readCalls, 0)
         terminal.foreground = true; _ = try relay.advance()
+        XCTAssertTrue(relay.waitInterests.result); XCTAssertTrue(relay.waitInterests.read)
+        XCTAssertFalse(relay.waitInterests.foregroundRetry)
         XCTAssertTrue(relay.needsTerminalRestoration)
         try relay.prepareForSuspension(); XCTAssertFalse(relay.needsTerminalRestoration)
+        XCTAssertFalse(relay.waitInterests.result); XCTAssertFalse(relay.waitInterests.read)
+        XCTAssertFalse(relay.waitInterests.write); XCTAssertFalse(relay.waitInterests.foregroundRetry)
         guard case .suspended = try relay.advance() else { return XCTFail("Only explicit resume permits activation") }
         relay.resume(); _ = try relay.advance(); XCTAssertEqual(terminal.activateCalls, 2)
         terminal.foreground = false

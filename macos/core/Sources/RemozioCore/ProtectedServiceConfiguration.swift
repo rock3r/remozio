@@ -12,8 +12,14 @@ public enum ProtectedServiceConfiguration {
         return try read(anchor: "/", relativePath: String(path.dropFirst()), owner: 0)
     }
 
+    /// Public metadata permits read access while retaining protected ownership, ancestry, ACL and identity checks.
+    static func readPublic(path: String) throws -> Data {
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try read(anchor: "/", relativePath: String(path.dropFirst()), owner: 0, privateFile: false)
+    }
+
     /// Fixture entry point. Production always walks from the filesystem root with UID 0.
-    static func read(anchor: String, relativePath: String, owner: uid_t) throws -> Data {
+    static func read(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool = true) throws -> Data {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !anchor.utf8.contains(0),
               anchor.utf8.count + relativePath.utf8.count + 1 < Int(PATH_MAX),
@@ -28,7 +34,7 @@ public enum ProtectedServiceConfiguration {
             do {
                 var info = stat()
                 guard fstat(fd, &info) == 0 else { throw JournalLeaseError.system(errno) }
-                try ProtectedStorageMetadata.validate(fd, info, directory: directory, privateObject: !directory,
+                try ProtectedStorageMetadata.validate(fd, info, directory: directory, privateObject: !directory && privateFile,
                     owner: owner, ancestorOwner: owner)
                 nodes.append(Node(fd: fd, parent: parent, name: name, info: info, directory: directory))
             } catch { _ = Darwin.close(fd); throw error }
@@ -58,7 +64,7 @@ public enum ProtectedServiceConfiguration {
             guard held.st_dev == node.info.st_dev, held.st_ino == node.info.st_ino,
                   named.st_dev == held.st_dev, named.st_ino == held.st_ino,
                   (named.st_mode & S_IFMT) == (node.directory ? S_IFDIR : S_IFREG) else { throw JournalLeaseError.identityChanged }
-            try ProtectedStorageMetadata.validate(node.fd, held, directory: node.directory, privateObject: !node.directory,
+            try ProtectedStorageMetadata.validate(node.fd, held, directory: node.directory, privateObject: !node.directory && privateFile,
                 owner: owner, ancestorOwner: owner)
             if !node.directory {
                 guard held.st_size == node.info.st_size,

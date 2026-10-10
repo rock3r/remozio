@@ -8,6 +8,7 @@ final class CommandMonitorProtocolTests: XCTestCase {
     private let jobTag = UInt32(REMOZIO_MONITOR_JOB_STATE.rawValue)
     private let reapedTag = UInt32(REMOZIO_MONITOR_TARGET_REAPED.rawValue)
     private let failureTag = UInt32(REMOZIO_MONITOR_FAILURE.rawValue)
+    private let appliedTag = UInt32(REMOZIO_MONITOR_CONTROL_APPLIED.rawValue)
     private let stoppedFlag = UInt32(REMOZIO_MONITOR_STOPPED.rawValue)
     private let knownFlag = UInt32(REMOZIO_MONITOR_TRACING_KNOWN.rawValue)
     private let tracedFlag = UInt32(REMOZIO_MONITOR_TRACED.rawValue)
@@ -54,7 +55,7 @@ final class CommandMonitorProtocolTests: XCTestCase {
     }
 
     func testCanonicalPreparedRecordUsesExplicitVersionAndNetworkByteOrder() throws {
-        let expected = "524d4d310000000100000001000000080000002a00000000000000000000000000000000000000010000000000000000000000006553f10000000000000f423f"
+        let expected = "524d4d310000000200000001000000080000002a00000000000000000000000000000000000000010000000000000000000000006553f10000000000000f423f"
         XCTAssertEqual(try encode(prepared()).map { String(format: "%02x", $0) }.joined(), expected)
         XCTAssertEqual(REMOZIO_MONITOR_RECORD_BYTES, 64)
     }
@@ -233,12 +234,88 @@ final class CommandMonitorProtocolTests: XCTestCase {
         XCTAssertEqual(state.latest.sequence, 1); XCTAssertEqual(decoded.sequence, 0)
     }
 
+    func testControlApplicationWatermarkRoundTripsWithoutChangingLifecycleEncoding() throws {
+        var record = event(appliedTag, sequence: 3)
+        record.applied_control_sequence = 4
+        let bytes = try encode(record)
+        XCTAssertEqual(bytes[11], 5)
+        XCTAssertEqual(Array(bytes[40..<48]), [0, 0, 0, 0, 0, 0, 0, 4])
+        var decoded = remozio_monitor_record_t()
+        XCTAssertEqual(bytes.withUnsafeBytes { remozio_monitor_record_decode($0.baseAddress, $0.count, &decoded) }, 0)
+        XCTAssertEqual(decoded.applied_control_sequence, 4)
+        XCTAssertEqual(decoded.job_revision, 0)
+        XCTAssertEqual(try encode(decoded), bytes)
+        var invalid = [record, record, record, record, record]
+        invalid[0].applied_control_sequence = 0
+        invalid[1].job_revision = 1
+        invalid[2].detail = UInt32(SIGCONT)
+        invalid[3].flags |= stoppedFlag
+        invalid[4].tag = jobTag; invalid[4].job_revision = 1
+        for var candidate in invalid {
+            var output = [UInt8](repeating: 0, count: 64)
+            XCTAssertEqual(remozio_monitor_record_encode(&candidate, &output), EPROTO)
+        }
+    }
+
+    func testMonitorAndControlChannelsRejectThePreviousPrivateVersion() throws {
+        var bytes = try encode(prepared()), record = remozio_monitor_record_t()
+        bytes[7] = 1
+        XCTAssertEqual(bytes.withUnsafeBytes { remozio_monitor_record_decode($0.baseAddress, $0.count, &record) }, EPROTO)
+        XCTAssertEqual(record.sequence, 0)
+        var control = remozio_monitor_control_t(), decoded = remozio_monitor_control_t()
+        control.tag = UInt32(REMOZIO_MONITOR_SIGNAL.rawValue); control.signal = UInt32(SIGCONT); control.sequence = 1
+        var command = [UInt8](repeating: 0, count: 32)
+        XCTAssertEqual(remozio_monitor_control_encode(&control, &command), 0)
+        command[7] = 1
+        XCTAssertEqual(command.withUnsafeBytes { remozio_monitor_control_decode($0.baseAddress, $0.count, &decoded) }, EPROTO)
+        XCTAssertEqual(decoded.sequence, 0)
+    }
+
+    func testApplicationAcknowledgmentsRetainStoppedStateAndRejectReplayOrChangedBinding() {
+        var state = released()
+        accept(&state, stop(revision: 7))
+        var record = event(appliedTag, sequence: 3)
+        record.applied_control_sequence = 1
+        accept(&state, record)
+        XCTAssertEqual(state.latest.tag, jobTag)
+        XCTAssertEqual(state.latest.detail, UInt32(SIGSTOP))
+        XCTAssertEqual(state.latest.sequence, 3)
+        XCTAssertEqual(state.last_job_revision, 7)
+        XCTAssertEqual(state.last_applied_control_sequence, 1)
+        record.sequence = 4
+        reject(&state, record)
+        record.applied_control_sequence = 5
+        record.target_pid += 1; reject(&state, record); record.target_pid -= 1
+        record.birth_seconds += 1; reject(&state, record); record.birth_seconds -= 1
+        accept(&state, record)
+        XCTAssertEqual(state.last_applied_control_sequence, 5)
+        accept(&state, event(jobTag, sequence: 5, revision: 8))
+        XCTAssertEqual(state.last_job_revision, 8)
+        XCTAssertEqual(state.last_applied_control_sequence, 5)
+        var terminal = event(reapedTag, sequence: 6, revision: 8); terminal.detail = UInt32(SIGKILL)
+        accept(&state, terminal)
+        record.sequence = 7; record.applied_control_sequence = 6; reject(&state, record)
+    }
+
+    func testApplicationAcknowledgmentCannotGrantReleaseOrRecoverFailedState() {
+        var state = remozio_monitor_stream_t(); remozio_monitor_stream_init(&state)
+        accept(&state, prepared())
+        var record = event(appliedTag, sequence: 2); record.applied_control_sequence = 1
+        reject(&state, record)
+        XCTAssertFalse(state.release_attempted)
+        XCTAssertEqual(state.last_applied_control_sequence, 0)
+        XCTAssertEqual(remozio_monitor_stream_note_release(&state), 0)
+        var failure = event(failureTag, sequence: 2); failure.detail = UInt32(EIO)
+        accept(&state, failure)
+        record.sequence = 3; reject(&state, record)
+    }
+
     func testCanonicalVersionedControlRecordsCarryNoTargetPID() {
         var control = remozio_monitor_control_t()
         control.tag = UInt32(REMOZIO_MONITOR_CANCEL.rawValue); control.sequence = 1
         var bytes = [UInt8](repeating: 0, count: Int(REMOZIO_MONITOR_CONTROL_BYTES))
         XCTAssertEqual(remozio_monitor_control_encode(&control, &bytes), 0)
-        XCTAssertEqual(bytes.map { String(format: "%02x", $0) }.joined(), "524d4b3100000001000000020000000000000000000000010000000000000000")
+        XCTAssertEqual(bytes.map { String(format: "%02x", $0) }.joined(), "524d4b3100000002000000020000000000000000000000010000000000000000")
         var decoded = remozio_monitor_control_t()
         XCTAssertEqual(bytes.withUnsafeBytes { remozio_monitor_control_decode($0.baseAddress, $0.count, &decoded) }, 0)
         XCTAssertEqual(decoded.tag, control.tag); XCTAssertEqual(decoded.sequence, 1); XCTAssertEqual(decoded.signal, 0)

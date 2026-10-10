@@ -38,7 +38,13 @@ public struct CommandHandshakeCapabilities: Equatable, Sendable {
     /// Explicit schema-3 direct streams with private controls and target job state.
     public static let mappedPipeJobExecutionControls = CommandHandshakeCapabilities(knownWire: [9], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
-    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2, 3, 4, 5, 6, 7, 8, 9], submission: CommandSubmission.supportedSchemaVersions,
+    /// Mapped PTY routing with nonce-bound current job queries. Historical profiles keep their original meanings.
+    public static let mappedTerminalCurrentJobExecution = CommandHandshakeCapabilities(knownWire: [10], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
+    /// Separate stdio controls with nonce-bound current job queries.
+    public static let mappedPipeCurrentJobExecutionControls = CommandHandshakeCapabilities(knownWire: [11], submission: CommandSubmission.supportedSchemaVersions,
+        input: [UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
+    fileprivate static let implemented = CommandHandshakeCapabilities(knownWire: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], submission: CommandSubmission.supportedSchemaVersions,
         input: [UInt64(MachCommandCallerReceiver.inputCarrierVersion), UInt64(MachCommandCallerReceiver.admissionInputCarrierVersion), UInt64(MachCommandCallerReceiver.ioInputCarrierVersion), UInt64(MachCommandCallerReceiver.mappedIOInputCarrierVersion)])
     private init(knownWire: Set<UInt64>, submission: Set<UInt64>, input: Set<UInt64>) {
         wireVersions = knownWire; submissionSchemaVersions = submission; inputCarrierVersions = input
@@ -111,15 +117,16 @@ public struct CommandHandshakeProfile: Equatable, Sendable {
         return Self(wireVersion: wire, submissionSchemaVersion: submission, inputCarrierVersion: input,
             callerBinding: binding, macID: mac, accountID: account)
     }
-    var supportsMappedLayout: Bool { [8, 9].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 5 }
+    var supportsMappedLayout: Bool { [8, 9, 10, 11].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 5 }
     var supportsAdmissionResults: Bool { supportsMappedLayout || submissionSchemaVersion == 1 &&
         ((wireVersion == 2 && inputCarrierVersion == 3) || ([3, 4, 5, 6, 7].contains(wireVersion) && inputCarrierVersion == 4)) }
     var supportsExecutionChannels: Bool { supportsMappedLayout || [3, 4, 5, 6, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
-    var supportsStreamingExecution: Bool { supportsMappedLayout && wireVersion == 8 ||
+    var supportsStreamingExecution: Bool { supportsMappedLayout && [8, 10].contains(wireVersion) ||
         [4, 6].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
-    var supportsPipeExecutionControls: Bool { supportsMappedLayout && wireVersion == 9 ||
+    var supportsPipeExecutionControls: Bool { supportsMappedLayout && [9, 11].contains(wireVersion) ||
         [5, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
     var supportsJobState: Bool { supportsMappedLayout || [6, 7].contains(wireVersion) && submissionSchemaVersion == 1 && inputCarrierVersion == 4 }
+    var supportsCurrentJob: Bool { supportsMappedLayout && [10, 11].contains(wireVersion) }
     var supportsExecutionControls: Bool { supportsStreamingExecution || supportsPipeExecutionControls }
     func supported(by capabilities: CommandHandshakeCapabilities) -> Bool {
         let understood = (wireVersion == 1 && submissionSchemaVersion == 1 && [2, 3].contains(inputCarrierVersion)) || supportsAdmissionResults
@@ -197,7 +204,7 @@ public final class RetainedCommandHandshake {
         let inputs = offer.capabilities.inputCarrierVersions.intersection(capabilities.inputCarrierVersions).sorted(by: >)
         let selected = wires.flatMap { wire in inputs.compactMap { input -> (UInt64, UInt64)? in
             (wire == 1 && [2, 3].contains(input)) || (wire == 2 && input == 3) ||
-                ([3, 4, 5, 6, 7].contains(wire) && input == 4) || ([8, 9].contains(wire) && input == 5) ? (wire, input) : nil
+                ([3, 4, 5, 6, 7].contains(wire) && input == 4) || ([8, 9, 10, 11].contains(wire) && input == 5) ? (wire, input) : nil
         } }.first
         guard let (wire, input) = selected,
               let submission = offer.capabilities.submissionSchemaVersions.intersection(capabilities.submissionSchemaVersions).max() else {

@@ -4,13 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #define REMOZIO_MONITOR_RECORD_BYTES 64
-#define REMOZIO_MONITOR_WIRE_VERSION 1
+#define REMOZIO_MONITOR_WIRE_VERSION 2
 /* Private inherited pipes only. These records do not grant authority or authenticate an executable. */
 enum remozio_monitor_tag {
     REMOZIO_MONITOR_PREPARED = 1,
     REMOZIO_MONITOR_JOB_STATE = 2,
     REMOZIO_MONITOR_TARGET_REAPED = 3,
-    REMOZIO_MONITOR_FAILURE = 4
+    REMOZIO_MONITOR_FAILURE = 4,
+    REMOZIO_MONITOR_CONTROL_APPLIED = 5
 };
 enum remozio_monitor_flags {
     REMOZIO_MONITOR_STOPPED = 1,
@@ -23,6 +24,8 @@ enum remozio_monitor_flags {
 typedef struct {
     uint32_t tag, flags, target_pid, detail, stop_code;
     uint64_t sequence, job_revision, birth_seconds, birth_microseconds;
+    /* Tag 5 uses wire offset 40 for this watermark. Other tags require zero here. */
+    uint64_t applied_control_sequence;
 } remozio_monitor_record_t;
 /* Exact version, canonical fields, and tag-specific shape. A decoder does not establish process ownership. */
 int remozio_monitor_record_encode(const remozio_monitor_record_t *record, unsigned char bytes[REMOZIO_MONITOR_RECORD_BYTES]);
@@ -30,6 +33,7 @@ int remozio_monitor_record_decode(const void *bytes, size_t count, remozio_monit
 typedef struct {
     remozio_monitor_record_t latest;
     uint64_t last_job_revision;
+    uint64_t last_applied_control_sequence;
     uint32_t failure_error;
     bool prepared, release_attempted, target_release_attempted, failed, reaped;
 } remozio_monitor_stream_t;

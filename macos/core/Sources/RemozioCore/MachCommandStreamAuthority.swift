@@ -13,6 +13,7 @@ final class MachCommandStreamAuthority {
     private var closed = false
     private var observedJob: CommandJobStatePayload?
     private var pendingJob: CommandJobStatePayload?
+    private var pendingCurrentJobNonce: Data?
     private(set) var outputDrained = false
 
     init(binding: CommandStreamBinding, original: RetainedCommandCaller, terminal: MachCommandReplyRight) throws {
@@ -54,6 +55,17 @@ final class MachCommandStreamAuthority {
         try checkPolicy()
         if try send(.jobState(pendingJob)) { self.pendingJob = nil }
     }
+    /// Recompute unsent replies on every attempt. Backpressure must not retain an older stopped confirmation.
+    func flushCurrentJob(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkPolicy: () throws -> Void,
+                         currentState: () throws -> CommandCurrentJobState) throws {
+        guard !closed, outgoing.next > 0, let nonce = pendingCurrentJobNonce else { return }
+        try original.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        try checkPolicy()
+        let value = CommandCurrentJobPayload(nonce: nonce, state: try currentState())
+        try original.recheck(expression: expression, userID: userID, auditSessionID: auditSessionID)
+        try checkPolicy()
+        if try send(.currentJob(value)) { pendingCurrentJobNonce = nil }
+    }
     func receiveControl(currentPolicy: XPCPeerPolicy) throws -> CommandStreamFrame.Body? {
         try receiveControl(expression: currentPolicy.requirement, userID: currentPolicy.expectedUserID,
             auditSessionID: currentPolicy.expectedAuditSessionID)
@@ -77,12 +89,16 @@ final class MachCommandStreamAuthority {
         if frame.body == .outputDrained {
             guard outgoing.ended, !outputDrained else { throw CommandStreamError.closed }
         }
+        if case .queryCurrentJob = frame.body {
+            guard pendingCurrentJobNonce == nil else { throw CommandStreamError.capacity }
+        }
         try incoming.accept(frame)
         if frame.body == .outputDrained { outputDrained = true }
+        if case .queryCurrentJob(let nonce) = frame.body { pendingCurrentJobNonce = nonce }
         return frame.body
     }
     func close() {
         guard !closed else { return }
-        closed = true; pendingJob = nil; endpoint.close(); output.close()
+        closed = true; pendingJob = nil; pendingCurrentJobNonce = nil; endpoint.close(); output.close()
     }
 }

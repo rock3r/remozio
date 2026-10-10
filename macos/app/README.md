@@ -4,6 +4,11 @@ The Xcode target builds `Remozio.app` for macOS 26 and Apple Silicon. This is th
 
 The SwiftUI app has a main window, a menu bar entry, and a native Settings window. The menu can reopen the main window and quit the app. Settings can hide the menu entry; the Dock and Applications remain available. That preference uses the current user's defaults. It carries no enrollment or approval authority.
 
+Settings also define defaults for the command caller: I/O mode, disconnect behavior, readiness wait, connection backoff, control timeout, and retry intervals.
+The form reports invalid durations and contradictory backoff values.
+These preferences apply to new CLI invocations and carry no authority pins or installation identity.
+CLI integration is still in progress. These settings do not activate a command service or change approval expiry.
+
 The app shows an explicit unconfigured state. It has no pairing, routing controls, network listeners, or approval actions yet. It does not load the experiment's service manifests, register services, request permissions, or start persistent background services. Privileged services still need the protected installation and identity gates before integration.
 
 ## Build checks
@@ -73,3 +78,36 @@ Private status buffering preserves cancellation and reaping when Root stops read
 The [monitor contract](../../docs/macos-command-monitor.md) defines release, control, descriptor and cleanup behavior.
 The authority does not launch this helper yet. Its native parent, protected installation and current elevation policy remain required.
 The packaging check verifies both helper identities and non-root refusal before any private input is read.
+
+## Embedded command frontend
+
+The app embeds the `RemozioCommandFrontend` target as `Contents/Helpers/remozio`.
+Debug uses `dev.remozio.command-frontend.debug`; Release uses `dev.remozio.command-frontend`.
+Both tools preserve actual C argv bytes and require the separator before the target command.
+
+```sh
+remozio run [options] -- executable [arguments...]
+remozio sudo [options] -- executable [arguments...]
+```
+
+The tool loads public installation metadata from `/Library/Application Support/Remozio/frontend.cbor`.
+Root ownership and protected local ancestors remain required.
+User settings come from the corresponding app's persistent preference domain.
+They cannot replace installation identity or authority pins.
+
+The CLI uses bootstrap discovery, authenticated mapped admission, and the original execution session.
+It reloads protected pins before each fresh handshake under one readiness deadline.
+Only verified busy refusals permit another submission.
+An admitted request keeps its original policy and channel.
+The loop relays PTY traffic or preserves separate pipe streams; it executes no target locally.
+
+The packaging check verifies signatures, security generation, and byte-identical embedding.
+It exercises only help and syntax refusal, including a raw non-UTF-8 argument.
+Those paths consume no command stdin, write no command stdout, and log no target arguments.
+The check does not submit a valid command or activate a service.
+
+This integration is unfinished and must not be activated as a privileged installation yet.
+The actual CLI loop passes composed anonymous-Mach and private-terminal tests, including verified-stop sampling, cleanup retries, and stop/resume.
+Those tests model the Root peer. Composed real-target reconciliation and installed service discovery remain release gates.
+Headless PTY output routing remains a pending user choice.
+Setup provisioning, CLI path installation, Developer ID signing, and real-device approval tests remain separate gates.

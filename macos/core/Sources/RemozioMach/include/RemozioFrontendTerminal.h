@@ -34,6 +34,9 @@ int remozio_frontend_terminal_write(remozio_frontend_terminal_t * _Nonnull termi
     const void * _Nonnull bytes, size_t length, size_t * _Nonnull count);
 /* A fresh foreground check grants no foreground takeover or execution authority. */
 int remozio_frontend_terminal_check_foreground(remozio_frontend_terminal_t * _Nonnull terminal);
+/* Borrows the independent descriptor for serialized readiness observation only. */
+int remozio_frontend_terminal_descriptor(remozio_frontend_terminal_t * _Nonnull terminal,
+    int * _Nonnull output);
 /* Copies current dimensions without changing them or taking foreground. */
 int remozio_frontend_terminal_dimensions(remozio_frontend_terminal_t * _Nonnull terminal,
     struct winsize * _Nonnull size);

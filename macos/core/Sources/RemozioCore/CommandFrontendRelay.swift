@@ -9,12 +9,16 @@ public enum CommandFrontendRelayError: Error, Equatable {
 public enum CommandFrontendRelayObservation {
     case waiting, progress, foregroundRequired, interrupted, suspended
     case jobState(VerifiedCommandExecutionJobObservation)
+    case currentJob(VerifiedCommandCurrentJobObservation)
     case terminal(VerifiedCommandTerminalResult)
 }
 
 protocol CommandFrontendExecutionChannel: AnyObject {
     var executionIOMode: CommandIOMode? { get }
-    func pollStreamEvent(timeoutMilliseconds: UInt32) throws -> CommandExecutionStreamEvent?
+    var supportsCurrentJobQueries: Bool { get }
+    func requestCurrentJob(timeoutMilliseconds: UInt32) throws -> Bool
+    func invalidateCurrentJobQuery()
+    func pollStreamEvent(timeoutMilliseconds: UInt32, nonblocking: Bool) throws -> CommandExecutionStreamEvent?
     func forwardInput(_ bytes: Data) throws -> Int
     func finishInput() throws -> Bool
     func acknowledgeOutput() throws -> Bool
@@ -25,6 +29,14 @@ protocol CommandFrontendExecutionChannel: AnyObject {
 }
 
 extension RetainedCommandExecutionSession: CommandFrontendExecutionChannel {}
+
+struct CommandFrontendWaitInterests {
+    let result: Bool
+    let read: Bool
+    let write: Bool
+    let controlRetry: Bool
+    let foregroundRetry: Bool
+}
 
 /// Relays the original admitted channel. It cannot approve, execute, resubmit or take terminal foreground.
 /// The CLI serializes every call and owns the signal loop. Poll waits never limit the command lifetime.
@@ -59,14 +71,31 @@ public final class CommandFrontendRelay {
     }
     deinit { channel.close(); terminal?.closeReportingFailure() }
     public var needsTerminalRestoration: Bool { terminal?.needsRestore ?? false }
+    var acceptsControls: Bool { opened && !closed }
+    var supportsCurrentJobQueries: Bool { channel.supportsCurrentJobQueries }
+    func requestCurrentJob(timeoutMilliseconds: UInt32) throws -> Bool {
+        guard acceptsControls else { return false }
+        do { return try channel.requestCurrentJob(timeoutMilliseconds: timeoutMilliseconds) }
+        catch { retireAfterFailure(); throw error }
+    }
+    func invalidateCurrentJobQuery() { channel.invalidateCurrentJobQuery() }
+    var waitInterests: CommandFrontendWaitInterests {
+        let terminalActive = mode == .pty && opened && active && !suspended && !closed
+        return .init(result: !closed && !suspended && output.isEmpty && (!opened || mode == .pipes || active),
+            read: terminalActive && !outputEnded && !inputEnded && input.isEmpty && inputCapacity > 0,
+            write: terminalActive && !output.isEmpty,
+            controlRetry: !closed && !suspended && (!input.isEmpty || pendingSize != nil ||
+                inputEnded && !inputEndSent && !outputEnded || outputEnded && output.isEmpty && !outputAcknowledged),
+            foregroundRetry: mode == .pty && !suspended && (opened && !active || terminalResult != nil && needsTerminalRestoration))
+    }
 
     /// Perform one bounded turn. The caller waits between idle turns and yields to its local signal loop on interruption.
-    public func advance(timeoutMilliseconds: UInt32 = 250) throws -> CommandFrontendRelayObservation {
+    public func advance(timeoutMilliseconds: UInt32 = 250, nonblocking: Bool = false) throws -> CommandFrontendRelayObservation {
         guard (1...60_000).contains(timeoutMilliseconds) else { throw CommandFrontendRelayError.invalidConfiguration }
         if terminalResult != nil { return try finishTerminal() }
         guard !closed else { throw CommandFrontendRelayError.closed }
         if suspended { return .suspended }
-        do { return try turn(timeoutMilliseconds: timeoutMilliseconds) }
+        do { return try turn(timeoutMilliseconds: timeoutMilliseconds, nonblocking: nonblocking) }
         catch CommandExecutionStreamPollError.interrupted {
             active = false
             if terminal?.needsRestore == true { try? terminal?.restore() }
@@ -85,7 +114,7 @@ public final class CommandFrontendRelay {
             throw error
         }
     }
-    private func turn(timeoutMilliseconds: UInt32) throws -> CommandFrontendRelayObservation {
+    private func turn(timeoutMilliseconds: UInt32, nonblocking: Bool) throws -> CommandFrontendRelayObservation {
         var progressed = false
         if opened, let terminal {
             if !(try terminal.isForeground()) {
@@ -138,7 +167,7 @@ public final class CommandFrontendRelay {
         // Retain one output chunk while allowing independent input and controls to progress.
         if !output.isEmpty { return progressed ? .progress : .waiting }
         if progressed { return .progress }
-        guard let event = try channel.pollStreamEvent(timeoutMilliseconds: timeoutMilliseconds) else { return .waiting }
+        guard let event = try channel.pollStreamEvent(timeoutMilliseconds: timeoutMilliseconds, nonblocking: nonblocking) else { return .waiting }
         switch event {
         case .opened:
             guard !opened else { throw CommandFrontendRelayError.invalidProgress }
@@ -158,6 +187,8 @@ public final class CommandFrontendRelay {
         case .jobState(let observation):
             // The CLI must reconcile the current local signal and foreground state before any suspension.
             return .jobState(observation)
+        case .currentJob(let observation):
+            return .currentJob(observation)
         case .terminal(let result):
             terminalResult = result; channel.close(); closed = true
             return try finishTerminal()
@@ -175,6 +206,11 @@ public final class CommandFrontendRelay {
     /// Restore before the CLI performs a cooperative stop. A failure leaves suspension incomplete and preserves cleanup.
     public func prepareForSuspension() throws {
         active = false; try terminal?.restore(); suspended = true
+    }
+    func prepareForConfirmedSuspension() throws -> Bool {
+        if let terminal, !(try terminal.isForeground()) { return false }
+        try prepareForSuspension()
+        return true
     }
     public func resume() { suspended = false }
     /// Known-zero sends can be retried by the CLI. These controls never submit or repeat a command.

@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <libproc.h>
 #include <limits.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <signal.h>
 #include <spawn.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 struct remozio_command_monitor {
     remozio_command_monitor_observation_t state;
+    pid_t parent;
     int configuration, status, release, control, events;
     unsigned char *frame, status_bytes[REMOZIO_MONITOR_RECORD_BYTES];
     size_t frame_count, written, status_count;
@@ -78,6 +80,7 @@ static int spawn_monitor(const char *path, const char *child, const void *frame,
     int configuration[2] = {-1,-1}, status[2] = {-1,-1}, release[2] = {-1,-1}, control[2] = {-1,-1};
     for (int i = 0; i < descriptor_count; ++i) copies[i] = -1;
     remozio_command_monitor_t *monitor = calloc(1, sizeof(*monitor)); if (!monitor) return ENOMEM;
+    monitor->parent = getpid();
     monitor->configuration = monitor->status = monitor->release = monitor->control = monitor->events = -1;
     remozio_monitor_stream_init(&monitor->state.status);
     monitor->frame_count = count; monitor->frame = malloc(count);
@@ -165,6 +168,45 @@ static int target_snapshot(remozio_command_monitor_t *monitor, const remozio_mon
     if ((record->flags & REMOZIO_MONITOR_BIRTH_KNOWN) && (snapshot->pbi_start_tvsec != record->birth_seconds || snapshot->pbi_start_tvusec != record->birth_microseconds)) return EPROTO;
     return 0;
 }
+int remozio_command_monitor_current_job(remozio_command_monitor_t *monitor, remozio_command_current_job_t *job) {
+    if (!monitor || !job) return EINVAL;
+    memset(job, 0, sizeof(*job));
+    if (getpid() != monitor->parent) return EPERM;
+    const remozio_command_monitor_observation_t *state = &monitor->state;
+    const remozio_monitor_record_t *record = &state->status.latest;
+    if (state->fault || state->cancelled || state->protocol_failed || !state->release_attempted ||
+        !state->target_kernel_registered || !state->target_exec_observed || state->target_exit_observed ||
+        state->monitor_reaped || state->monitor_ownership_lost || state->monitor_exit_observed || state->status_closed ||
+        !state->status.prepared || state->status.failed || state->status.reaped || !state->status.target_release_attempted ||
+        !(record->flags & REMOZIO_MONITOR_BIRTH_KNOWN) ||
+        state->status.last_applied_control_sequence != monitor->control_sequence) return 0;
+    struct proc_bsdinfo before, after;
+    if (target_snapshot(monitor, record, &before)) return 0;
+    mach_port_t name = MACH_PORT_NULL;
+    if (task_name_for_pid(mach_task_self(), (int)record->target_pid, &name) != KERN_SUCCESS) return 0;
+    mach_task_basic_info_data_t first = {0}, second = {0};
+    mach_msg_type_number_t first_count = MACH_TASK_BASIC_INFO_COUNT, second_count = MACH_TASK_BASIC_INFO_COUNT;
+    kern_return_t first_status = task_info(name, MACH_TASK_BASIC_INFO, (task_info_t)&first, &first_count);
+    kern_return_t second_status = task_info(name, MACH_TASK_BASIC_INFO, (task_info_t)&second, &second_count);
+    mach_port_deallocate(mach_task_self(), name);
+    if (first_status != KERN_SUCCESS || second_status != KERN_SUCCESS ||
+        first_count != MACH_TASK_BASIC_INFO_COUNT || second_count != MACH_TASK_BASIC_INFO_COUNT ||
+        first.suspend_count < 0 || first.suspend_count != second.suspend_count ||
+        target_snapshot(monitor, record, &after)) return 0;
+    if (before.pbi_status != after.pbi_status || before.pbi_pgid != after.pbi_pgid ||
+        (before.pbi_flags & PROC_FLAG_TRACED) != (after.pbi_flags & PROC_FLAG_TRACED)) return 0;
+    bool stopped = after.pbi_status == SSTOP && second.suspend_count > 0;
+    if (second.suspend_count > 0 && !stopped) return 0;
+    if (after.pbi_status != SSTOP && after.pbi_status != SRUN && after.pbi_status != SSLEEP) return 0;
+    if (stopped && (record->tag != REMOZIO_MONITOR_JOB_STATE || !(record->flags & REMOZIO_MONITOR_STOPPED) ||
+        !record->job_revision || !record->detail || record->detail >= NSIG)) return 0;
+    job->known = true; job->stopped = stopped;
+    job->traced = (after.pbi_flags & PROC_FLAG_TRACED) != 0;
+    job->original_group = after.pbi_pgid == record->target_pid;
+    job->job_revision = state->status.last_job_revision;
+    job->stop_signal = stopped ? record->detail : 0;
+    return 0;
+}
 static int register_target(remozio_command_monitor_t *monitor, const remozio_monitor_record_t *record) {
     struct proc_bsdinfo before, after;
     int error = target_snapshot(monitor, record, &before); if (error) return error;
@@ -194,6 +236,7 @@ static int pump_status(remozio_command_monitor_t *monitor) {
         if (monitor->status_count == sizeof(monitor->status_bytes)) {
             remozio_monitor_record_t record;
             int error = remozio_monitor_record_decode(monitor->status_bytes, sizeof(monitor->status_bytes), &record);
+            if (!error && record.tag == REMOZIO_MONITOR_CONTROL_APPLIED && record.applied_control_sequence > monitor->control_sequence) error = EPROTO;
             if (!error) error = remozio_monitor_stream_accept(&monitor->state.status, &record);
             if (error) return fail_status_protocol(monitor, error);
             monitor->status_count = 0;

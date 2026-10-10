@@ -16,6 +16,11 @@ typedef struct {
     bool protocol_failed;
     remozio_monitor_stream_t status;
 } remozio_command_monitor_observation_t;
+typedef struct {
+    bool known, stopped, traced, original_group;
+    uint32_t stop_signal;
+    uint64_t job_revision;
+} remozio_command_current_job_t;
 /* Both absolute helper paths must be verified by the serialized Root owner.
  * Borrow stdio and the retained directory without touching their shared flags.
  * The monitor owns target waitpid; this parent exclusively owns monitor waitpid.
@@ -35,6 +40,13 @@ int remozio_command_monitor_spawn_with_terminal(const char *monitor_path, const 
  * On failure, cancel and continue polling until the monitor retires. */
 int remozio_command_monitor_poll(remozio_command_monitor_t *monitor,
     remozio_command_monitor_observation_t *observation);
+/* Fresh BSD and read-only Mach task snapshots of the original birth-bound target.
+ * Consume no status or target wait event. Acquire no task-control right.
+ * Serialize with the monitor owner. Unknown includes unstable, unreleased, retired, or unbound state.
+ * Every queued signal must have a monitor application acknowledgment before this query can be known.
+ * This query grants no execution or signal authority and does not prove a terminal outcome.
+ * A stopped result still needs an authenticated fresh frontend exchange and private-terminal foreground checks. */
+int remozio_command_monitor_current_job(remozio_command_monitor_t *monitor, remozio_command_current_job_t *job);
 /* Consumed before one byte write, including failure. Requires no fault or cancellation,
  * complete configuration, prepared target and independent target kernel registration.
  * Root must separately consume the durable permit and finish policy/capture/code checks. */

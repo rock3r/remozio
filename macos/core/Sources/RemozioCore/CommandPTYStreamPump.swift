@@ -35,7 +35,8 @@ final class CommandPTYStreamPump {
     }
     // The callbacks run only within this bounded turn. The pump never retains its native process owner.
     func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, allowInput: Bool, checkCaller: () throws -> Void,
-              checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void) throws {
+              checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void,
+              currentJob: () throws -> CommandCurrentJobState = { .unknown }) throws {
         guard opened else { return }
         if connected {
             do {
@@ -51,12 +52,17 @@ final class CommandPTYStreamPump {
                     case .inputEnd: inputEnded = true
                     case .signal, .resize, .cancel: try applyControl(body)
                     case .outputDrained: break
+                    case .queryCurrentJob: break
                     default: throw CommandStreamError.malformed
                     }
                 }
             } catch { detach(); throw error }
         }
-        if connected { try channel.flushJobState(checkPolicy: checkControlPolicy) }
+        if connected {
+            try channel.flushCurrentJob(expression: expression, userID: userID, auditSessionID: auditSessionID,
+                checkPolicy: checkControlPolicy, currentState: currentJob)
+            try channel.flushJobState(checkPolicy: checkControlPolicy)
+        }
         for _ in 0..<4 {
             if allowInput { try pumpInput() }
             if connected, !outputEndSent, pendingCredit > 0 {
@@ -116,6 +122,7 @@ final class CommandPTYStreamPump {
         // Accepted input stays bounded and is flushed for a selected continuing command. Native cancellation belongs to the controller.
     }
     func signalForeground(_ number: Int32) throws { try pty.signalForeground(number) }
+    func foregroundGroup() throws -> pid_t? { try pty.foregroundGroup() }
     func resize(_ size: winsize) throws { try pty.resize(size) }
     func finishDelivery() { channel.close(); connected = false }
     func close() { channel.close(); pty.close() }

@@ -113,3 +113,67 @@ The installed frontend, terminal restoration and macOS 26 runtime remain separat
 The frontend must not suspend itself from a queued historical snapshot alone.
 Debugger attach and ownership changes remain tracked in [issue 250](https://github.com/rock3r/remozio/issues/250).
 Physical device and privileged end-to-end checks wait for the interactive handoff.
+
+## Fresh target state
+
+The native parent now provides a read-only query for its original retained target.
+It checks the target's birth identity and monitor parent before and after reading task information.
+It acquires a task-name right, reads the suspension count twice, and releases that right.
+It acquires no task-control right and consumes no target wait event or status record.
+Missing, retired, unstable, or unavailable evidence remains unknown.
+Queued signal controls also keep the result unknown until the monitor acknowledges their application.
+The acknowledgment uses [private monitor wire version 2](macos-command-monitor-protocol.md). It does not change historical frontend profiles.
+
+```mermaid
+flowchart TD
+    O[Original retained monitor owner] --> A{All queued controls acknowledged?}
+    A -->|No| U[Unknown]
+    A -->|Yes| B[Check target birth and parent]
+    B --> N[Acquire read-only task-name right]
+    N --> M[Read task suspension count twice]
+    M --> R[Release name right and recheck target]
+    R --> K{Stable evidence available?}
+    K -->|No| U[Unknown]
+    K -->|Yes| C[Compare BSD state with actual suspension]
+    C --> S[Current stopped or running observation]
+```
+
+BSD status alone does not establish current suspension on the local runtime.
+A disposable child can resume through SIGCONT inside `sigwait` while BSD status remains SSTOP.
+Its actual continuation marker proves resumed execution; the task suspension count becomes zero.
+
+| Owned-child probe | Before SIGCONT: BSD / suspension count | After continuation marker: BSD / suspension count |
+| --- | --- | --- |
+| Returning handler | SSTOP / 1 | SRUN / 0 |
+| `sigwait` | SSTOP / 1 | SSTOP / 0 |
+
+Both children were explicitly reaped on macOS 27.0.1, with an arm64 macOS 26 deployment target.
+The repository fixture is `sigwait-current-state.c`; `FrontendRuntimeTests` runs it in disposable processes.
+The first local measurement is retained in `/tmp/remozio-sigwait-state-probe.jsonl`.
+This does not establish behavior on the supported macOS 26 runtime or signed installed targets.
+
+Apple's current source resumes the task in its SIGCONT wait branch without assigning SRUN there.
+That difference suggests the bookkeeping explanation; it does not identify the exact running kernel source.
+See the [SIGCONT wait branch in XNU](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c).
+
+The fresh query requires actual suspension as well as BSD stopped status before reporting a current stop.
+A zero suspension count can disprove the retained BSD stopped status.
+The returned stop signal belongs to the retained native revision; it does not prove a historical stop cause.
+
+The monitor fixture verifies a current stop, then queues SIGCONT through the original control pipe.
+The query remains unknown before Root consumes the application acknowledgment. Once acknowledged, fresh kernel evidence must report running.
+The fixture also pauses its owned monitor before queuing SIGCONT. This makes the delayed application window explicit in both I/O modes.
+An acknowledgment for an unqueued control closes the original status channel and leaves the query unknown.
+A negative control replaces the query with cached state; that control fails this probe and still reaps its owned monitor.
+
+The `sigwait` target also resisted SIGTERM retirement in the measured sequence.
+The fixture explicitly uses SIGKILL for final retirement and verifies that actual signal outcome.
+This changes no production signal policy and introduces no automatic substitution of SIGKILL for SIGTERM.
+
+The [fresh confirmation transport](macos-command-current-job.md) now uses explicit profiles 10 and 11.
+It binds a query nonce and rechecks the original caller and current protected policy.
+The CLI selects these profiles and reconciles the fresh result with its local signal ticket and terminal foreground ownership.
+The [frontend runtime](macos-command-frontend-runtime.md) records its disposable stop/resume composition checks and remaining installed-service gates.
+A Root control-pipe write does not establish that the monitor has applied an earlier SIGCONT.
+The native query now preserves that control order through the application watermark.
+Current profiles and their historical snapshot meanings remain unchanged.

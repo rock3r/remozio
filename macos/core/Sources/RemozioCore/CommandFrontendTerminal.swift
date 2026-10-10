@@ -52,6 +52,11 @@ public final class CommandFrontendTerminal: CommandFrontendTerminalIO {
         }
     }
     public var needsRestore: Bool { handle.map { remozio_frontend_terminal_needs_restore($0) } ?? false }
+    func borrowedReadinessDescriptor() throws -> Int32 {
+        var descriptor: Int32 = -1
+        try check(remozio_frontend_terminal_descriptor(try owner(), &descriptor))
+        return descriptor
+    }
     public func isForeground() throws -> Bool {
         let status = remozio_frontend_terminal_check_foreground(try owner())
         if status == EAGAIN { return false }

@@ -193,6 +193,8 @@ func transfer(submission: CommandSubmission, handshake: sending VerifiedCommandH
         probes["terminal-proof-forge"] = ("import RemozioCore\nfunc forge() -> VerifiedCommandTerminalResult { VerifiedCommandTerminalResult() }\n", False)
         probes["job-proof-forge"] = ("import RemozioCore\nfunc forge() -> VerifiedCommandExecutionJobObservation { VerifiedCommandExecutionJobObservation() }\n", False)
         probes["job-proof-read"] = ("import RemozioCore\nfunc read(_ job: VerifiedCommandExecutionJobObservation) -> CommandExecutionJobState { job.state }\n", True)
+        probes["current-job-proof-forge"] = ("import RemozioCore\nfunc forge() -> VerifiedCommandCurrentJobObservation { VerifiedCommandCurrentJobObservation() }\n", False)
+        probes["current-job-proof-read"] = ("import RemozioCore\nfunc read(_ job: VerifiedCommandCurrentJobObservation) -> CommandCurrentJobState { job.state }\n", True)
         for name, (source, accepted) in probes.items():
             path = scratch / (name + ".swift")
             path.write_text(source)
@@ -204,13 +206,13 @@ func transfer(submission: CommandSubmission, handshake: sending VerifiedCommandH
             ], capture_output=True, text=True, timeout=60)
             if accepted:
                 passed = result.returncode == 0
-            elif name in {"proof-forge", "terminal-proof-forge", "job-proof-forge"}:
+            elif name in {"proof-forge", "terminal-proof-forge", "job-proof-forge", "current-job-proof-forge"}:
                 passed = result.returncode != 0 and "fileprivate" in result.stderr
             else:
                 passed = result.returncode != 0 and "SendingRisksDataRace" in result.stderr
             if not passed:
                 raise SystemExit("Command ownership probe failed: " + name + "\n" + result.stderr[:4096])
-    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected; I/O handshake reuse rejected; verified admission, terminal result, and job observation construction remains private.")
+    print("Command ownership: coordinator, journal, handshake, registry, and host transfers accepted; object and alias reuse rejected; I/O handshake reuse rejected; verified admission, terminal result, job observation, and current job construction remains private.")
 
 
 if __name__ == "__main__":

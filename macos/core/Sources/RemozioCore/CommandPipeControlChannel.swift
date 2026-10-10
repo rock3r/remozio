@@ -17,7 +17,8 @@ final class CommandPipeControlChannel {
         if connected { try channel.observeJobState(value) }
     }
     func poll(expression: String, userID: uid_t, auditSessionID: au_asid_t?, checkCaller: () throws -> Void,
-              checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void) throws {
+              checkControlPolicy: () throws -> Void, applyControl: (CommandStreamFrame.Body) throws -> Void,
+              currentJob: () throws -> CommandCurrentJobState = { .unknown }) throws {
         guard opened, connected else { return }
         do {
             try checkCaller()
@@ -26,9 +27,12 @@ final class CommandPipeControlChannel {
                 try checkControlPolicy()
                 switch body {
                 case .signal, .cancel: try applyControl(body)
+                case .queryCurrentJob: break
                 default: throw CommandStreamError.malformed
                 }
             }
+            try channel.flushCurrentJob(expression: expression, userID: userID, auditSessionID: auditSessionID,
+                checkPolicy: checkControlPolicy, currentState: currentJob)
             try channel.flushJobState(checkPolicy: checkControlPolicy)
         } catch { detach(); throw error }
     }

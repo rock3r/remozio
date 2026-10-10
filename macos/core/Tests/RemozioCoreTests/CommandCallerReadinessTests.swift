@@ -611,4 +611,93 @@ extension CommandCallerReadinessTests {
             XCTFail("A non-root policy must be rejected")
         } catch { XCTAssertEqual(error as? MachCommandHandshakeError, .invalidConfiguration) }
     }
+
+    func testMappedRefreshUsesEachAttemptPolicyAndRetainsTheAdmittedPolicy() throws {
+        let endpoint = try Endpoint(), input = Darwin.open("/dev/null", O_RDONLY), output = try privateOutput()
+        defer { for fd in [input, output] { _ = Darwin.close(fd) } }
+        let reasons: [CommandAdmissionRejectionReason] = [.updateInstalling, .authorityStarting, .updateWaiting, .storageUnavailable]
+        let request = CommandAdmittedRequest(requestID: Data(repeating: 4, count: 16),
+            requestDigest: Data(repeating: 5, count: 32), challenge: Data(repeating: 6, count: 32))
+        let server = try serve(endpoint, replies: reasons.map(busy) + [.result(.admitted(request))], io: true, mapped: true,
+            capabilities: .mappedPipeJobExecutionControls, terminalOutcome: .cancelledBeforeStart)
+        let actual = try expression()
+        var refreshes = 0, lookups = 0, policyRetired = false
+        let response = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: input, outputDescriptor: output,
+            errorDescriptor: output, controlTerminalDescriptor: nil, authorityPort: {
+                lookups += 1; XCTAssertEqual(refreshes, lookups); return endpoint.port
+            }, expression: "cdhash H\"0000000000000000000000000000000000000000\"", userID: geteuid(), auditSessionID: nil,
+            macID: mac, accountID: account, submissionLimits: limits(),
+            configuration: .init(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1, maximumBackoffMilliseconds: 4),
+            wait: { _, check in try check() }, refreshAuthorityRequirement: {
+                guard !policyRetired else { throw Cancelled.stopped }
+                refreshes += 1
+                // Different valid requirements prove each attempt uses its provider, rather than the invalid fixed fallback.
+                return .init(expression: "(\(actual)) or cdhash H\"" + String(repeating: String(refreshes), count: 40) + "\"",
+                    userID: geteuid(), auditSessionID: nil)
+            })
+        guard case .admitted(let session) = response else { return XCTFail("Expected the admitted channel") }
+        defer { session.close() }
+        policyRetired = true
+        XCTAssertEqual(try server.finish().count, 5); XCTAssertEqual(refreshes, 5); XCTAssertEqual(lookups, 5)
+        guard case .terminal(let result)? = try session.pollStreamEvent(timeoutMilliseconds: 1000) else {
+            return XCTFail("The original policy must validate the terminal result")
+        }
+        XCTAssertEqual(result.outcome, .cancelledBeforeStart); XCTAssertEqual(result.request, request)
+        XCTAssertEqual(refreshes, 5); try assertNoNextAttempt(endpoint)
+    }
+
+    func testMappedRefreshFailureAfterBusyNeverBecomesUnavailableRetry() throws {
+        let endpoint = try Endpoint(), input = Darwin.open("/dev/null", O_RDONLY), output = try privateOutput()
+        defer { for fd in [input, output] { _ = Darwin.close(fd) } }
+        let server = try serve(endpoint, replies: [busy(.updateInstalling)], io: true, mapped: true,
+            capabilities: .mappedPipeJobExecutionControls)
+        let actual = try expression()
+        var refreshes = 0, lookups = 0
+        do {
+            let response = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: input, outputDescriptor: output,
+                errorDescriptor: output, controlTerminalDescriptor: nil, authorityPort: { lookups += 1; return endpoint.port },
+                expression: actual, userID: geteuid(), auditSessionID: nil, macID: mac, accountID: account, submissionLimits: limits(),
+                configuration: .init(timeoutMilliseconds: 5000, initialBackoffMilliseconds: 1),
+                wait: { _, check in try check() }, refreshAuthorityRequirement: {
+                    refreshes += 1
+                    if refreshes > 1 { throw CommandAuthorityEndpointError.unavailable }
+                    return .init(expression: actual, userID: geteuid(), auditSessionID: nil)
+                })
+            if case .admitted(let session) = response { session.close() }
+            XCTFail("A failed provider must stop before another lookup")
+        } catch { XCTAssertTrue(error is CommandAuthorityEndpointError) }
+        XCTAssertEqual(try server.finish().count, 1); XCTAssertEqual(refreshes, 2); XCTAssertEqual(lookups, 1)
+        try assertNoNextAttempt(endpoint)
+    }
+
+    func testMappedRefreshKeepsTheOriginalDeadlineAndRootGuard() throws {
+        let endpoint = try Endpoint()
+        var clock: UInt64 = 0, refreshes = 0
+        do {
+            let response = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: -1, outputDescriptor: -1,
+                errorDescriptor: -1, controlTerminalDescriptor: nil,
+                authorityPort: { XCTFail("The deadline must be checked before lookup"); return endpoint.port },
+                expression: expression(), userID: geteuid(), auditSessionID: nil, macID: mac, accountID: account,
+                submissionLimits: limits(), configuration: .init(timeoutMilliseconds: 10), clock: { clock },
+                refreshAuthorityRequirement: {
+                    refreshes += 1; clock = 10
+                    return .init(expression: "false", userID: geteuid(), auditSessionID: nil)
+                })
+            if case .admitted(let session) = response { session.close() }; XCTFail("Refresh must not reset the deadline")
+        } catch { XCTAssertEqual(error as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: nil)) }
+        XCTAssertEqual(refreshes, 1); try assertNoNextAttempt(endpoint)
+        let root = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+            approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: 0)
+        let user = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+            approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: geteuid())
+        do {
+            let response = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: -1, outputDescriptor: -1,
+                errorDescriptor: -1, controlTerminalDescriptor: nil,
+                authorityPort: { XCTFail("A refreshed non-root policy must not be used"); return endpoint.port },
+                authorityPolicy: root, macID: mac, accountID: account, submissionLimits: limits(),
+                configuration: .init(timeoutMilliseconds: 5000), refreshAuthorityPolicy: { user })
+            if case .admitted(let session) = response { session.close() }; XCTFail("Every refreshed policy must require Root")
+        } catch { XCTAssertEqual(error as? MachCommandHandshakeError, .invalidConfiguration) }
+        try assertNoNextAttempt(endpoint)
+    }
 }

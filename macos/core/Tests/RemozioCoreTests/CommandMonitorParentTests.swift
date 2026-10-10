@@ -3,12 +3,13 @@ import Foundation
 import XCTest
 
 final class CommandMonitorParentTests: XCTestCase {
-    private var directory: URL!, child: URL!, monitor: URL!, driver: URL!, faultDriver: URL!, malformedMonitor: URL!
+    private var directory: URL!, child: URL!, monitor: URL!, driver: URL!, faultDriver: URL!, malformedMonitor: URL!, queryControlDriver: URL!
     override func setUpWithError() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("remozio-monitor-parent-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         child = directory.appendingPathComponent("child"); monitor = directory.appendingPathComponent("monitor")
         driver = directory.appendingPathComponent("driver"); faultDriver = directory.appendingPathComponent("fault-driver")
+        queryControlDriver = directory.appendingPathComponent("query-negative-control")
         malformedMonitor = directory.appendingPathComponent("malformed-monitor")
         let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let native = core.appendingPathComponent("Sources/RemozioMach")
@@ -31,6 +32,8 @@ final class CommandMonitorParentTests: XCTestCase {
         try compile([fixture("child"), specification], native: native, output: child)
         try compile([native.appendingPathComponent("CommandMonitor.c"), fixture("monitor-parent-driver"), specification,
                      protocolSource, native.appendingPathComponent("CommandPTY.c")], native: native, output: driver)
+        try compile([fixture("monitor-current-job-negative"), fixture("monitor-parent-driver"), specification,
+                     protocolSource, native.appendingPathComponent("CommandPTY.c")], native: native, output: queryControlDriver)
         try compile([fixture("monitor-parent-fault-wrapper"), fixture("monitor-parent-fault-driver"), specification, protocolSource],
                     native: native, output: faultDriver)
         try compile([fixture("malformed-monitor"), protocolSource], native: native, output: malformedMonitor)
@@ -43,8 +46,9 @@ final class CommandMonitorParentTests: XCTestCase {
         try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
     }
-    private func run(_ mode: String, fault: Int32? = nil, malformed: Bool = false, launcherName: String? = nil) throws {
-        let arguments = [Data([0xff]), Data(), Data([0xfe]), Data((mode == "late_observation" ? "wait" : mode.contains("stop_resume") ? "plain_stop" : "output").utf8)]
+    private func run(_ mode: String, fault: Int32? = nil, malformed: Bool = false, launcherName: String? = nil,
+                     queryNegativeControl: Bool = false) throws {
+        let arguments = [Data([0xff]), Data(), Data([0xfe]), Data((mode.contains("current_job") ? "sigwait" : mode == "late_observation" ? "wait" : mode.contains("stop_resume") ? "plain_stop" : "output").utf8)]
         let environment = [Data("CWD=\(directory.path)".utf8), Data("EMPTY=".utf8), Data([0x52,0x41,0x57,0x3d,0xfd])]
         var body = Data()
         let executable = mode == "exec_failure" ? directory.appendingPathComponent("missing-target").path : child.path
@@ -58,7 +62,8 @@ final class CommandMonitorParentTests: XCTestCase {
         }
         frame.append(body)
         let file = directory.appendingPathComponent("frame.bin"); try frame.write(to: file)
-        let process = Process(); process.executableURL = fault == nil ? driver : faultDriver; process.currentDirectoryURL = directory
+        let process = Process(); process.executableURL = queryNegativeControl ? queryControlDriver : fault == nil ? driver : faultDriver
+        process.currentDirectoryURL = directory
         var launcher = child!
         if let launcherName { launcher = directory.appendingPathComponent(launcherName); try FileManager.default.copyItem(at: child, to: launcher) }
         process.arguments = [(malformed ? malformedMonitor : monitor).path,
@@ -67,16 +72,38 @@ final class CommandMonitorParentTests: XCTestCase {
         let output = Pipe(); process.standardOutput = output
         try process.run(); process.waitUntilExit()
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        XCTAssertEqual(process.terminationStatus, 0, String(decoding: data, as: UTF8.self))
+        XCTAssertEqual(process.terminationStatus, queryNegativeControl ? 1 : 0, String(decoding: data, as: UTF8.self))
         let record = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(record["failure"] as? Int, 0)
+        XCTAssertEqual(record["failure"] as? Int, queryNegativeControl ? 36 : 0)
         XCTAssertEqual(record["monitorActuallyReaped"] as? Bool, mode != "preflight")
+        if mode.contains("current_job") { XCTAssertEqual(record["currentKernelStateChecked"] as? Bool, !queryNegativeControl) }
+        if mode.contains("queued_current_job") { XCTAssertEqual(record["queuedControlChecked"] as? Bool, true) }
     }
     func testExactSeparatePipesAndInputRetention() throws { try run("output") }
     func testIndependentExecExitAndActualMonitorWait() throws { try run("stop_resume") }
     func testPreparedCancellationNeverExecutes() throws { try run("cancel") }
     func testImmediateCancellationRetiresTheMonitor() throws { try run("immediate_cancel") }
     func testOwnedTerminalStopResume() throws { try run("pty_stop_resume") }
+    func testCurrentKernelStateRejectsTheQueuedStopSnapshotAfterContinue() throws { try run("current_job") }
+    func testCurrentKernelStateRetainsThePrivateTerminalTargetBinding() throws { try run("pty_current_job") }
+    func testQueuedContinueCannotConfirmTheStillStoppedPipeTarget() throws { try run("queued_current_job") }
+    func testQueuedContinueCannotConfirmTheStillStoppedTerminalTarget() throws { try run("pty_queued_current_job") }
+    func testCachedSnapshotNegativeControlFailsTheCurrentStateProbe() throws { try run("current_job", queryNegativeControl: true) }
+    func testUnqueuedApplicationWatermarkClosesTheOriginalStatusChannel() throws {
+        let core = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let native = core.appendingPathComponent("Sources/RemozioMach")
+        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "monitor-ack-boundary", withExtension: "c", subdirectory: "Fixtures/command-process"))
+        let executable = directory.appendingPathComponent("ack-boundary")
+        try compile([fixture, native.appendingPathComponent("CommandChildSpecification.c"), native.appendingPathComponent("CommandMonitorProtocol.c")],
+                    native: native, output: executable)
+        let process = Process(), output = Pipe()
+        process.executableURL = executable; process.standardOutput = output
+        try process.run(); process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(process.terminationStatus, 0, String(decoding: data, as: UTF8.self))
+        let record = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Bool])
+        XCTAssertEqual(record, ["unqueuedWatermarkRejected": true, "queryUnknown": true, "channelRemainsClosed": true])
+    }
     func testOwnedTerminalCancellationRetainsItsMasterUntilCleanup() throws { try run("pty_cancel") }
     func testReleasedObservationFailureKeepsRunningAndAcceptsOwnedSignal() throws { try run("late_observation", launcherName: "late-fault-child") }
     func testExecFailureHasNoFalseKernelExec() throws { try run("exec_failure") }

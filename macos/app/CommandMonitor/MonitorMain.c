@@ -25,7 +25,7 @@ typedef struct {
     mach_timebase_info_data_t timebase;
     unsigned char header[REMOZIO_CHILD_HEADER_BYTES], *frame;
     size_t frame_used, frame_count;
-    uint64_t started, deadline, sequence, control_sequence, reported_revision;
+    uint64_t started, deadline, sequence, control_sequence, applied_control_sequence, reported_control_sequence, reported_revision;
     bool configured, cancelled, release_consumed, prepared_sent, failure_sent, terminal_sent, status_broken;
     int failure;
     unsigned char pending[REMOZIO_MONITOR_RECORD_BYTES], control[REMOZIO_MONITOR_CONTROL_BYTES];
@@ -167,6 +167,7 @@ static int pump_control(monitor_t *monitor) {
             if (!monitor->release_consumed || !monitor->observed.release_attempted || !monitor->target) return EPROTO;
             error = remozio_command_process_signal(monitor->target, (int)record.signal);
             if (error) return error;
+            monitor->applied_control_sequence = record.sequence;
         }
     }
     return 0;
@@ -178,6 +179,10 @@ static int queue_status(monitor_t *monitor) {
     else if (monitor->failure && !monitor->failure_sent) { record.tag = REMOZIO_MONITOR_FAILURE; record.detail = (uint32_t)monitor->failure; }
     else if (monitor->observed.reaped && !monitor->terminal_sent) {
         record.tag = REMOZIO_MONITOR_TARGET_REAPED; record.detail = (uint32_t)monitor->observed.wait_status; record.job_revision = monitor->observed.job_control_revision;
+    } else if (monitor->prepared_sent && !monitor->failure && monitor->observed.release_attempted &&
+        !monitor->observed.reaped && !monitor->observed.ownership_lost && monitor->applied_control_sequence > monitor->reported_control_sequence) {
+        record.tag = REMOZIO_MONITOR_CONTROL_APPLIED;
+        record.applied_control_sequence = monitor->applied_control_sequence;
     } else if (monitor->prepared_sent && !monitor->failure && monitor->observed.release_attempted && !monitor->observed.reaped && !monitor->observed.ownership_lost && monitor->observed.job_control_revision > monitor->reported_revision) {
         record.tag = REMOZIO_MONITOR_JOB_STATE; record.job_revision = monitor->observed.job_control_revision;
         if (monitor->observed.stopped) {
@@ -196,6 +201,7 @@ static int queue_status(monitor_t *monitor) {
     int error = remozio_monitor_record_encode(&record, monitor->pending); if (error) return error;
     monitor->sequence = record.sequence; monitor->pending_tag = record.tag; monitor->pending_count = sizeof(monitor->pending); monitor->pending_used = 0;
     if (record.tag == REMOZIO_MONITOR_JOB_STATE) monitor->reported_revision = record.job_revision;
+    if (record.tag == REMOZIO_MONITOR_CONTROL_APPLIED) monitor->reported_control_sequence = record.applied_control_sequence;
     return 0;
 }
 static int pump_status(monitor_t *monitor) {

@@ -34,14 +34,15 @@ struct CommandStreamFrame: Equatable {
     enum Body: Equatable {
         case opened, output(Data), outputEnd, inputCredit(UInt32), jobState(CommandJobStatePayload)
         case input(Data), inputEnd, signal(UInt32), resize(UInt16, UInt16, UInt16, UInt16), cancel, outputDrained
+        case currentJob(CommandCurrentJobPayload), queryCurrentJob(Data)
     }
     let sequence: UInt64
     let body: Body
 
     var direction: Direction {
         switch body {
-        case .opened, .output, .outputEnd, .inputCredit, .jobState: .toFrontend
-        case .input, .inputEnd, .signal, .resize, .cancel, .outputDrained: .toAuthority
+        case .opened, .output, .outputEnd, .inputCredit, .jobState, .currentJob: .toFrontend
+        case .input, .inputEnd, .signal, .resize, .cancel, .outputDrained, .queryCurrentJob: .toAuthority
         }
     }
     static func limits() throws -> CBORLimits { try .init(maxBytes: maximumBytes, maxDepth: 7, maxItems: 128) }
@@ -49,9 +50,14 @@ struct CommandStreamFrame: Equatable {
         try binding.validate()
         guard sequence < UInt64.max else { throw CommandStreamError.sequence }
         if case .jobState = body, !binding.profile.supportsJobState { throw CommandStreamError.malformed }
+        switch body {
+        case .currentJob, .queryCurrentJob:
+            guard binding.profile.supportsCurrentJob else { throw CommandStreamError.malformed }
+        default: break
+        }
         if binding.profile.supportsPipeExecutionControls {
             switch body {
-            case .opened, .signal, .cancel, .jobState: break
+            case .opened, .signal, .cancel, .jobState, .currentJob, .queryCurrentJob: break
             default: throw CommandStreamError.malformed
             }
         }
@@ -64,6 +70,10 @@ struct CommandStreamFrame: Equatable {
             guard (1...UInt32(Self.inputWindow)).contains(count) else { throw CommandStreamError.capacity }
             tag = 4; value = .unsigned(UInt64(count))
         case .jobState(let observation): tag = 5; value = try observation.fields
+        case .currentJob(let observation): tag = 6; value = try observation.fields
+        case .queryCurrentJob(let nonce):
+            guard nonce.count == 32 else { throw CommandStreamError.binding }
+            tag = 16; value = .bytes(nonce)
         case .input(let bytes): tag = 10; value = try Self.chunk(bytes)
         case .inputEnd: tag = 11; value = .null
         case .signal(let signal):
@@ -99,6 +109,10 @@ struct CommandStreamFrame: Equatable {
             guard case .unsigned(let count) = value, count > 0, count <= UInt64(inputWindow) else { throw CommandStreamError.capacity }
             body = .inputCredit(UInt32(count))
         case 5: body = .jobState(try CommandJobStatePayload.decode(value))
+        case 6: body = .currentJob(try CommandCurrentJobPayload.decode(value))
+        case 16:
+            guard case .bytes(let nonce) = value, nonce.count == 32 else { throw CommandStreamError.binding }
+            body = .queryCurrentJob(nonce)
         case 12:
             guard case .unsigned(let signal) = value, signal > 0, signal < UInt64(NSIG) else { throw CommandStreamError.malformed }
             body = .signal(UInt32(signal))
@@ -131,7 +145,10 @@ struct CommandStreamReceiveSequence {
         switch direction {
         case .toFrontend:
             if ended {
-                guard case .jobState = frame.body else { throw CommandStreamError.closed }
+                switch frame.body {
+                case .jobState, .currentJob: break
+                default: throw CommandStreamError.closed
+                }
             }
             guard (next == 0) == (frame.body == .opened) else { throw CommandStreamError.closed }
         case .toAuthority:
