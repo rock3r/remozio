@@ -5,4 +5,6 @@ let package = Package(name: "CommandFrontendExperiment", platforms: [.macOS("26.
     dependencies: [.package(path: "../../macos/core"), .package(path: "../../protocol/swift")],
     targets: [.target(name: "OwnedTTY"), .executableTarget(name: "CommandFrontendFixture", dependencies: [
         "OwnedTTY",
-        .product(name: "RemozioCore", package: "core"), .product(name: "RemozioProtocol", package: "swift")])])
+        .product(name: "RemozioCore", package: "core"), .product(name: "RemozioProtocol", package: "swift")]),
+        .executableTarget(name: "LiveCommandFixture", dependencies: ["OwnedTTY",
+            .product(name: "RemozioCore", package: "core"), .product(name: "RemozioProtocol", package: "swift")])])

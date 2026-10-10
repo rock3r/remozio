@@ -70,7 +70,7 @@ def main():
     log = BUILD / "swift-build.log"
     log.write_text(result.stdout + result.stderr)
     if result.returncode:
-        raise RuntimeError(f"Frontend fixture build failed; see {log}")
+        raise RuntimeError(f"Frontend fixture build failed; see {log}\n{result.stdout}{result.stderr}")
     location = subprocess.run(arguments + ["--show-bin-path"], check=True, capture_output=True, text=True)
     binary = Path(location.stdout.strip()) / "CommandFrontendFixture"
     supervisor = BUILD / "job-supervisor"
