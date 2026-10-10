@@ -108,6 +108,49 @@ The check does not submit a valid command or activate a service.
 
 This integration is unfinished and must not be activated as a privileged installation yet.
 The actual CLI loop passes composed anonymous-Mach and private-terminal tests, including verified-stop sampling, cleanup retries, and stop/resume.
-Those tests model the Root peer. Composed real-target reconciliation and installed service discovery remain release gates.
+The [live frontend experiment](../../docs/experiments/live-command-frontend.md) also joins the real frontend, admission owner, executor, monitor and target.
+That experiment uses one unprivileged UID, software test keys and explicit fixture identity seams.
+Privileged reconciliation and installed service discovery remain release gates.
 Headless PTY output routing remains a pending user choice.
 Setup provisioning, CLI path installation, Developer ID signing, and real-device approval tests remain separate gates.
+
+## Embedded approval transport
+
+`RemozioTransport` is embedded at `Contents/Library/LaunchServices/RemozioTransport`.
+Debug and Release have separate signing identifiers and retain security generation 1.
+It accepts only `--configuration /absolute/protected/transport.cbor`.
+The process loads Root-owned public metadata and requires the configured service UID as both its real and effective UID.
+It rejects Root and the recorded interactive owner account.
+Provisioning must create the dedicated account and protect its key custody; different UID values alone do not prove that setup.
+
+```mermaid
+flowchart LR
+    P[Enrolled phone] <-->|Pinned TLS 1.3| T[Dedicated transport process]
+    T <-->|Authenticated current IPC| A[Root authority]
+    A --> J[Protected journal]
+    C[Protected configuration] --> T
+    K[Provisioned transport identity] --> T
+```
+
+The configuration contains installation scope, account UIDs, authority code pins, one keychain identity reference and a transport public-key pin.
+It contains no private key bytes, approval key or provider credential.
+The identity lookup disables authentication UI and checks the exact configured reference.
+It requires a Secure Enclave P-256 private key, a matching certificate key, the configured SPKI and a current certificate validity interval.
+It never searches for a replacement identity or generates a new key at startup.
+
+The process starts the existing authenticated authority feed before accepting phone channels.
+It uses the existing discovery and request-exchange handler; decisions remain Root operations.
+Signal cancellation closes the service. Authority loss or listener failure closes this incarnation and returns a temporary failure.
+A subsequent launch reloads configuration and performs a fresh authority handshake.
+Launchd registration and restart policy are not installed by this change.
+
+The bundle check exercises syntax and missing-provisioning refusal only, with unread stdin and no command stdout.
+Unit tests cover configuration bounds, account separation, exact lookup, blocked authentication and wrong item types.
+They do not access an actual keychain identity or start a configured transport.
+
+Pre-login identity access, TLS signing without UI, dedicated-account key custody and actual enrolled-phone delivery remain unproven.
+Apple's [Mac keychain guidance](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains) requires daemons outside user contexts to use the file-based keychain.
+The earlier enclave TLS probe used an interactive disposable identity; it does not establish daemon support.
+This initial loader supports the hardware identity path only.
+The approved protected-file fallback remains separate work after the pre-login feasibility gate; there is no silent software fallback here.
+Setup, protected activation, service registration and real-device tests remain required before deployment.
