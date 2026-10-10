@@ -36,3 +36,26 @@ A signed terminal status releases capture capacity. Retirement or enrollment clo
 ## Remaining integration
 
 Pairing setup must populate the archive before this screen can connect. It currently uses the enrolled relay; LAN preference and push wake delivery remain separate integration work. Capture-limit settings and distinct remote oversized-request reporting remain pending. Issue #132 still tracks capacity and storage recovery beyond the current generic connection error. Device end-to-end behavior remains unverified.
+
+## Complete stream inspection
+
+The Android command channel explicitly offers capture schemas 1, 2, and 3 with no additional features.
+The existing sheet on compact windows and dialog on wider windows both use the same inspector.
+Schemas 1 and 2 retain their existing input display; the app does not invent uncaptured output details.
+
+Schema 3 shows standard input, standard output, and standard error in separate sections.
+Each section shows its captured source, access mode, all enabled portable flags, observed path, identity, and binding.
+Routing text distinguishes a private command terminal from the retained original source.
+The inspector shows the separate caller terminal, its session and device, or an explicit absence description.
+The captured routing mask remains available with the other bindings.
+Paths remain escaped descriptive values. The existing exact-byte toggle includes all source paths.
+Input content remains uncaptured. The layout does not change decision controls, biometric requirements, or terminal-status cleanup.
+
+Three static debug previews use bytes copied from the shared schema-3 vectors: mixed terminal routing, redirected streams, and all portable flags.
+They create no enrollment and offer no approval action.
+Presentation tests compare all 39 valid shared vectors with their independent role, kind, access, flag, and mask expectations.
+The tests also preserve the legacy display boundary and the explicit supported capability set.
+The local native/Python gate and all six Kotlin/Android tasks pass.
+API 37 emulator checks show the compact light sheet, the dark sheet at font scale 1.3, and the wide dark dialog at font scale 1.3.
+The captured screenshots show mixed routing, original append output, separate terminal metadata, and all four portable flags.
+These are synthetic previews. Physical Pixel, TalkBack, real biometric, and installed Root end-to-end checks remain deferred.

@@ -24,6 +24,9 @@ import dev.remozio.protocol.RequestStatusReason
 
 private enum class SampleScene(val label: Int) {
     PENDING(R.string.open_sample_command),
+    STREAMS(R.string.open_sample_streams),
+    PIPES(R.string.open_sample_pipes),
+    FLAGS(R.string.open_sample_flags),
     ESTIMATE_PASSED(R.string.open_sample_estimate),
     EXPIRED(R.string.open_sample_expired),
     DISAPPEARED(R.string.open_sample_disappeared),
@@ -50,10 +53,15 @@ internal fun DevelopmentTools() {
     val resources = LocalResources.current
     val status = remember(current) { sampleStatus(current) }
     val capture = remember(current, resources) {
-        if (current != SampleScene.PENDING && current != SampleScene.CLOCK_UNCERTAIN) null else {
-            val bytes = resources.openRawResource(R.raw.sample_command).use { it.readBytes() }
-            CommandCapture(bytes, CborLimits(8192, 16, 1024))
+        val (resource, schema) = when (current) {
+            SampleScene.PENDING, SampleScene.CLOCK_UNCERTAIN -> R.raw.sample_command to 1uL
+            SampleScene.STREAMS -> R.raw.sample_command_streams to 3uL
+            SampleScene.PIPES -> R.raw.sample_command_pipes to 3uL
+            SampleScene.FLAGS -> R.raw.sample_command_flags to 3uL
+            else -> return@remember null
         }
+        val bytes = resources.openRawResource(resource).use { it.readBytes() }
+        CommandCapture(bytes, CborLimits(8192, 16, 1024), expectedSchemaVersion = schema)
     }
     CommandInspection(capture, stringResource(R.string.sample_mac), stringResource(R.string.sample_account),
         onDismiss = { scene = null }, sample = true, status = status)

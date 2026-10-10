@@ -173,7 +173,8 @@ Actual fileports preserve distinct output files, access and flags, terminal attr
 Lost, malformed, wrong-digest, permanent and uncertain replies produce no second invocation.
 The tests also check cancellation, shared deadlines, legacy-peer rejection and the public Root-policy guard.
 These fixtures use the test user's identity and grant no privilege.
-The new readiness tests run locally on macOS 27.0.1. Their macOS 26 CI result remains a gate for this change.
+All 21 readiness tests pass locally on macOS 27.0.1 and in [macOS 26 CI](https://github.com/rock3r/remozio/actions/runs/38020555477/job/114120398049).
+The CI run uses macOS 26.6.2, build 25G83, arm64, and passes all 1,389 core tests.
 
 ## Evidence and remaining integration
 
