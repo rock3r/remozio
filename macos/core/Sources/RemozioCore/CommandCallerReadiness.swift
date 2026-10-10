@@ -154,13 +154,43 @@ public enum CommandCallerReadiness {
             submissionLimits: submissionLimits, configuration: configuration, capabilities: capabilities, checkCancellation: checkCancellation, onStatus: onStatus)
     }
 
+    /// Borrows all original streams and a separate caller terminal without reading or changing them.
+    /// The mode selects one mapped profile. This does not permit a legacy fallback or activate terminal raw mode.
+    public static func submitMappedIO(_ template: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
+                                      controlTerminalDescriptor: Int32?, authorityPort: () throws -> mach_port_t,
+                                      authorityPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
+                                      submissionLimits: CBORLimits, configuration: CommandCallerReadinessConfiguration,
+                                      checkCancellation: () throws -> Void = {},
+                                      onStatus: (CommandCallerReadinessStatus) -> Void = { _ in }) throws -> sending CommandIOAdmission {
+        guard authorityPolicy.expectedUserID == 0 else { throw MachCommandHandshakeError.invalidConfiguration }
+        return try submitMappedIO(template, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor,
+            controlTerminalDescriptor: controlTerminalDescriptor, authorityPort: authorityPort, expression: authorityPolicy.requirement,
+            userID: 0, auditSessionID: authorityPolicy.expectedAuditSessionID, macID: macID, accountID: accountID,
+            submissionLimits: submissionLimits, configuration: configuration, checkCancellation: checkCancellation, onStatus: onStatus)
+    }
+
+    static func submitMappedIO(_ template: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32,
+                              controlTerminalDescriptor: Int32?, authorityPort: () throws -> mach_port_t,
+                              expression: String, userID: uid_t, auditSessionID: au_asid_t?, macID: Data, accountID: Data,
+                              submissionLimits: CBORLimits, configuration: CommandCallerReadinessConfiguration,
+                              checkCancellation: () throws -> Void = {}, onStatus: (CommandCallerReadinessStatus) -> Void = { _ in },
+                              clock: (() throws -> UInt64)? = nil, wait: ((UInt32, () throws -> Void) throws -> Void)? = nil) throws -> sending CommandIOAdmission {
+        try submitIO(template, inputDescriptor: inputDescriptor, outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor,
+            authorityPort: authorityPort, expression: expression, userID: userID, auditSessionID: auditSessionID,
+            macID: macID, accountID: accountID, submissionLimits: submissionLimits, configuration: configuration,
+            capabilities: template.ioMode == .pty ? .mappedTerminalJobExecution : .mappedPipeJobExecutionControls,
+            checkCancellation: checkCancellation, onStatus: onStatus, clock: clock, wait: wait,
+            mapped: true, controlTerminalDescriptor: controlTerminalDescriptor)
+    }
+
     /// Fixture identity and clock seams. The transport and result verification still use actual Mach messages.
     static func submitIO(_ template: CommandSubmission, inputDescriptor: Int32, outputDescriptor: Int32, errorDescriptor: Int32, authorityPort: () throws -> mach_port_t,
                        expression: String, userID: uid_t, auditSessionID: au_asid_t?, macID: Data, accountID: Data,
                        submissionLimits: CBORLimits, configuration: CommandCallerReadinessConfiguration,
                        capabilities: CommandHandshakeCapabilities = .executionChannels,
                        checkCancellation: () throws -> Void = {}, onStatus: (CommandCallerReadinessStatus) -> Void = { _ in },
-                       clock: (() throws -> UInt64)? = nil, wait: ((UInt32, () throws -> Void) throws -> Void)? = nil) throws -> sending CommandIOAdmission {
+                       clock: (() throws -> UInt64)? = nil, wait: ((UInt32, () throws -> Void) throws -> Void)? = nil,
+                       mapped: Bool = false, controlTerminalDescriptor: Int32? = nil) throws -> sending CommandIOAdmission {
         guard macID.count == 16, accountID.count == 16, submissionLimits.maxBytes > 0,
               submissionLimits.maxBytes <= Int(UInt32.max) - 1024 else { throw CommandCallerReadinessError.invalidConfiguration }
         let continuous = try AuthorityClock(), now = clock ?? { try continuous.now().milliseconds }
@@ -236,7 +266,8 @@ public enum CommandCallerReadiness {
             let response = try MachCommandIOClient.submit(submission, inputDescriptor: inputDescriptor,
                 outputDescriptor: outputDescriptor, errorDescriptor: errorDescriptor, handshake: handshake,
                 expression: expression, userID: userID, auditSessionID: auditSessionID,
-                maximumPayloadBytes: submissionLimits.maxBytes, timeoutMilliseconds: controlBudget, checkCancellation: checkpoint)
+                maximumPayloadBytes: submissionLimits.maxBytes, timeoutMilliseconds: controlBudget, checkCancellation: checkpoint,
+                mapped: mapped, controlTerminalDescriptor: controlTerminalDescriptor)
             switch response {
             case .admitted(let session):
                 do { try checkpoint() } catch { session.close(); throw error }

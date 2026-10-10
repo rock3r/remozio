@@ -132,6 +132,49 @@ Terminal sends do not wait for queue capacity while holding the authority lock.
 A full or dead private queue can lose the result, but cannot undo the committed transition or authorize another invocation.
 The caller must treat result loss as uncertainty. These channels do not provide durable result retrieval after a process restart.
 
+## Mapped caller readiness
+
+`CommandCallerReadiness.submitMappedIO` passes a separate caller terminal through the same admission loop.
+The caller keeps all borrowed descriptors open. Readiness reads no stream bytes and changes no flags or terminal settings.
+It does not activate the frontend terminal lease.
+
+| Requested mode | Explicit offer | Submission carrier |
+| --- | --- | --- |
+| PTY | Wire 8, submission schema 1 | Carrier 5: three streams, optional terminal, two reply rights |
+| Pipes | Wire 9, submission schema 1 | Carrier 5: three streams, optional terminal, two reply rights |
+
+The mode selects exactly one profile, even when Root supports both.
+A legacy-only peer receives harmless handshake metadata and an incompatible result.
+Readiness does not expose the invocation to that peer or change the requested mode.
+The existing `submitIO` API keeps its default and legacy carrier.
+
+```mermaid
+flowchart TD
+    M[Requested I/O mode] --> P[Offer wire 8 or 9 with carrier 5]
+    P --> A[Authenticate Root and negotiate the exact profile]
+    A -->|Incompatible| X[Stop before command exposure]
+    A --> S[Send original streams and separate terminal]
+    S -->|Verified busy refusal| B[Wait within the original deadline]
+    B --> N[Fresh handshake, ID, nonce and reply rights]
+    N --> A
+    S -->|Admitted| R[Retain the original execution channel]
+    S -->|Uncertain, lost or invalid reply| U[Stop without resubmission]
+```
+
+All four verified busy classes keep their existing backoff and one continuous readiness deadline.
+Cancellation and a reason change cannot reset that deadline.
+The deadline bounds readiness; it imposes no command runtime limit.
+Admission retains the original authenticated channel, including before-start terminal results.
+This API does not start a terminal pump, apply an elevation policy, or execute a command.
+
+Native tests negotiate both modes against a peer that supports both mapped profiles.
+Each mode runs with a separate private terminal and with no supplied terminal.
+Actual fileports preserve distinct output files, access and flags, terminal attributes, and unread binary input across all four busy classes.
+Lost, malformed, wrong-digest, permanent and uncertain replies produce no second invocation.
+The tests also check cancellation, shared deadlines, legacy-peer rejection and the public Root-policy guard.
+These fixtures use the test user's identity and grant no privilege.
+The new readiness tests run locally on macOS 27.0.1. Their macOS 26 CI result remains a gate for this change.
+
 ## Evidence and remaining integration
 
 Native tests use actual Mach messages, copied fileports, pipes and serialized journal fixtures.
