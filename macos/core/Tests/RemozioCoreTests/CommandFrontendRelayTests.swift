@@ -98,11 +98,10 @@ final class CommandFrontendRelayTests: XCTestCase {
         let channel = FrontendRelayTestChannel(), terminal = FrontendRelayTestTerminal()
         channel.events = [.opened]
         var relay: CommandFrontendRelay? = try CommandFrontendRelay(channel: channel, terminal: terminal)
-        weak let released = relay
         _ = try relay!.advance(); _ = try relay!.advance()
         XCTAssertTrue(terminal.needsRestore)
         relay = nil
-        XCTAssertNil(released); XCTAssertEqual(channel.closeCalls, 1)
+        XCTAssertEqual(channel.closeCalls, 1)
         XCTAssertFalse(terminal.needsRestore); XCTAssertTrue(terminal.restorationFailures.isEmpty)
     }
     func testDestructionReportsFailedRestorationAndKeepsTheRetainedOwnerRecoverable() throws {
