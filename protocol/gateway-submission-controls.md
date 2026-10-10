@@ -216,4 +216,47 @@ Tests cover native client-to-endpoint-to-coordinator delivery using disposable k
 They cover challenge expiry at actor admission and authority changes during OAuth, without contacting FCM.
 They also cover rotation, preserved retries, partial coalesced batches, original deadlines, and independent new deliveries.
 These tests do not prove OS code validation, service-account provisioning, protected key custody, or device notification receipt.
-The retained Root request publisher, installed transport signer, startup migration, and provider/device tests still require integration.
+The retained Root request publisher, signer provisioning, startup migration, and provider/device tests still require integration.
+
+## Dedicated transport wake signer
+
+`GatewayWakeSigner` restores a distinct local key and signs only a typed wake submission.
+It checks all five registration identifiers and the current credential ID before signing.
+It uses the existing wake signing purpose and verifies each signature against the provisioned public key.
+The typed channel overload builds the submission from a fresh gateway challenge and this protected signer identity.
+It preserves the existing handshake, peer checks, timeout, and one-at-a-time transaction.
+
+Protected provisioning chooses Secure Enclave custody or the explicit transport-only private-file option.
+Both use a private record owned by the dedicated transport account, under protected Root-owned ancestors.
+The hardware record contains a device-bound wrapped representation. The file option contains private P-256 bytes.
+The loader requires matching real and effective transport UIDs before reading the record.
+Missing, malformed, mismatched, or inaccessible material fails without key creation, rotation, or custody fallback.
+Hardware restoration and signing forbid authentication dialogs.
+Authority and recipient keys retain their separate hardware-only requirements.
+
+The Root-owned public configuration contains local identity pins and the record location, never private key material.
+Configuration schema 1 has this exact canonical CBOR map:
+
+| Key | Value |
+| --- | --- |
+| 0 | Schema: unsigned 1 |
+| 1 | Owner, Mac, account, gateway, lifecycle IDs; each 16 bytes |
+| 2 | Current credential ID: 16 bytes |
+| 3–5 | Transport, owner, and gateway UIDs; nonzero and distinct |
+| 6–8 | Wake Mach service, signing team, and gateway component identifier |
+| 9 | Sorted distinct approved gateway code hashes |
+| 10 | Custody: 1 for Secure Enclave; 2 for explicit private file |
+| 11 | Absolute protected key record path |
+| 12 | P-256 public key: valid uncompressed point, 65 bytes |
+| 13 | Client timeout: 1 through 60,000 milliseconds |
+
+The private key record uses schema 1 and exact keys 0 through 5.
+They contain the schema, five identity IDs, credential ID, public key, custody, and private or wrapped representation.
+Unknown versions, fields, and custody values fail. The record must match every configured identity pin and custody choice.
+Neither the record nor its per-Mac configuration belongs in a shared setup export.
+
+Tests use disposable file keys to prove purpose separation, substitution rejection, account checks, and typed channel composition.
+They do not prove Secure Enclave restoration under a service account or installed file ownership.
+Protected setup must stage these records, prevent reuse of TLS keys, and publish the public credential through Root history.
+The transport runtime must reconcile credential activation and rotation before selecting a signer.
+Installed XPC and key custody checks remain required before production activation; see issue #286.

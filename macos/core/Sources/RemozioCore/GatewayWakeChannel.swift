@@ -82,6 +82,16 @@ public actor GatewayWakeChannel {
     /// Sign exactly the gateway's one-use challenge and current grant identifier, with a separate wake purpose.
     public func wake(binding: GatewaySubmissionBinding, credentialID: Data, deliveryID: UUID,
                      sign: @Sendable (Data) throws -> Data) async throws {
+        try await submit(binding: binding, credentialID: credentialID, deliveryID: deliveryID,
+            sign: { try sign($0.signingInput()) })
+    }
+    /// Uses only the provisioned wake key, with its protected scope and credential identity.
+    public func wake(deliveryID: UUID, signer: GatewayWakeSigner) async throws {
+        try await submit(binding: signer.binding, credentialID: signer.credentialID, deliveryID: deliveryID,
+            sign: { try signer.sign($0) })
+    }
+    private func submit(binding: GatewaySubmissionBinding, credentialID: Data, deliveryID: UUID,
+                        sign: @Sendable (GatewayWakeSubmission) throws -> Data) async throws {
         try verifyAccount(); try Task.checkCancellation()
         guard state == .open else { throw GatewayWakeChannelError.closed }
         guard !submitting else { throw GatewayWakeChannelError.busy }
@@ -94,7 +104,7 @@ public actor GatewayWakeChannel {
             }
             let submission = try GatewayWakeSubmission(binding: binding, credentialID: credentialID,
                 deliveryID: GatewayHostSnapshot.bytes(deliveryID), challenge: challenge)
-            let signature = try sign(submission.signingInput())
+            let signature = try sign(submission)
             guard signature.count == 64 else { throw GatewayWakeChannelError.invalidMessage }
             guard case .accepted(let accepted) = try await perform(.wake(submission.encode(), signature)) else {
                 throw GatewayWakeChannelError.invalidMessage
