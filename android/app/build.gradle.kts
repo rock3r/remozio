@@ -64,7 +64,10 @@ dependencies {
 }
 
 val commandCaptureFixture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")
+val commandStreamVectors = rootProject.layout.projectDirectory.file("protocol/vectors/command-capture-v3.json")
 tasks.withType<Test>().configureEach {
+    inputs.file(commandStreamVectors)
+    systemProperty("remozio.test.commandStreamVectors", commandStreamVectors.asFile.absolutePath)
     inputs.file(commandCaptureFixture)
     systemProperty("remozio.test.commandCapture", commandCaptureFixture.asFile.absolutePath)
 }

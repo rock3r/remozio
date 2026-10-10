@@ -47,6 +47,8 @@ import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.CommandCapture
 import dev.remozio.protocol.CommandIOMode
 import dev.remozio.protocol.CommandInputKind
+import dev.remozio.protocol.CapturedCommandStream
+import dev.remozio.protocol.CommandStreamAccess
 import dev.remozio.protocol.EnvironmentSource
 import dev.remozio.protocol.StartedCommandDisconnect
 
@@ -93,6 +95,7 @@ private fun InspectionContent(
     actions: (@Composable () -> Unit)? = null,
 ) {
     var raw by remember { mutableStateOf(false) }
+    val layout = capture?.stdioLayout
     Column(modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(when {
@@ -153,21 +156,56 @@ private fun InspectionContent(
                         }
                     }
                 }
+                if (layout != null) {
+                    item {
+                        Section(R.string.command_streams) {
+                            Text(stringResource(R.string.stream_observation_notice), style = MaterialTheme.typography.bodySmall)
+                            if (capture.ioMode == CommandIOMode.PTY) Text(stringResource(R.string.private_terminal_routing))
+                        }
+                    }
+                    inspectedCommandStreams(capture).forEach { inspected ->
+                        item {
+                            Section(inspected.role.title) {
+                                Text(stringResource(if (inspected.routedToPrivateTerminal) R.string.stream_private_terminal else R.string.stream_original_source),
+                                    style = MaterialTheme.typography.titleSmall)
+                                StreamDetails(inspected.stream, raw)
+                                if (inspected.role == InspectedStreamRole.INPUT && inspected.stream.source.kind != CommandInputKind.NULL) {
+                                    Text(stringResource(R.string.input_not_captured), style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        Section(R.string.caller_control_terminal) {
+                            val terminal = layout.terminal
+                            if (terminal == null) Text(stringResource(if (capture.ioMode == CommandIOMode.PTY)
+                                R.string.caller_terminal_absent_pty else R.string.caller_terminal_absent_pipes))
+                            else {
+                                Text(stringResource(R.string.caller_terminal_settings), style = MaterialTheme.typography.bodySmall)
+                                StreamDetails(terminal.stream, raw)
+                                Numeric(R.string.session_id, terminal.sessionID.toString())
+                                Numeric(R.string.terminal_device, terminal.terminalDevice.toString())
+                            }
+                        }
+                    }
+                }
                 item {
                     Section(R.string.input_and_lifetime) {
-                        Text(stringResource(when (capture.input.kind) {
-                            CommandInputKind.NULL -> R.string.input_null
-                            CommandInputKind.PIPE -> R.string.input_pipe
-                            CommandInputKind.FILE -> R.string.input_file
-                            CommandInputKind.TTY -> R.string.input_tty
-                            CommandInputKind.PTY -> R.string.input_pty
-                            CommandInputKind.SOCKET -> R.string.input_socket
-                            CommandInputKind.DIRECTORY -> R.string.input_directory
-                            CommandInputKind.DEVICE -> R.string.input_device
-                            CommandInputKind.OTHER -> R.string.input_other
-                        }))
-                        if (capture.input.kind != CommandInputKind.NULL) Text(stringResource(R.string.input_not_captured))
-                        BytesValue(R.string.input_path, capture.input.observedPath, raw)
+                        if (layout == null) {
+                            Text(stringResource(when (capture.input.kind) {
+                                CommandInputKind.NULL -> R.string.input_null
+                                CommandInputKind.PIPE -> R.string.input_pipe
+                                CommandInputKind.FILE -> R.string.input_file
+                                CommandInputKind.TTY -> R.string.input_tty
+                                CommandInputKind.PTY -> R.string.input_pty
+                                CommandInputKind.SOCKET -> R.string.input_socket
+                                CommandInputKind.DIRECTORY -> R.string.input_directory
+                                CommandInputKind.DEVICE -> R.string.input_device
+                                CommandInputKind.OTHER -> R.string.input_other
+                            }))
+                            if (capture.input.kind != CommandInputKind.NULL) Text(stringResource(R.string.input_not_captured))
+                            BytesValue(R.string.input_path, capture.input.observedPath, raw)
+                        }
                         Text(stringResource(if (capture.ioMode == CommandIOMode.PTY) R.string.io_pty else R.string.io_pipes))
                         Text(stringResource(if (capture.disconnectBehavior == StartedCommandDisconnect.TERMINATE) R.string.disconnect_terminate else R.string.disconnect_continue))
                     }
@@ -228,8 +266,10 @@ private fun InspectionContent(
                         Identity(R.string.executable_identity, capture.executable.identity)
                         Numeric(R.string.executable_sha256, ByteText.hex(capture.executable.sha256.copyBytes()))
                         Identity(R.string.directory_identity, capture.directory.identity)
-                        Identity(R.string.input_identity, capture.input.identity)
-                        Numeric(R.string.input_binding, capture.input.streamBinding?.copyBytes()?.let(ByteText::hex))
+                        if (layout == null) {
+                            Identity(R.string.input_identity, capture.input.identity)
+                            Numeric(R.string.input_binding, capture.input.streamBinding?.copyBytes()?.let(ByteText::hex))
+                        } else Numeric(R.string.terminal_routing_mask, layout.ptyMask.toString())
                         Numeric(R.string.code_directory_hash, capture.requester.signing.cdHash?.copyBytes()?.let(ByteText::hex))
                         Numeric(R.string.submission_id, ByteText.hex(capture.submission.id.copyBytes()))
                         Numeric(R.string.submission_nonce, ByteText.hex(capture.submission.nonce.copyBytes()))
@@ -243,6 +283,37 @@ private fun InspectionContent(
             Text(stringResource(R.string.close_details))
         }
     }
+}
+
+@Composable
+private fun StreamDetails(stream: CapturedCommandStream, raw: Boolean) {
+    Text(stringResource(when (stream.source.kind) {
+        CommandInputKind.NULL -> R.string.stream_source_null
+        CommandInputKind.PIPE -> R.string.stream_source_pipe
+        CommandInputKind.FILE -> R.string.stream_source_file
+        CommandInputKind.TTY -> R.string.stream_source_tty
+        CommandInputKind.PTY -> R.string.stream_source_pty
+        CommandInputKind.SOCKET -> R.string.stream_source_socket
+        CommandInputKind.DIRECTORY -> R.string.stream_source_directory
+        CommandInputKind.DEVICE -> R.string.stream_source_device
+        CommandInputKind.OTHER -> R.string.stream_source_other
+    }))
+    Text(stringResource(when (stream.access) {
+        CommandStreamAccess.READ_ONLY -> R.string.stream_access_read
+        CommandStreamAccess.WRITE_ONLY -> R.string.stream_access_write
+        CommandStreamAccess.READ_WRITE -> R.string.stream_access_read_write
+    }))
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(stringResource(R.string.stream_flags), style = MaterialTheme.typography.labelLarge)
+        if (stream.flags.wireValue == 0uL) Text(stringResource(R.string.none_label))
+        if (stream.flags.append) Text(stringResource(R.string.stream_flag_append))
+        if (stream.flags.nonblocking) Text(stringResource(R.string.stream_flag_nonblocking))
+        if (stream.flags.asynchronous) Text(stringResource(R.string.stream_flag_asynchronous))
+        if (stream.flags.synchronous) Text(stringResource(R.string.stream_flag_synchronous))
+    }
+    BytesValue(R.string.stream_observed_path, stream.source.observedPath, raw)
+    Identity(R.string.stream_identity, stream.source.identity)
+    Numeric(R.string.stream_binding, stream.source.streamBinding?.copyBytes()?.let(ByteText::hex))
 }
 
 @Composable

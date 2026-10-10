@@ -2,7 +2,7 @@
 
 Schema 3 records each original stream and the original caller terminal separately.
 Root derives the routing mask from retained kernel objects before encoding approval bytes.
-Capture and native mapped execution support all eight masks. Android inspection and production frontend integration remain separate gates.
+Capture, native mapped execution, and Android inspection support all eight masks. Production frontend integration remains a separate gate.
 
 ```mermaid
 flowchart TD
@@ -125,7 +125,7 @@ A private caller revokes its own terminal with masks zero and seven. Fresh obser
 Swift and Kotlin share 39 valid and 75 invalid schema 3 fixtures.
 They retain exact legacy bytes and reject malformed nested layouts.
 Signed phone-session tests bind routing to the issued request and reject changed layouts under the original signature.
-These tests prove parsing and authentication, not the Android inspection UI.
+These tests prove parsing and authentication. Android presentation separately checks all 39 valid fixtures against their stream and routing expectations.
 
 Mapped execution tests pass locally on macOS 27.0.1 and in [macOS 26 CI](https://github.com/rock3r/remozio/actions/runs/38018582425/job/114114369697).
 They exercise authenticated submission, schema-3 phone approval, the journal dispatch commit, and actual native targets with all eight masks.
@@ -136,6 +136,6 @@ They check terminal drain acknowledgment with no caller terminal and prevent rep
 Native copy tests cover all three access modes and all 16 portable flag combinations without changing the private control description.
 
 The CI run uses macOS 26.6.2, build 25G83, arm64. All 1,384 core tests pass, including both real mapped handshakes.
-The Android app still advertises capture schemas 1 and 2. It must show the complete layout before advertising schema 3.
+The Android app advertises capture schemas 1, 2, and 3. Its inspector shows all original streams, their access and flags, routing, and the separate caller terminal.
 Production frontend integration must use the separate caller terminal for interactive traffic and preserve redirected stdin.
 Installed Root deployment, elevation policy, and physical-device tests remain unperformed.
