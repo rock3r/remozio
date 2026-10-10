@@ -182,6 +182,42 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             return PhoneRequestDelivery(id: identifier, recipient: DeliveryRecipient(enrollment), requestID: id(n),
                 admittedAt: AuthorityMoment(epoch: clock.epoch, milliseconds: 100), deadlineMilliseconds: deadline)
         }
+        func requestJournal() throws -> (AuthorityJournal, IssuedRequestPayload) {
+            try Self.requestJournal(root: root, clock: clock, key: key)
+        }
+        private static func requestJournal(root: URL, clock: Clock, key: P256.Signing.PrivateKey) throws -> (AuthorityJournal, IssuedRequestPayload) {
+            func id(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
+            let directory = root.appendingPathComponent("requests").path
+            try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "journal.sqlite"] {
+                let fd = Darwin.open(directory + "/" + name, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw GatewayDatabaseError.storage(errno) }; Darwin.close(fd)
+            }
+            let limits = try CBORLimits(maxBytes: 4096, maxDepth: 12, maxItems: 256)
+            let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+            let capabilities = ContractCapabilities(contracts: [contract: []])
+            let database = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "requests", owner: getuid()),
+                macID: id(2), accountID: id(3), recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+            let revision = try database.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+            let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(id(2)),
+                2: .bytes(id(3)), 3: .bytes(id(99)), 4: .unsigned(1), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
+            let writer = try database.write { try $0.createEpoch(descriptor) }
+            let enrollment = try StoredApprovalEnrollment(epoch: id(7), notificationTag: id(6, 32), identityPublicKey: key.publicKey.x963Representation,
+                approval: ApprovalEnrollment(phoneID: id(6), active: true, capabilities: capabilities, keys: [
+                    EnrolledApprovalKey(id: id(11), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                    EnrolledApprovalKey(id: id(12), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)]))
+            _ = try database.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision, eventID: id(30), receiptTimeMs: nil,
+                writer: writer, expectedAuditHead: 0) }
+            let owner = try ApprovalRequestCoordinator(database: database, writer: writer, clockEpoch: clock.epoch, maximumRequests: 8,
+                maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits, decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+            let moment = clock.sample().moment
+            let request = try owner.admitFixture(ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]),
+                actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+                firstObservedAt: moment, deadlineMilliseconds: 10_100, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 11_000),
+                now: moment, receiptTimeMs: nil)
+            return (AuthorityJournal(requests: owner), request)
+        }
     }
 
     func testAcceptedProbeIsNotSentAgainAndStartupHasPacingDelay() async throws {
@@ -752,6 +788,96 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             }
         }
         func close() { endpoint.close() }
+    }
+    private final class RootEndpointDriver: GatewayRootDriver, @unchecked Sendable {
+        let endpoint: GatewayXPCEndpoint
+        init(_ endpoint: GatewayXPCEndpoint) { self.endpoint = endpoint }
+        func start(closed: @escaping @Sendable () -> Void) {}
+        func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void) {
+            switch call {
+            case .hello: endpoint.hello { reply(.version($0)) }
+            case .synchronize(let bytes): endpoint.synchronize(bytes) { reply(.synchronized($0)) }
+            case .command(let bytes): endpoint.command(bytes) { reply(.command($0)) }
+            }
+        }
+        func close() { endpoint.close() }
+    }
+    private final class HintEndpointDriver: AuthorityWakeHintDriver, @unchecked Sendable {
+        let endpoint: AuthorityXPCEndpoint
+        init(_ endpoint: AuthorityXPCEndpoint) { self.endpoint = endpoint }
+        func start(closed: @escaping @Sendable () -> Void) {}
+        func invoke(_ call: AuthorityWakeHintCall, reply: @escaping @Sendable (AuthorityWakeHintResponse) -> Void) {
+            switch call {
+            case .hello: endpoint.hello { reply(.version($0)) }
+            case .version: endpoint.requestWakeVersion { reply(.version($0)) }
+            case .hints: endpoint.wakeDeliveryHints { reply(.hints($0)) }
+            }
+        }
+        func close() { endpoint.close() }
+    }
+
+    func testRetainedRootPublicationThroughHintRuntimeStartsActualGatewayAndWithdrawsForgottenRequest() async throws {
+        let fixture = try Fixture(), provider = Provider([]), clock = fixture.clock, key = P256.Signing.PrivateKey()
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let validateLease = Mutex(false)
+        let coordinator = try fixture.coordinator(provider, wakePolicy: wakePolicy(), validateAuthority: {
+            if validateLease.withLock({ $0 }) { try lease.validate() }
+        })
+        try await prepareWakes(fixture, coordinator)
+        try await submissionControl(fixture, coordinator, key: key, revision: 3, credential: 20)
+        let (journal, request) = try fixture.requestJournal()
+        defer { try? journal.close() }
+        let receiptKey = P256.Signing.PrivateKey(), limits = try CBORLimits(maxBytes: 4096, maxDepth: 12, maxItems: 256)
+        let receipts = try GatewayReceiptSigner(bytes: DeterministicCBOR.encode(.map([0: .unsigned(1),
+            1: .text("remozio-gateway-receipt-key"), 2: .bytes(receiptKey.x963Representation)]), limits: limits),
+            expectedPublicKey: receiptKey.publicKey.x963Representation)
+        let dispatcher = GatewayRootDispatcher(coordinator: coordinator, lease: lease, receipts: receipts, retryInterval: 10)
+        let rootEndpoint = try GatewayXPCEndpoint(verify: {}, budget: AuthorityXPCWorkBudget(), invalidate: { lease.retire() },
+            synchronize: { try await dispatcher.synchronize($0) }, execute: { try await dispatcher.execute($0) })
+        let route = PresenceRouting(destination: .phones, reason: .manualAway, detectionLimited: false)
+        let publisher = try AuthorityWakePublisher(journal: journal, channel: GatewayRootChannel(driver: RootEndpointDriver(rootEndpoint)),
+            registration: fixture.identity(), leaseMilliseconds: 1000, clock: { clock.sample().moment }, routing: { route })
+        validateLease.withLock { $0 = true }
+        try await publisher.start(); try await publisher.reconcile()
+        let feed = publisher.hintFeed
+        let trust = DirectApprovalTrust(macID: id(2), accountID: id(3), revision: UUID(), peers: [])
+        let hintEndpoint = try AuthorityXPCEndpoint(macID: id(2), accountID: id(3), budget: AuthorityXPCWorkBudget(), verify: {},
+            invalidate: {}, snapshot: { trust }, validate: { _ in false }, wakeHints: { try feed.current() })
+        let wakeEndpoint = try GatewayWakeXPCEndpoint(verify: {}, budget: AuthorityXPCWorkBudget(),
+            sample: { clock.sample().moment.milliseconds }, challengeLifetimeMillis: 100, invalidate: {},
+            execute: { _ = try await coordinator.submitWake($0, signature: $1, challenge: $2) })
+        let signerConfiguration = try GatewayWakeSignerConfiguration(binding: feed.binding, credentialID: id(20), transportUID: 401,
+            ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
+            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, 20)], custody: .protectedFile,
+            keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: key.publicKey.x963Representation)
+        let record = try GatewayWakeKeyRecord(binding: feed.binding, credentialID: id(20), fileKey: key)
+        let signer = try GatewayWakeSigner.load(configuration: signerConfiguration, realUID: 401, effectiveUID: 401,
+            read: { _, _ in try record.encode() })
+        let runtime = try TransportWakeRuntime(hints: AuthorityWakeHintChannel(driver: HintEndpointDriver(hintEndpoint), binding: feed.binding),
+            gateway: GatewayWakeChannel(driver: WakeEndpointDriver(wakeEndpoint)), signer: signer)
+        let hints = try await publisher.readyDeliveryIDs(), deliveryID = try XCTUnwrap(hints.first)
+        let beforeWake = await provider.wakes
+        XCTAssertTrue(beforeWake.isEmpty)
+        await provider.hold()
+        try await runtime.start(); try await runtime.poll()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await provider.wakes.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
+        let wakes = await provider.wakes
+        XCTAssertEqual(wakes.count, 1)
+        let progress = try await coordinator.wakeProgress(deliveryID: deliveryID)
+        XCTAssertEqual(progress?.deliveryID, deliveryID)
+        XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).deadlineMilliseconds }, 10_100)
+        try journal.withRequests { owner in
+            _ = try owner.retirePending(requestID: request.requestID, reason: .cancelled, now: clock.sample().moment, receiptTimeMs: nil)
+            try owner.forgetTerminal(requestID: request.requestID)
+        }
+        try await publisher.reconcile(); try await runtime.poll()
+        XCTAssertTrue(try feed.current().deliveryIDs.isEmpty)
+        let withdrawn = try await coordinator.wakeProgress(deliveryID: deliveryID)
+        XCTAssertEqual(withdrawn?.status, .withdrawn)
+        await runtime.close(); await publisher.close()
+        XCTAssertThrowsError(try lease.validate())
+        try await coordinator.shutdown()
     }
 
     func testRestrictedNativeChannelRechecksChallengeAtCoordinatorAdmission() async throws {

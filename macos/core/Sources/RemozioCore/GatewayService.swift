@@ -3,7 +3,7 @@ import Foundation
 import RemozioProtocol
 import Synchronization
 
-private actor GatewayRootDispatcher {
+actor GatewayRootDispatcher {
     let coordinator: GatewayDeliveryCoordinator
     let lease: GatewayAuthorityLease
     let receipts: GatewayReceiptSigner

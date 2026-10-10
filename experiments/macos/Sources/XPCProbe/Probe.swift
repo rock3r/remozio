@@ -7,6 +7,8 @@ import RemozioCore
 
 final class ProbeService: NSObject, ProbeProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    func requestWakeVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
+    func wakeDeliveryHints(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func requestDeliveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
     func requestDiscoveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
     func pendingRequestIDs(_ binding: Data, reply: @escaping @Sendable (Data?) -> Void) {

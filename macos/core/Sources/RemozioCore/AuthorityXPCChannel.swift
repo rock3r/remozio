@@ -12,6 +12,9 @@ import Foundation
     /// Optional state/decision extension. Negotiate before sending request IDs or signed decisions.
     func requestExchangeVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func exchangeRequest(_ binding: Data, query: Data, reply: @escaping @Sendable (Data?) -> Void)
+    /// Optional wake hints. Clients negotiate this extension on their own connection.
+    func requestWakeVersion(reply: @escaping @Sendable (UInt64) -> Void)
+    func wakeDeliveryHints(reply: @escaping @Sendable (Data?) -> Void)
     func trustSnapshot(reply: @escaping @Sendable (Data?) -> Void)
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void)
 }
