@@ -252,9 +252,10 @@ static int cooperative_suspend(remozio_frontend_runtime_t *owner, uint32_t milli
     if (error) goto restore;
     while (atomic_load_explicit(&handlers, memory_order_seq_cst)) usleep(1000);
     if (!suspend_intent(owner, confirmed, ticket, deadline)) {
-        /* SIGCONT cancels the pending stop, including one queued after an earlier returning CONT handler. */
-        error = pthread_kill(pthread_self(), SIGCONT);
-        if (error) goto restore;
+        /* Discard the pending stop without creating a continuation that the CLI would forward to the target. */
+        action.sa_handler = SIG_IGN;
+        if (sigaction(SIGTSTP, &action, NULL)) error = errno;
+        goto restore;
     } else if (queued) *queued = true;
     wait_mask = before; sigdelset(&wait_mask, SIGTSTP); sigdelset(&wait_mask, SIGCONT);
     struct timespec timeout = {.tv_sec = milliseconds / 1000, .tv_nsec = (milliseconds % 1000) * 1000000};

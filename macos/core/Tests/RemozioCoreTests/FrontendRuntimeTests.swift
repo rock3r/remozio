@@ -30,7 +30,7 @@ final class FrontendRuntimeTests: XCTestCase {
     func testActualCooperativeStopPreservesCancellationRestorationAndOrphanedGroupBehavior() throws {
         let result = try runFixture("frontend-suspension", sources: ["FrontendTerminal.c", "CommandStreamSource.c"])
         XCTAssertEqual(result["failure"] as? Int, 0)
-        for key in ["orphanedGroupDoesNotHang", "confirmedStopTicketChecked", "restoredBeforeActualStop", "crossThreadContinueCancelsStop",
+        for key in ["orphanedGroupDoesNotHang", "confirmedStopTicketChecked", "noSyntheticContinueChecked", "restoredBeforeActualStop", "crossThreadContinueCancelsStop",
             "backgroundResumeNeverActivates", "foregroundResumeFreshActivation", "latestDimensionsCopied",
             "finalSettingsRestored", "sessionOwnerReaped"] {
             XCTAssertEqual(result[key] as? Bool, true, key)

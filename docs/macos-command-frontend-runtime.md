@@ -73,7 +73,7 @@ sequenceDiagram
     N->>K: Queue SIGTSTP on the masked main thread
     N->>N: Reconcile handlers again
     alt SIGCONT cancelled the intent
-        N->>K: Cancel the pending stop with SIGCONT
+        N->>K: Temporarily ignore SIGTSTP to discard the pending stop
     end
     N->>K: Atomically unmask during a positive bounded wait
     Note over K: Ordinary SIGTSTP stops this process; SIGCONT resumes it
@@ -92,6 +92,7 @@ It does not force a SIGSTOP or change terminal foreground ownership.
 SIGCONT can arrive before queuing, after queuing, or while a handler runs on another thread.
 Recorded continuation cancels a stop queued after that continuation's handler returned.
 Kernel continuation also cancels a pending stop.
+Native cancellation restores the returning route immediately. It creates no synthetic continuation for the command.
 A positive wait bounds signal delivery when the group is orphaned.
 It does not limit time spent stopped or the command's runtime.
 Cleanup is required after any operation failure.
@@ -107,6 +108,7 @@ The local runtime is macOS 27.0.1; deployment-target compilation is not macOS 26
 | Handler teardown | An entered handler keeps its descriptor alive; actual descriptor reuse leaves the replacement pipe untouched |
 | Cooperative stop | Three deterministic cross-thread continuation cases cancel the stop |
 | Confirmed stop | Changed tickets, background ownership and expiry prevent a stale stop; actual queuing followed by expiry cancels the stop |
+| Cancellation controls | Expiry or resize after queuing preserves the stop route and mask without producing a continuation event |
 | Private PTY | Actual SIGTSTP follows restoration; background resume refuses activation; foreground resume copies new dimensions |
 | Orphaned group | The operation returns and restores its route without forcing a stop or hanging |
 
@@ -131,13 +133,14 @@ No fixture executes the requested target, registers a service, or accesses an ex
 | Connection cleanup | An injected channel error and restoration failures retain raw settings until cleanup succeeds; the original error survives |
 | Suspension retry | An injected restoration failure preserves the admitted channel; authenticated SIGTSTP and SIGCONT complete before exit |
 | Confirmed target sample | Explicit profile 10 and a fresh query drive actual SIGTSTP; background resume preserves settings; foreground resume sends new dimensions |
+| Cancelled confirmation | Actual SIGWINCH invalidates the first ticket; another nonce-bound query on the original admission permits the eventual observed stop |
 
 The three cleanup regressions failed before their loop fixes and pass afterward.
 Their injected failures wrap a real private terminal lease.
 They do not prove actual foreground-loss scheduling in the composed loop.
 The separate native fixture checks real foreground transitions.
 
-`scripts/run-macos-frontend-composition.py` runs these seven cases within `scripts/check.sh`.
+`scripts/run-macos-frontend-composition.py` runs these eight cases within `scripts/check.sh`.
 It records runtime, deployment target, native statuses, and observations in `.build/command-frontend/evidence.json`.
 It removes previous success evidence before each run.
 The confirmed-stop supervisor owns and reaps its direct child on success and failure.

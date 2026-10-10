@@ -44,15 +44,18 @@ def invoke(binary, mode, expected_status, supervisor=None):
     if suspend_retry_checked is not (mode == "pty-suspend-retry"):
         raise RuntimeError(f"Wrong suspend retry fixture mode: {mode}")
     confirmed_job_checked = observations.pop("confirmedJobChecked", None)
-    if confirmed_job_checked is not (mode == "pty-job"):
+    if confirmed_job_checked is not mode.startswith("pty-job"):
         raise RuntimeError(f"Wrong confirmed job fixture mode: {mode}")
+    confirmed_job_retry_checked = observations.pop("confirmedJobRetryChecked", None)
+    if confirmed_job_retry_checked is not (mode == "pty-job-retry"):
+        raise RuntimeError(f"Wrong confirmed job retry fixture mode: {mode}")
     expected = {"authenticatedComposedLoop", "actualArgvAndDirectoryCaptured", "rawClaimsPreserved", "busyThenOneAdmission",
                 "pipeInputUnread", "originalFlagsPreserved", "cleanupCompleted"}
     if set(observations) != expected or any(value is not True for value in observations.values()):
         raise RuntimeError(f"Incomplete frontend fixture {mode}: {observations!r}")
     return {"nativeStatus": process.returncode, "observations": observations,
             "privatePTYChecked": pty_checked, "interruptedCleanupChecked": cleanup_checked, "failedConnectionCleanupChecked": failed_connection_checked, "suspendRestorationRetryChecked": suspend_retry_checked,
-            "confirmedJobChecked": confirmed_job_checked}
+            "confirmedJobChecked": confirmed_job_checked, "confirmedJobRetryChecked": confirmed_job_retry_checked}
 
 
 def main():
@@ -79,7 +82,8 @@ def main():
                 "pipes": invoke(binary, "pipes", 13), "signal": invoke(binary, "signal", -signal.SIGINT),
                 "pty": invoke(binary, "pty", 13), "ptyCleanup": invoke(binary, "pty-cleanup", 13), "ptyFailure": invoke(binary, "pty-failure", os.EX_PROTOCOL),
                 "ptySuspendRetry": invoke(binary, "pty-suspend-retry", 13),
-                "ptyConfirmedJob": invoke(binary, "pty-job", 13, supervisor)}
+                "ptyConfirmedJob": invoke(binary, "pty-job", 13, supervisor),
+                "ptyConfirmedJobRetry": invoke(binary, "pty-job-retry", 13, supervisor)}
     path.write_text(json.dumps(evidence, indent=2) + "\n")
     print(f"Composed frontend Mach loop and native signal result passed. Evidence: {path}")
 

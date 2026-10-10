@@ -16,6 +16,7 @@ static uint64_t controlled_time(void);
 #include "include/RemozioFrontendTerminal.h"
 static _Atomic bool inject_after_queue, pause_capture, captured, released;
 static _Atomic bool inject_expiry_after_queue;
+static _Atomic bool inject_resize_after_queue;
 static _Atomic uint64_t overridden_time;
 static uint64_t controlled_time(void) {
     uint64_t value = atomic_load(&overridden_time);
@@ -48,6 +49,7 @@ static int send_continue(void) {
 }
 static int queued_kill(pthread_t thread, int number) {
     int error = pthread_kill(thread, number);
+    if (!error && number == SIGTSTP && atomic_exchange(&inject_resize_after_queue, false)) error = pthread_kill(thread, SIGWINCH);
     if (!error && number == SIGTSTP && atomic_exchange(&inject_expiry_after_queue, false)) atomic_store(&overridden_time, UINT64_MAX);
     if (!error && number == SIGTSTP && atomic_exchange(&inject_after_queue, false)) error = send_continue();
     return error;
@@ -102,6 +104,11 @@ static pid_t wait_for(pid_t child, int *status, int options) {
         usleep(1000);
     }
     return 0;
+}
+static bool returning_stop_route(void) {
+    struct sigaction action = {0}; sigset_t mask;
+    return !sigaction(SIGTSTP, NULL, &action) && action.sa_handler == signal_route &&
+        !pthread_sigmask(SIG_BLOCK, NULL, &mask) && !sigismember(&mask, SIGTSTP) && !sigismember(&mask, SIGCONT);
 }
 static int orphaned_group(void) {
     pid_t child = fork();
@@ -168,11 +175,21 @@ static int worker(int slave, int command, int report) {
     if (remozio_frontend_runtime_job_ticket(owner, &ticket) ||
         remozio_frontend_runtime_suspend_confirmed(owner, ticket, 0, 50, &queued) || queued ||
         !byte(report, 'O') || !receive(command, 'S')) return 65;
+    if (remozio_frontend_runtime_take_signals(owner, &delivered)) return 67;
     atomic_store(&inject_expiry_after_queue, true);
     int expired = remozio_frontend_runtime_suspend_confirmed(owner, ticket, confirmation_deadline(owner), 50, &queued);
     atomic_store(&overridden_time, 0);
-    if (expired || queued || atomic_load(&inject_expiry_after_queue) ||
+    if (remozio_frontend_runtime_take_signals(owner, &delivered) || delivered & REMOZIO_FRONTEND_CONTINUE) {
+        fprintf(stderr, "Expired stop produced a continuation event: %u\n", delivered);
+        return 68;
+    }
+    if (expired || queued || atomic_load(&inject_expiry_after_queue) || !returning_stop_route() ||
         !byte(report, 'E') || !receive(command, 'S')) return 66;
+    if (remozio_frontend_runtime_job_ticket(owner, &ticket)) return 69;
+    atomic_store(&inject_resize_after_queue, true);
+    if (remozio_frontend_runtime_suspend_confirmed(owner, ticket, confirmation_deadline(owner), 50, &queued) || queued ||
+        remozio_frontend_runtime_take_signals(owner, &delivered) || delivered != REMOZIO_FRONTEND_RESIZE ||
+        !returning_stop_route() || !byte(report, 'W') || !receive(command, 'S')) return 70;
     /* A ticket captured after an earlier CONT can authorize a new cooperative stop without fabricating local TSTP history. */
     if (remozio_frontend_runtime_job_ticket(owner, &ticket) ||
         remozio_frontend_runtime_suspend_confirmed(owner, ticket, confirmation_deadline(owner), 50, &queued) || !queued) return 61;
@@ -203,8 +220,8 @@ static int supervise(int slave) {
     close(command[0]); close(report[1]);
     int error = 0, status = 0; bool reaped = false;
     if ((setpgid(child, child) && errno != EACCES) || tcsetpgrp(slave, child) || !byte(command[1], 'F')) error = 35;
-    for (unsigned i = 0; !error && i < 7; i++) {
-        const char expected[] = {'C', 'D', 'H', 'Q', 'J', 'O', 'E'};
+    for (unsigned i = 0; !error && i < 8; i++) {
+        const char expected[] = {'C', 'D', 'H', 'Q', 'J', 'O', 'E', 'W'};
         pid_t observed;
         if (!receive(report[0], expected[i]) || (observed = waitpid(child, &status, WNOHANG | WUNTRACED)) != 0 || !byte(command[1], 'S')) error = 45;
     }
@@ -245,9 +262,9 @@ int main(void) {
     }
     if (master >= 0) close(master); if (slave >= 0) close(slave);
     if (error) fprintf(stderr, "frontend suspension fixture failed at stage %d\n", error);
-    printf("{\"failure\":%d,\"orphanedGroupDoesNotHang\":true,\"confirmedStopTicketChecked\":%s,\"restoredBeforeActualStop\":%s,\"crossThreadContinueCancelsStop\":%s,\"backgroundResumeNeverActivates\":%s,"
+    printf("{\"failure\":%d,\"orphanedGroupDoesNotHang\":true,\"noSyntheticContinueChecked\":%s,\"confirmedStopTicketChecked\":%s,\"restoredBeforeActualStop\":%s,\"crossThreadContinueCancelsStop\":%s,\"backgroundResumeNeverActivates\":%s,"
         "\"foregroundResumeFreshActivation\":%s,\"latestDimensionsCopied\":%s,\"finalSettingsRestored\":%s,\"sessionOwnerReaped\":%s}\n",
-        error, error ? "false" : "true", error ? "false" : "true", error ? "false" : "true", error ? "false" : "true", error ? "false" : "true",
+        error, error ? "false" : "true", error ? "false" : "true", error ? "false" : "true", error ? "false" : "true", error ? "false" : "true", error ? "false" : "true",
         error ? "false" : "true", error ? "false" : "true", result == child ? "true" : "false");
     return error;
 }

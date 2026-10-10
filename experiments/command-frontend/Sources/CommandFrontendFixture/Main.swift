@@ -91,6 +91,28 @@ private final class FailedChannel: CommandFrontendExecutionChannel {
     func close() { session.close() }
 }
 
+/// Cancel one confirmation with an actual local resize while restoring the real terminal lease.
+private final class CancelledConfirmationTerminal: CommandFrontendTerminalIO {
+    let terminal: CommandFrontendTerminal
+    private(set) var injected = false
+    init(_ terminal: CommandFrontendTerminal) { self.terminal = terminal }
+    var needsRestore: Bool { terminal.needsRestore }
+    func isForeground() throws -> Bool { try terminal.isForeground() }
+    func activate() throws { try terminal.activate() }
+    func restore() throws {
+        if !injected && terminal.needsRestore {
+            injected = true
+            try require(pthread_kill(pthread_self(), SIGWINCH) == 0, "confirmation resize")
+        }
+        try terminal.restore()
+    }
+    func read(maximumBytes: Int) throws -> CommandFrontendTerminalRead { try terminal.read(maximumBytes: maximumBytes) }
+    func write(_ bytes: Data) throws -> Int { try terminal.write(bytes) }
+    func dimensions() throws -> CommandFrontendTerminalSize { try terminal.dimensions() }
+    func close() throws { try terminal.close() }
+    func closeReportingFailure() { terminal.closeReportingFailure() }
+}
+
 @main
 private struct Probe {
     static func main() {
@@ -99,9 +121,9 @@ private struct Probe {
             let limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
             var arguments = try CommandFrontendInvocation.copyArguments(count: CommandLine.argc, vector: CommandLine.unsafeArgv, limits: limits)
             guard arguments.count > 2, let mode = String(data: arguments[1], encoding: .utf8),
-                  ["pipes", "signal", "pty", "pty-cleanup", "pty-failure", "pty-suspend-retry", "pty-job"].contains(mode) else { exit(EX_USAGE) }
+                  ["pipes", "signal", "pty", "pty-cleanup", "pty-failure", "pty-suspend-retry", "pty-job", "pty-job-retry"].contains(mode) else { exit(EX_USAGE) }
             arguments.remove(at: 1)
-            try run(arguments: arguments, signalMode: mode == "signal", ptyMode: mode.hasPrefix("pty"), cleanupMode: mode == "pty-cleanup", failureMode: mode == "pty-failure", suspendRetryMode: mode == "pty-suspend-retry", jobMode: mode == "pty-job").finish()
+            try run(arguments: arguments, signalMode: mode == "signal", ptyMode: mode.hasPrefix("pty"), cleanupMode: mode == "pty-cleanup", failureMode: mode == "pty-failure", suspendRetryMode: mode == "pty-suspend-retry", jobMode: mode.hasPrefix("pty-job"), jobRetryMode: mode == "pty-job-retry").finish()
         }
         catch { fputs("Composed frontend fixture failed: \(error)\n", stderr); exit(EX_SOFTWARE) }
     }
@@ -115,7 +137,7 @@ private struct Probe {
         }
         return "cdhash H\"" + hash.map { String(format: "%02x", $0) }.joined() + "\""
     }
-    private static func run(arguments: [Data], signalMode: Bool, ptyMode: Bool, cleanupMode: Bool, failureMode: Bool, suspendRetryMode: Bool, jobMode: Bool) throws -> CommandFrontendExit {
+    private static func run(arguments: [Data], signalMode: Bool, ptyMode: Bool, cleanupMode: Bool, failureMode: Bool, suspendRetryMode: Bool, jobMode: Bool, jobRetryMode: Bool) throws -> CommandFrontendExit {
         var cleanupFailed = false
         let runtime = CommandFrontendRuntime(reportCleanupFailure: { _ in cleanupFailed = true })
         defer { try? runtime.close() }
@@ -270,16 +292,20 @@ private struct Probe {
                         try queued { try stream.send(.jobState(.init(revision: 1,
                             state: .stopped(signal: UInt32(SIGTSTP), rawStopCode: UInt32(CLD_STOPPED), tracing: .untraced)))) }
                         let deadline = Date().addingTimeInterval(10)
-                        var queried = false
-                        while !queried {
-                            if let body = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
-                                guard case .queryCurrentJob = body else { throw Failure.assertion("fresh query required") }
-                                queried = true
+                        var previousNonce: Data?
+                        for _ in 0..<(jobRetryMode ? 2 : 1) {
+                            var queried = false
+                            while !queried {
+                                if let body = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                                    guard case .queryCurrentJob(let nonce) = body else { throw Failure.assertion("fresh query required") }
+                                    try require(nonce != previousNonce, "fresh confirmation retry nonce")
+                                    previousNonce = nonce; queried = true
+                                }
+                                try require(Date() < deadline, "query deadline"); usleep(1000)
                             }
-                            try require(Date() < deadline, "query deadline"); usleep(1000)
+                            try stream.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
+                                checkPolicy: {}, currentState: { .stopped(signal: UInt32(SIGTSTP), revision: 1) })
                         }
-                        try stream.flushCurrentJob(expression: expression, userID: user, auditSessionID: nil,
-                            checkPolicy: {}, currentState: { .stopped(signal: UInt32(SIGTSTP), revision: 1) })
                         var continued = false
                         while !continued {
                             if let body = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
@@ -324,8 +350,10 @@ private struct Probe {
         guard case .admitted(let session) = response else { throw Failure.assertion("admission") }
         defer { session.close() }
         let cleanupProbe = (cleanupMode || failureMode || suspendRetryMode) ? terminal.map { InterruptedCleanupTerminal($0, failureBeforeResult: failureMode, suspendRetry: suspendRetryMode) } : nil
+        let confirmationProbe = jobRetryMode ? terminal.map(CancelledConfirmationTerminal.init) : nil
         let relay: CommandFrontendRelay
         if let cleanupProbe { relay = try CommandFrontendRelay(channel: failureMode ? FailedChannel(session) : session, terminal: cleanupProbe) }
+        else if let confirmationProbe { relay = try CommandFrontendRelay(channel: session, terminal: confirmationProbe) }
         else { relay = try terminal.map { try CommandFrontendRelay(session: session, terminal: $0) } ?? CommandFrontendRelay(pipeSession: session) }
         defer { try? relay.close() }
         try runtime.attach(session: session, terminal: terminal)
@@ -345,6 +373,7 @@ private struct Probe {
         try require(!cleanupMode || cleanupProbe?.failures == 1, "cleanup failure was not exercised")
         try require(!suspendRetryMode || cleanupProbe?.restorationFailures == 1 && cleanupProbe?.failures == 0,
             "suspend restoration retry was not exercised")
+        try require(!jobRetryMode || confirmationProbe?.injected == true, "confirmation cancellation was not exercised")
         try require(done.wait(timeout: .now() + 5) == .success, "server completion")
         try outcome.withLock { result in
             guard let result else { throw Failure.assertion("server result") }; try result.get()
@@ -367,7 +396,7 @@ private struct Probe {
         }
         try runtime.close()
         try require(!cleanupFailed, "cleanup")
-        FileHandle.standardOutput.write(Data("{\"authenticatedComposedLoop\":true,\"actualArgvAndDirectoryCaptured\":true,\"rawClaimsPreserved\":true,\"busyThenOneAdmission\":true,\"pipeInputUnread\":true,\"originalFlagsPreserved\":true,\"cleanupCompleted\":true,\"privatePTYChecked\":\(ptyMode),\"interruptedCleanupChecked\":\(cleanupMode),\"failedConnectionCleanupChecked\":\(failureMode),\"suspendRestorationRetryChecked\":\(suspendRetryMode),\"confirmedJobChecked\":\(jobMode)}\n".utf8))
+        FileHandle.standardOutput.write(Data("{\"authenticatedComposedLoop\":true,\"actualArgvAndDirectoryCaptured\":true,\"rawClaimsPreserved\":true,\"busyThenOneAdmission\":true,\"pipeInputUnread\":true,\"originalFlagsPreserved\":true,\"cleanupCompleted\":true,\"privatePTYChecked\":\(ptyMode),\"interruptedCleanupChecked\":\(cleanupMode),\"failedConnectionCleanupChecked\":\(failureMode),\"suspendRestorationRetryChecked\":\(suspendRetryMode),\"confirmedJobChecked\":\(jobMode),\"confirmedJobRetryChecked\":\(jobRetryMode)}\n".utf8))
         return result
     }
     private static func queued(_ operation: () throws -> Bool) throws {

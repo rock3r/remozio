@@ -100,8 +100,11 @@ flowchart TD
 Any recorded local signal changes the ticket. Consuming pending signal bits does not reset that ticket.
 The ticket saturates rather than wraps. It contains no remote authorization.
 The native operation checks the continuous-clock deadline before and after queuing its own masked stop.
-An intervening continuation or expired sample cancels that pending stop through local SIGCONT.
-The loop uses the existing authenticated continuation control. It sends no second target stop for a confirmed stopped job.
+An intervening signal or expired sample discards that pending stop through a temporary ignored SIGTSTP disposition.
+The native owner immediately restores its returning route. Cancellation creates no continuation event for the target.
+Resize retains the historical candidate and starts another fresh query on the same admitted channel.
+Actual continuation, termination or a local suspend event clears that candidate at the next loop turn.
+Actual SIGCONT uses the existing authenticated continuation control. The loop sends no second target stop for a confirmed stopped job.
 Background resume leaves terminal settings restored. Foreground resume copies the current dimensions before relaying more traffic.
 Ordinary orphaned-group behavior remains intact. No path substitutes SIGSTOP or takes terminal foreground.
 
@@ -119,8 +122,10 @@ Actual macOS 26 runtime, signed target task-name access, and installed privilege
 The actual CLI now selects the new profiles and schedules queries from historical stop candidates.
 A Debug-only anonymous-Mach fixture supplies a nonce-bound synthetic stopped sample to the actual serialized CLI loop.
 Its disposable supervisor observes an actual SIGTSTP, restored settings, background SIGCONT, fresh foreground resize, and final child reaping.
+Another composed case injects actual SIGWINCH during restoration. It requires a second fresh nonce before observing the stop.
 This proves the frontend composition, not a real target stop or installed Root service.
 Separate native tests cancel a stop after continuation, after expiry, and after expiry while the stop is already queued.
+Expiry and resize after queuing create no synthetic continuation. Both restore the returning stop route and signal mask.
 The expiry-after-queue test advances a fixture clock. It retains actual signal delivery and wait checks.
 Nested foreground job behavior remains an experiment gate. Missing state must remain unknown without an invented terminal fallback.
 Physical terminal and phone end-to-end checks wait for the user's interactive session.

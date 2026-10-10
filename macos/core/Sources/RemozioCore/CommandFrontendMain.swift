@@ -215,7 +215,6 @@ public enum CommandFrontendMain {
                             let queued = try runtime.suspendConfirmed(ticket: value.ticket, deadlineMilliseconds: value.deadline,
                                 waitMilliseconds: settings.foregroundRetryMilliseconds)
                             if queued { mirroredRevision = value.revision; candidateRevision = nil }
-                            else if try runtime.jobTicket() != value.ticket { candidateRevision = nil }
                             relay.resume()
                         }
                         confirmation = nil
