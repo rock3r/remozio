@@ -14,8 +14,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-/* Root supplies only private descriptors 3 through 6. Stdin stays unread until exec. */
-enum { configuration_fd = 3, directory_fd = 4, status_fd = 5, release_fd = 6 };
+/* Root supplies private descriptors 3 through 6 and the format-2 terminal at 7. Stdin stays unread until exec. */
+enum { configuration_fd = 3, directory_fd = 4, status_fd = 5, release_fd = 6, terminal_fd = 7 };
 static mach_timebase_info_data_t timebase;
 static uint64_t milliseconds(void) {
     return (uint64_t)(((__uint128_t)mach_continuous_time() * timebase.numer) / ((uint64_t)timebase.denom * 1000000));
@@ -80,7 +80,7 @@ static int close_other_descriptors(void) {
     int received = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, items, bytes);
     if (received < 0 || received > bytes || received % sizeof(*items) != 0) { free(items); return EIO; }
     for (size_t index = 0; index < (size_t)received / sizeof(*items); ++index)
-        if (items[index].proc_fd >= 7) close(items[index].proc_fd);
+        if (items[index].proc_fd >= 8) close(items[index].proc_fd);
     free(items); return 0;
 }
 static void wipe(void *buffer, size_t count) {
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
     unsigned char header[REMOZIO_CHILD_HEADER_BYTES];
     if ((error = read_exact(configuration_fd, header, sizeof(header), deadline))) goto fail;
     uint32_t body_count = word(header + 4), budget = word(header + 28);
-    if (word(header) != 0x524d4331 || body_count > REMOZIO_CHILD_MAX_BYTES - sizeof(header) || budget < 100 || budget > 60000) { error = EINVAL; goto fail; }
+    if ((word(header) != REMOZIO_CHILD_FRAME_V1 && word(header) != REMOZIO_CHILD_FRAME_V2) || body_count > REMOZIO_CHILD_MAX_BYTES - sizeof(header) || budget < 100 || budget > 60000) { error = EINVAL; goto fail; }
     deadline = started + budget;
     frame_count = sizeof(header) + body_count;
     frame = malloc(frame_count);
@@ -132,14 +132,18 @@ int main(int argc, char **argv) {
     if (actual_count != (int)count || memcmp(actual, groups, count * sizeof(gid_t)) != 0) { error = EPERM; goto fail; }
     if (fchdir(directory_fd) != 0) { error = errno; goto fail; }
     close(directory_fd); umask(spec.file_creation_mask);
-    if (spec.io_mode == 1) {
+    if (spec.io_mode != 0) {
+        int controlling = spec.io_mode == 2 ? terminal_fd : 0;
+        int streams[3] = {0, 1, 2};
+        if (spec.io_mode == 2 && (error = remozio_child_spec_validate_stdio(&spec, controlling, streams))) goto fail;
         if (in_session) {
-            if (tcgetsid(0) != getsid(0) || tcgetpgrp(0) != getpgrp()) { error = EINVAL; goto fail; }
+            if (tcgetsid(controlling) != getsid(0) || tcgetpgrp(controlling) != getpgrp()) { error = EINVAL; goto fail; }
         } else {
             if (getsid(0) != getpid()) { error = EINVAL; goto fail; }
-            if (ioctl(0, TIOCSCTTY, 0) != 0) { error = errno; goto fail; }
+            if (ioctl(controlling, TIOCSCTTY, 0) != 0) { error = errno; goto fail; }
         }
     }
+    close(terminal_fd);
     if (milliseconds() >= deadline) { error = ETIMEDOUT; goto fail; }
     if ((error = report(1, 0))) goto fail;
     unsigned char release;

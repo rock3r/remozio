@@ -32,6 +32,15 @@ int remozio_command_process_spawn(const char *path, const void *frame, size_t co
  * The same protected launcher, exclusive owner and durable release requirements apply. */
 int remozio_command_process_spawn_in_session(const char *path, const void *frame, size_t count,
     int input, int output, int error, int directory, remozio_command_process_t **process);
+/* Explicit format-2 layout. Borrow the separate private terminal without changing
+ * shared flags. Validate its relationship to every stream before spawning.
+ * The standalone owner retains a terminal copy until disposal after actual reaping.
+ * The in-session caller instead retains its terminal through target cleanup.
+ * The same protected launcher, exclusive wait owner and durable permit are required. */
+int remozio_command_process_spawn_with_terminal(const char *path, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, remozio_command_process_t **process);
+int remozio_command_process_spawn_in_session_with_terminal(const char *path, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, remozio_command_process_t **process);
 /* Nonblocking progress, including at most four owned stop/continue records per poll.
  * A private status EOF never establishes exec. Exit status is meaningful only after reaping. */
 int remozio_command_process_poll(remozio_command_process_t *process, remozio_command_process_observation_t *observation);

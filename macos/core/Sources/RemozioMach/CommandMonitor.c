@@ -56,8 +56,8 @@ static int private_pipe(int ends[2]) {
     if (error) { close_descriptor(&ends[0]); close_descriptor(&ends[1]); }
     return error;
 }
-int remozio_command_monitor_spawn(const char *path, const char *child, const void *frame, size_t count,
-    int input, int output, int error, int directory, remozio_command_monitor_t **result) {
+static int spawn_monitor(const char *path, const char *child, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, bool mapped, remozio_command_monitor_t **result) {
     if (!result) return EINVAL;
     *result = NULL;
     if (!path || path[0] != '/' || strnlen(path, PATH_MAX) >= PATH_MAX || !child || child[0] != '/' || strnlen(child, PATH_MAX) >= PATH_MAX) return EINVAL;
@@ -66,10 +66,17 @@ int remozio_command_monitor_spawn(const char *path, const char *child, const voi
     if (action.sa_handler == SIG_IGN || (action.sa_flags & SA_NOCLDWAIT)) return EINVAL;
     remozio_child_spec_t spec = {0}; int failure = remozio_child_spec_decode(frame, count, &spec);
     if (failure) return failure;
+    if (spec.format_version != (mapped ? 2U : 1U)) { remozio_child_spec_close(&spec); return ENOTSUP; }
+    if (mapped) {
+        int streams[3] = {input, output, error};
+        failure = remozio_child_spec_validate_stdio(&spec, terminal, streams);
+        if (failure) { remozio_child_spec_close(&spec); return failure; }
+    }
     uint32_t budget = spec.preparation_milliseconds; remozio_child_spec_close(&spec);
-    int original[8] = {input, output, error, -1, directory, -1, -1, -1}, copies[8];
+    int descriptor_count = mapped ? 9 : 8;
+    int original[9] = {input, output, error, -1, directory, -1, -1, -1, terminal}, copies[9];
     int configuration[2] = {-1,-1}, status[2] = {-1,-1}, release[2] = {-1,-1}, control[2] = {-1,-1};
-    for (int i = 0; i < 8; ++i) copies[i] = -1;
+    for (int i = 0; i < descriptor_count; ++i) copies[i] = -1;
     remozio_command_monitor_t *monitor = calloc(1, sizeof(*monitor)); if (!monitor) return ENOMEM;
     monitor->configuration = monitor->status = monitor->release = monitor->control = monitor->events = -1;
     remozio_monitor_stream_init(&monitor->state.status);
@@ -95,13 +102,13 @@ int remozio_command_monitor_spawn(const char *path, const char *child, const voi
     if ((failure = mark_private(monitor->configuration, true, true)) || (failure = mark_private(monitor->status, true, false)) ||
         (failure = mark_private(monitor->release, true, true)) || (failure = mark_private(monitor->control, true, true))) goto cleanup;
     original[3] = configuration[0]; original[5] = status[1]; original[6] = release[0]; original[7] = control[0];
-    for (int i = 0; i < 8; ++i) { copies[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 128); if (copies[i] < 0) { failure = system_error(); goto cleanup; } }
+    for (int i = 0; i < descriptor_count; ++i) { copies[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 128); if (copies[i] < 0) { failure = system_error(); goto cleanup; } }
     close_descriptor(&configuration[0]); close_descriptor(&status[1]); close_descriptor(&release[0]); close_descriptor(&control[0]);
     monitor->events = kqueue(); if (monitor->events < 0) { failure = system_error(); goto cleanup; }
     if ((failure = mark_private(monitor->events, false, false))) goto cleanup;
     posix_spawn_file_actions_t actions;
     if ((failure = posix_spawn_file_actions_init(&actions))) goto cleanup;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < descriptor_count; ++i) {
         failure = posix_spawn_file_actions_adddup2(&actions, copies[i], i);
         if (failure) { posix_spawn_file_actions_destroy(&actions); goto cleanup; }
     }
@@ -121,11 +128,19 @@ int remozio_command_monitor_spawn(const char *path, const char *child, const voi
     if (kill(monitor->state.monitor_pid, SIGCONT)) { failure = system_error(); goto cleanup; }
     monitor->resumed = true;
 cleanup:
-    for (int i = 0; i < 8; ++i) close_descriptor(&copies[i]);
+    for (int i = 0; i < descriptor_count; ++i) close_descriptor(&copies[i]);
     for (int i = 0; i < 2; ++i) { close_descriptor(&configuration[i]); close_descriptor(&status[i]); close_descriptor(&release[i]); close_descriptor(&control[i]); }
     if (failure && !*result) { close_resources(monitor); free(monitor); }
     if (failure && *result) monitor->state.fault = failure;
     return failure;
+}
+int remozio_command_monitor_spawn(const char *path, const char *child, const void *frame, size_t count,
+    int input, int output, int error, int directory, remozio_command_monitor_t **result) {
+    return spawn_monitor(path, child, frame, count, input, output, error, directory, -1, false, result);
+}
+int remozio_command_monitor_spawn_with_terminal(const char *path, const char *child, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, remozio_command_monitor_t **result) {
+    return spawn_monitor(path, child, frame, count, input, output, error, directory, terminal, true, result);
 }
 static int pump_configuration(remozio_command_monitor_t *monitor) {
     if (monitor->configuration < 0) return 0;

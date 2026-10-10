@@ -41,6 +41,87 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
         let pointer = try XCTUnwrap(pointer)
         return Data(bytes: pointer, count: strlen(pointer))
     }
+    private func mappedFrame(mask: UInt32) throws -> Data {
+        var bytes = try frame()
+        var value = mask.bigEndian
+        withUnsafeBytes(of: &value) { bytes.insert(contentsOf: $0, at: 40) }
+        word(0x524d4332, offset: 0, bytes: &bytes)
+        word(UInt32(bytes.count - 40), offset: 4, bytes: &bytes)
+        word(2, offset: 36, bytes: &bytes)
+        return bytes
+    }
+    func testMappedFormatAcceptsEveryExplicitMaskWithoutChangingInvocationBytes() throws {
+        let expected = try capture()
+        for mask: UInt32 in 0...7 {
+            XCTAssertEqual(try decode(mappedFrame(mask: mask)) { spec in
+                XCTAssertEqual(spec.io_mode, 2)
+                XCTAssertEqual(spec.format_version, 2); XCTAssertEqual(spec.stdio_pty_mask, mask)
+                XCTAssertEqual(spec.uid, expected.target.uid); XCTAssertEqual(spec.gid, expected.target.gid)
+                XCTAssertEqual(try raw(spec.executable), expected.executable.path)
+                for index in 0..<3 { XCTAssertEqual(try raw(spec.arguments[index]), expected.arguments[index]) }
+                XCTAssertEqual(try raw(spec.environment[1]), Data("RAW=".utf8) + Data([0xff, 0x3d, 0x0a]))
+            }, 0)
+        }
+    }
+    func testMalformedMappedMaskModeAndBodyCannotDecodeAsLegacyFormat() throws {
+        let original = try mappedFrame(mask: 5)
+        for (offset, values): (Int, [UInt32]) in [(0, [0x524d4331, 0x524d4333]), (4, [0, UInt32.max]),
+            (36, [0, 1, 3, UInt32.max]), (40, [8, UInt32.max])] {
+            for value in values {
+                var changed = original; word(value, offset: offset, bytes: &changed)
+                XCTAssertEqual(try decode(changed), EINVAL)
+            }
+        }
+        for count in 0..<original.count { XCTAssertEqual(try decode(original.prefix(count)), EINVAL) }
+        var extra = original + Data([0]); word(UInt32(extra.count - 40), offset: 4, bytes: &extra)
+        XCTAssertEqual(try decode(extra), EINVAL)
+    }
+    func testMappedDescriptorsMatchEveryDeclaredDirectionWithoutReadingOrChangingStreams() throws {
+        var descriptors = [Int32](repeating: -1, count: 6)
+        for index in 0..<3 {
+            var pair = [Int32](repeating: -1, count: 2)
+            XCTAssertEqual(pipe(&pair), 0)
+            descriptors[index * 2] = pair[0]; descriptors[index * 2 + 1] = pair[1]
+        }
+        defer { for descriptor in descriptors where descriptor >= 0 { _ = Darwin.close(descriptor) } }
+        let terminal = try RetainedCommandPTY(); defer { terminal.close() }
+        let expected = Data([0xff, 0x00, 0x0a, 0xfe])
+        XCTAssertEqual(expected.withUnsafeBytes { Darwin.write(descriptors[1], $0.baseAddress, $0.count) }, expected.count)
+        let direct = [descriptors[0], descriptors[3], descriptors[5]]
+        let flags = direct.map { fcntl($0, F_GETFL) }
+        try terminal.withBorrowedSlave { control in
+            let terminalFlags = fcntl(control, F_GETFL)
+            for mask: UInt32 in 0...7 {
+                XCTAssertEqual(try decode(mappedFrame(mask: mask)) { decoded in
+                    var spec = decoded
+                    let streams = (0..<3).map { mask & (1 << $0) == 0 ? direct[$0] : control }
+                    XCTAssertEqual(streams.withUnsafeBufferPointer { remozio_child_spec_validate_stdio(&spec, control, $0.baseAddress) }, 0)
+                    for index in 0..<3 {
+                        var wrong = streams; wrong[index] = mask & (1 << index) == 0 ? control : direct[index]
+                        XCTAssertEqual(wrong.withUnsafeBufferPointer { remozio_child_spec_validate_stdio(&spec, control, $0.baseAddress) }, EINVAL)
+                    }
+                }, 0)
+            }
+            XCTAssertEqual(fcntl(control, F_GETFL), terminalFlags)
+        }
+        XCTAssertEqual(direct.map { fcntl($0, F_GETFL) }, flags)
+        var received = Data(count: expected.count)
+        XCTAssertEqual(received.withUnsafeMutableBytes { Darwin.read(descriptors[0], $0.baseAddress, $0.count) }, expected.count)
+        XCTAssertEqual(received, expected)
+    }
+    func testMappedDirectOutputMayRemainOnADifferentTerminal() throws {
+        let terminal = try RetainedCommandPTY(), other = try RetainedCommandPTY()
+        defer { terminal.close(); other.close() }
+        try terminal.withBorrowedSlave { control in
+            try other.withBorrowedSlave { output in
+                XCTAssertEqual(try decode(mappedFrame(mask: 5)) { decoded in
+                    var spec = decoded
+                    let streams = [control, output, control]
+                    XCTAssertEqual(streams.withUnsafeBufferPointer { remozio_child_spec_validate_stdio(&spec, control, $0.baseAddress) }, 0)
+                }, 0)
+            }
+        }
+    }
     func testNativeDecoderRetainsEveryRawInvocationAndCredentialField() throws {
         let expected = try capture()
         XCTAssertEqual(try decode(frame()) { spec in

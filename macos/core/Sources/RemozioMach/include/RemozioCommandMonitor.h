@@ -23,6 +23,12 @@ typedef struct {
 int remozio_command_monitor_spawn(const char *monitor_path, const char *child_path,
     const void *frame, size_t count, int input, int output, int error, int directory,
     remozio_command_monitor_t **monitor);
+/* Explicit format-2 layout. The private terminal is separate from stdin and
+ * retained by the monitor through target cleanup. Legacy frames are not accepted.
+ * All code, authority, durable release and exclusive wait requirements above apply. */
+int remozio_command_monitor_spawn_with_terminal(const char *monitor_path, const char *child_path,
+    const void *frame, size_t count, int input, int output, int error, int directory, int terminal,
+    remozio_command_monitor_t **monitor);
 /* Bounded private-frame/status/control progress and nonblocking kernel/reap observations.
  * Register and independently bind the prepared target before making release available.
  * A status record, clean EOF or monitor exit alone is never a command outcome.
