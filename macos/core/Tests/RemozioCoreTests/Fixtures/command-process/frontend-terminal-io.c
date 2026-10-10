@@ -52,6 +52,8 @@ static int worker(int slave, int report, int resume) {
         else return 19;
     }
     if (used != sizeof(input) || memcmp(received, input, used)) return 20;
+    // Output has its own fixture budget, independent of input and CI scheduling.
+    end = now() + 30000;
     unsigned char chunk[4096]; size_t sent = 0; bool blocked = false;
     while (sent < TOTAL && now() < end) {
         size_t length = TOTAL - sent; if (length > sizeof(chunk)) length = sizeof(chunk);
@@ -66,11 +68,18 @@ static int worker(int slave, int report, int resume) {
                 if (read(resume, &command, 1) != 1) return 22;
                 blocked = true;
             }
-            usleep(1000);
+            struct pollfd ready = {.fd = slave, .events = POLLOUT};
+            int waited = poll(&ready, 1, 100);
+            if (waited < 0 && errno != EINTR) return 36;
         } else if (error == EINTR) continue;
         else return 23;
     }
-    if (sent != TOTAL || !blocked || fcntl(slave, F_GETFL) != flags) return 24;
+    if (sent != TOTAL) {
+        fprintf(stderr, "Terminal fixture output deadline: sent=%zu expected=%d blocked=%d\n", sent, TOTAL, blocked);
+        return 24;
+    }
+    if (!blocked) return 35;
+    if (fcntl(slave, F_GETFL) != flags) return 34;
     if (remozio_frontend_terminal_restore(terminal) || tcgetattr(slave, &seen)) return 25;
     if (seen.c_iflag != original.c_iflag || seen.c_oflag != original.c_oflag ||
         seen.c_cflag != original.c_cflag || (seen.c_lflag & ~PENDIN) != (original.c_lflag & ~PENDIN) ||
@@ -96,7 +105,7 @@ int main(void) {
         close(report[0]); close(resume[1]); return 5;
     }
     bool ready = false, blocked = false, mismatch = false; size_t received = 0;
-    long end = now() + 6000; int status = 0, error = 0; pid_t result = 0;
+    long end = now() + 45000; int status = 0, error = 0; pid_t result = 0;
     while (now() < end) {
         char marker;
         ssize_t report_count = read(report[0], &marker, 1);
@@ -132,7 +141,11 @@ int main(void) {
             break;
         }
         if (result < 0 && errno != EINTR) { error = 28; break; }
-        usleep(1000);
+        struct pollfd ready[2] = {
+            {.fd = report[0], .events = POLLIN},
+            {.fd = blocked ? master : -1, .events = POLLIN},
+        };
+        if (poll(ready, 2, 100) < 0 && errno != EINTR) { error = 37; break; }
     }
     if (result != child) {
         if (!error) error = 29;

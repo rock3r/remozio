@@ -84,6 +84,9 @@ Sixteen new focused tests pass locally on macOS 27.0.1, build 26A434, on arm64.
 The two native fixtures compile with an arm64 macOS 26 deployment target.
 One fixture forces actual terminal output backpressure and checks every byte of 1 MiB.
 It also checks binary input, copied dimensions, original flags and restored settings.
+The fixture waits for kernel readiness between blocked operations.
+Its input and output have separate bounded experiment deadlines.
+Output timeout, missing backpressure and changed original flags have distinct failure codes.
 The other forces a stale foreground check before a real kernel read.
 It observes `SIGTTIN` and `EINTR`, preserves queued input, and completes restoration after foreground returns.
 Unsafe input signal routes are rejected before consumption.
