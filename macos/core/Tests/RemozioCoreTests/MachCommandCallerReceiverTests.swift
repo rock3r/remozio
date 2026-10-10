@@ -3244,6 +3244,57 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testRealMappedHandshakeNegotiatesBothProfilesAndTheHighestUnderstoodPair() throws {
+        let mixed = try CommandHandshakeCapabilities(wireVersions: [6, 7, 8, 9], submissionSchemaVersions: [1], inputCarrierVersions: [4, 5])
+        for (wire, capabilities): (UInt64, CommandHandshakeCapabilities) in [
+            (8, .mappedTerminalJobExecution), (9, .mappedPipeJobExecutionControls), (9, mixed),
+        ] {
+            let endpoint = try Endpoint(), port = endpoint.port, expression = try selfExpression(), uid = geteuid()
+            let mac = handshakeMac, account = handshakeAccount, result = HandshakeResult()
+            DispatchQueue.global().async {
+                result.finish(Result {
+                    let receiver = try MachCommandCallerReceiver(receivePort: port, expression: expression,
+                        userID: uid, auditSessionID: nil, maxPayloadBytes: 4096)
+                    return try RetainedCommandHandshake(hello: receiver.receiveHello(timeoutMilliseconds: 5000),
+                        capabilities: mixed, macID: mac, accountID: account, expression: expression, userID: uid, auditSessionID: nil)
+                })
+            }
+            let client = try MachCommandHandshakeClient.negotiate(authorityPort: port, expression: expression, userID: uid,
+                auditSessionID: nil, macID: mac, accountID: account, capabilities: capabilities)
+            let server = try result.take()
+            defer { client.close(); server.close() }
+            XCTAssertEqual(client.profile, server.profile)
+            XCTAssertEqual(server.profile.wireVersion, wire)
+            XCTAssertEqual(server.profile.submissionSchemaVersion, 1)
+            XCTAssertEqual(server.profile.inputCarrierVersion, 5)
+            XCTAssertTrue(server.profile.supportsMappedLayout)
+        }
+    }
+
+    func testMappedHandshakeRejectsWrongCarriersAndLegacyOnlyPeers() throws {
+        for mapped: CommandHandshakeCapabilities in [.mappedTerminalJobExecution, .mappedPipeJobExecutionControls] {
+            let wrongCarrier = try CommandHandshakeCapabilities(wireVersions: mapped.wireVersions,
+                submissionSchemaVersions: [1], inputCarrierVersions: [4])
+            for (offered, server) in [(wrongCarrier, mapped), (mapped, wrongCarrier),
+                (mapped, CommandHandshakeCapabilities.streamingJobExecution),
+                (CommandHandshakeCapabilities.pipeJobExecutionControls, mapped)] {
+                let endpoint = try Endpoint(), reply = try Endpoint()
+                XCTAssertThrowsError(try RetainedCommandHandshake(hello: hello(endpoint, reply: reply, capabilities: offered),
+                    capabilities: server, macID: handshakeMac, accountID: handshakeAccount,
+                    expression: selfExpression(), userID: geteuid(), auditSessionID: nil)) {
+                    XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+                }
+                let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+                defer { response.caller.close() }
+                XCTAssertThrowsError(try CommandHandshakeReply.decode(response.payload,
+                    offer: CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: offered),
+                    macID: handshakeMac, accountID: handshakeAccount)) {
+                    XCTAssertEqual($0 as? MachCommandHandshakeError, .incompatible)
+                }
+            }
+        }
+    }
+
     func testHandshakeReplyRightOwnershipClosesOnDiscardAndNegotiationFailure() throws {
         let endpoint = try Endpoint(), reply = try Endpoint(), baseline = try sendReferences(reply.port)
         var packet: MachCommandHello? = try hello(endpoint, reply: reply)

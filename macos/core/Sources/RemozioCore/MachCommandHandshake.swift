@@ -196,7 +196,8 @@ public final class RetainedCommandHandshake {
         let wires = offer.capabilities.wireVersions.intersection(capabilities.wireVersions).sorted(by: >)
         let inputs = offer.capabilities.inputCarrierVersions.intersection(capabilities.inputCarrierVersions).sorted(by: >)
         let selected = wires.flatMap { wire in inputs.compactMap { input -> (UInt64, UInt64)? in
-            (wire == 1 && [2, 3].contains(input)) || (wire == 2 && input == 3) || ([3, 4, 5, 6, 7].contains(wire) && input == 4) ? (wire, input) : nil
+            (wire == 1 && [2, 3].contains(input)) || (wire == 2 && input == 3) ||
+                ([3, 4, 5, 6, 7].contains(wire) && input == 4) || ([8, 9].contains(wire) && input == 5) ? (wire, input) : nil
         } }.first
         guard let (wire, input) = selected,
               let submission = offer.capabilities.submissionSchemaVersions.intersection(capabilities.submissionSchemaVersions).max() else {
