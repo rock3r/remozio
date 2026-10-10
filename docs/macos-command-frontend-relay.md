@@ -32,6 +32,7 @@ The relay never chooses its terminal from `isatty(stdin)`.
 | Input | Read at most 4096 bytes within the remaining 32768-byte credit window |
 | Full control queue | Retain the whole unsent input chunk |
 | Output | Retain one chunk and its unwritten suffix; do not receive another output chunk while blocked |
+| Blocked output | Continue bounded input, EOF and resize delivery through the original channel |
 | Output acknowledgment | Send only after output ends and every local output byte is written |
 | Local EOF | Retain the EOF control until a known-zero send succeeds |
 | Resize | Retain the latest dimensions until the original control channel accepts them |
@@ -79,7 +80,7 @@ This does not promise restoration after process loss or `SIGKILL`.
 
 ## Evidence and remaining gates
 
-Fifteen new focused tests pass locally on macOS 27.0.1, build 26A434, on arm64.
+Sixteen new focused tests pass locally on macOS 27.0.1, build 26A434, on arm64.
 The two native fixtures compile with an arm64 macOS 26 deployment target.
 One fixture forces actual terminal output backpressure and checks every byte of 1 MiB.
 It also checks binary input, copied dimensions, original flags and restored settings.
@@ -88,7 +89,8 @@ It observes `SIGTTIN` and `EINTR`, preserves queued input, and completes restora
 Unsafe input signal routes are rejected before consumption.
 
 A real Mach integration test uses the original authenticated execution session.
-It checks partial output, drain acknowledgment, exact binary input and a historical stopped-job observation.
+It checks exact binary input and EOF delivery while local output remains blocked.
+It then checks partial output, drain acknowledgment and a historical stopped-job observation.
 A second real Mach test sends `SIGWINCH` to its own receiving test thread.
 It observes interruption, then completes the same authenticated request without resubmission.
 The kernel probe also checks preview and receive interruption with queued-message preservation.

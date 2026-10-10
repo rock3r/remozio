@@ -9,6 +9,7 @@ final class FrontendRelayTestTerminal: CommandFrontendTerminalIO {
     var reads: [CommandFrontendTerminalRead] = []
     var readCalls = 0, activateCalls = 0, restoreCalls = 0, closeCalls = 0
     var writeCounts: [Int] = []
+    var writeBlocked = false, writeCalls = 0
     var written = Data()
     var readError: Error?
     var restoreError: Error?
@@ -35,6 +36,8 @@ final class FrontendRelayTestTerminal: CommandFrontendTerminalIO {
         return next
     }
     func write(_ bytes: Data) throws -> Int {
+        writeCalls += 1
+        if writeBlocked { return 0 }
         let count = writeCounts.isEmpty ? min(37, bytes.count) : writeCounts.removeFirst()
         if (0...bytes.count).contains(count) { written.append(bytes.prefix(count)) }
         return count
@@ -135,6 +138,28 @@ final class CommandFrontendRelayTests: XCTestCase {
         _ = try relay.advance(); XCTAssertEqual(terminal.written, bytes); XCTAssertEqual(channel.ackCalls, 0)
         _ = try relay.advance(); _ = try relay.advance(); _ = try relay.advance(); _ = try relay.advance()
         XCTAssertEqual(channel.ackCalls, 2); XCTAssertEqual(terminal.written, bytes)
+        try relay.close()
+    }
+    func testBlockedOutputStillRelaysInputWithoutConsumingAnotherOutputFrame() throws {
+        let channel = FrontendRelayTestChannel(), terminal = FrontendRelayTestTerminal()
+        let output = Data([255, 0, 13]), input = Data([3])
+        channel.events = [.opened, .output(output), .outputEnded]
+        terminal.writeCounts = [0, 0, output.count]; channel.inputCounts = [0, input.count]
+        let relay = try CommandFrontendRelay(channel: channel, terminal: terminal)
+        _ = try relay.advance(); _ = try relay.advance(); _ = try relay.advance()
+        let polls = channel.pollCalls
+        terminal.reads = [.bytes(input)]
+        _ = try relay.advance()
+        XCTAssertEqual(channel.attemptedInput, [input])
+        XCTAssertTrue(channel.acceptedInput.isEmpty); XCTAssertTrue(terminal.written.isEmpty)
+        XCTAssertEqual(channel.pollCalls, polls); XCTAssertEqual(channel.ackCalls, 0)
+        _ = try relay.advance()
+        XCTAssertEqual(channel.attemptedInput, [input, input]); XCTAssertEqual(channel.acceptedInput, input)
+        XCTAssertTrue(terminal.written.isEmpty); XCTAssertEqual(channel.pollCalls, polls)
+        _ = try relay.advance()
+        XCTAssertEqual(terminal.written, output); XCTAssertEqual(channel.pollCalls, polls)
+        _ = try relay.advance(); _ = try relay.advance()
+        XCTAssertEqual(channel.ackCalls, 1); XCTAssertEqual(channel.acceptedInput, input)
         try relay.close()
     }
     func testBackgroundWaitAndExplicitSuspensionRestoreBeforeFreshActivation() throws {

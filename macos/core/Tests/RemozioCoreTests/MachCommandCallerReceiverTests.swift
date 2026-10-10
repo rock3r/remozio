@@ -7307,6 +7307,7 @@ extension MachCommandCallerReceiverTests {
         let payloads = try ioPayloads(profile: profile, submission: submission)
         let expression = try selfExpression(), user = geteuid(), port = endpoint.port
         let allowOpen = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let inputWhileBlocked = DispatchSemaphore(value: 0)
         let result = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
         let binaryInput = Data([0, 255, 10, 13])
         let binaryOutput = Data((0..<4096).map { UInt8($0 % 251) }) + Data([255, 0, 13])
@@ -7325,6 +7326,15 @@ extension MachCommandCallerReceiverTests {
                 try Self.waitQueued { try stream.send(.opened) }
                 var controls: [CommandStreamFrame.Body] = []
                 let inputDeadline = Date().addingTimeInterval(5)
+                while controls.count < 1 {
+                    if let control = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
+                        controls.append(control)
+                    }
+                    guard Date() < inputDeadline else { throw MachCommandCallerError.timeout }
+                    usleep(1000)
+                }
+                XCTAssertEqual(controls, [.resize(53, 143, 0, 0)])
+                try Self.waitQueued { try stream.send(.output(Data(binaryOutput.prefix(4096)))) }
                 while controls.count < 3 {
                     if let control = try stream.receiveControl(expression: expression, userID: user, auditSessionID: nil) {
                         controls.append(control)
@@ -7333,7 +7343,7 @@ extension MachCommandCallerReceiverTests {
                     usleep(1000)
                 }
                 XCTAssertEqual(controls, [.resize(53, 143, 0, 0), .input(binaryInput), .inputEnd])
-                try Self.waitQueued { try stream.send(.output(Data(binaryOutput.prefix(4096)))) }
+                inputWhileBlocked.signal()
                 try Self.waitQueued { try stream.send(.output(Data(binaryOutput.dropFirst(4096)))) }
                 try Self.waitQueued { try stream.send(.outputEnd) }
                 let outputDeadline = Date().addingTimeInterval(5)
@@ -7357,13 +7367,13 @@ extension MachCommandCallerReceiverTests {
         guard case .admitted(let session) = io else { return XCTFail("The original authenticated channel must remain owned") }
         defer { session.close() }
         let terminal = FrontendRelayTestTerminal()
-        terminal.reads = [.bytes(binaryInput), .end]; terminal.writeCounts = [0, 3, 0, 71]
+        terminal.writeBlocked = true; terminal.writeCounts = [0, 3, 0, 71]
         let relay = try CommandFrontendRelay(channel: session, terminal: terminal)
         defer { try? relay.close() }
         guard case .waiting = try relay.advance(timeoutMilliseconds: 1000) else { return XCTFail("Admission must not open the stream") }
         XCTAssertEqual(terminal.activateCalls, 0); XCTAssertEqual(terminal.readCalls, 0)
         allowOpen.signal()
-        var final: VerifiedCommandTerminalResult?, sawJob = false
+        var final: VerifiedCommandTerminalResult?, sawJob = false, suppliedInput = false, receivedBlockedInput = false
         let deadline = Date().addingTimeInterval(10)
         while final == nil {
             switch try relay.advance(timeoutMilliseconds: 1000) {
@@ -7375,10 +7385,20 @@ extension MachCommandCallerReceiverTests {
             case .suspended, .foregroundRequired, .interrupted: XCTFail("Historical job metadata must not suspend this foreground relay")
             case .waiting, .progress: break
             }
+            if !suppliedInput, terminal.writeCalls > 0 {
+                XCTAssertTrue(terminal.written.isEmpty)
+                terminal.reads = [.bytes(binaryInput), .end]; suppliedInput = true
+            }
+            if !receivedBlockedInput, inputWhileBlocked.wait(timeout: .now()) == .success {
+                XCTAssertTrue(terminal.written.isEmpty)
+                terminal.writeBlocked = false; receivedBlockedInput = true
+            }
             guard Date() < deadline else { throw MachCommandCallerError.timeout }
+            usleep(1000)
         }
         XCTAssertEqual(final?.outcome, .exited(7)); XCTAssertEqual(terminal.written, binaryOutput)
-        XCTAssertEqual(terminal.readCalls, 2); XCTAssertTrue(sawJob)
+        XCTAssertTrue(suppliedInput); XCTAssertTrue(receivedBlockedInput); XCTAssertTrue(terminal.reads.isEmpty)
+        XCTAssertGreaterThanOrEqual(terminal.readCalls, 2); XCTAssertTrue(sawJob)
         XCTAssertFalse(relay.needsTerminalRestoration); XCTAssertGreaterThan(terminal.closeCalls, 0)
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
         try result.withLock { try XCTUnwrap($0).get() }

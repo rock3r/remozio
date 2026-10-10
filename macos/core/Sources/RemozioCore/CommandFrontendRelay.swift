@@ -107,8 +107,7 @@ public final class CommandFrontendRelay {
                 let count = try terminal.write(output)
                 guard (0...output.count).contains(count) else { throw CommandFrontendRelayError.invalidProgress }
                 if count > 0 { output = Data(output.dropFirst(count)); progressed = true }
-                // Do not consume another output frame while a local suffix remains blocked.
-                if !output.isEmpty { return progressed ? .progress : .waiting }
+                // Input must still progress while the local output suffix remains blocked.
             }
             if !outputEnded {
                 if input.isEmpty, !inputEnded, inputCapacity > 0 {
@@ -136,6 +135,8 @@ public final class CommandFrontendRelay {
             outputAcknowledged = try channel.acknowledgeOutput()
             progressed = progressed || outputAcknowledged
         }
+        // Retain one output chunk while allowing independent input and controls to progress.
+        if !output.isEmpty { return progressed ? .progress : .waiting }
         if progressed { return .progress }
         guard let event = try channel.pollStreamEvent(timeoutMilliseconds: timeoutMilliseconds) else { return .waiting }
         switch event {
