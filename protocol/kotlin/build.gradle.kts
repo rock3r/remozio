@@ -10,6 +10,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    val gatewaySubmissionVectors = rootProject.layout.projectDirectory.file("protocol/vectors/gateway-submission-v1.json")
+    inputs.file(gatewaySubmissionVectors)
+    systemProperty("remozio.gatewaySubmissionVectors", gatewaySubmissionVectors.asFile.absolutePath)
     val pairingVectors = rootProject.layout.projectDirectory.file("protocol/vectors/pairing-v1.json")
     inputs.file(pairingVectors)
     systemProperty("remozio.pairingVectors", pairingVectors.asFile.absolutePath)
