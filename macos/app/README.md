@@ -132,10 +132,10 @@ flowchart LR
     K[Provisioned transport identity] --> T
 ```
 
-The configuration contains installation scope, account UIDs, authority code pins, one keychain identity reference and a transport public-key pin.
+The configuration contains installation scope, account UIDs, authority code pins, one explicit identity location and a transport public-key pin.
 It contains no private key bytes, approval key or provider credential.
 The identity lookup disables authentication UI and checks the exact configured reference.
-It requires a Secure Enclave P-256 private key, a matching certificate key, the configured SPKI and a current certificate validity interval.
+The hardware path requires a Secure Enclave P-256 private key, a matching certificate key, the configured SPKI and a current certificate validity interval.
 It never searches for a replacement identity or generates a new key at startup.
 
 The process starts the existing authenticated authority feed before accepting phone channels.
@@ -151,6 +151,9 @@ They do not access an actual keychain identity or start a configured transport.
 Pre-login identity access, TLS signing without UI, dedicated-account key custody and actual enrolled-phone delivery remain unproven.
 Apple's [Mac keychain guidance](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains) requires daemons outside user contexts to use the file-based keychain.
 The earlier enclave TLS probe used an interactive disposable identity; it does not establish daemon support.
-This initial loader supports the hardware identity path only.
-The approved protected-file fallback remains separate work after the pre-login feasibility gate; there is no silent software fallback here.
+The [explicit transport file path](../core/transport-identity.md) supports the approved fallback as a separate provisioning choice.
+Version 1 hardware configuration remains compatible. Version 2 names one service-owned private file under Root-owned ancestors.
+Startup validates the private key, certificate and installation pin without a keychain search.
+Lookup failures never switch custody paths. Authority and credential recipient loaders do not use the file format.
+Disposable tests verify native signatures after reload; dedicated-account isolation and pre-login TLS remain activation gates for either path.
 Setup, protected activation, service registration and real-device tests remain required before deployment.
