@@ -24,7 +24,7 @@ def build():
     log = BUILD / "swift-build.log"
     log.write_text(result.stdout + result.stderr)
     if result.returncode:
-        raise RuntimeError(f"Live frontend build failed; see {log}")
+        raise RuntimeError(f"Live frontend build failed; see {log}\n{result.stdout}{result.stderr}")
     location = subprocess.run(arguments + ["--show-bin-path"], check=True, capture_output=True, text=True)
     binary = Path(location.stdout.strip()) / "LiveCommandFixture"
     sources = {
@@ -53,7 +53,7 @@ def build():
 def invoke(binary, helpers, mode):
     target = "/bin/bash" if mode == "nested" else str(helpers["target"])
     process = subprocess.Popen([str(binary), "authority", mode, str(helpers["supervisor"]), str(helpers["monitor"]),
-                                str(helpers["child"]), target], cwd="/private/tmp",
+                                str(helpers["child"]), target, str(helpers["target"])], cwd="/private/tmp",
                                env={"PATH": "/usr/bin:/bin"}, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     try:
@@ -63,6 +63,19 @@ def invoke(binary, helpers, mode):
         process.send_signal(signal.SIGTERM)
         output, errors = process.communicate(timeout=20)
         raise
+    finally:
+        try:
+            if process.poll() is None:
+                # This still-owned runner has its own session. Never signal a reaped or borrowed PID.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=10)
+        finally:
+            # Independent native owners observe channel loss and retire their own children.
+            process.stdout.close()
+            process.stderr.close()
     if process.returncode:
         raise RuntimeError(f"Live frontend returned {process.returncode}: {errors.decode(errors='replace')}")
     observations = json.loads(output)
@@ -75,7 +88,7 @@ def invoke(binary, helpers, mode):
     if frontend.get("frontendCleanupCompleted") is not True:
         raise RuntimeError("Frontend cleanup was not verified")
     if mode == "nested":
-        confirmed = (frontend["nestedPhase"] == 6 and frontend["nestedUnknownQueries"] == 1 and
+        confirmed = (frontend["nestedPhase"] == 7 and frontend["nestedUnknownQueries"] == 1 and
                      frontend["freshRunningQueries"] == 1 and frontend["originalStopEvents"] == 0)
     else:
         confirmed = frontend["freshStoppedQueries"] >= 1 if mode == "job" else (
@@ -85,25 +98,43 @@ def invoke(binary, helpers, mode):
     return observations
 
 
-def main():
-    if os.geteuid() == 0:
-        raise RuntimeError("This experiment must run unprivileged")
-    evidence_path = BUILD / "evidence.json"
-    evidence_path.unlink(missing_ok=True)
-    binary, helpers = build()
+def source_files():
     files = [Path(__file__), PACKAGE / "Sources/LiveCommandFixture/Main.swift", PACKAGE / "Sources/OwnedTTY/Supervisor.c",
              PACKAGE / "job-supervisor.c", PACKAGE / "live-monitor.c", PACKAGE / "live-child.c", PACKAGE / "live-target.c",
              ROOT / "macos/app/CommandMonitor/MonitorMain.c", ROOT / "macos/app/CommandChild/ChildMain.c",
              NATIVE / "CommandProcess.c", NATIVE / "CommandMonitor.c", NATIVE / "CommandMonitorProtocol.c",
              *(ROOT / "macos/core/Sources/RemozioCore" / name for name in ["CommandExecution.swift", "AuthorityJournal.swift",
                "CommandReceiveHost.swift", "CommandCallerReadiness.swift", "CommandFrontendMain.swift", "CommandFrontendRelay.swift"])]
+    files += [PACKAGE / "Package.swift", ROOT / "macos/core/Package.swift", ROOT / "protocol/swift/Package.swift",
+              *PACKAGE.glob("Sources/OwnedTTY/*.c"), *PACKAGE.glob("Sources/OwnedTTY/include/*.h"),
+              *(path for path in NATIVE.rglob("*") if path.is_file() and path.suffix in {".c", ".h", ".m", ".mm", ".cpp"}),
+              *(ROOT / "macos/core/Sources").glob("*/module.modulemap"),
+              *(ROOT / "macos/core/Sources/RemozioCore").glob("*.swift"),
+              *(ROOT / "protocol/swift/Sources/RemozioProtocol").glob("*.swift")]
+    return sorted(set(files))
+
+
+def main():
+    if os.geteuid() == 0:
+        raise RuntimeError("This experiment must run unprivileged")
+    evidence_path = BUILD / "evidence.json"
+    evidence_path.unlink(missing_ok=True)
+    files = source_files()
     hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+    binary, helpers = build()
+    if files != source_files():
+        raise RuntimeError("The live frontend source set changed during compilation")
+    for path in files:
+        if hashlib.sha256(path.read_bytes()).hexdigest() != hashes[str(path.relative_to(ROOT))]:
+            raise RuntimeError("A live frontend source changed during compilation")
     cases = {}
     for mode in ["job", "stale", "nested"]:
         observations = [invoke(binary, helpers, mode) for _ in range(TRIALS)]
         if any(value != observations[0] for value in observations[1:]):
             raise RuntimeError(f"Live frontend observations changed between {mode} trials: {observations!r}")
         cases[mode] = {"trials": TRIALS, "allTrialsMatch": True, "observations": observations[0]}
+    if files != source_files():
+        raise RuntimeError("The live frontend source set changed during measurement")
     for path in files:
         if hashlib.sha256(path.read_bytes()).hexdigest() != hashes[str(path.relative_to(ROOT))]:
             raise RuntimeError("A live frontend source changed during measurement")

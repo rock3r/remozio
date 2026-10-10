@@ -44,13 +44,18 @@ The runner repeats each case three times and requires matching observations.
 | --- | --- | --- |
 | Original job | The target stops itself. The frontend suspends after a fresh query. | Restored caller attributes, background target resumption, new dimensions and one admission. |
 | Overtaken stop | A real continuation resumes the target before the frontend receives the historical stop. | A fresh query reports running. The supervisor observes no frontend suspension. |
-| Nested shell | Typed Ctrl-Z stops a nested shell job. Typed `fg` resumes it. | A query reports unknown during nested ownership and running after Bash regains the terminal. Bash and the frontend never stop. |
+| Nested shell | Typed Ctrl-Z stops an owned nested target. Typed `fg` resumes it. | A query reports unknown during nested ownership and running after Bash regains the terminal. Bash and the frontend never stop. |
 
 All cases require actual owner reaping and the journal's revision-two verified outcome.
 Exit 13 produces a verified failure phase. It is the fixture's expected command result.
 The supervisor checks terminal attributes after the frontend exits.
+The nested target waits for an actual continuation and an explicit keyboard release.
+It cannot finish because a short sleep expires before the query completes.
 Cancellation asks the supervisor to retire its own frontend.
 The authority stays alive while the product owner cancels and reaps its monitor and target.
+If graceful cancellation stalls, the runner kills only its still-owned private process group and waits for its child.
+Native owners observe the lost channels and retire their own children.
+Source hashes cover compilation inputs before the build and are checked after compilation and the trials.
 
 The overtaken-stop case delays an already authenticated frontend observation.
 It does not replace the authority's current-job callback.

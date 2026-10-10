@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
         signal(SIGTTOU, SIG_IGN) == SIG_ERR || pipe(report) || pipe(start) ||
         fcntl(master, F_SETFL, O_NONBLOCK) || fcntl(report[0], F_SETFL, O_NONBLOCK)) return 65;
     struct termios original, seen; if (tcgetattr(slave, &original)) return 66;
-    bool passive = getenv("REMOZIO_FIXTURE_RESUME_MARKER") && argc == 6 &&
+    bool passive = getenv("REMOZIO_FIXTURE_RESUME_MARKER") && argc == 7 &&
         (!strcmp(argv[3], "stale") || !strcmp(argv[3], "nested"));
     pid_t child = fork(); if (child < 0) return 67;
     if (!child) {
@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
     int error = 0, status = 0; bool reaped = false, stopped = false;
     if ((setpgid(child, child) && errno != EACCES) || tcsetpgrp(slave, child) || write(start[1], "F", 1) != 1) error = 71;
     close(start[1]);
-    uint64_t deadline = now() + 15000;
+    uint64_t deadline = now() + (passive ? 45000 : 15000);
     if (passive) {
         while (!error && !cancelled && !reaped && now() < deadline) {
             pid_t found = waitpid(child, &status, WNOHANG | WUNTRACED);

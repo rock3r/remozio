@@ -41,6 +41,8 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
     let report: Int32
     let mode: String
     let keyboard: Int32
+    let nestedTarget: String
+    let marker: String
     private var output = Data()
     private(set) var reportedResume = false
     private(set) var stoppedQueries = 0
@@ -52,8 +54,10 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
     private(set) var nestedPhase = 0
     private(set) var nestedUnknownQueries = 0
     private(set) var originalStopEvents = 0
-    init(_ session: RetainedCommandExecutionSession, report: Int32, mode: String, keyboard: Int32) {
+    init(_ session: RetainedCommandExecutionSession, report: Int32, mode: String, keyboard: Int32,
+         nestedTarget: String, marker: String) {
         self.session = session; self.report = report; self.mode = mode; self.keyboard = keyboard
+        self.nestedTarget = nestedTarget; self.marker = marker
     }
     private func typeBytes(_ bytes: Data) throws {
         try require(bytes.withUnsafeBytes { Darwin.write(keyboard, $0.baseAddress, $0.count) } == bytes.count,
@@ -104,13 +108,16 @@ private final class ObservedChannel: CommandFrontendExecutionChannel {
             if mode == "nested" {
                 if nestedPhase == 0 && output.range(of: Data("READY_MARKER".utf8)) != nil {
                     nestedPhase = 1; output.removeAll()
-                    try typeBytes(Data("/bin/sh -c 'printf \"NESTED_RUNNING\\n\"; /bin/sleep 2; printf \"NESTED_DONE\\n\"'\n".utf8))
+                    func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+                    try typeBytes(Data("\(quote(nestedTarget)) nested \(quote(marker))\n".utf8))
                 } else if nestedPhase == 1 && output.range(of: Data("NESTED_RUNNING".utf8)) != nil {
                     nestedPhase = 2; output.removeAll(); try nestedQuery()
                 } else if nestedPhase == 3 && output.range(of: Data("Stopped".utf8)) != nil {
                     nestedPhase = 4; output.removeAll(); try nestedQuery()
-                } else if nestedPhase == 5 && output.range(of: Data("NESTED_DONE".utf8)) != nil {
-                    nestedPhase = 6; output.removeAll(); try typeBytes(Data("exit 13\n".utf8))
+                } else if nestedPhase == 5 && output.range(of: Data("NESTED_RESUMED".utf8)) != nil {
+                    nestedPhase = 6; output.removeAll(); try typeBytes(Data("RELEASE\n".utf8))
+                } else if nestedPhase == 6 && output.range(of: Data("NESTED_DONE".utf8)) != nil {
+                    nestedPhase = 7; output.removeAll(); try typeBytes(Data("exit 13\n".utf8))
                 }
             }
         }
@@ -153,12 +160,13 @@ private struct Probe {
             guard arguments.count >= 2 else { throw Failure.assertion("role") }
             switch arguments[1] {
             case "frontend":
-                try require(arguments.count == 5 && ["job", "stale", "nested"].contains(arguments[2]), "frontend arguments")
-                let result = try frontend(mode: arguments[2], target: arguments[3], marker: arguments[4])
+                try require(arguments.count == 6 && ["job", "stale", "nested"].contains(arguments[2]), "frontend arguments")
+                let result = try frontend(mode: arguments[2], target: arguments[3], marker: arguments[4], nestedTarget: arguments[5])
                 result.finish()
             case "authority":
-                try require(arguments.count == 7 && ["job", "stale", "nested"].contains(arguments[2]), "authority arguments")
-                try authority(mode: arguments[2], supervisor: arguments[3], monitor: arguments[4], child: arguments[5], target: arguments[6])
+                try require(arguments.count == 8 && ["job", "stale", "nested"].contains(arguments[2]), "authority arguments")
+                try authority(mode: arguments[2], supervisor: arguments[3], monitor: arguments[4], child: arguments[5],
+                    target: arguments[6], nestedTarget: arguments[7])
             default: throw Failure.assertion("role")
             }
         } catch {
@@ -167,7 +175,7 @@ private struct Probe {
         }
     }
 
-    private static func frontend(mode: String, target: String, marker: String) throws -> CommandFrontendExit {
+    private static func frontend(mode: String, target: String, marker: String, nestedTarget: String) throws -> CommandFrontendExit {
         var failedCleanup = false
         let runtime = CommandFrontendRuntime(reportCleanupFailure: { _ in failedCleanup = true })
         defer { try? runtime.close() }
@@ -200,7 +208,7 @@ private struct Probe {
             configuration: configuration, currentJobQueries: true)
         guard case .admitted(let session) = response else { throw Failure.assertion("admission") }
         defer { session.close() }
-        let observed = ObservedChannel(session, report: report, mode: mode, keyboard: master)
+        let observed = ObservedChannel(session, report: report, mode: mode, keyboard: master, nestedTarget: nestedTarget, marker: marker)
         let relay = try CommandFrontendRelay(channel: observed, terminal: terminal)
         defer { try? relay.close() }
         try runtime.attach(session: session, terminal: terminal)
@@ -210,7 +218,7 @@ private struct Probe {
         try relay.close(); try runtime.close()
         let checked: Bool
         if mode == "nested" {
-            checked = observed.nestedPhase == 6 && observed.nestedUnknownQueries == 1 && observed.runningQueries == 1 &&
+            checked = observed.nestedPhase == 7 && observed.nestedUnknownQueries == 1 && observed.runningQueries == 1 &&
                 observed.stoppedQueries == 0 && observed.originalStopEvents == 0 && observed.continuations == 0
         } else {
             checked = observed.reportedResume && observed.continuations == 1 &&
@@ -228,7 +236,7 @@ private struct Probe {
         return result
     }
 
-    private static func authority(mode: String, supervisor: String, monitor: String, child: String, target: String) throws {
+    private static func authority(mode: String, supervisor: String, monitor: String, child: String, target: String, nestedTarget: String) throws {
         try require(remozio_fixture_install_cancellation() == 0, "owned authority cancellation")
         let clock = try AuthorityClock(), limits = try CBORLimits(maxBytes: 16384, maxDepth: 16, maxItems: 2048)
         let (expression, hash) = try signingIdentity()
@@ -290,14 +298,14 @@ private struct Probe {
         defer { host.close() }
         var supervisorPID: pid_t = -1, output: Int32 = -1
         let marker = root.appendingPathComponent("target-resumed").path
-        let arguments = [supervisor, CommandLine.arguments[0], "frontend", mode, target, marker].map { strdup($0)! }
+        let arguments = [supervisor, CommandLine.arguments[0], "frontend", mode, target, marker, nestedTarget].map { strdup($0)! }
         defer { arguments.forEach { free($0) } }
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { $0 } + [nil]
         try require(remozio_fixture_spawn_supervisor(supervisor, &argv, port, marker, &supervisorPID, &output) == 0, "spawn owned supervisor")
         defer { _ = Darwin.close(output) }
         var reaped = false, status: Int32 = 0, report = Data(), admitted = 0, requestID: Data?
         var failure: Error?
-        let deadline = try clock.now().milliseconds + 30000
+        let deadline = try clock.now().milliseconds + 50000
         while !reaped || journal.activeCommandCount != 0 {
             do {
                 if failure == nil {
