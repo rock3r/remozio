@@ -16,6 +16,7 @@ if [ "$(uname -s)" = Darwin ]; then
     python3 scripts/run-macos-self-code-experiment.py
     python3 scripts/run-macos-command-caller-experiment.py
     python3 scripts/run-macos-frontend-composition.py
+    python3 scripts/run-macos-live-frontend.py
     python3 scripts/run-macos-command-fileport-experiment.py
     python3 scripts/run-macos-journal-experiment.py
     swift test --package-path protocol/swift --triple arm64-apple-macosx26.0
