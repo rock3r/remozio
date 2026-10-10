@@ -21,7 +21,7 @@ public actor AuthorityWakePublisher {
     private let registration: GatewayRegistrationIdentity
     private let leaseMilliseconds: UInt64
     private let clock: @Sendable () throws -> AuthorityMoment
-    private let routing: @Sendable () throws -> PresenceRouting
+    private let routing: @Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting
     private let receiptTime: @Sendable () -> UInt64?
     public nonisolated let hintFeed: AuthorityWakeHintFeed
     private var state = State.new
@@ -31,14 +31,16 @@ public actor AuthorityWakePublisher {
     private var sequence: UInt64 = 0
     private var lease: (deadline: UInt64, trustRevision: UUID, phoneRouting: Bool)?
 
+    /// The owner-aware callback may read the durable mode. It must not mutate the owner or reenter the journal.
     public init(journal: AuthorityJournal, channel: GatewayRootChannel, registration: GatewayRegistrationIdentity,
                 leaseMilliseconds: UInt64, clock: @escaping @Sendable () throws -> AuthorityMoment,
                 routing: @escaping @Sendable () throws -> PresenceRouting,
-                receiptTime: @escaping @Sendable () -> UInt64? = { nil }) throws {
+                receiptTime: @escaping @Sendable () -> UInt64? = { nil },
+                ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)? = nil) throws {
         guard (1...60_000).contains(leaseMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         self.journal = journal; self.channel = channel; self.registration = registration
-        self.leaseMilliseconds = leaseMilliseconds; self.clock = clock; self.routing = routing; self.receiptTime = receiptTime
-        hintFeed = try AuthorityWakeHintFeed(journal: journal, registration: registration, clock: clock, routing: routing, receiptTime: receiptTime)
+        self.leaseMilliseconds = leaseMilliseconds; self.clock = clock; self.routing = ownerRouting ?? { _, _ in try routing() }; self.receiptTime = receiptTime
+        hintFeed = try AuthorityWakeHintFeed(journal: journal, registration: registration, clock: clock, routing: self.routing, receiptTime: receiptTime)
     }
 
     public func start() async throws {
@@ -75,7 +77,7 @@ public actor AuthorityWakePublisher {
                     let now = try clock()
                     guard now.epoch == expectedEpoch else { throw AuthorityWakePublisherError.invalidClock }
                     guard let deadline, now.milliseconds < deadline else { throw AuthorityWakePublisherError.expiredLease }
-                    _ = try owner.acknowledgeWakeRegistration(delivery, routing: routing(), now: now, receiptTimeMs: receiptTime())
+                    _ = try owner.acknowledgeWakeRegistration(delivery, routing: routing(owner, now), now: now, receiptTimeMs: receiptTime())
                 }
                 try requireOpen()
             }
@@ -126,7 +128,7 @@ public actor AuthorityWakePublisher {
     private func sample() throws -> WakePublicationSample {
         try Task.checkCancellation()
         let current = try journal.withRequests { [clock, routing, receiptTime] owner in
-            let now = try clock(), route = try routing(), trust = try owner.wakeDeliveryTrust()
+            let now = try clock(), route = try routing(owner, now), trust = try owner.wakeDeliveryTrust()
             let work = try owner.reconcileWakePublications(routing: route, now: now, receiptTimeMs: receiptTime(), trust: trust)
             return WakePublicationSample(now: now, routing: route, trust: trust, work: work)
         }

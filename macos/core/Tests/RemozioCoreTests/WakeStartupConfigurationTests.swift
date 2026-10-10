@@ -60,9 +60,63 @@ final class WakeStartupConfigurationTests: XCTestCase {
         fields[4] = .unsigned(1)
         XCTAssertThrowsError(try TransportWakeStartupConfiguration.decode(DeterministicCBOR.encode(.map(fields), limits: limits)))
     }
+    func testPresenceConfigurationRejectsInvalidScopeAccountAndRecoveryIntervals() throws {
+        let policy = try PresenceConfiguration(observationLifetimeMilliseconds: 1000, unavailableGraceMilliseconds: 200)
+        for uid: UInt32 in [0, UInt32.max] {
+            XCTAssertThrowsError(try AuthorityAccountPresenceConfiguration(macID: id(1), accountID: id(2), ownerUID: uid, policy: policy))
+        }
+        XCTAssertThrowsError(try AuthorityAccountPresenceConfiguration(macID: id(1, count: 15), accountID: id(2), ownerUID: 501, policy: policy))
+        for tooLarge in [try PresenceConfiguration(observationLifetimeMilliseconds: 60_001, unavailableGraceMilliseconds: 200),
+                         try PresenceConfiguration(observationLifetimeMilliseconds: 1000, unavailableGraceMilliseconds: 60_001)] {
+            XCTAssertThrowsError(try AuthorityAccountPresenceConfiguration(macID: id(1), accountID: id(2), ownerUID: 501, policy: tooLarge))
+        }
+    }
+    func testPresenceStartupRoundTripKeepsDistinctAccountAndServices() throws {
+        let wake = try root()
+        let original = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: "dev.remozio.presence",
+            teamID: "TEAMID1234", appIdentifier: "dev.remozio.mac", appHashes: [id(7, count: 20)],
+            policy: .init(idleMilliseconds: 120_000, observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
+        let decoded = try AuthorityPresenceStartupConfiguration.decode(original.canonicalBytes)
+        XCTAssertEqual(decoded.canonicalBytes, original.canonicalBytes)
+        XCTAssertEqual(decoded.presence.ownerUID, 501); XCTAssertEqual(decoded.presence.macID, wake.request.service.macID)
+        XCTAssertEqual(decoded.presence.policy.idleMilliseconds, 120_000)
+        XCTAssertEqual(decoded.endpoint.appPolicy.expectedUserID, 501)
+        let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 3, maxItems: 128)
+        guard case .map(let fields) = try DeterministicCBOR.decode(original.canonicalBytes, limits: limits) else { return XCTFail() }
+        for (field, value): (UInt64, CBORValue) in [(0, .unsigned(2)), (2, .unsigned(0)), (2, .unsigned(401)), (2, .unsigned(402)),
+            (2, .unsigned(UInt64(UInt32.max))), (3, .text(wake.request.service.serviceName)), (3, .text(wake.gatewayServiceName)),
+            (7, .unsigned(0)), (8, .unsigned(60_001)), (9, .unsigned(60_001)), (10, .null)] {
+            var changed = fields; changed[field] = value
+            XCTAssertThrowsError(try AuthorityPresenceStartupConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+    }
+    func testPublicPresenceClientConfigurationPinsRootAndRejectsMalformedMetadata() throws {
+        let original = try AuthorityPresenceClientConfiguration(macID: id(1), accountID: id(2), ownerUID: 501,
+            serviceName: "dev.remozio.presence", teamID: "TEAMID1234", rootIdentifier: "dev.remozio.authority", rootHashes: [id(7, count: 20)])
+        let decoded = try AuthorityPresenceClientConfiguration.decode(original.canonicalBytes)
+        XCTAssertEqual(decoded.canonicalBytes, original.canonicalBytes); XCTAssertEqual(decoded.rootPolicy.expectedUserID, 0)
+        XCTAssertEqual(decoded.ownerUID, 501)
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 3, maxItems: 128)
+        guard case .map(let fields) = try DeterministicCBOR.decode(original.canonicalBytes, limits: limits) else { return XCTFail() }
+        for (field, value): (UInt64, CBORValue) in [(0, .unsigned(2)), (1, .bytes(id(1, count: 15))), (2, .bytes(id(2, count: 17))),
+            (3, .unsigned(0)), (3, .unsigned(UInt64(UInt32.max))), (4, .text("other.presence")),
+            (7, .array([.bytes(id(7, count: 20)), .bytes(id(7, count: 20))])), (8, .unsigned(0)), (8, .unsigned(60_001)), (9, .null)] {
+            var changed = fields; changed[field] = value
+            XCTAssertThrowsError(try AuthorityPresenceClientConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+    }
+
     func testNormalAccountCannotOpenRootServiceOrReadPrivateStartupInputs() throws {
         guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Requires an unprivileged fixture") }
         XCTAssertThrowsError(try AuthorityWakeStartupConfiguration.load(path: "/Library/Remozio/root/startup.cbor"))
+        let presence = try AuthorityAccountPresenceConfiguration(macID: id(1), accountID: id(2), ownerUID: 501,
+            policy: PresenceConfiguration(observationLifetimeMilliseconds: 1000, unavailableGraceMilliseconds: 200))
+        XCTAssertThrowsError(try AuthorityWakeService.open(configuration: root(), accountPresence: presence,
+            appEndpoint: .init(serviceName: "dev.remozio.presence.test", appPolicy: .init(teamID: "ABCDEFGHIJ",
+                componentIdentifier: "dev.remozio.app", approvedCodeDirectoryHashes: [Data(repeating: 8, count: 20)], expectedUserID: presence.ownerUID)),
+            reconcileExpired: { _ in XCTFail("Wrong account reached presence cleanup") })) {
+            XCTAssertEqual($0 as? GatewayServiceError, .wrongAccount)
+        }
         XCTAssertThrowsError(try AuthorityWakeService.open(configuration: root(), routing: {
             XCTFail("Wrong account reached presence")
             throw AuthorityWakePublisherError.closed

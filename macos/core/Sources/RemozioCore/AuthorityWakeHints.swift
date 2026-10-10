@@ -56,10 +56,10 @@ public final class AuthorityWakeHintFeed: Sendable {
     private let journal: AuthorityJournal
     public let binding: GatewaySubmissionBinding
     private let clock: @Sendable () throws -> AuthorityMoment
-    private let routing: @Sendable () throws -> PresenceRouting
+    private let routing: @Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting
     private let receiptTime: @Sendable () -> UInt64?
     init(journal: AuthorityJournal, registration: GatewayRegistrationIdentity,
-         clock: @escaping @Sendable () throws -> AuthorityMoment, routing: @escaping @Sendable () throws -> PresenceRouting,
+         clock: @escaping @Sendable () throws -> AuthorityMoment, routing: @escaping @Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting,
          receiptTime: @escaping @Sendable () -> UInt64?) throws {
         self.journal = journal; self.clock = clock; self.routing = routing; self.receiptTime = receiptTime
         binding = try GatewaySubmissionBinding(ownerID: registration.ownerID, macID: registration.macID,
@@ -80,7 +80,7 @@ public final class AuthorityWakeHintFeed: Sendable {
         }
         guard let lease = captured.1 else { return try AuthorityWakeHints(binding: binding, deliveryIDs: []) }
         let ids = try journal.withRequests { [clock, routing, receiptTime, binding] owner in
-            let now = try clock(), route = try routing(), trust = try owner.wakeDeliveryTrust()
+            let now = try clock(), route = try routing(owner, now), trust = try owner.wakeDeliveryTrust()
             guard now.epoch == lease.epoch, now.milliseconds < lease.deadline,
                   trust.approval.macID == binding.macID, trust.approval.accountID == binding.accountID else {
                 throw AuthorityWakeHintError.unavailable

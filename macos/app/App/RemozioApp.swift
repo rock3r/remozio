@@ -4,17 +4,20 @@ import SwiftUI
 
 @main
 struct RemozioApp: App {
+    @State private var presence = PresenceControls()
     @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
     var body: some Scene {
         Window("Remozio", id: "main") {
-            SetupOverview()
+            SetupOverview(presence: presence)
+                .task { presence.start() }
         }
         .defaultSize(width: 600, height: 440)
         .windowResizability(.contentMinSize)
 
         MenuBarExtra("Remozio", systemImage: "hand.raised", isInserted: $showMenuBarExtra) {
-            RemozioMenu()
+            RemozioMenu(presence: presence)
+                .task { presence.start() }
         }
 
         Settings {
@@ -24,11 +27,7 @@ struct RemozioApp: App {
                     Text("You can always open Remozio from the Dock or Applications.")
                         .foregroundStyle(.secondary)
                 }
-                Section("Request delivery") {
-                    Label("Setup is not available yet", systemImage: "wrench.and.screwdriver")
-                    Text("Routing, device pairing, and background services are still being built.")
-                        .foregroundStyle(.secondary)
-                }
+                PresenceSettingsSection(controls: presence)
                 CommandCallerSettingsForm()
             }
             .formStyle(.grouped)
@@ -87,6 +86,7 @@ private struct CommandCallerSettingsForm: View {
 }
 
 private struct SetupOverview: View {
+    let presence: PresenceControls
     @State private var showingSetupPreview = false
     var body: some View {
         ScrollView {
@@ -98,7 +98,7 @@ private struct SetupOverview: View {
                 }
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
-                        Label("This Mac is not configured", systemImage: "macbook.and.iphone")
+                        Label(presence.status != nil ? "This Mac’s authority is connected" : presence.configured ? "This Mac’s authority is unavailable" : "This Mac is not configured", systemImage: "macbook.and.iphone")
                             .font(.headline)
                         Text("This early build cannot pair devices, send requests, or approve actions.")
                         Text("No background services are installed or started by this app.")
@@ -125,9 +125,20 @@ private struct SetupOverview: View {
 
 private struct RemozioMenu: View {
     @Environment(\.openWindow) private var openWindow
+    let presence: PresenceControls
 
     var body: some View {
-        Text("Not configured")
+        Text(presence.headline)
+        if presence.status != nil {
+            Button("Automatic") { Task { await presence.setMode(.automatic) } }
+                .disabled(presence.changing)
+            Button("Present") { Task { await presence.setMode(.present) } }
+                .disabled(presence.changing)
+            Button("Away") { Task { await presence.setMode(.away) } }
+                .disabled(presence.changing)
+        }
+        if let notice = presence.notice { Text(notice) }
+        Divider()
         Button("Open Remozio") {
             openWindow(id: "main")
             NSApplication.shared.activate()
