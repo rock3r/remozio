@@ -107,4 +107,23 @@ final class GatewayWakeChannelTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.value.withLock { $0.calls.count }, 2)
         XCTAssertEqual(driver.value.withLock { $0.closed }, 1)
     }
+    func testTypedProtectedFileSignerUsesItsPinnedIdentityAndFreshChallenge() async throws {
+        let key = P256.Signing.PrivateKey(), binding = try binding(), credential = Data(repeating: 3, count: 16)
+        let config = try GatewayWakeSignerConfiguration(binding: binding, credentialID: credential, transportUID: 401,
+            ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
+            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
+            custody: .protectedFile, keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: key.publicKey.x963Representation)
+        let record = try GatewayWakeKeyRecord(binding: binding, credentialID: credential, fileKey: key)
+        let signer = try GatewayWakeSigner.load(configuration: config, realUID: 401, effectiveUID: 401, read: { _, _ in try record.encode() })
+        let driver = Driver(), channel = GatewayWakeChannel(driver: driver), id = UUID()
+        try await channel.start()
+        try await channel.wake(deliveryID: id, signer: signer)
+        guard case .wake(let payload, let signature) = driver.value.withLock({ $0.calls.last }) else { return XCTFail() }
+        let submission = try GatewayWakeSubmission.decode(payload)
+        XCTAssertEqual(submission.binding, binding); XCTAssertEqual(submission.credentialID, credential)
+        XCTAssertEqual(submission.deliveryID, GatewayHostSnapshot.bytes(id))
+        XCTAssertEqual(submission.challenge, Data(repeating: 1, count: 32))
+        XCTAssertTrue(try key.publicKey.isValidSignature(P256.Signing.ECDSASignature(rawRepresentation: signature), for: submission.signingInput()))
+        await channel.close()
+    }
 }
