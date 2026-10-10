@@ -57,7 +57,7 @@ public final class CommandFrontendRelay {
         }
         self.channel = channel; self.terminal = terminal; self.mode = mode
     }
-    deinit { channel.close() }
+    deinit { channel.close(); terminal?.closeReportingFailure() }
     public var needsTerminalRestoration: Bool { terminal?.needsRestore ?? false }
 
     /// Perform one bounded turn. The caller waits between idle turns and yields to its local signal loop on interruption.

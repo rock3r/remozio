@@ -29,6 +29,7 @@ protocol CommandFrontendTerminalIO: AnyObject {
     func write(_ bytes: Data) throws -> Int
     func dimensions() throws -> CommandFrontendTerminalSize
     func close() throws
+    func closeReportingFailure()
 }
 
 /// Owns the calling terminal independently. The CLI must serialize this owner and its signal routes.
@@ -91,6 +92,12 @@ public final class CommandFrontendTerminal: CommandFrontendTerminalIO {
     public func close() throws {
         guard let handle else { return }
         try check(remozio_frontend_terminal_close(handle)); self.handle = nil
+    }
+    /// Destruction cannot throw. Report failed cleanup and keep the retained owner available for another close attempt.
+    func closeReportingFailure() {
+        do { try close() }
+        catch CommandFrontendTerminalError.native(let number) { reportRestorationFailure(number) }
+        catch { reportRestorationFailure(EIO) }
     }
     private func owner() throws -> OpaquePointer {
         guard let handle else { throw CommandFrontendTerminalError.closed }

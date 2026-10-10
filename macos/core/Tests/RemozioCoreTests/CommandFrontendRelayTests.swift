@@ -13,6 +13,7 @@ final class FrontendRelayTestTerminal: CommandFrontendTerminalIO {
     var written = Data()
     var readError: Error?
     var restoreError: Error?
+    var restorationFailures: [Int32] = []
     var size = CommandFrontendTerminalSize(rows: 53, columns: 143)
     func isForeground() throws -> Bool { foreground }
     func activate() throws {
@@ -44,6 +45,11 @@ final class FrontendRelayTestTerminal: CommandFrontendTerminalIO {
     }
     func dimensions() throws -> CommandFrontendTerminalSize { size }
     func close() throws { closeCalls += 1; try restore() }
+    func closeReportingFailure() {
+        do { try close() }
+        catch CommandFrontendTerminalError.native(let number) { restorationFailures.append(number) }
+        catch { restorationFailures.append(EIO) }
+    }
 }
 
 private final class FrontendRelayTestChannel: CommandFrontendExecutionChannel {
@@ -88,6 +94,29 @@ private final class FrontendRelayTestChannel: CommandFrontendExecutionChannel {
 }
 
 final class CommandFrontendRelayTests: XCTestCase {
+    func testDestructionRestoresAnExternallyRetainedActiveTerminal() throws {
+        let channel = FrontendRelayTestChannel(), terminal = FrontendRelayTestTerminal()
+        channel.events = [.opened]
+        var relay: CommandFrontendRelay? = try CommandFrontendRelay(channel: channel, terminal: terminal)
+        weak let released = relay
+        _ = try relay!.advance(); _ = try relay!.advance()
+        XCTAssertTrue(terminal.needsRestore)
+        relay = nil
+        XCTAssertNil(released); XCTAssertEqual(channel.closeCalls, 1)
+        XCTAssertFalse(terminal.needsRestore); XCTAssertTrue(terminal.restorationFailures.isEmpty)
+    }
+    func testDestructionReportsFailedRestorationAndKeepsTheRetainedOwnerRecoverable() throws {
+        let channel = FrontendRelayTestChannel(), terminal = FrontendRelayTestTerminal()
+        channel.events = [.opened]
+        var relay: CommandFrontendRelay? = try CommandFrontendRelay(channel: channel, terminal: terminal)
+        _ = try relay!.advance(); _ = try relay!.advance()
+        terminal.restoreError = CommandFrontendTerminalError.native(EAGAIN)
+        relay = nil
+        XCTAssertEqual(channel.closeCalls, 1); XCTAssertTrue(terminal.needsRestore)
+        XCTAssertEqual(terminal.restorationFailures, [EAGAIN])
+        terminal.restoreError = nil; try terminal.close()
+        XCTAssertFalse(terminal.needsRestore); XCTAssertEqual(channel.closeCalls, 1)
+    }
     func testNoTerminalInputOrActivationBeforeOpeningAndPipesNeverTouchTerminal() throws {
         let channel = FrontendRelayTestChannel(), terminal = FrontendRelayTestTerminal()
         let relay = try CommandFrontendRelay(channel: channel, terminal: terminal)

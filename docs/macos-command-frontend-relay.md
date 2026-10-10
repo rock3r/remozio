@@ -75,12 +75,14 @@ Failures preserve the original error and the terminal's restoration obligation.
 `close` can retry terminal cleanup without reopening or repeating the command.
 A verified terminal result remains available while cleanup waits for foreground.
 The terminal owner requires a restoration-failure callback.
-If destruction cannot restore settings, it reports that failure before abandoning its descriptor.
+Relay destruction closes its channel and attempts terminal cleanup even when the caller retains the terminal owner.
+A failed cleanup reports through that callback and preserves the retained owner for another close attempt.
+The terminal owner's destructor reports failed restoration before it abandons the descriptor.
 This does not promise restoration after process loss or `SIGKILL`.
 
 ## Evidence and remaining gates
 
-Sixteen new focused tests pass locally on macOS 27.0.1, build 26A434, on arm64.
+Eighteen new focused tests pass locally on macOS 27.0.1, build 26A434, on arm64.
 The two native fixtures compile with an arm64 macOS 26 deployment target.
 One fixture forces actual terminal output backpressure and checks every byte of 1 MiB.
 It also checks binary input, copied dimensions, original flags and restored settings.
@@ -90,6 +92,8 @@ Output timeout, missing backpressure and changed original flags have distinct fa
 The other forces a stale foreground check before a real kernel read.
 It observes `SIGTTIN` and `EINTR`, preserves queued input, and completes restoration after foreground returns.
 Unsafe input signal routes are rejected before consumption.
+Two lifetime regressions drop an active relay while the caller retains its terminal owner.
+They verify successful restoration and failure reporting with a retained cleanup obligation that can recover later.
 
 A real Mach integration test uses the original authenticated execution session.
 It checks exact binary input and EOF delivery while local output remains blocked.
