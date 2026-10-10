@@ -36,7 +36,7 @@ final class CommandSubmissionReplayJournal {
 
     func install() throws {
         let version = try schemaVersion()
-        guard (13...15).contains(version) else { throw CommandSubmissionReplayError.unavailable }
+        guard (13...16).contains(version) else { throw CommandSubmissionReplayError.unavailable }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw CommandSubmissionReplayError.unavailable }
         if version < 15 {
@@ -106,8 +106,8 @@ final class CommandSubmissionReplayJournal {
 
     private func requireInstalled() throws {
         let version = try schemaVersion()
-        guard (12...15).contains(version) else { throw JournalDatabaseError.incompatibleStore }
-        guard version == 15 else { throw CommandSubmissionReplayError.unavailable }
+        guard (12...16).contains(version) else { throw JournalDatabaseError.incompatibleStore }
+        guard version >= 15 else { throw CommandSubmissionReplayError.unavailable }
     }
     private func schemaVersion() throws -> Int64 {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }

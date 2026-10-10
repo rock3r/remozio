@@ -178,6 +178,15 @@ public actor GatewayDeliveryCoordinator {
             registrationToken: registrationToken, trust: trust(phoneID), nowUnixMillis: time.wall, now: time.moment)
     }
 
+    /// Root-only control plane. The current host lease and registration remain authoritative; no phone enrollment is required.
+    public func applySubmission(canonicalPayload: Data, signature: Data, wireVersion: UInt64) throws -> GatewaySubmissionApplication {
+        try running()
+        let time = try current()
+        return try database.applySubmission(canonicalPayload: canonicalPayload, signature: signature, wireVersion: wireVersion,
+            trust: GatewaySubmissionTrust(registration: identity, active: active, revision: trustRevision, appliedControlRevision: database.head()),
+            nowUnixMillis: time.wall, now: time.moment)
+    }
+
     public func applyRecipient(canonicalPayload: Data, signature: Data, wireVersion: UInt64,
                                kind: GatewayRecipientKind, phoneID: Data) throws -> GatewayRecipientApplication {
         try running()

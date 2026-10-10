@@ -37,6 +37,9 @@ private actor GatewayRootDispatcher {
             let result = try await coordinator.applyRecipient(canonicalPayload: payload, signature: signature,
                 wireVersion: version, kind: kind, phoneID: phone)
             return try GatewayRootCommand.reply([.bytes(result.receipt.canonicalPayload), .bytes(result.receipt.signature), .boolean(result.inserted)])
+        case .submission(let payload, let signature, let version):
+            let result = try await coordinator.applySubmission(canonicalPayload: payload, signature: signature, wireVersion: version)
+            return try GatewayRootCommand.reply([.bytes(result.receipt.canonicalPayload), .bytes(result.receipt.signature), .boolean(result.inserted)], version: 2)
         case .probe(let operation, let phone):
             try await coordinator.startProbe(operationID: operation, phoneID: phone)
             return try GatewayRootCommand.reply([.boolean(true)])

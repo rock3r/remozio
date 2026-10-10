@@ -74,7 +74,7 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
     }
     func testRechecksInvocationAfterHelloBeforeAsynchronousWork() async throws {
         let state = State(), endpoint = try endpoint(state)
-        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.hello { XCTAssertEqual($0, 2) }
         let done = expectation(description: "synchronized")
         endpoint.synchronize(try snapshot().canonicalBytes) { XCTAssertTrue($0); done.fulfill() }
         await fulfillment(of: [done], timeout: 2)
@@ -98,7 +98,7 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
         let started = expectation(description: "started"), late = expectation(description: "no late success")
         late.isInverted = true
         let endpoint = try endpoint(state, budget: budget, execute: { _ in await gate.run(started: started) })
-        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.hello { XCTAssertEqual($0, 2) }
         endpoint.command(try GatewayRootCommand.head(Data([1])).encode()) { _ in late.fulfill() }
         await fulfillment(of: [started], timeout: 2)
         XCTAssertFalse(budget.acquire())
@@ -108,4 +108,20 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(state.value.withLock { $0.closed }, 1)
         XCTAssertTrue(budget.acquire()); budget.release()
     }
+    func testSubmissionRequiresVersionTwoAndExactBoundedFields() throws {
+        let command = GatewayRootCommand.submission(payload: Data([1]), signature: Data(repeating: 2, count: 64), wireVersion: 1)
+        let encoded = try command.encode()
+        XCTAssertEqual(command.protocolVersion, 2)
+        guard case .submission(let payload, let signature, let wireVersion) = try GatewayRootCommand.decode(encoded) else { return XCTFail() }
+        XCTAssertEqual(payload, Data([1])); XCTAssertEqual(signature.count, 64); XCTAssertEqual(wireVersion, 1)
+        for fields: [CBORValue] in [
+            [.unsigned(1), .unsigned(7), .bytes(payload), .bytes(signature), .unsigned(1)],
+            [.unsigned(3), .unsigned(7), .bytes(payload), .bytes(signature), .unsigned(1)],
+            [.unsigned(2), .unsigned(7), .bytes(payload), .bytes(Data(repeating: 2, count: 63)), .unsigned(1)],
+            [.unsigned(2), .unsigned(7), .bytes(payload), .bytes(signature), .unsigned(1), .null]
+        ] {
+            XCTAssertThrowsError(try GatewayRootCommand.decode(DeterministicCBOR.encode(.array(fields), limits: GatewayRootCommand.limits)))
+        }
+    }
+
 }

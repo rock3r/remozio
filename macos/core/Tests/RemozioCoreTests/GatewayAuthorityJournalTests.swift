@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import RemozioProtocol
 import SQLite3
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -884,6 +885,294 @@ final class GatewayAuthorityJournalTests: XCTestCase {
             XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(registration) })
             XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot() }.revision, revision)
         }
+    }
+
+
+    private func installSubmissionFeatures(_ db: JournalDatabase) throws {
+        try db.write { tx in
+            _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
+                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                    installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+            ]), expectedRevision: nil)
+            try tx.installCommandSubmissionReplay()
+            try tx.installGatewaySubmissionHistory(trust().registration)
+        }
+    }
+    private func signSubmission(_ value: GatewaySubmissionControl) throws -> Data {
+        try key.signature(for: GatewaySubmissionSigningInput.make(wireVersion: 1, kind: value.kind,
+            canonicalPayload: value.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation
+    }
+    private func rotateSubmission(_ db: JournalDatabase, head: UInt64 = 0, publicKey: Data? = nil,
+                                  wall: UInt64 = 1000, now: UInt64 = 100) throws -> GatewayAuthorityEnvelope {
+        try db.write { try $0.rotateGatewaySubmission(publicKey: publicKey ?? P256.Signing.PrivateKey().publicKey.x963Representation,
+            registration: trust().registration, registrationActive: true, expectedHead: head, nowUnixMillis: wall,
+            now: moment(now), sign: signSubmission) }
+    }
+    private func revokeSubmission(_ db: JournalDatabase, credential: Data, head: UInt64, wall: UInt64 = 1000,
+                                  now: UInt64 = 100) throws -> GatewayAuthorityEnvelope {
+        try db.write { try $0.revokeGatewaySubmission(credentialID: credential, registration: trust().registration,
+            registrationActive: true, expectedHead: head, nowUnixMillis: wall, now: moment(now), sign: signSubmission) }
+    }
+    private func submissionValue(_ envelope: GatewayAuthorityEnvelope) throws -> GatewaySubmissionControl {
+        try GatewaySubmissionControl.decode(envelope.canonicalPayload, limits: limits)
+    }
+
+    func testRootSubmissionInstallIsExplicitAndChangesOnlyAuthorityDigest() throws {
+        let fixture = try Fixture(), db = try setup(fixture)
+        XCTAssertThrowsError(try rotateSubmission(db))
+        XCTAssertThrowsError(try db.write { try $0.installGatewaySubmissionHistory(trust().registration) })
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "12")
+        try db.write { tx in
+            _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
+                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                    installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+            ]), expectedRevision: nil)
+            try tx.installCommandSubmissionReplay()
+        }
+        let before = try db.read { try $0.continuityDigests() }
+        XCTAssertThrowsError(try db.write { tx in
+            try tx.installGatewaySubmissionHistory(trust().registration)
+            throw Failure.injected
+        })
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "15")
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+        try db.write { try $0.installGatewaySubmissionHistory(trust().registration) }
+        let installed = try db.read { try $0.continuityDigests() }
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "16")
+        XCTAssertNotEqual(installed.authority, before.authority); XCTAssertEqual(installed.ledger, before.ledger)
+        try db.write { try $0.installGatewaySubmissionHistory(trust().registration) }
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, installed)
+        try db.close()
+        let reopened = try open(fixture)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, installed)
+        XCTAssertEqual(try reopened.read { try $0.codePolicy() }?.policy.entries.count, 1)
+        XCTAssertNil(try reopened.read { try $0.historyRecovery(epoch: id(9)) })
+    }
+
+    func testRootSubmissionControlsShareHeadCapacityAndAcknowledgment() throws {
+        let fixture = try Fixture(), db = try setup(fixture, maximum: 3)
+        try installSubmissionFeatures(db)
+        let first = try prepare(db), rotation = try rotateSubmission(db, head: 1), value = try submissionValue(rotation)
+        XCTAssertEqual(rotation.revision, 2); XCTAssertNil(rotation.registrationToken)
+        let removal = try revokeSubmission(db, credential: value.credentialID, head: 2)
+        XCTAssertEqual(removal.kind, 5); XCTAssertEqual(removal.revision, 3)
+        XCTAssertNil(try db.read { try $0.desiredGatewaySubmission(trust().registration) })
+        XCTAssertThrowsError(try rotateSubmission(db, head: 3)) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
+        XCTAssertThrowsError(try prepare(db, head: 3)) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
+        let (head, _) = try gatewayEvidence([first, rotation, removal])
+        XCTAssertEqual(try db.write { try $0.acknowledgeGatewayHead(head) }.disposition, .recorded)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 3)
+        XCTAssertEqual(try db.read { try $0.gatewayAcknowledgment(trust().registration) }?.revision, 3)
+    }
+
+    func testRootSubmissionRestartRenewalUsesCurrentIntentAndFreshCredentialIdentity() throws {
+        let fixture = try Fixture(), db = try setup(fixture)
+        try installSubmissionFeatures(db)
+        let publicKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        let first = try rotateSubmission(db, publicKey: publicKey)
+        XCTAssertEqual(try db.read { try $0.pendingGatewaySubmission(operationID: first.operationID,
+            registration: trust().registration, registrationActive: true, nowUnixMillis: 1001, now: moment(101)) }?.canonicalPayload, first.canonicalPayload)
+        try db.close()
+        let reopened = try open(fixture)
+        XCTAssertThrowsError(try reopened.read { try $0.pendingGatewaySubmission(operationID: first.operationID,
+            registration: trust().registration, registrationActive: true, nowUnixMillis: 1001, now: moment(101)) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .expired)
+        }
+        let renewed = try reopened.write { try $0.renewGatewaySubmission(operationID: first.operationID,
+            registration: trust().registration, registrationActive: true, expectedHead: 1, nowUnixMillis: 3000,
+            now: moment(110), sign: signSubmission) }
+        XCTAssertEqual(renewed.revision, 2); XCTAssertNotEqual(renewed.operationID, first.operationID)
+        XCTAssertNotEqual(try submissionValue(renewed).credentialID, try submissionValue(first).credentialID)
+        XCTAssertEqual(try submissionValue(renewed).publicKey, publicKey)
+        XCTAssertThrowsError(try reopened.write { try $0.renewGatewaySubmission(operationID: first.operationID,
+            registration: trust().registration, registrationActive: true, expectedHead: 2, nowUnixMillis: 3001,
+            now: moment(111), sign: signSubmission) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .superseded) }
+        _ = try revokeSubmission(reopened, credential: submissionValue(first).credentialID, head: 2, wall: 3001, now: 111)
+        XCTAssertEqual(try reopened.read { try $0.desiredGatewaySubmission(trust().registration) }?.control.operationID, renewed.operationID)
+        _ = try revokeSubmission(reopened, credential: submissionValue(renewed).credentialID, head: 3, wall: 3002, now: 112)
+        XCTAssertNil(try reopened.read { try $0.desiredGatewaySubmission(trust().registration) })
+    }
+
+    func testRootSubmissionSignerFailureAndOuterRollbackLeaveNoAuthority() throws {
+        let fixture = try Fixture(), db = try setup(fixture)
+        try installSubmissionFeatures(db)
+        let before = try db.read { try $0.continuityDigests() }, publicKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        XCTAssertThrowsError(try db.write { try $0.rotateGatewaySubmission(publicKey: publicKey, registration: trust().registration,
+            registrationActive: true, expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: { _ in Data(repeating: 0, count: 64) }) })
+        XCTAssertThrowsError(try db.write { tx in
+            _ = try tx.rotateGatewaySubmission(publicKey: publicKey, registration: trust().registration,
+                registrationActive: true, expectedHead: 0, nowUnixMillis: 1000, now: moment(), sign: signSubmission)
+            throw Failure.injected
+        })
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_submission_outbox_v1"), "0")
+    }
+
+    func testRootSubmissionCannotHideRevocationWithAlteredCredentialColumn() throws {
+        let fixture = try Fixture(), db = try setup(fixture)
+        try installSubmissionFeatures(db)
+        let first = try rotateSubmission(db)
+        _ = try revokeSubmission(db, credential: submissionValue(first).credentialID, head: 1)
+        // Leave an unrelated latest control intact so head validation alone cannot detect the altered older row.
+        _ = try revokeSubmission(db, credential: id(99), head: 2)
+        try fixture.sql("UPDATE gateway_submission_outbox_v1 SET credential=zeroblob(16) WHERE revision=X'0000000000000002'")
+        XCTAssertThrowsError(try db.read { try $0.desiredGatewaySubmission(trust().registration) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .corruptData)
+        }
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(trust().registration) }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+        }
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_submission_outbox_v1"), "3")
+    }
+
+    func testRootSubmissionRejectsInactiveAuthorityAndBothDeadlineBoundaries() throws {
+        let fixture = try Fixture(), db = try setup(fixture)
+        try installSubmissionFeatures(db)
+        let publicKey = P256.Signing.PrivateKey().publicKey.x963Representation
+        XCTAssertThrowsError(try db.write { try $0.rotateGatewaySubmission(publicKey: publicKey,
+            registration: trust().registration, registrationActive: false, expectedHead: 0,
+            nowUnixMillis: 1000, now: moment(100), sign: signSubmission) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableRegistration)
+        }
+        let first = try rotateSubmission(db, publicKey: publicKey), value = try submissionValue(first)
+        XCTAssertThrowsError(try db.write { try $0.renewGatewaySubmission(operationID: first.operationID,
+            registration: trust().registration, registrationActive: false, expectedHead: 1,
+            nowUnixMillis: 1001, now: moment(101), sign: signSubmission) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .unavailableRegistration)
+        }
+        let duration = value.expiresAtUnixMillis - value.issuedAtUnixMillis
+        for (wall, mono) in [(value.expiresAtUnixMillis, UInt64(102)), (UInt64(1001), 100 + duration)] {
+            XCTAssertThrowsError(try db.read { try $0.pendingGatewaySubmission(operationID: first.operationID,
+                registration: trust().registration, registrationActive: true, nowUnixMillis: wall, now: moment(mono)) }) {
+                XCTAssertEqual($0 as? GatewayAuthorityError, .expired)
+            }
+        }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+    }
+
+    func testRootSubmissionRecoveryRetainsReceiptWithoutPhoneTrustChangeOrFreshDeadline() throws {
+        let fixture = try Fixture(), db = try setup(fixture)
+        try installSubmissionFeatures(db)
+        var writer: AuditEpochWriter?
+        let revision = try enrollForRecovery(db, onWriter: { writer = $0 })
+        var escaped: GatewayAuthorityEnvelope?
+        do {
+            try db.write { tx in
+                escaped = try tx.rotateGatewaySubmission(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                    registration: trust().registration, registrationActive: true, expectedHead: 0,
+                    nowUnixMillis: 1000, now: moment(), sign: signSubmission)
+                throw Failure.injected
+            }
+        } catch Failure.injected {}
+        let envelope = try XCTUnwrap(escaped), (head, history) = try gatewayEvidence([envelope], after: 0)
+        let repaired = try db.write { try $0.recoverGatewayTrust(from: head, expectedTrustRevision: revision,
+            receiptTimeMs: 1020, writer: XCTUnwrap(writer), expectedAuditHead: 1) }
+        XCTAssertEqual(repaired.trustRevision, revision); XCTAssertTrue(repaired.changedPhoneIDs.isEmpty)
+        XCTAssertEqual(try db.write { try $0.reconcileGatewayDeliveryHistory(XCTUnwrap(history), registrationActive: true,
+            expectedTrustRevision: revision, expectedLocalRevision: 0, now: moment(120)) }.disposition, .reconciled)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
+        XCTAssertEqual(try db.read { try $0.desiredGatewaySubmission(trust().registration) }?.canonicalPayload, envelope.canonicalPayload)
+        XCTAssertThrowsError(try db.read { try $0.pendingGatewaySubmission(operationID: envelope.operationID,
+            registration: trust().registration, registrationActive: true, nowUnixMillis: 1020, now: moment(120)) }) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .expired)
+        }
+    }
+
+
+    func testRootSubmissionRecoveryRejectsCredentialReuseWithinMissingBatchAtomically() throws {
+        for priorKind in [GatewaySubmissionKind.rotation, .revocation] {
+            let fixture = try Fixture(), db = try setup(fixture)
+            try installSubmissionFeatures(db)
+            let first = try rotateSubmission(db), registration = try trust().registration
+            let revision = try enrollForRecovery(db)
+            let publicKey = P256.Signing.PrivateKey().publicKey.x963Representation
+            var receipts: [GatewayControlReceipt] = [.submission(GatewaySubmissionReceipt(
+                control: try submissionValue(first), canonicalPayload: first.canonicalPayload, signature: first.signature))]
+            var last: GatewayAuthorityEnvelope?
+            for (number, kind) in [(UInt64(2), priorKind), (UInt64(3), GatewaySubmissionKind.rotation)] {
+                let value = try GatewaySubmissionControl(kind: kind,
+                    binding: GatewaySubmissionBinding(ownerID: registration.ownerID, macID: registration.macID,
+                        accountID: registration.accountID, gatewayID: registration.gatewayID, lifecycleEpoch: registration.lifecycleEpoch),
+                    revision: number, operationID: id(UInt8(30 + number)), issuedAtUnixMillis: 1000,
+                    expiresAtUnixMillis: 2000, credentialID: id(40), publicKey: kind == .rotation ? publicKey : nil)
+                let payload = try value.encode(limits: limits), signature = try signSubmission(value)
+                _ = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+                    registration: registration, payloadLimits: limits, signingLimits: limits)
+                receipts.append(.submission(GatewaySubmissionReceipt(control: value, canonicalPayload: payload, signature: signature)))
+                last = GatewayAuthorityEnvelope(kind: kind.rawValue, operationID: value.operationID, revision: number,
+                    canonicalPayload: payload, signature: signature, registrationToken: nil)
+            }
+            let head = try verifiedHead([XCTUnwrap(last)])
+            let collector = try GatewayHistoryCollector(head: head, afterRevision: 0)
+            let page = GatewayControlHistoryPage(registration: registration, afterRevision: 0, throughRevision: 3,
+                records: receipts, hasMore: false)
+            let history = try XCTUnwrap(collector.accept(VerifiedGatewayControlHistory(page: page,
+                receivedAt: moment(120), queryOwnerID: head.queryOwnerID)))
+            let before = try db.read { try $0.continuityDigests() }
+            XCTAssertEqual(try db.write { try $0.reconcileGatewayDeliveryHistory(history, registrationActive: true,
+                expectedTrustRevision: revision, expectedLocalRevision: 1, now: moment(120)) }.disposition, .conflictingLocalHistory)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, 1)
+            XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+            XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_submission_outbox_v1"), "1")
+        }
+    }
+
+    private final class EndpointDriver: GatewayRootDriver {
+        let endpoint: GatewayXPCEndpoint
+        init(_ endpoint: GatewayXPCEndpoint) { self.endpoint = endpoint }
+        func start(closed: @escaping @Sendable () -> Void) {}
+        func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void) {
+            switch call {
+            case .hello: endpoint.hello { reply(.version($0)) }
+            case .synchronize(let bytes): endpoint.synchronize(bytes) { reply(.synchronized($0)) }
+            case .command(let bytes): endpoint.command(bytes) { reply(.command($0)) }
+            }
+        }
+        func close() { endpoint.close() }
+    }
+
+    func testRootOutboxEndpointCoordinatorAndFreshAcknowledgmentRoundTrip() async throws {
+        let rootFixture = try Fixture(), root = try setup(rootFixture), registration = try trust().registration
+        try installSubmissionFeatures(root)
+        let envelope = try rotateSubmission(root), gatewayFixture = try Fixture()
+        let database = try gatewayFixture.gateway(identity: registration, limits: limits, epoch: clockEpoch)
+        let epoch = clockEpoch, providerCalls = Mutex(0), allowed = Mutex(true)
+        let tokens = try FCMTokenSource(now: { .now }, refresh: {
+            providerCalls.withLock { $0 += 1 }
+            return FCMTokenLease(value: try FCMAccessToken("synthetic"), expiresAt: .now.advanced(by: .seconds(3600)))
+        })
+        let coordinator = try GatewayDeliveryCoordinator(database: database, identity: registration, tokens: tokens,
+            policy: GatewayDeliveryPolicy(maximumFlights: 1, minimumSendIntervalMillis: 10),
+            sample: { .init(wall: 1010, moment: AuthorityMoment(epoch: epoch, milliseconds: 110)) },
+            sleep: { _ in }, send: { _, _ in providerCalls.withLock { $0 += 1 }; return .accepted })
+        let endpoint = GatewayXPCEndpoint(verify: {
+            guard allowed.withLock({ $0 }) else { throw GatewayServiceError.wrongAccount }
+        }, budget: try AuthorityXPCWorkBudget(maximum: 1), invalidate: {}, synchronize: { _ in }, execute: { command in
+            guard case .submission(let payload, let signature, let version) = command else { throw GatewayServiceError.invalidMessage }
+            let result = try await coordinator.applySubmission(canonicalPayload: payload, signature: signature, wireVersion: version)
+            return try GatewayRootCommand.reply([.bytes(result.receipt.canonicalPayload), .bytes(result.receipt.signature), .boolean(result.inserted)], version: 2)
+        })
+        let channel = GatewayRootChannel(driver: EndpointDriver(endpoint))
+        try await channel.start()
+        let applied = try await channel.applySubmission(envelope, registration: registration)
+        XCTAssertTrue(applied.inserted); XCTAssertEqual(applied.receipt.canonicalPayload, envelope.canonicalPayload)
+        let retry = try await channel.applySubmission(envelope, registration: registration)
+        XCTAssertFalse(retry.inserted)
+
+        let gatewayKey = P256.Signing.PrivateKey(), owner = try GatewayHeadQueryOwner(registration: registration,
+            gatewayPublicKey: gatewayKey.publicKey.x963Representation, clockEpoch: epoch)
+        let query = try owner.makeQuery(now: moment(110))
+        let reply = try await coordinator.recoveryHeadReply(canonicalQuery: query) { try gatewayKey.signature(for: $0).rawRepresentation }
+        let head = try owner.accept(reply, now: moment(111))
+        XCTAssertEqual(head.evidence.receipt?.kind, 4)
+        XCTAssertEqual(try root.write { try $0.acknowledgeGatewayHead(head) }.disposition, .recorded)
+        XCTAssertEqual(providerCalls.withLock { $0 }, 0)
+        allowed.withLock { $0 = false }
+        do { _ = try await channel.applySubmission(envelope, registration: registration); XCTFail() } catch {}
+        XCTAssertEqual(try root.read { try $0.gatewayAuthorityHead(registration) }, 1)
+        await channel.close()
+        try await coordinator.shutdown()
     }
 
     private func gatewayEvidence(_ controls: [GatewayAuthorityEnvelope], after: UInt64? = nil, includeBoundary: Bool = true,

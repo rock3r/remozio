@@ -193,6 +193,11 @@ final class GatewayAuthorityJournal {
             }
             missing = missing.dropFirst()
         }
+        var submissionCredentials = Set<Data>()
+        if missing.contains(where: { if case .submission = $0 { true } else { false } }) {
+            guard try submissionHistoryInstalled() else { return result(.requiresTrustRecovery) }
+            submissionCredentials = Set(try submissionEntries(identity).map { $0.receipt.control.credentialID })
+        }
         var candidates: [Data?] = []
         for record in missing {
             if let recovered = try recoveredRevocation(operation: record.operationID, identity: identity) {
@@ -201,7 +206,16 @@ final class GatewayAuthorityJournal {
             }
             let binding: GatewayTokenBinding
             switch record {
-            case .submission: return result(.requiresTrustRecovery)
+            case .submission(let receipt):
+                guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
+                let value = receipt.control
+                let freshCredential = submissionCredentials.insert(value.credentialID).inserted
+                if value.kind == .rotation, !freshCredential {
+                    return result(.conflictingLocalHistory)
+                }
+                guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
+                candidates.append(nil)
+                continue
             case .candidate(let value): binding = value.candidate.binding
             case .recipient(let value):
                 switch value.control {
@@ -235,14 +249,21 @@ final class GatewayAuthorityJournal {
                 try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",
                     [record.operationID, uint(record.revision), candidate, record.canonicalPayload, record.signature]) { try done($0) }
             } else {
-                guard case .recipient(let receipt) = record, case .revocation(let value) = receipt.control else {
-                    throw GatewayAuthorityError.corruptData
+                // The zero run cannot belong to a live owner. Recovery retains history, not a renewed publication deadline.
+                switch record {
+                case .submission(let receipt):
+                    let value = receipt.control
+                    try statement("INSERT INTO main.gateway_submission_outbox_v1 VALUES(?,?,\(value.kind.rawValue),?,?,?,?,?,?)",
+                        [record.operationID, uint(record.revision), value.credentialID, record.canonicalPayload, record.signature,
+                         Data(repeating: 0, count: 16), uint(0), uint(value.expiresAtUnixMillis - value.issuedAtUnixMillis)]) { try done($0) }
+                case .recipient(let receipt):
+                    guard case .revocation(let value) = receipt.control else { throw GatewayAuthorityError.corruptData }
+                    try statement("INSERT INTO main.gateway_revocations_v1 VALUES(?,?,?,?,?,?,?,?,?)",
+                        [record.operationID, uint(record.revision), value.binding.phoneID, value.binding.enrollmentEpoch,
+                         record.canonicalPayload, record.signature, Data(repeating: 0, count: 16), uint(0),
+                         uint(value.expiresAtUnixMillis - value.issuedAtUnixMillis)]) { try done($0) }
+                case .candidate: throw GatewayAuthorityError.corruptData
                 }
-                // The zero run cannot belong to a live owner. Preserve the signed duration for stored-row validation.
-                try statement("INSERT INTO main.gateway_revocations_v1 VALUES(?,?,?,?,?,?,?,?,?)",
-                    [record.operationID, uint(record.revision), value.binding.phoneID, value.binding.enrollmentEpoch,
-                     record.canonicalPayload, record.signature, Data(repeating: 0, count: 16), uint(0),
-                     uint(value.expiresAtUnixMillis - value.issuedAtUnixMillis)]) { try done($0) }
             }
         }
         // Retain desired token material, but retire every old candidate and proof in the same transaction.
@@ -445,7 +466,8 @@ final class GatewayAuthorityJournal {
             guard previous == encoded else { throw GatewayAuthorityError.wrongScope }
             return
         }
-        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)", []) {
+        let extra = try submissionCountSQL()
+        try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_root_candidates_v1)+(SELECT count(*) FROM main.gateway_desired_tokens_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_acknowledgment_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)" + extra, []) {
             guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) == 0 else { throw GatewayAuthorityError.corruptData }
         }
         try statement("INSERT INTO main.gateway_authority_v1 VALUES(1,?,?)", [encoded, uint(0)]) { try done($0) }
@@ -457,13 +479,15 @@ final class GatewayAuthorityJournal {
             guard sqlite3_step($0) == SQLITE_ROW else { throw GatewayAuthorityError.unconfigured }
             guard try blob($0, 0, maximum: 512) == identity.encode() else { throw GatewayAuthorityError.wrongScope }
             let value = try unsigned(blob($0, 1, maximum: 8))
-            let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)", []) { stmt -> UInt64 in
+            let extra = try submissionCountSQL()
+            let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)" + extra, []) { stmt -> UInt64 in
                 guard sqlite3_step(stmt) == SQLITE_ROW, let count = UInt64(exactly: sqlite3_column_int64(stmt, 0)) else { throw GatewayAuthorityError.corruptData }
                 return count
             }
             guard value == count else { throw GatewayAuthorityError.corruptData }
             if value > 0 {
-                try statement("SELECT operation,revision FROM main.gateway_outbox_v1 UNION ALL SELECT operation,revision FROM main.gateway_revocations_v1 UNION ALL SELECT operation,revision FROM main.gateway_reconciled_controls_v1 ORDER BY revision DESC LIMIT 1", []) { stmt in
+                let submission = try submissionSchemaVersion() >= 16 ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1" : ""
+                try statement("SELECT operation,revision FROM main.gateway_outbox_v1 UNION ALL SELECT operation,revision FROM main.gateway_revocations_v1 UNION ALL SELECT operation,revision FROM main.gateway_reconciled_controls_v1" + submission + " ORDER BY revision DESC LIMIT 1", []) { stmt in
                     guard sqlite3_step(stmt) == SQLITE_ROW, let latest = try envelope(blob(stmt, 0, maximum: 16), identity: identity),
                           latest.revision == value else { throw GatewayAuthorityError.corruptData }
                 }
@@ -719,6 +743,7 @@ final class GatewayAuthorityJournal {
 
     private func envelope(_ operation: Data, identity: GatewayRegistrationIdentity) throws -> GatewayAuthorityEnvelope? {
         guard operation.count == 16 else { throw GatewayAuthorityError.wrongScope }
+        if let submission = try submissionEntry(operation, identity: identity) { return submission.envelope }
         if let revoked = try revocation(operation, identity: identity) { return revoked.envelope }
         return try statement("SELECT revision,kind,candidate,payload,signature,token,0 FROM main.gateway_outbox_v1 WHERE operation=? UNION ALL SELECT revision,kind,candidate,payload,signature,NULL,1 FROM main.gateway_reconciled_controls_v1 WHERE operation=?", [operation, operation]) {
             let result = sqlite3_step($0)
@@ -764,7 +789,8 @@ final class GatewayAuthorityJournal {
     }
 
     private func capacity(additional: Int = 1) throws {
-        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)", []) { stmt in
+        let extra = try submissionCountSQL()
+        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)" + extra, []) { stmt in
             guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }; return sqlite3_column_int64(stmt, 0)
         }
         guard additional > 0, count <= policy.maximumControls, additional <= policy.maximumControls - Int(count) else { throw GatewayAuthorityError.capacityExceeded }
@@ -774,6 +800,191 @@ final class GatewayAuthorityJournal {
         try statement("INSERT INTO main.gateway_outbox_v1 VALUES(?,?,\(entry.kind),?,?,?,?)",
             [entry.operationID, uint(entry.revision), candidate, entry.canonicalPayload, entry.signature, entry.registrationToken.map { Data($0.utf8) }]) { try done($0) }
     }
+
+    /// Protected setup only. The host must commit the new authority digest to its continuity boundary before activation.
+    func installSubmissionHistory(identity: GatewayRegistrationIdentity) throws {
+        try scope(identity); _ = try head(identity)
+        guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
+        let version = try submissionSchemaVersion()
+        guard version == 15 || version == 16 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try CodePolicyJournal(connection: db).read() != nil else { throw GatewayAuthorityError.unconfigured }
+        if version == 15 {
+            let result = sqlite3_exec(db, """
+                CREATE TABLE main.gateway_submission_outbox_v1(
+                    operation BLOB PRIMARY KEY CHECK(length(operation)=16), revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8),
+                    kind INTEGER NOT NULL CHECK(kind IN (4,5)), credential BLOB NOT NULL CHECK(length(credential)=16),
+                    payload BLOB NOT NULL, signature BLOB NOT NULL CHECK(length(signature)=64),
+                    run BLOB NOT NULL CHECK(length(run)=16), started BLOB NOT NULL CHECK(length(started)=8),
+                    deadline BLOB NOT NULL CHECK(length(deadline)=8)
+                ) STRICT, WITHOUT ROWID;
+                PRAGMA main.user_version=16;
+                """, nil, nil, nil)
+            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        }
+        try statement("SELECT operation,revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 LIMIT 0", []) {
+            guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayAuthorityError.corruptData }
+        }
+    }
+
+    /// The privileged host supplies a staged public key. Root assigns the new identity and signed control revision.
+    func rotateSubmission(publicKey: Data, identity: GatewayRegistrationIdentity, active: Bool,
+                          expectedHead: UInt64, wall: UInt64, now: AuthorityMoment,
+                          sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        guard (try? P256.Signing.PublicKey(x963Representation: publicKey)) != nil else { throw GatewaySubmissionVerificationError.invalidCredential }
+        return try issueSubmission(kind: .rotation, credential: uuid(UUID()), publicKey: publicKey, identity: identity,
+            active: active, expectedHead: expectedHead, wall: wall, now: now, sign: sign)
+    }
+
+    func revokeSubmission(credentialID: Data, identity: GatewayRegistrationIdentity, active: Bool,
+                          expectedHead: UInt64, wall: UInt64, now: AuthorityMoment,
+                          sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try issueSubmission(kind: .revocation, credential: credentialID, publicKey: nil, identity: identity,
+            active: active, expectedHead: expectedHead, wall: wall, now: now, sign: sign)
+    }
+
+    private func issueSubmission(kind: GatewaySubmissionKind, credential: Data, publicKey: Data?,
+                                 identity: GatewayRegistrationIdentity, active: Bool, expectedHead: UInt64,
+                                 wall: UInt64, now: AuthorityMoment, sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try scope(identity); try clock(now); try requireHead(expectedHead, identity: identity)
+        guard active else { throw GatewayAuthorityError.unavailableRegistration }
+        guard try submissionSchemaVersion() == 16 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard credential.count == 16 else { throw GatewayAuthorityError.wrongScope }
+        let (expiry, overflow) = wall.addingReportingOverflow(policy.candidateLifetimeMillis)
+        let (deadline, monoOverflow) = now.milliseconds.addingReportingOverflow(policy.candidateLifetimeMillis)
+        guard !overflow, !monoOverflow else { throw GatewayAuthorityError.invalidClock }
+        let r = identity
+        let value = try GatewaySubmissionControl(kind: kind,
+            binding: GatewaySubmissionBinding(ownerID: r.ownerID, macID: mac, accountID: account, gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch),
+            revision: expectedHead + 1, operationID: uuid(UUID()), issuedAtUnixMillis: wall, expiresAtUnixMillis: expiry,
+            credentialID: credential, publicKey: publicKey)
+        let payload = try value.encode(limits: policy.payloadLimits), signature = try sign(value)
+        _ = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+            registration: identity, payloadLimits: policy.payloadLimits, signingLimits: policy.signingLimits)
+        let entries = try submissionEntries(identity)
+        if kind == .rotation, entries.contains(where: { $0.receipt.control.credentialID == credential }) { throw GatewayAuthorityError.superseded }
+        guard try envelope(value.operationID, identity: identity) == nil else { throw GatewayAuthorityError.corruptData }
+        try capacity()
+        try statement("INSERT INTO main.gateway_submission_outbox_v1 VALUES(?,?,\(kind.rawValue),?,?,?,?,?,?)",
+            [value.operationID, uint(value.revision), credential, payload, signature, uuid(run), uint(now.milliseconds), uint(deadline)]) { try done($0) }
+        try advance(from: expectedHead, to: value.revision)
+        return GatewayAuthorityEnvelope(kind: kind.rawValue, operationID: value.operationID, revision: value.revision,
+            canonicalPayload: payload, signature: signature, registrationToken: nil)
+    }
+
+    /// Historical Root intent only. It is not evidence that the gateway applied this control or that a private key is available.
+    func desiredSubmission(identity: GatewayRegistrationIdentity) throws -> GatewaySubmissionReceipt? {
+        _ = try head(identity)
+        let entries = try submissionEntries(identity)
+        guard let latest = entries.last(where: { $0.receipt.control.kind == .rotation }) else { return nil }
+        guard !entries.contains(where: {
+            $0.receipt.control.kind == .revocation && $0.receipt.control.credentialID == latest.receipt.control.credentialID
+        }) else { return nil }
+        return latest.receipt
+    }
+
+    func pendingSubmission(operationID: Data, identity: GatewayRegistrationIdentity, active: Bool,
+                           wall: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
+        try clock(now); _ = try head(identity)
+        guard active else { throw GatewayAuthorityError.unavailableRegistration }
+        guard try submissionSchemaVersion() == 16 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        let entries = try submissionEntries(identity)
+        guard let entry = entries.first(where: { $0.receipt.control.operationID == operationID }) else { return nil }
+        let value = entry.receipt.control
+        if value.kind == .rotation {
+            guard try desiredSubmission(identity: identity)?.control.operationID == operationID else { throw GatewayAuthorityError.superseded }
+        } else {
+            guard entries.last(where: { $0.receipt.control.kind == .revocation && $0.receipt.control.credentialID == value.credentialID })?.receipt.control.operationID == operationID else {
+                throw GatewayAuthorityError.superseded
+            }
+        }
+        guard entry.run == uuid(run), entry.started <= now.milliseconds, now.milliseconds < entry.deadline,
+              value.issuedAtUnixMillis <= wall, wall < value.expiresAtUnixMillis else { throw GatewayAuthorityError.expired }
+        return entry.envelope
+    }
+
+    /// Renew only the retained current intent. Never use an arbitrary historical rotation to restore an older credential.
+    func renewSubmission(operationID: Data, identity: GatewayRegistrationIdentity, active: Bool, expectedHead: UInt64,
+                         wall: UInt64, now: AuthorityMoment, sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
+        try scope(identity); try clock(now); try requireHead(expectedHead, identity: identity)
+        guard active else { throw GatewayAuthorityError.unavailableRegistration }
+        let entries = try submissionEntries(identity)
+        guard let previous = entries.first(where: { $0.receipt.control.operationID == operationID }) else { throw GatewayAuthorityError.unconfigured }
+        let value = previous.receipt.control
+        if value.kind == .rotation {
+            guard try desiredSubmission(identity: identity)?.control.operationID == operationID, let key = value.publicKey else {
+                throw GatewayAuthorityError.superseded
+            }
+            return try rotateSubmission(publicKey: key, identity: identity, active: active, expectedHead: expectedHead, wall: wall, now: now, sign: sign)
+        }
+        guard entries.last(where: { $0.receipt.control.kind == .revocation && $0.receipt.control.credentialID == value.credentialID })?.receipt.control.operationID == operationID else {
+            throw GatewayAuthorityError.superseded
+        }
+        return try revokeSubmission(credentialID: value.credentialID, identity: identity, active: active,
+            expectedHead: expectedHead, wall: wall, now: now, sign: sign)
+    }
+
+    private struct SubmissionEntry {
+        let receipt: GatewaySubmissionReceipt
+        let envelope: GatewayAuthorityEnvelope
+        let run: Data
+        let started: UInt64
+        let deadline: UInt64
+    }
+
+    private func submissionEntry(_ operation: Data, identity: GatewayRegistrationIdentity) throws -> SubmissionEntry? {
+        guard try submissionSchemaVersion() >= 16 else { return nil }
+        return try statement("SELECT revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 WHERE operation=?", [operation]) { row in
+            let rc = sqlite3_step(row)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw JournalDatabaseError.storage(rc) }
+            let payload = try blob(row, 3, maximum: policy.payloadLimits.maxBytes), signature = try blob(row, 4, maximum: 64)
+            let value: GatewaySubmissionControl
+            do {
+                value = try GatewaySubmissionVerifier.authenticate(canonicalPayload: payload, signature: signature, wireVersion: 1,
+                    registration: identity, payloadLimits: policy.payloadLimits, signingLimits: policy.signingLimits)
+            } catch { throw GatewayAuthorityError.corruptData }
+            let started = try unsigned(blob(row, 6, maximum: 8)), deadline = try unsigned(blob(row, 7, maximum: 8))
+            guard sqlite3_column_type(row, 1) == SQLITE_INTEGER, value.kind.rawValue == UInt64(exactly: sqlite3_column_int64(row, 1)),
+                  value.operationID == operation, value.revision == (try unsigned(blob(row, 0, maximum: 8))),
+                  value.credentialID == (try blob(row, 2, maximum: 16)), deadline > started,
+                  deadline - started == value.expiresAtUnixMillis - value.issuedAtUnixMillis else { throw GatewayAuthorityError.corruptData }
+            let receipt = GatewaySubmissionReceipt(control: value, canonicalPayload: payload, signature: signature)
+            return SubmissionEntry(receipt: receipt, envelope: GatewayAuthorityEnvelope(kind: value.kind.rawValue,
+                operationID: operation, revision: value.revision, canonicalPayload: payload, signature: signature, registrationToken: nil),
+                run: try blob(row, 5, maximum: 16), started: started, deadline: deadline)
+        }
+    }
+
+    private func submissionEntries(_ identity: GatewayRegistrationIdentity) throws -> [SubmissionEntry] {
+        guard try submissionSchemaVersion() >= 16 else { return [] }
+        let operations: [Data] = try statement("SELECT operation FROM main.gateway_submission_outbox_v1 ORDER BY revision", []) { row in
+            var result: [Data] = []
+            while true {
+                let rc = sqlite3_step(row)
+                if rc == SQLITE_DONE { return result }
+                guard rc == SQLITE_ROW else { throw JournalDatabaseError.storage(rc) }
+                guard result.count < policy.maximumControls else { throw GatewayAuthorityError.capacityExceeded }
+                result.append(try blob(row, 0, maximum: 16))
+            }
+        }
+        return try operations.map {
+            guard let entry = try submissionEntry($0, identity: identity) else { throw GatewayAuthorityError.corruptData }
+            return entry
+        }
+    }
+
+    func submissionHistoryInstalled() throws -> Bool { try submissionSchemaVersion() == 16 }
+
+    private func submissionSchemaVersion() throws -> Int64 {
+        try statement("PRAGMA main.user_version", []) { row in
+            guard sqlite3_step(row) == SQLITE_ROW else { throw JournalDatabaseError.incompatibleStore }
+            return sqlite3_column_int64(row, 0)
+        }
+    }
+    private func submissionCountSQL() throws -> String {
+        try submissionSchemaVersion() >= 16 ? "+(SELECT count(*) FROM main.gateway_submission_outbox_v1)" : ""
+    }
+
     private func authenticate(phone: Data, epoch: Data, trust: GatewayAuthorityTrust) throws {
         try scope(trust.registration)
         guard trust.active, trust.enrollment.active else { throw GatewayAuthorityError.unavailableEnrollment }
