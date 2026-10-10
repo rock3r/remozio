@@ -110,7 +110,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func enrollment(active: Bool = true, phone: UInt8 = 6) throws -> GatewayPhoneEnrollment {
             try .init(phoneID: id(phone), epoch: id(7), tag: id(phone, 32), active: active)
         }
-        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil) throws -> GatewayDeliveryCoordinator {
+        func coordinator(_ provider: Provider, attempts: Int = 3, lifetime: UInt64 = 10_000, tokenSource: FCMTokenSource? = nil, sender: FCMWakeSender? = nil, retryBase: UInt64 = 1, retryCap: UInt64 = 1, coordinatorIdentity: GatewayRegistrationIdentity? = nil, wakePolicy: GatewayWakePolicy? = nil, maximumFlights: Int = 2, schedulerTimer: SchedulerTimer? = nil, validateAuthority: @escaping @Sendable () throws -> Void = {}) throws -> GatewayDeliveryCoordinator {
             let clock = clock, refreshes = refreshes
             let source = try tokenSource ?? FCMTokenSource(now: { .now }, refresh: {
                 refreshes.value.withLock { $0 += 1 }
@@ -133,7 +133,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
                 sleep: { clock.advance($0) }, send: { probe, token in
                     if let sender { return try await sender.send(probe, accessToken: token) }
                     return try await provider.send(at: clock.sample().moment.milliseconds)
-                }, wakePolicy: wakePolicy, sendWake: wakeSend, schedulerSleep: { milliseconds in
+                }, wakePolicy: wakePolicy, sendWake: wakeSend, validateAuthority: validateAuthority, schedulerSleep: { milliseconds in
                     if let schedulerTimer { try await schedulerTimer.sleep(milliseconds) }
                     else { try await Task.sleep(for: .milliseconds(milliseconds)) }
                 })
@@ -255,6 +255,61 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         throw FixtureFailure.timeout
     }
     private enum FixtureFailure: Error { case timeout }
+
+    func testAuthorityLossDuringOAuthPreventsProviderHandoff() async throws {
+        let fixture = try Fixture(), provider = Provider([]), gate = OAuthGate()
+        let source = try FCMTokenSource(now: { .now }, refresh: { try await gate.refresh() })
+        // A shared reference models the synchronous native lease guard.
+        final class Permission: Sendable { let allowed = Mutex(true) }
+        let permission = Permission()
+        let coordinator = try fixture.coordinator(provider, tokenSource: source, validateAuthority: {
+            guard permission.allowed.withLock({ $0 }) else { throw GatewayServiceError.unavailable }
+        })
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        try await coordinator.startProbe(operationID: id(1), phoneID: id(6))
+        try await until { await gate.started }
+        permission.allowed.withLock { $0 = false }
+        try await gate.release()
+        try await until { await coordinator.activeProbeCount == 0 }
+        let times = await provider.times, progress = try await coordinator.progress(operationID: id(1))
+        XCTAssertTrue(times.isEmpty)
+        XCTAssertNil(progress)
+        try await coordinator.shutdown()
+    }
+
+    func testHeartbeatPreservesHeldWakeAndOriginalDeadline() async throws {
+        let fixture = try Fixture(), provider = Provider([]), rootEpoch = UUID()
+        let clock = fixture.clock
+        let lease = try GatewayAuthorityLease(epoch: fixture.clock.epoch, maximumLifetime: 1000, sample: {
+            clock.sample().moment
+        })
+        let wakePolicy = try GatewayWakePolicy(maximumEntries: 8, maximumAttempts: 3, minimumEnrollmentIntervalMillis: 10,
+            maximumLifetimeMillis: 10000, maximumTTLSeconds: 60)
+        let coordinator = try fixture.coordinator(provider, wakePolicy: wakePolicy, validateAuthority: { try lease.validate() })
+        func snapshot(_ sequence: UInt64) throws -> GatewayHostSnapshot {
+            try GatewayHostSnapshot(registration: fixture.identity(), rootEpoch: rootEpoch, sequence: sequence,
+                observedAtMilliseconds: fixture.clock.sample().moment.milliseconds,
+                leaseDeadlineMilliseconds: fixture.clock.sample().moment.milliseconds + 1000,
+                enrollments: [fixture.enrollment()], active: true, phoneRouting: true)
+        }
+        try await coordinator.synchronizeHost(snapshot(1), lease: lease)
+        try await fixture.admit(coordinator)
+        try await fixture.activate(coordinator)
+        await provider.hold()
+        let delivery = try fixture.delivery()
+        _ = try await coordinator.enqueueWake(delivery)
+        let phoneID = fixture.id(6), enrollmentEpoch = fixture.id(7)
+        let send = Task { try await coordinator.deliverWakeBatch(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch) }
+        defer { send.cancel() }
+        try await until { await provider.times.count == 1 }
+        try await coordinator.synchronizeHost(snapshot(2), lease: lease)
+        await provider.release()
+        let result = try await send.value
+        XCTAssertEqual(result.first?.status, .accepted)
+        XCTAssertEqual(result.first?.attempts, 1)
+        try await coordinator.shutdown()
+    }
 
     func testConcurrencyLimitDuplicateAndPacingAcrossCandidates() async throws {
         let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)

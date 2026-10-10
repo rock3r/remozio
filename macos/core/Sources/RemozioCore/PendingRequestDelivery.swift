@@ -13,6 +13,7 @@ public struct RequestDeliveryTrust: Sendable {
 public struct DeliveryRecipient: Hashable, Sendable {
     public let phoneID: Data
     public let enrollmentEpoch: Data
+    init(phoneID: Data, enrollmentEpoch: Data) { self.phoneID = phoneID; self.enrollmentEpoch = enrollmentEpoch }
     init(_ enrollment: StoredApprovalEnrollment) {
         phoneID = enrollment.approval.phoneID; enrollmentEpoch = enrollment.epoch
     }

@@ -1,0 +1,147 @@
+import Darwin
+import Foundation
+import RemozioProtocol
+
+public enum GatewayRootChannelError: Error, Equatable { case invalidConfiguration, closed, busy, timedOut, rejected, invalidMessage }
+enum GatewayRootCall: Sendable { case hello, synchronize(Data), command(Data) }
+enum GatewayRootResponse: Sendable { case version(UInt64), synchronized(Bool), command(Data?), failed }
+protocol GatewayRootDriver: Sendable {
+    func start(closed: @escaping @Sendable () -> Void)
+    func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void)
+    func close()
+}
+
+private final class NativeGatewayRootDriver: GatewayRootDriver, @unchecked Sendable {
+    private let connection: NSXPCConnection
+    private let policy: XPCPeerPolicy
+    init(serviceName: String, policy: XPCPeerPolicy) {
+        self.policy = policy
+        connection = NSXPCConnection(machServiceName: serviceName, options: .privileged)
+        connection.remoteObjectInterface = NSXPCInterface(with: GatewayRootXPCProtocol.self)
+        policy.configure(connection)
+    }
+    func start(closed: @escaping @Sendable () -> Void) {
+        connection.interruptionHandler = closed; connection.invalidationHandler = closed; connection.activate()
+    }
+    func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void) {
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(.failed) }) as? any GatewayRootXPCProtocol else {
+            reply(.failed); return
+        }
+        switch call {
+        case .hello: proxy.hello { [self] in checked(.version($0), reply: reply) }
+        case .synchronize(let bytes): proxy.synchronize(bytes) { [self] in checked(.synchronized($0), reply: reply) }
+        case .command(let bytes): proxy.command(bytes) { [self] in checked(.command($0), reply: reply) }
+        }
+    }
+    private func checked(_ result: GatewayRootResponse, reply: @Sendable (GatewayRootResponse) -> Void) {
+        do { _ = try policy.verifyCredentials(connection); reply(result) } catch { reply(.failed) }
+    }
+    func close() { connection.invalidate() }
+    deinit { connection.invalidate() }
+}
+
+/// Root-side control client. A harmless authenticated handshake precedes every sensitive call on a new connection.
+/// The caller must independently verify recovery signatures and reconcile its retained journal before enabling delivery.
+public actor GatewayRootChannel {
+    private enum State { case new, opening, open, closed }
+    private let driver: any GatewayRootDriver
+    private let timeout: UInt64
+    private let verifyAccount: @Sendable () throws -> Void
+    private var state = State.new
+    private var pending: (id: UUID, continuation: CheckedContinuation<GatewayRootResponse, any Error>)?
+    private var timer: Task<Void, Never>?
+    public init(serviceName: String, gatewayPolicy: XPCPeerPolicy, timeoutMilliseconds: UInt64 = 5000) throws {
+        guard gatewayPolicy.expectedUserID > 0, (1...60_000).contains(timeoutMilliseconds),
+              serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+              serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
+            throw GatewayRootChannelError.invalidConfiguration
+        }
+        driver = NativeGatewayRootDriver(serviceName: serviceName, policy: gatewayPolicy)
+        timeout = timeoutMilliseconds
+        verifyAccount = { guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount } }
+    }
+    init(driver: any GatewayRootDriver, timeoutMilliseconds: UInt64 = 5000,
+         verifyAccount: @escaping @Sendable () throws -> Void = {}) {
+        self.driver = driver; timeout = timeoutMilliseconds; self.verifyAccount = verifyAccount
+    }
+    deinit { timer?.cancel(); driver.close() }
+
+    public func start() async throws {
+        try verifyAccount()
+        guard state == .new else { throw GatewayRootChannelError.closed }
+        state = .opening
+        driver.start { [weak self] in Task { await self?.close() } }
+        do {
+            guard case .version(1) = try await perform(.hello), state == .opening else { throw GatewayRootChannelError.invalidMessage }
+            state = .open
+        } catch { close(); throw error }
+    }
+    public func synchronize(_ snapshot: GatewayHostSnapshot) async throws {
+        guard case .synchronized(let accepted) = try await perform(.synchronize(snapshot.canonicalBytes)) else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        guard accepted else { throw GatewayRootChannelError.rejected }
+    }
+    /// Recovery replies remain unverified data until GatewayHeadQueryOwner accepts the fresh query response.
+    public func head(query: Data) async throws -> GatewayHeadReply {
+        let fields = try await command(.head(query))
+        guard fields.count == 3, case .bytes(let payload) = fields[1], case .bytes(let signature) = fields[2], signature.count == 64 else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        return GatewayHeadReply(canonicalPayload: payload, signature: signature)
+    }
+    public func history(query: Data) async throws -> GatewayControlHistoryReply {
+        let fields = try await command(.history(query))
+        guard fields.count == 3, case .bytes(let payload) = fields[1], case .bytes(let signature) = fields[2], signature.count == 64 else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        return GatewayControlHistoryReply(canonicalPayload: payload, signature: signature)
+    }
+    public func command(_ command: GatewayRootCommand) async throws -> [CBORValue] {
+        guard case .command(let bytes) = try await perform(.command(command.encode())) else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        guard let bytes else { throw GatewayRootChannelError.rejected }
+        do {
+            guard case .array(let fields) = try DeterministicCBOR.decode(bytes,
+                    limits: CBORLimits(maxBytes: 1_100_128, maxDepth: 1, maxItems: 8)), fields.first == .unsigned(1) else {
+                throw GatewayRootChannelError.invalidMessage
+            }
+            return fields
+        } catch { close(); throw error }
+    }
+    public func close() {
+        guard state != .closed else { return }
+        state = .closed; timer?.cancel(); timer = nil; driver.close()
+        let previous = pending; pending = nil; previous?.continuation.resume(throwing: GatewayRootChannelError.closed)
+    }
+    private func perform(_ call: GatewayRootCall) async throws -> GatewayRootResponse {
+        try verifyAccount(); try Task.checkCancellation()
+        switch call {
+        case .hello: guard state == .opening else { throw GatewayRootChannelError.closed }
+        case .synchronize, .command: guard state == .open else { throw GatewayRootChannelError.closed }
+        }
+        guard pending == nil else { throw GatewayRootChannelError.busy }
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = (id, continuation)
+                timer = Task { [weak self, timeout] in
+                    do { try await Task.sleep(for: .milliseconds(timeout)) } catch { return }
+                    await self?.expire(id)
+                }
+                driver.invoke(call) { [weak self] result in Task { await self?.complete(id, result: result) } }
+            }
+        } onCancel: { [weak self] in Task { await self?.close() } }
+    }
+    private func complete(_ id: UUID, result: GatewayRootResponse) {
+        guard let pending, pending.id == id, state != .closed else { return }
+        self.pending = nil; timer?.cancel(); timer = nil
+        if case .failed = result { pending.continuation.resume(throwing: GatewayRootChannelError.closed); close() }
+        else { pending.continuation.resume(returning: result) }
+    }
+    private func expire(_ id: UUID) {
+        guard let pending, pending.id == id else { return }
+        self.pending = nil; pending.continuation.resume(throwing: GatewayRootChannelError.timedOut); close()
+    }
+}
