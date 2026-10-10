@@ -156,11 +156,12 @@ final class CommandCallerReadinessTests: XCTestCase {
         let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateInstalling), busy(.storageUnavailable)])
         let fd = Darwin.open("/dev/null", O_RDONLY); defer { _ = Darwin.close(fd) }
         var now: UInt64 = 1000
-        let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 30, initialBackoffMilliseconds: 10,
-            maximumBackoffMilliseconds: 20, controlTimeoutMilliseconds: 1000)
+        let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 3000, initialBackoffMilliseconds: 1000,
+            maximumBackoffMilliseconds: 2000, controlTimeoutMilliseconds: 1000)
         XCTAssertThrowsError(try submit(endpoint, fd: fd, configuration: configuration, clock: { now }, wait: { delay, check in
             now += UInt64(delay); try check()
         })) { XCTAssertEqual($0 as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: .storageUnavailable)) }
+        XCTAssertEqual(now, 4000)
         XCTAssertEqual(try server.finish().count, 2); try assertNoNextAttempt(endpoint)
     }
 
@@ -391,12 +392,13 @@ extension CommandCallerReadinessTests {
         do {
             let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateInstalling), busy(.storageUnavailable)], io: true)
             var now: UInt64 = 1000
-            let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 30, initialBackoffMilliseconds: 10,
-                maximumBackoffMilliseconds: 20, controlTimeoutMilliseconds: 1000)
+            let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 3000, initialBackoffMilliseconds: 1000,
+                maximumBackoffMilliseconds: 2000, controlTimeoutMilliseconds: 1000)
             XCTAssertThrowsError(try submitIO(endpoint, input: input, output: output, configuration: configuration,
                 clock: { now }, wait: { delay, check in now += UInt64(delay); try check() })) {
                 XCTAssertEqual($0 as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: .storageUnavailable))
             }
+            XCTAssertEqual(now, 4000)
             XCTAssertEqual(try server.finish().count, 2); try assertNoNextAttempt(endpoint)
         }
         do {
@@ -554,14 +556,15 @@ extension CommandCallerReadinessTests {
                 let endpoint = try Endpoint(), server = try serve(endpoint, replies: [busy(.updateInstalling), busy(.storageUnavailable)],
                     io: true, mapped: true, capabilities: mappedCapabilities(mode))
                 var now: UInt64 = 1000
-                let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 30, initialBackoffMilliseconds: 10,
-                    maximumBackoffMilliseconds: 20, controlTimeoutMilliseconds: 1000)
+                let configuration = try CommandCallerReadinessConfiguration(timeoutMilliseconds: 3000, initialBackoffMilliseconds: 1000,
+                    maximumBackoffMilliseconds: 2000, controlTimeoutMilliseconds: 1000)
                 do {
                     let result = try mapped(endpoint, mode: mode, input: input, output: output, error: error, configuration: configuration,
                         clock: { now }, wait: { delay, check in now += UInt64(delay); try check() })
                     if case .admitted(let session) = result { session.close() }
                     XCTFail("Reason changes must not reset the deadline")
                 } catch { XCTAssertEqual(error as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: .storageUnavailable)) }
+                XCTAssertEqual(now, 4000)
                 XCTAssertEqual(try server.finish().count, 2); try assertNoNextAttempt(endpoint)
             }
             do {
