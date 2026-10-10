@@ -400,6 +400,8 @@ public final class RetainedCommandInputDescriptor {
     fileprivate init(fileport: mach_port_t) throws {
         let imported = fileport_makefd(fileport)
         guard imported >= 0 else { throw RetainedCommandInputError.system(errno) }
+        do { try CommandStreamSource.rejectTerminalAlias(imported) }
+        catch { _ = Darwin.close(imported); throw error }
         let flags = fcntl(imported, F_GETFD)
         guard flags >= 0, fcntl(imported, F_SETFD, flags | FD_CLOEXEC) == 0 else {
             let error = errno

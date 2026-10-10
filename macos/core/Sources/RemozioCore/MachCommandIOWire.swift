@@ -22,7 +22,9 @@ enum MachCommandIOWire {
                 guard flags & O_ACCMODE != O_RDONLY, flags & O_EVTONLY == 0 else { throw RetainedCommandOutputError.notWritable }
             }
             var port: mach_port_t = 0
-            guard fileport_makeport(descriptor, &port) == 0 else { throw RetainedCommandInputError.system(errno) }
+            try CommandStreamSource.withRetainedDescriptor(descriptor) { stable in
+                guard fileport_makeport(stable, &port) == 0 else { throw RetainedCommandInputError.system(errno) }
+            }
             fileports.append(port)
         }
         let ports = fileports + [admissionReply, terminalReply]

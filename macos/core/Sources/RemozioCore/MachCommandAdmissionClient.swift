@@ -106,9 +106,11 @@ enum MachCommandAdmissionWire {
         }
         let flags = fcntl(inputDescriptor, F_GETFL)
         guard flags >= 0 else { throw RetainedCommandInputError.system(errno) }
-        guard flags & O_ACCMODE != O_WRONLY else { throw RetainedCommandInputError.notReadable }
+        guard flags & O_ACCMODE != O_WRONLY, flags & O_EVTONLY == 0 else { throw RetainedCommandInputError.notReadable }
         var fileport: mach_port_t = 0
-        guard fileport_makeport(inputDescriptor, &fileport) == 0 else { throw RetainedCommandInputError.system(errno) }
+        try CommandStreamSource.withRetainedDescriptor(inputDescriptor) { stable in
+            guard fileport_makeport(stable, &fileport) == 0 else { throw RetainedCommandInputError.system(errno) }
+        }
         defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
         let headerBytes = MemoryLayout<mach_msg_header_t>.size
         let bodyBytes = MemoryLayout<mach_msg_body_t>.size, descriptorBytes = MemoryLayout<mach_msg_port_descriptor_t>.size
