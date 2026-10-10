@@ -23,7 +23,7 @@ struct TransportMain {
         } catch is CancellationError {
             exit(EX_OK)
         } catch ApprovalTransportStartupError.invalidIdentity {
-            fail("Transport identity does not match its hardware policy and installation pin.", code: EX_CONFIG)
+            fail("Transport identity does not match its configured custody and installation pin.", code: EX_CONFIG)
         } catch {
             fail("Transport is unavailable. Restart requires fresh configuration and authority authentication.", code: EX_TEMPFAIL)
         }

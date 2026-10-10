@@ -48,15 +48,19 @@ final class ApprovalTransportConfigurationTests: XCTestCase {
     }
     func testExactIdentityLookupDisallowsUIAndDoesNotTryAnotherKey() throws {
         let configuration = try configuration()
+        let reference = try XCTUnwrap(configuration.identityReference)
         var calls = 0
         XCTAssertThrowsError(try ApprovalTransportIdentity.load(configuration: configuration, lookup: { query in
             calls += 1
             let fields = query as NSDictionary
             XCTAssertEqual(fields[kSecClass] as? String, kSecClassIdentity as String)
-            XCTAssertEqual(fields[kSecMatchItemList] as? [Data], [configuration.identityReference])
+            XCTAssertEqual(fields[kSecMatchItemList] as? [Data], [reference])
             XCTAssertEqual(fields[kSecMatchLimit] as? String, kSecMatchLimitOne as String)
             XCTAssertEqual((fields[kSecUseAuthenticationContext] as? LAContext)?.interactionNotAllowed, true)
             return (errSecInteractionNotAllowed, nil)
+        }, readFile: { _, _ in
+            XCTFail("A failed hardware lookup must not read a software key")
+            return Data()
         })) { XCTAssertEqual($0 as? ApprovalTransportStartupError, .identityUnavailable) }
         XCTAssertEqual(calls, 1)
         XCTAssertThrowsError(try ApprovalTransportIdentity.load(configuration: configuration, lookup: { _ in

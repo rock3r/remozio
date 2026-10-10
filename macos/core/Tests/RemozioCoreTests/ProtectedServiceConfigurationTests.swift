@@ -113,6 +113,19 @@ final class ProtectedServiceConfigurationTests: XCTestCase {
         XCTAssertEqual(chmod(fixture.path, 0o600), 0)
         XCTAssertEqual(chmod(fixture.directory, 0o770), 0); XCTAssertThrowsError(try fixture.read())
     }
+    func testPrivateFileOwnerAndAncestorOwnerAreCheckedIndependently() throws {
+        let fixture = try Fixture()
+        XCTAssertEqual(try ProtectedServiceConfiguration.read(anchor: fixture.root.path,
+            relativePath: "config/authority.cbor", owner: getuid(), ancestorOwner: getuid()), Data([1, 2, 3]))
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.read(anchor: fixture.root.path,
+            relativePath: "config/authority.cbor", owner: getuid() + 1, ancestorOwner: getuid()))
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.read(anchor: fixture.root.path,
+            relativePath: "config/authority.cbor", owner: getuid(), ancestorOwner: getuid() + 1))
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.readServicePrivate(path: fixture.path, serviceUID: 0))
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.readServicePrivate(path: fixture.path, serviceUID: getuid() + 1))
+        // The ordinary-user fixture cannot satisfy the production Root-owned ancestor walk.
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.readServicePrivate(path: fixture.path, serviceUID: getuid()))
+    }
     func testRejectsUnknownVersionFieldsDuplicatesAndInvalidBounds() throws {
         let value = try configuration(), limits = try CBORLimits(maxBytes: 65536, maxDepth: 3, maxItems: 128)
         guard case .map(let fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: limits) else { return XCTFail("Expected map") }
