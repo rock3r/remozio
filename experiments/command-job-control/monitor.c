@@ -10,6 +10,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 static int report(uint32_t tag,uint32_t detail){uint32_t r[3]={0x524d5431,tag,detail};return write(5,r,sizeof r)==sizeof r?0:1;}
+static int report_reaped_target(int failure_fd,uint32_t status){
+ int failed=0;ssize_t count;
+ do{count=read(failure_fd,&failed,sizeof failed);}while(count<0&&errno==EINTR);
+ if(count<0||(count!=0&&count!=sizeof failed))return 1;
+ if(count==sizeof failed&&(failed<=0||report('F',(uint32_t)failed)))return 1;
+ return report('X',status);
+}
 int main(int argc,char **argv){
  if(argc!=2||getsid(0)!=getpid()||ioctl(0,TIOCSCTTY,0))return 70;
  signal(SIGTTOU,SIG_IGN);signal(SIGPIPE,SIG_IGN);
@@ -43,7 +50,7 @@ int main(int argc,char **argv){
   if(got==target){
    if(WIFSTOPPED(status)){if(report('S',(uint32_t)WSTOPSIG(status)))error=1;}
    else if(WIFCONTINUED(status)){if(report('C',0))error=1;}
-   else {reaped=1;if(report('X',(uint32_t)status))error=1;}
+   else {reaped=1;if(report_reaped_target(failure[0],(uint32_t)status))error=1;}
   }else if(got<0&&errno!=EINTR){if(errno==ECHILD)ownership_lost=1;error=1;break;}
   if(error&&!reaped)kill(-target,SIGKILL);
   usleep(1000);
