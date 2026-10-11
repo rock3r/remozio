@@ -140,6 +140,123 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    private final class ReceivePort: Sendable { let value = Mutex<mach_port_t>(0) }
+    private func commandWorker(_ fixture: Fixture, port: ReceivePort,
+                               policyRead: @escaping @Sendable () throws -> Void = {},
+                               report: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in }) throws -> AuthorityCommandReceiveWorker {
+        let journal = fixture.journal, epoch = fixture.epoch
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        return try AuthorityCommandReceiveWorker(ownedJournal: journal,
+            submissionLimits: CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 256), makeHost: {
+                var receiver: mach_port_t = 0
+                guard mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &receiver) == KERN_SUCCESS else {
+                    throw CommandReceiveHostError.invalidConfiguration
+                }
+                let host = try CommandReceiveHost(takingReceiveRight: receiver, macID: Fixture.id(1), accountID: Fixture.id(2),
+                    userID: geteuid(), auditSessionID: nil, maximumSessions: 4, maximumPayloadBytes: 8192,
+                    receiveWaitMilliseconds: 10, replyTimeoutMilliseconds: 100, context: { _ in
+                        try policyRead(); return context
+                    })
+                port.value.withLock { $0 = receiver }; return host
+            }, resolve: { _ in .refuse(.policyRejected) }, draft: { _ in throw ApprovalCoordinatorError.invalidDraft },
+            clock: { .init(epoch: epoch, milliseconds: 110) }, report: report)
+    }
+    private static func hasReceiveRight(_ port: mach_port_t) -> Bool {
+        var type: mach_port_type_t = 0
+        return mach_port_type(mach_task_self_, port, &type) == KERN_SUCCESS &&
+            (type & (UInt32(1) << (MACH_PORT_RIGHT_RECEIVE + 16))) != 0
+    }
+    func testCommandReceiverDrainsBeforeServiceClosesSharedJournal() async throws {
+        let f = try Fixture(), port = ReceivePort(), block = Mutex(false), entered = Mutex(false), closes = Mutex(0)
+        let gate = DispatchSemaphore(value: 0), journal = f.journal
+        let worker = try commandWorker(f, port: port, policyRead: {
+            if block.withLock({ $0 }) { entered.withLock { $0 = true }; gate.wait() }
+            XCTAssertEqual(try journal.read { _ in 17 }, 17)
+        })
+        let service = try AuthorityWakeService(makePublisher: { try f.publisher(Driver()) },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 100, startRequests: {}, closeRequests: {
+                XCTAssertEqual(worker.status, .closed)
+                XCTAssertFalse(Self.hasReceiveRight(port.value.withLock { $0 }))
+                closes.withLock { $0 += 1 }; try journal.close()
+            }, commandReceiver: worker)
+        defer { gate.signal(); worker.requestStop() }
+        try await service.start(); block.withLock { $0 = true }
+        try await waitUntil { entered.withLock { $0 } }
+        let close = Task { try await service.close() }
+        try await waitUntil { await service.wakeStatus == .closed }
+        XCTAssertEqual(closes.withLock { $0 }, 0)
+        XCTAssertTrue(Self.hasReceiveRight(port.value.withLock { $0 }))
+        gate.signal(); try await close.value
+        XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+    func testServiceCloseDuringReceiverReadinessCannotStartLatePublisher() async throws {
+        let f = try Fixture(), port = ReceivePort(), entered = Mutex(false), publishers = Mutex(0), closes = Mutex(0)
+        let gate = DispatchSemaphore(value: 0)
+        let worker = try commandWorker(f, port: port, report: {
+            if $0 == .running { entered.withLock { $0 = true }; gate.wait() }
+        })
+        let service = try AuthorityWakeService(makePublisher: {
+            publishers.withLock { $0 += 1 }; return try f.publisher(Driver())
+        }, hints: AuthorityWakeHintSource(registration: f.registration), interval: 100, startRequests: {}, closeRequests: {
+            XCTAssertEqual(worker.status, .closed)
+            XCTAssertFalse(Self.hasReceiveRight(port.value.withLock { $0 }))
+            closes.withLock { $0 += 1 }; try f.journal.close()
+        }, commandReceiver: worker)
+        let start = Task { try await service.start() }
+        defer { start.cancel(); gate.signal(); worker.requestStop() }
+        try await waitUntil { entered.withLock { $0 } }
+        let close = Task { try await service.close() }
+        try await waitUntil { await service.wakeStatus == .closed }
+        XCTAssertEqual(closes.withLock { $0 }, 0)
+        gate.signal()
+        do { try await start.value; XCTFail("Closed service completed startup") }
+        catch { XCTAssertEqual(error as? AuthorityWakePublisherError, .closed) }
+        try await close.value
+        XCTAssertEqual(publishers.withLock { $0 }, 0); XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+    func testCommandPolicyRetirementClosesServiceWithHealthyGateway() async throws {
+        let f = try Fixture(deadline: 5000), port = ReceivePort(), failed = Mutex(false), closes = Mutex(0)
+        let worker = try commandWorker(f, port: port, policyRead: {
+            if failed.withLock({ $0 }) { throw CommandSessionRegistryError.invalidCodePolicy }
+        })
+        let service = try AuthorityWakeService(makePublisher: { try f.publisher(Driver()) },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 100, startRequests: {}, closeRequests: {
+                XCTAssertEqual(worker.status, .closed)
+                XCTAssertFalse(Self.hasReceiveRight(port.value.withLock { $0 }))
+                closes.withLock { $0 += 1 }; try f.journal.close()
+            }, commandReceiver: worker)
+        try await service.start()
+        try await waitUntil { await service.wakeStatus == .running }
+        failed.withLock { $0 = true }
+        do { try await waitUntil { await service.wakeStatus == .closed } }
+        catch { try await service.close(); throw error }
+        try await service.close()
+        XCTAssertTrue(worker.isRetired); XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+    func testCommandPolicyRetirementClosesServiceWhileGatewayIsUnavailable() async throws {
+        let f = try Fixture(), port = ReceivePort(), failed = Mutex(false), publishers = Mutex(0), closes = Mutex(0)
+        let worker = try commandWorker(f, port: port, policyRead: {
+            if failed.withLock({ $0 }) { throw CommandSessionRegistryError.invalidCodePolicy }
+        })
+        let driver = Driver(); driver.value.withLock { $0.failHello = true }
+        let service = try AuthorityWakeService(makePublisher: {
+            publishers.withLock { $0 += 1 }; return try f.publisher(driver)
+        }, hints: AuthorityWakeHintSource(registration: f.registration), interval: 100,
+        initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, startRequests: {}, closeRequests: {
+            XCTAssertEqual(worker.status, .closed)
+            XCTAssertFalse(Self.hasReceiveRight(port.value.withLock { $0 }))
+            closes.withLock { $0 += 1 }; try f.journal.close()
+        }, commandReceiver: worker)
+        try await service.start()
+        try await waitUntil { await service.wakeStatus == .waiting(retryMilliseconds: 100) }
+        failed.withLock { $0 = true }
+        try await waitUntil { await service.wakeStatus == .closed }
+        try await service.close()
+        let retired = await service.isRetired
+        XCTAssertTrue(retired); XCTAssertTrue(worker.isRetired)
+        XCTAssertEqual(publishers.withLock { $0 }, 1); XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+
     func testAccountPresenceModeChangesReachPublisherAndLiveHintFeed() async throws {
         let f = try Fixture(enablePresence: true), driver = Driver()
         let presence = AuthorityPresenceRuntime(configuration: try .init(macID: f.registration.macID, accountID: f.registration.accountID,

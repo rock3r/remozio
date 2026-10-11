@@ -88,6 +88,13 @@ public final class CommandReceiveHost {
 
     deinit { close() }
 
+    /// The queue owner validates current policy before reporting readiness. This does not receive a message.
+    func validateStartupContext() throws {
+        guard !running, !delivering else { throw CommandReceiveHostError.operationActive }
+        try begin(); defer { end() }
+        _ = try currentContext()
+    }
+
     /// One bounded receive turn also prunes while idle or under continuous invalid traffic.
     /// The synchronous handler receives input ownership and must complete every separate admission gate.
     public func poll(handleInput: (sending ReceivedMachCommandInputSubmission) throws -> Void) throws -> CommandReceiveEvent {
