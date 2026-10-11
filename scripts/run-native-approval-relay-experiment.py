@@ -125,15 +125,18 @@ def framing(executable, mode):
                 failures.append("TCP fixture failed")
 
     worker = threading.Thread(target=echo)
-    worker.start()
-    probe = Probe(executable, listener.getsockname()[1])
+    probe = None
+    worker_started = False
     expected = b""
     try:
+        probe = Probe(executable, listener.getsockname()[1])
         with probe.connect() as sock:
             headers = upgrade(sock, protocol=("wrong.v1" if mode == "wrongProtocol" else
                                         "remozio.ciphertext.v2, remozio.ciphertext.v1" if mode == "protocolFallback" else
                                         "remozio.ciphertext.v1"),
                               extensions=mode == "extensionsNotNegotiated")
+            worker.start()
+            worker_started = True
             if mode == "wrongProtocol":
                 if headers.startswith(b"HTTP/1.1 101"):
                     raise RuntimeError("Wrong subprotocol accepted")
@@ -181,8 +184,12 @@ def framing(executable, mode):
             raise RuntimeError("Rejected upgrade reached the TCP destination")
     finally:
         listener.close()
-        probe.close()
-        worker.join(timeout=7)
+        try:
+            if probe is not None:
+                probe.close()
+        finally:
+            if worker_started:
+                worker.join(timeout=7)
 
 
 def tls(executable):
