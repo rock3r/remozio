@@ -19,7 +19,7 @@ final class AuthorityCommandExecutionWorkerTests: XCTestCase {
             calls.withLock { $0 += 1 }; entered.signal()
             guard resume.wait(timeout: .now() + 3) == .success else { throw AuthorityCommandExecutionWorkerError.closed }
             try check()
-        }, rejectUnowned: { _ in XCTFail("A successful attempt needs no rejection") }, report: { _, _ in completed.signal() })
+        }, rejectUnowned: { _ in }, report: { _, _ in completed.signal() })
         try worker.start()
         let original = notice(3)
         XCTAssertEqual(worker.enqueue(original), .queued)
@@ -71,7 +71,7 @@ final class AuthorityCommandExecutionWorkerTests: XCTestCase {
         XCTAssertNotNil(retired)
         XCTAssertEqual(worker.enqueue(notice(5)), .closed)
         resume.signal(); await worker.close()
-        XCTAssertEqual(rejected.withLock { $0 }, 1)
+        XCTAssertEqual(rejected.withLock { $0 }, 3)
     }
 
     @MainActor func testStartFailureUsesOnlyTheJournalRejectionCallbackWithoutRetry() async throws {
@@ -102,14 +102,51 @@ final class AuthorityCommandExecutionWorkerTests: XCTestCase {
     }
 
     @MainActor func testCloseBeforeStartAndInvalidBoundsNeverCallBegin() async throws {
+        let rejections = Mutex(0)
         let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail("A closed worker must not start") },
-            rejectUnowned: { _ in XCTFail("An unqueued notice must remain with the enclosing journal") })
+            rejectUnowned: { _ in rejections.withLock { $0 += 1 } })
         XCTAssertEqual(worker.enqueue(notice(3)), .closed)
         await worker.close(); await worker.close()
         XCTAssertThrowsError(try worker.start())
         XCTAssertEqual(worker.enqueue(notice(3)), .closed)
+        XCTAssertEqual(rejections.withLock { $0 }, 2)
         for maximum in [0, 4097] {
             XCTAssertThrowsError(try AuthorityCommandExecutionWorker(maximumPending: maximum, begin: { _, _ in }, rejectUnowned: { _ in }))
         }
     }
+    func testCloseJoinsAnInFlightNonqueuedRejection() async throws {
+        let entered = Mutex(false), returned = Mutex(false), closed = Mutex(false)
+        let resume = DispatchSemaphore(value: 0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail("A stopped worker must not begin") },
+            rejectUnowned: { _ in
+                entered.withLock { $0 = true }
+                XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
+            })
+        try worker.start(); worker.requestStop()
+        let original = notice(3)
+        let rejection = Task.detached { XCTAssertEqual(worker.enqueue(original), .closed); returned.withLock { $0 = true } }
+        defer { resume.signal() }
+        for _ in 0..<300 where !entered.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(entered.withLock { $0 })
+        let cleanup = Task { await worker.close(); closed.withLock { $0 = true } }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertFalse(closed.withLock { $0 }); XCTAssertFalse(returned.withLock { $0 })
+        resume.signal(); await rejection.value; await cleanup.value
+        XCTAssertTrue(closed.withLock { $0 }); XCTAssertTrue(returned.withLock { $0 })
+    }
+
+    @MainActor func testNonqueuedRejectionFailureRetiresWithoutTryingExecution() async throws {
+        let reported = Mutex(false)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail("No execution may start") },
+            rejectUnowned: { _ in throw AuthorityCommandExecutionWorkerError.invalidConfiguration }, report: { _, result in
+                guard case .failure(let error) = result else { return XCTFail("A rejection failure must be reported") }
+                XCTAssertEqual(error as? AuthorityCommandExecutionWorkerError, .invalidConfiguration)
+                reported.withLock { $0 = true }
+            })
+        try worker.start(); worker.requestStop()
+        XCTAssertEqual(worker.enqueue(notice(3)), .closed)
+        XCTAssertTrue(reported.withLock { $0 }); XCTAssertTrue(worker.isRetired)
+        await worker.close()
+    }
+
 }

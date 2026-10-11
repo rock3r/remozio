@@ -59,20 +59,29 @@ public final class AuthorityCommandExecutionWorker: Sendable {
         }
     }
 
-    /// Queue once while pending. Original journal state prevents release after duplicates or restart.
+    /// Queue once while pending. Reject nonqueued approvals through the journal before returning.
+    /// Call after the approval lock releases. Original state prevents duplicate release or replay.
     public func enqueue(_ notice: AuthorityCommandAuthorizationNotice) -> EnqueueResult {
+        let ownership = self.ownership
         let admitted: EnqueueResult = ownership.state.withLock { state in
-            guard state.started, !state.stopping else { return .closed }
             guard state.pending[notice.requestID] == nil else { return .duplicate }
-            guard state.pending.count < maximumPending else { return .capacity }
-            state.pending[notice.requestID] = notice; ownership.completion.enter(); return .queued
+            ownership.completion.enter()
+            guard state.started, !state.stopping else { return .closed }
+            guard state.pending.count < maximumPending else { state.stopping = true; return .capacity }
+            state.pending[notice.requestID] = notice; return .queued
         }
         guard admitted == .queued else {
-            // Saturation retires the enclosing runtime rather than silently stranding approvals.
+            guard admitted != .duplicate else { return admitted }
+            defer { ownership.completion.leave() }
+            // The journal must settle this exact unowned approval before capacity retirement.
+            do {
+                try rejectUnowned(notice)
+                report(notice, .failure(admitted == .capacity ? AuthorityCommandExecutionWorkerError.capacity : .closed))
+            } catch { ownership.fail(); report(notice, .failure(error)) }
             if admitted == .capacity { ownership.fail() }
             return admitted
         }
-        let ownership = ownership, begin = begin, rejectUnowned = rejectUnowned, report = report
+        let begin = begin, rejectUnowned = rejectUnowned, report = report
         queue.async {
             defer {
                 _ = ownership.state.withLock { $0.pending.removeValue(forKey: notice.requestID) }

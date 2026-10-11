@@ -717,7 +717,7 @@ extension AuthorityWakePublisherTests {
             hints: AuthorityWakeHintSource(registration: fixture.registration), interval: 100,
             startRequests: { XCTAssertEqual(worker.enqueue(notice), .queued) }, closeRequests: {
                 XCTAssertEqual(worker.enqueue(notice), .closed)
-                XCTAssertEqual(rejections.withLock { $0 }, 1); closes.withLock { $0 += 1 }; try journal.close()
+                XCTAssertEqual(rejections.withLock { $0 }, 2); closes.withLock { $0 += 1 }; try journal.close()
             }, commandExecutionWorker: worker)
         defer { gate.signal(); worker.requestStop() }
         try await service.start(); try await waitUntil { entered.withLock { $0 } }
@@ -739,7 +739,7 @@ extension AuthorityWakePublisherTests {
         }, rejectUnowned: { _ in rejected.withLock { $0 += 1 } })
         let service = try AuthorityWakeService(makePublisher: { try fixture.publisher(Driver()) },
             hints: AuthorityWakeHintSource(registration: fixture.registration), interval: 100, startRequests: {}, closeRequests: {
-                XCTAssertEqual(rejected.withLock { $0 }, 1); closes.withLock { $0 += 1 }; try fixture.journal.close()
+                XCTAssertEqual(rejected.withLock { $0 }, 2); closes.withLock { $0 += 1 }; try fixture.journal.close()
             }, commandExecutionWorker: worker)
         defer { gate.signal(); worker.requestStop() }
         try await service.start(); XCTAssertEqual(worker.enqueue(notice), .queued)

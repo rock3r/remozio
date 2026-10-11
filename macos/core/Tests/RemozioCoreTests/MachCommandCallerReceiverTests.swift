@@ -8415,6 +8415,49 @@ extension MachCommandCallerReceiverTests {
         }
     }
 
+    @MainActor func testNonqueuedExecutionNoticeCommitsCancellationAndRepliesToTheOriginalFrontend() async throws {
+        for checkpointed in [false, true] {
+            for saturated in [false, true] {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+                let journal = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminal = try Endpoint()
+                let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal)
+                let request = try admitOwnedCommand(command, fixture: fixture)
+                let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+                _ = try ownerDecision(request, fixture: fixture, decline: false)
+                let original = try executionNotice(request, journal: journal), time = fixture.now(130)
+                let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+                let worker = try AuthorityCommandExecutionWorker(maximumPending: 1, begin: { notice, check in
+                    XCTAssertNotEqual(notice.requestID, original.requestID, "The rejected command must never begin")
+                    entered.signal()
+                    guard resume.wait(timeout: .now() + 3) == .success else { throw CommandExecutionError.unavailable }
+                    try check()
+                }, rejectUnowned: { notice in
+                    let cancelled = try journal.cancelUnownedCommandExecution(notice, now: time, receiptTimeMs: nil)
+                    if notice.requestID == original.requestID { XCTAssertTrue(cancelled) }
+                })
+                defer { resume.signal(); worker.requestStop() }
+                try worker.start()
+                if saturated {
+                    let current = try journal.withRequests { try $0.state(requestID: request.requestID) }
+                    let pending = AuthorityCommandAuthorizationNotice(state: .init(requestKind: .command, macID: current.macID,
+                        accountID: current.accountID, requestDigest: current.requestDigest, challenge: current.challenge, reason: .none,
+                        terminalAt: nil, decisionPhoneID: nil, requestID: Data(repeating: 0xfe, count: 16), phase: .authorized,
+                        revision: current.revision, firstObservedAt: current.firstObservedAt, deadlineMilliseconds: current.deadlineMilliseconds))
+                    XCTAssertEqual(worker.enqueue(pending), .queued)
+                    XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+                } else { worker.requestStop() }
+                XCTAssertEqual(worker.enqueue(original), saturated ? .capacity : .closed)
+                XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .cancelledBeforeStart)
+                XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .cancelled)
+                XCTAssertEqual(try journal.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 1)
+                XCTAssertEqual(journal.activeCommandCount, 0)
+                resume.signal(); await worker.close()
+                XCTAssertEqual(worker.isRetired, saturated)
+                XCTAssertThrowsError(try receiver(terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+            }
+        }
+    }
+
     @MainActor func testExecutionWorkerRejectionUsesOriginalDurableRequestAndFrontendReply() async throws {
         for checkpointed in [false, true] {
             let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)

@@ -116,11 +116,13 @@ A thrown start can already own a monitor. The rejection operation first proves t
 It cancels only the exact original authorized request. It commits the no-dispatch result and sends the original frontend its terminal reply.
 A native owner keeps its resources, cleanup and actual outcome. An exception is never treated as proof that no child exists.
 
-Saturation retires the enclosing runtime instead of silently dropping an approval while continuing to accept work.
+A notice refused during saturation or shutdown receives the same exact-request rejection before enqueue returns.
+Shutdown joins in-flight rejection work. A rejection storage failure retires the runtime and reports failure without claiming cancellation.
+Saturation retires the enclosing runtime after rejection instead of silently dropping an approval.
 The execution queue and active command limits remain explicit host settings. Installed Root behavior and complete target groups remain gates in issues 286 and 298.
 The app entry point and installer do not activate command mode as part of this integration change.
 
-Eighteen focused checks cover the scheduler, versioned configuration, original-request rejection, native ownership and enclosing runtime lifecycle.
+Twenty-one focused checks cover the scheduler, versioned configuration, original-request rejection, native ownership and enclosing runtime lifecycle.
 The native cases execute disposable ordinary-account targets through both current mapped profiles.
 They preserve one effect after a handler failure and a duplicate notice. They also retain a monitor after a failed start attempt.
 A frozen public-only version 1 fixture checks exact byte compatibility. These results do not prove installed Root execution or complete target-group semantics.
