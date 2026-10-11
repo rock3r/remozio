@@ -84,6 +84,32 @@ final class SignedReleaseInspectionTests: XCTestCase {
             XCTAssertEqual($0 as? ReleaseManifestError, .unsafePath)
         }
     }
+    func testReleaseEntitlementsBindToTrustedTeamAndComponent() {
+        let identifier = "dev.remozio.mac", team = "ABCDEFGHIJ"
+        let applicationKey = "com.apple.application-identifier", teamKey = "com.apple.developer.team-identifier"
+        for values: [String: Any] in [[:], [applicationKey: team + "." + identifier], [teamKey: team],
+                                      [applicationKey: team + "." + identifier, teamKey: team]] {
+            XCTAssertTrue(SignedReleaseInspection.validEntitlements(values, identifier: identifier, teamID: team))
+        }
+        for values: [String: Any] in [[applicationKey: identifier], [applicationKey: "OTHERTEAM1." + identifier],
+                                      [applicationKey: team + ".dev.remozio.other"], [applicationKey: 1],
+                                      [teamKey: "OTHERTEAM1"], [teamKey: true], [teamKey: NSNull()],
+                                      ["com.apple.security.get-task-allow": false],
+                                      ["com.apple.security.cs.disable-library-validation": true],
+                                      ["keychain-access-groups": [team + ".shared"]]] {
+            XCTAssertFalse(SignedReleaseInspection.validEntitlements(values, identifier: identifier, teamID: team))
+        }
+    }
+    func testAdHocFixtureEntitlementsCannotClaimATeam() {
+        let identifier = "dev.remozio.mac"
+        XCTAssertTrue(SignedReleaseInspection.validEntitlements([:], identifier: identifier, teamID: nil))
+        XCTAssertTrue(SignedReleaseInspection.validEntitlements(["com.apple.application-identifier": identifier], identifier: identifier, teamID: nil))
+        for values: [String: Any] in [["com.apple.application-identifier": "ABCDEFGHIJ." + identifier],
+                                      ["com.apple.developer.team-identifier": "ABCDEFGHIJ"],
+                                      ["com.apple.developer.team-identifier": NSNull()]] {
+            XCTAssertFalse(SignedReleaseInspection.validEntitlements(values, identifier: identifier, teamID: nil))
+        }
+    }
     func testProductionIdentityInputsCannotInjectARequirement() throws {
         for team in ["", "abcdef1234", "ABCDEFGHIJ\" or true"] {
             XCTAssertThrowsError(try SignedReleaseInspection.inspect(repository, teamID: team, appIdentifier: "dev.remozio.mac")) {

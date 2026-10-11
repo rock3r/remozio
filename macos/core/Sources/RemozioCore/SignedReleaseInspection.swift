@@ -24,7 +24,7 @@ public enum SignedReleaseInspection {
                         requirement: (String, Data) throws -> String) throws -> SignedReleaseEvidence {
         let root = bundle.standardizedFileURL
         try noSymlink(root)
-        let app = try signedMetadata(root, identifier: expectedAppIdentifier, requirement: requirement)
+        let app = try signedMetadata(root, identifier: expectedAppIdentifier, expectedTeamID: expectedTeamID, requirement: requirement)
         guard let declaration = app.plist[ReleaseManifest.infoKey] as? Data,
               declaration.count <= ReleaseManifest.maximumBytes else { throw ReleaseManifestError.missingMetadata }
         let manifest = try ReleaseManifest.decode(declaration)
@@ -41,7 +41,7 @@ public enum SignedReleaseInspection {
                 path.appendPathComponent(String(segment)); try noSymlink(path)
             }
             try thinArm64(path)
-            let metadata = component.role == .app ? app : try signedMetadata(path, identifier: component.identifier, requirement: requirement)
+            let metadata = component.role == .app ? app : try signedMetadata(path, identifier: component.identifier, expectedTeamID: expectedTeamID, requirement: requirement)
             guard metadata.identifier == component.identifier, metadata.teamID == expectedTeamID,
                   component.teamID == metadata.teamID, metadata.plist["CFBundleVersion"] as? String == component.build,
                   metadata.plist["CFBundleIdentifier"] as? String == component.identifier,
@@ -52,7 +52,7 @@ public enum SignedReleaseInspection {
             hashes[component.role] = metadata.hash
         }
         // Check the enclosing seal again after inspecting all nested code. This remains a candidate snapshot.
-        let final = try signedMetadata(root, identifier: expectedAppIdentifier, requirement: requirement)
+        let final = try signedMetadata(root, identifier: expectedAppIdentifier, expectedTeamID: expectedTeamID, requirement: requirement)
         guard final.hash == app.hash, final.plist[ReleaseManifest.infoKey] as? Data == declaration else {
             throw ReleaseManifestError.identityMismatch
         }
@@ -65,7 +65,7 @@ public enum SignedReleaseInspection {
         let teamID: String?
         let plist: [String: Any]
     }
-    private static func signedMetadata(_ url: URL, identifier: String,
+    private static func signedMetadata(_ url: URL, identifier: String, expectedTeamID: String?,
                                        requirement: (String, Data) throws -> String) throws -> Metadata {
         var code: SecStaticCode?
         try checked(SecStaticCodeCreateWithPath(url as CFURL, [], &code))
@@ -92,10 +92,25 @@ public enum SignedReleaseInspection {
             throw ReleaseManifestError.identityMismatch
         }
         let entitlements = values[kSecCodeInfoEntitlementsDict as String] as? [String: Any] ?? [:]
-        guard entitlements.isEmpty || (entitlements.count == 1 && entitlements["com.apple.application-identifier"] as? String == identifier) else {
+        let teamID = values[kSecCodeInfoTeamIdentifier as String] as? String
+        guard teamID == expectedTeamID, validEntitlements(entitlements, identifier: identifier, teamID: expectedTeamID) else {
             throw ReleaseManifestError.identityMismatch
         }
-        return Metadata(identifier: actualIdentifier, hash: hash, teamID: values[kSecCodeInfoTeamIdentifier as String] as? String, plist: plist)
+        return Metadata(identifier: actualIdentifier, hash: hash, teamID: teamID, plist: plist)
+    }
+    /// Only identity declarations are allowed. The caller supplies the Team ID from trusted policy.
+    static func validEntitlements(_ values: [String: Any], identifier: String, teamID: String?) -> Bool {
+        let applicationKey = "com.apple.application-identifier"
+        let teamKey = "com.apple.developer.team-identifier"
+        guard Set(values.keys).isSubset(of: [applicationKey, teamKey]) else { return false }
+        if let value = values[applicationKey] {
+            let expected = teamID.map { $0 + "." + identifier } ?? identifier
+            guard value as? String == expected else { return false }
+        }
+        if let value = values[teamKey] {
+            guard let teamID, value as? String == teamID else { return false }
+        }
+        return true
     }
     private static func thinArm64(_ url: URL) throws {
         let file = try FileHandle(forReadingFrom: url)

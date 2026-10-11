@@ -58,6 +58,12 @@ Decoding alone does not authenticate the release.
 
 `SignedReleaseInspection.inspect` requires a trusted Team ID and expected app identifier.
 It verifies the Developer ID requirement, hardened runtime, entitlements, all architectures, and nested code through public Security APIs.
+Only the application and Team ID entitlements may be present.
+Their values must match the trusted Team ID and component identifier.
+A production application identifier uses `<TeamID>.<BundleID>`; a team entitlement must match the same trusted Team ID.
+[Apple documents this identity prefix](https://developer.apple.com/documentation/security/sharing-access-to-keychain-items-among-a-collection-of-apps).
+An ad-hoc fixture cannot claim a production Team ID. Unknown entitlements remain rejected.
+
 It reads `kSecCodeInfoPList`, the secured dictionary from signing information.
 It does not use `Bundle.infoDictionary` as authenticated metadata or request private signing-information flags.
 
