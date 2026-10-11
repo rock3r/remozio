@@ -33,9 +33,10 @@ def check(configuration):
     usage = subprocess.run([str(authority)], text=True, capture_output=True, timeout=5)
     require(usage.returncode == 64 and 'Usage:' in usage.stderr, 'Authority must reject missing configuration')
     if os.geteuid() != 0:
-        denied = subprocess.run([str(authority), '--configuration', '/nonexistent/remozio.cbor'],
-                                text=True, capture_output=True, timeout=5)
-        require(denied.returncode == 77, 'Authority must reject non-root startup before reading configuration')
+        for flag in ('--configuration', '--presence-configuration'):
+            denied = subprocess.run([str(authority), flag, '/nonexistent/remozio.cbor'],
+                                    text=True, capture_output=True, timeout=5)
+            require(denied.returncode == 77, 'Authority must reject non-root startup before reading configuration')
     transport = app / 'Contents/Library/LaunchServices/RemozioTransport'
     transport_identity = 'dev.remozio.transport.debug' if configuration == 'Debug' else 'dev.remozio.transport'
     require(transport.is_file(), 'Missing embedded approval transport')
