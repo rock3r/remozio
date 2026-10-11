@@ -472,8 +472,10 @@ public final class ApprovalRequestCoordinator {
         _ = try read { try head($0) }
         return wakePublication.acknowledgeWithdrawal(delivery)
     }
-    /// Losing the Root control channel retires this wake incarnation without retiring signed phone-frame retrieval.
-    func retireWakePublications() { wakePublication.close() }
+    /// Only the active publisher can acknowledge work. Replacement preserves original grant IDs and deadlines.
+    func beginWakePublicationSession(_ id: UUID) throws { try running(); try wakePublication.beginSession(id) }
+    func requireWakePublicationSession(_ id: UUID) throws { try running(); try wakePublication.requireSession(id) }
+    func endWakePublicationSession(_ id: UUID) { wakePublication.endSession(id) }
 
     /// Reconcile queue ownership from current owner state, including terminal states whose capture was released.
     public func reconcileDelivery(requestID: Data, delivery: PendingRequestDelivery, routing: PresenceRouting,

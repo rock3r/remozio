@@ -57,7 +57,9 @@ Gateway acceptance transfers provider retries to the gateway. Rejected submissio
 
 `AuthorityWakeService.open` requires the Root account and a live presence callback. It restores the hardware signer and protected stores before starting any listener. One clock serves request preparation and lease publication.
 
-The service owns the publisher task. Shutdown cancels publication and retires its gateway connection before closing request storage. A failed publisher retires this service incarnation.
+The service owns the publisher task. Shutdown cancels publication and retires its gateway connection before closing request storage.
+
+Gateway outages now retire only the publisher. The service retries with a fresh authenticated channel while direct approvals continue. [Wake recovery](authority-wake-recovery.md) describes ownership, retained grants, and cleanup retries. Authority clock, storage, and request-maintenance failures still retire the Root service.
 
 The transport executable accepts `--wake-configuration PATH`. The wrapper contains protected direct transport metadata and an existing wake signer configuration. It contains no private key bytes.
 

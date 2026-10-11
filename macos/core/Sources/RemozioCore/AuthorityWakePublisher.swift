@@ -29,6 +29,7 @@ public actor AuthorityWakePublisher {
     private var loopRunning = false
     private var epoch: UUID?
     private var sequence: UInt64 = 0
+    private let session = UUID()
     private var lease: (deadline: UInt64, trustRevision: UUID, phoneRouting: Bool)?
 
     /// The owner-aware callback may read the durable mode. It must not mutate the owner or reenter the journal.
@@ -47,6 +48,7 @@ public actor AuthorityWakePublisher {
         guard state == .new else { throw AuthorityWakePublisherError.closed }
         state = .opening
         do {
+            try journal.withRequests { try $0.beginWakePublicationSession(session) }
             _ = try sample()
             try await channel.start()
             guard state == .opening else { throw AuthorityWakePublisherError.closed }
@@ -72,8 +74,10 @@ public actor AuthorityWakePublisher {
                 do { try await channel.registerWake(delivery) }
                 catch GatewayRootChannelError.rejected { continue }
                 // The asynchronous acknowledgment is data until the serialized owner rechecks the original request.
+                try requireOpen()
                 let expectedEpoch = epoch, deadline = lease?.deadline
-                try journal.withRequests { [clock, routing, receiptTime] owner in
+                try journal.withRequests { [clock, routing, receiptTime, session] owner in
+                    try owner.requireWakePublicationSession(session)
                     let now = try clock()
                     guard now.epoch == expectedEpoch else { throw AuthorityWakePublisherError.invalidClock }
                     guard let deadline, now.milliseconds < deadline else { throw AuthorityWakePublisherError.expiredLease }
@@ -121,13 +125,14 @@ public actor AuthorityWakePublisher {
         state = .closed; lease = nil
         hintFeed.close()
         // The gateway's connection lease owns cleanup if withdrawal cannot complete during shutdown.
-        try? journal.withRequests { $0.retireWakePublications() }
+        try? journal.withRequests { $0.endWakePublicationSession(session) }
         await channel.close()
     }
 
     private func sample() throws -> WakePublicationSample {
         try Task.checkCancellation()
-        let current = try journal.withRequests { [clock, routing, receiptTime] owner in
+        let current = try journal.withRequests { [clock, routing, receiptTime, session] owner in
+            try owner.requireWakePublicationSession(session)
             let now = try clock(), route = try routing(owner, now), trust = try owner.wakeDeliveryTrust()
             let work = try owner.reconcileWakePublications(routing: route, now: now, receiptTimeMs: receiptTime(), trust: trust)
             return WakePublicationSample(now: now, routing: route, trust: trust, work: work)
@@ -172,7 +177,10 @@ public actor AuthorityWakePublisher {
             do { try await channel.withdrawWake(delivery.id) }
             catch GatewayRootChannelError.rejected { continue }
             _ = try liveSample()
-            _ = try journal.withRequests { try $0.acknowledgeWakeWithdrawal(delivery) }
+            _ = try journal.withRequests { owner in
+                try owner.requireWakePublicationSession(session)
+                return try owner.acknowledgeWakeWithdrawal(delivery)
+            }
             try requireOpen()
         }
     }

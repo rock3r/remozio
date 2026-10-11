@@ -1,25 +1,54 @@
 import Darwin
 import Foundation
 import RemozioProtocol
+import Synchronization
+
+private final class AuthorityRequestRetirementSignal: Sendable { let value = Mutex(false) }
 
 /// Owns the request service and its asynchronous publisher. Presence remains a required live runtime input.
 public actor AuthorityWakeService {
     public nonisolated let presence: AuthorityPresenceRuntime?
-    private let publisher: AuthorityWakePublisher
+    public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), closed }
+    private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
+    private let hints: AuthorityWakeHintSource
+    private let requestsRetired: @Sendable () -> Bool
     private let startRequests: @Sendable () throws -> Void
     private let closeRequests: @Sendable () throws -> Void
     private let interval: UInt64
+    private let initialRetry: UInt64
+    private let maximumRetry: UInt64
     private var task: Task<Void, Never>?
+    private var publisher: AuthorityWakePublisher?
+    private var closing: Task<Void, any Error>?
+    private var cleanupComplete = false
     private var started = false
     private var closed = false
     private var retired = false
+    public private(set) var wakeStatus = WakeStatus.idle
     public var isRetired: Bool { retired }
-    init(publisher: AuthorityWakePublisher, interval: UInt64,
+    init(makePublisher: @escaping @Sendable () throws -> AuthorityWakePublisher, hints: AuthorityWakeHintSource,
+         interval: UInt64, initialRetryMilliseconds: UInt64 = 1000, maximumRetryMilliseconds: UInt64 = 30_000,
          startRequests: @escaping @Sendable () throws -> Void, closeRequests: @escaping @Sendable () throws -> Void,
-         presence: AuthorityPresenceRuntime? = nil) {
-        self.presence = presence; self.publisher = publisher; self.interval = interval; self.startRequests = startRequests; self.closeRequests = closeRequests
+         requestsRetired: @escaping @Sendable () -> Bool = { false }, presence: AuthorityPresenceRuntime? = nil) throws {
+        guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
+              (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
+        self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
+        self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
+        self.startRequests = startRequests; self.closeRequests = closeRequests; self.requestsRetired = requestsRetired
     }
-    deinit { task?.cancel(); presence?.close(); publisher.hintFeed.close(); if !closed { try? closeRequests() } }
+    deinit {
+        task?.cancel(); presence?.close(); hints.close()
+        let worker = task, publisher = publisher, pending = closing, closeRequests = closeRequests
+        if !cleanupComplete {
+            Task {
+                if let pending {
+                    do { try await pending.value } catch { try? closeRequests() }
+                } else {
+                    await publisher?.close(); await worker?.value; try? closeRequests()
+                }
+            }
+        }
+    }
     /// Restore the hardware Root signer and both protected stores before any listener starts.
     public static func open(configuration: AuthorityWakeStartupConfiguration,
                             routing: @escaping @Sendable () throws -> PresenceRouting,
@@ -66,53 +95,108 @@ public actor AuthorityWakeService {
             let providers: AuthorityRequestProviders
             if let presence { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, presence: presence) }
             else { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, routing: routing) }
-            let channel = try GatewayRootChannel(serviceName: configuration.gatewayServiceName, gatewayPolicy: configuration.gatewayPolicy,
-                timeoutMilliseconds: configuration.timeoutMilliseconds)
             let ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)?
             if let presence { ownerRouting = { owner, moment in try presence.routing(owner: owner, now: moment) } }
             else { ownerRouting = nil }
-            let publisher = try AuthorityWakePublisher(journal: journal, channel: channel, registration: configuration.registration,
-                leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
-                ownerRouting: ownerRouting)
+            let hints = try AuthorityWakeHintSource(registration: configuration.registration)
+            let retired = AuthorityRequestRetirementSignal()
+            let makePublisher: @Sendable () throws -> AuthorityWakePublisher = {
+                let channel = try GatewayRootChannel(serviceName: configuration.gatewayServiceName, gatewayPolicy: configuration.gatewayPolicy,
+                    timeoutMilliseconds: configuration.timeoutMilliseconds)
+                return try AuthorityWakePublisher(journal: journal, channel: channel, registration: configuration.registration,
+                    leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
+                    ownerRouting: ownerRouting)
+            }
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
-                wakeHintFeed: publisher.hintFeed, reconcileExpired: reconcileExpired)
+                wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
+                onMaintenanceFailure: { retired.value.withLock { $0 = true } })
             let presenceListener: AuthorityPresenceXPCListener?
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock)
             } else { presenceListener = nil }
-            return AuthorityWakeService(publisher: publisher, interval: configuration.pollMilliseconds,
+            return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,
                 startRequests: { try service.start(); try presenceListener?.start() },
-                closeRequests: { presenceListener?.close(); try service.close() }, presence: presence)
+                closeRequests: { presenceListener?.close(); try service.close() },
+                requestsRetired: { retired.value.withLock { $0 } }, presence: presence)
         } catch { presence?.close(); try? journal.close(); throw error }
     }
+    /// Start direct request listeners before attempting the optional gateway connection.
     public func start() async throws {
         guard !started, !closed else { throw AuthorityWakePublisherError.closed }
         started = true
-        do {
-            try startRequests()
-            try await publisher.start()
-            guard !closed else { throw AuthorityWakePublisherError.closed }
-            task = Task { [weak self, publisher, interval] in
-                do { try await publisher.run(intervalMilliseconds: interval) }
-                catch { await self?.publisherDidStop() }
-            }
-        } catch { try? await close(); throw error }
+        do { try startRequests() }
+        catch { try? await close(); throw error }
+        task = Task { [weak self, makePublisher, hints, requestsRetired, interval, initialRetry, maximumRetry] in
+            await Self.publish(makePublisher: makePublisher, hints: hints, requestsRetired: requestsRetired,
+                interval: interval, initialRetry: initialRetry, maximumRetry: maximumRetry,
+                update: { [weak self] publisher, status in await self?.update(publisher: publisher, status: status) ?? false },
+                failed: { [weak self] in await self?.publisherDidStop() })
+        }
     }
+    /// Failed request cleanup remains owned and can be retried. Concurrent callers share one cleanup attempt.
     public func close() async throws {
-        guard !closed else { return }
-        closed = true
+        closed = true; wakeStatus = .closed
+        guard !cleanupComplete else { return }
+        if let closing { try await closing.value; return }
         let previous = task; task = nil; previous?.cancel()
-        await publisher.close()
-        await previous?.value
-        presence?.close()
-        try closeRequests()
+        hints.close(); presence?.close()
+        let publisher = publisher, closeRequests = closeRequests
+        let work = Task {
+            await publisher?.close()
+            await previous?.value
+            try closeRequests()
+        }
+        closing = work
+        do { try await work.value; cleanupComplete = true; closing = nil; self.publisher = nil }
+        catch { closing = nil; throw error }
+    }
+    private func update(publisher: AuthorityWakePublisher?, status: WakeStatus) -> Bool {
+        guard !closed, !retired else { return false }
+        self.publisher = publisher; wakeStatus = status
+        return true
     }
     private func publisherDidStop() async {
         guard !closed else { return }
         retired = true
-        task = nil // This callback runs on the terminating worker; do not await that worker from its own close path.
+        task = nil // This callback runs on the terminating worker. Its publisher has already closed.
         try? await close()
+    }
+    private static func publish(makePublisher: @Sendable () throws -> AuthorityWakePublisher, hints: AuthorityWakeHintSource,
+                                requestsRetired: @Sendable () -> Bool, interval: UInt64, initialRetry: UInt64, maximumRetry: UInt64,
+                                update: @Sendable (AuthorityWakePublisher?, WakeStatus) async -> Bool,
+                                failed: @Sendable () async -> Void) async {
+        var retry = initialRetry
+        while !Task.isCancelled {
+            var publisher: AuthorityWakePublisher?
+            do {
+                guard !requestsRetired() else { throw AuthorityXPCEndpointError.unavailable }
+                let next = try makePublisher(); publisher = next
+                guard await update(next, .connecting) else { throw CancellationError() }
+                try await next.start()
+                try Task.checkCancellation()
+                try await next.reconcile()
+                try hints.install(next.hintFeed)
+                guard await update(next, .running) else { throw CancellationError() }
+                retry = initialRetry
+                try await next.run(intervalMilliseconds: interval)
+            } catch {
+                if let publisher { hints.clear(publisher.hintFeed); await publisher.close() }
+                if Task.isCancelled { return }
+                guard retryWake(error), !requestsRetired() else { await failed(); return }
+                guard await update(nil, .waiting(retryMilliseconds: retry)) else { return }
+                do { try await Task.sleep(for: .milliseconds(retry)) } catch { return }
+                retry = min(retry * 2, maximumRetry)
+            }
+        }
+    }
+    private static func retryWake(_ error: any Error) -> Bool {
+        switch error {
+        case GatewayRootChannelError.closed, GatewayRootChannelError.timedOut, GatewayRootChannelError.rejected,
+             GatewayRootChannelError.invalidMessage, GatewayRootChannelError.unsupportedVersion,
+             AuthorityWakePublisherError.expiredLease: return true
+        default: return false
+        }
     }
 }

@@ -18,15 +18,17 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
             var held: (@Sendable (GatewayRootResponse) -> Void)?
             var onRegistration: (@Sendable () throws -> Void)?
             var closed = 0
+            var failHello = false
+            var lost: (@Sendable () -> Void)?
         }
         let value = Mutex(State())
-        func start(closed: @escaping @Sendable () -> Void) {}
+        func start(closed: @escaping @Sendable () -> Void) { value.withLock { $0.lost = closed } }
         func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void) {
             do {
                 let response: GatewayRootResponse?
                 switch call {
                 case .hello:
-                    value.withLock { $0.calls += 1 }; response = .version(3)
+                    response = value.withLock { $0.calls += 1; return $0.failHello ? .failed : .version(3) }
                 case .synchronize(let bytes):
                     let snapshot = try GatewayHostSnapshot.decode(bytes)
                     value.withLock { $0.calls += 1; $0.snapshots.append(snapshot) }
@@ -250,9 +252,11 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         catch { XCTAssertEqual(error as? AuthorityWakePublisherError, .closed) }
         XCTAssertEqual(driver.value.withLock { $0.closed }, 1)
         XCTAssertEqual(try fixture.journal.withRequests { try $0.state(requestID: fixture.request.requestID).phase }, .queued)
-        XCTAssertThrowsError(try fixture.journal.withRequests {
+        let retained = try fixture.journal.withRequests {
             try $0.reconcileWakePublications(routing: fixture.routing(), now: fixture.now(), receiptTimeMs: nil)
-        })
+        }
+        XCTAssertEqual(retained.registrations.count, 1)
+        XCTAssertTrue(retained.readyDeliveryIDs.isEmpty)
     }
     func testClosingDuringRegistrationRejectsLateAcknowledgmentAndConcurrentDrain() async throws {
         let fixture = try Fixture(), driver = Driver(), publisher = try fixture.publisher(driver)
@@ -306,7 +310,8 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         let fixture = try Fixture(), driver = Driver(), publisher = try fixture.publisher(driver)
         driver.value.withLock { $0.holdRegistration = true }
         let starts = Mutex(0), closes = Mutex(0), feed = publisher.hintFeed
-        let service = AuthorityWakeService(publisher: publisher, interval: 100, startRequests: { starts.withLock { $0 += 1 } }, closeRequests: {
+        let hints = try AuthorityWakeHintSource(registration: fixture.registration)
+        let service = try AuthorityWakeService(makePublisher: { publisher }, hints: hints, interval: 100, startRequests: { starts.withLock { $0 += 1 } }, closeRequests: {
             XCTAssertThrowsError(try feed.current())
             closes.withLock { $0 += 1 }
             try fixture.journal.close()
@@ -315,8 +320,172 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while driver.value.withLock({ $0.held == nil }), ContinuousClock.now < deadline { await Task.yield() }
         XCTAssertNotNil(driver.value.withLock { $0.held })
-        try await service.close(); try await service.close()
+        async let firstClose: Void = service.close()
+        async let secondClose: Void = service.close()
+        _ = try await (firstClose, secondClose)
         XCTAssertEqual(starts.withLock { $0 }, 1); XCTAssertEqual(closes.withLock { $0 }, 1)
         XCTAssertEqual(driver.value.withLock { $0.closed }, 1)
     }
+    private func waitUntil(_ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw GatewayRootChannelError.timedOut }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+    func testReplacementPublisherKeepsGrantAndRejectsOldSessionOwnership() async throws {
+        let f = try Fixture(deadline: 5000), first = Driver(), second = Driver()
+        let old = try f.publisher(first), replacement = try f.publisher(second)
+        try await old.start(); try await old.reconcile()
+        let original = try XCTUnwrap(first.value.withLock { $0.registrations.first })
+        do { try await replacement.start(); XCTFail("Overlapping publisher") } catch {}
+        XCTAssertEqual(try old.hintFeed.current().deliveryIDs, [original.id])
+        await old.close()
+        let next = try f.publisher(second)
+        try await next.start(); try await next.reconcile()
+        XCTAssertEqual(second.value.withLock { $0.registrations }, [original])
+        await old.close()
+        XCTAssertEqual(try next.hintFeed.current().deliveryIDs, [original.id])
+        await next.close()
+    }
+    func testUnavailableGatewayAndReconnectLeaveDirectRequestsRunning() async throws {
+        let f = try Fixture(deadline: 5000), first = Driver(), second = Driver(), third = Driver()
+        first.value.withLock { $0.failHello = true }
+        let attempts = Mutex(0), starts = Mutex(0), closes = Mutex(0)
+        let hints = try AuthorityWakeHintSource(registration: f.registration)
+        let service = try AuthorityWakeService(makePublisher: {
+            let number = attempts.withLock { $0 += 1; return $0 }
+            return try f.publisher(number == 1 ? first : number == 2 ? second : third)
+        }, hints: hints, interval: 100, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 200,
+        startRequests: { starts.withLock { $0 += 1 } }, closeRequests: { closes.withLock { $0 += 1 }; try f.journal.close() })
+        try await service.start()
+        XCTAssertEqual(starts.withLock { $0 }, 1)
+        try await waitUntil { await service.wakeStatus == .waiting(retryMilliseconds: 100) }
+        XCTAssertEqual(closes.withLock { $0 }, 0)
+        XCTAssertTrue(try hints.current().deliveryIDs.isEmpty)
+        XCTAssertEqual(try f.journal.withRequests { try $0.state(requestID: f.request.requestID).phase }, .queued)
+        try await waitUntil { await service.wakeStatus == .running }
+        let original = try XCTUnwrap(second.value.withLock { $0.registrations.first })
+        try await waitUntil { (try? hints.current().deliveryIDs) == [original.id] }
+        second.value.withLock { $0.lost }?()
+        try await waitUntil {
+            let status = await service.wakeStatus
+            return attempts.withLock { $0 } >= 3 && status == .running
+        }
+        XCTAssertEqual(third.value.withLock { $0.registrations }, [original])
+        try await waitUntil { (try? hints.current().deliveryIDs) == [original.id] }
+        XCTAssertEqual(starts.withLock { $0 }, 1); XCTAssertEqual(closes.withLock { $0 }, 0)
+        let retired = await service.isRetired; XCTAssertFalse(retired)
+        try await service.close()
+        XCTAssertEqual(closes.withLock { $0 }, 1)
+        XCTAssertThrowsError(try hints.current())
+    }
+    func testDisconnectedTerminalRequestKeepsWithdrawalAcrossReplacement() async throws {
+        let f = try Fixture(deadline: 5000), first = Driver(), second = Driver()
+        let old = try f.publisher(first)
+        try await old.start(); try await old.reconcile()
+        let original = try XCTUnwrap(first.value.withLock { $0.registrations.first })
+        await old.close(); try f.cancelAndForget()
+        let next = try f.publisher(second)
+        try await next.start(); try await next.reconcile()
+        XCTAssertEqual(second.value.withLock { $0.withdrawals }, [original.id])
+        XCTAssertTrue(second.value.withLock { $0.registrations.isEmpty })
+        XCTAssertTrue(try next.hintFeed.current().deliveryIDs.isEmpty)
+        await next.close()
+    }
+    func testFailedRequestShutdownRetainsCleanupForRetry() async throws {
+        let f = try Fixture(), attempts = Mutex(0), hints = try AuthorityWakeHintSource(registration: f.registration)
+        let service = try AuthorityWakeService(makePublisher: { try f.publisher(Driver()) }, hints: hints, interval: 100,
+            startRequests: {}, closeRequests: {
+                let attempt = attempts.withLock { $0 += 1; return $0 }
+                if attempt == 1 { throw JournalLeaseError.busy }
+                try f.journal.close()
+            })
+        try await service.start()
+        do { try await service.close(); XCTFail("Failed cleanup was hidden") }
+        catch { XCTAssertEqual(error as? JournalLeaseError, .busy) }
+        XCTAssertThrowsError(try hints.current())
+        try await service.close(); try await service.close()
+        XCTAssertEqual(attempts.withLock { $0 }, 2)
+    }
+    func testStorageRetirementClosesDirectRequestsWithoutGatewayRetry() async throws {
+        let f = try Fixture(), attempts = Mutex(0), closes = Mutex(0), retirement = Mutex(false)
+        let hints = try AuthorityWakeHintSource(registration: f.registration)
+        let service = try AuthorityWakeService(makePublisher: { attempts.withLock { $0 += 1 }; return try f.publisher(Driver()) },
+            hints: hints, interval: 100, startRequests: {}, closeRequests: { closes.withLock { $0 += 1 }; try f.journal.close() },
+            requestsRetired: { retirement.withLock { $0 } })
+        retirement.withLock { $0 = true }
+        try await service.start()
+        try await waitUntil { await service.isRetired }
+        try await service.close()
+        XCTAssertEqual(attempts.withLock { $0 }, 0); XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+
+    func testLateAcknowledgmentCannotAffectReplacementPublisherOrHintSource() async throws {
+        let f = try Fixture(deadline: 5000), first = Driver(), second = Driver()
+        first.value.withLock { $0.holdRegistration = true }
+        let old = try f.publisher(first), next = try f.publisher(second)
+        let hints = try AuthorityWakeHintSource(registration: f.registration)
+        try await old.start(); try hints.install(old.hintFeed)
+        let drain = Task { try await old.reconcile() }
+        try await waitUntil { first.value.withLock { $0.held != nil } }
+        let reply = try XCTUnwrap(first.value.withLock { $0.held })
+        let original = try XCTUnwrap(first.value.withLock { $0.registrations.first })
+        hints.clear(old.hintFeed); await old.close()
+        XCTAssertTrue(try hints.current().deliveryIDs.isEmpty)
+        try await next.start(); try await next.reconcile(); try hints.install(next.hintFeed)
+        reply(.command(try GatewayRootCommand.reply([.boolean(true)], version: 3)))
+        do { try await drain.value; XCTFail("Old acknowledgment accepted") } catch {}
+        hints.clear(old.hintFeed)
+        XCTAssertEqual(try hints.current().deliveryIDs, [original.id])
+        XCTAssertEqual(second.value.withLock { $0.registrations }, [original])
+        await next.close(); hints.close()
+    }
+    func testRequestExpiredWhileDisconnectedCannotRegainWakeGrant() async throws {
+        let f = try Fixture(deadline: 200), first = Driver(), second = Driver()
+        let old = try f.publisher(first)
+        try await old.start(); try await old.reconcile()
+        let original = try XCTUnwrap(first.value.withLock { $0.registrations.first })
+        await old.close(); f.state.withLock { $0.time = 201 }
+        let next = try f.publisher(second)
+        try await next.start(); try await next.reconcile()
+        XCTAssertEqual(second.value.withLock { $0.withdrawals }, [original.id])
+        XCTAssertTrue(second.value.withLock { $0.registrations.isEmpty })
+        XCTAssertTrue(try next.hintFeed.current().deliveryIDs.isEmpty)
+        XCTAssertEqual(try f.journal.withRequests { try $0.state(requestID: f.request.requestID).phase }, .expired)
+        await next.close()
+    }
+
+    func testShutdownDuringBackoffPreventsAnotherConnectionAttempt() async throws {
+        let f = try Fixture(), attempts = Mutex(0), closes = Mutex(0)
+        let hints = try AuthorityWakeHintSource(registration: f.registration)
+        let service = try AuthorityWakeService(makePublisher: {
+            attempts.withLock { $0 += 1 }
+            let driver = Driver(); driver.value.withLock { $0.failHello = true }
+            return try f.publisher(driver)
+        }, hints: hints, interval: 100, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 200,
+        startRequests: {}, closeRequests: { closes.withLock { $0 += 1 }; try f.journal.close() })
+        try await service.start()
+        try await waitUntil { await service.wakeStatus == .waiting(retryMilliseconds: 100) }
+        let count = attempts.withLock { $0 }
+        try await service.close()
+        try await Task.sleep(for: .milliseconds(220))
+        XCTAssertEqual(attempts.withLock { $0 }, count)
+        XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+
+    func testInvalidAuthorityClockRetiresRequestsRatherThanRetryingGateway() async throws {
+        let f = try Fixture(), attempts = Mutex(0), closes = Mutex(0)
+        let hints = try AuthorityWakeHintSource(registration: f.registration)
+        let service = try AuthorityWakeService(makePublisher: {
+            attempts.withLock { $0 += 1 }; throw AuthorityWakePublisherError.invalidClock
+        }, hints: hints, interval: 100, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 200,
+        startRequests: {}, closeRequests: { closes.withLock { $0 += 1 }; try f.journal.close() })
+        try await service.start()
+        try await waitUntil { await service.isRetired }
+        try await service.close()
+        XCTAssertEqual(attempts.withLock { $0 }, 1); XCTAssertEqual(closes.withLock { $0 }, 1)
+        XCTAssertThrowsError(try hints.current())
+    }
+
 }

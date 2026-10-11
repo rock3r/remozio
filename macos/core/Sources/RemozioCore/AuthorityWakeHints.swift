@@ -95,3 +95,46 @@ public final class AuthorityWakeHintFeed: Sendable {
         }
     }
 }
+
+/// Keeps the negotiated endpoint available while its optional publisher reconnects.
+/// A read never holds this lock while reading the journal, and rechecks ownership before returning hints.
+final class AuthorityWakeHintSource: Sendable {
+    private struct State { var feed: AuthorityWakeHintFeed?; var generation: UInt64 = 0; var closed = false }
+    private let state = Mutex(State())
+    let binding: GatewaySubmissionBinding
+    init(registration: GatewayRegistrationIdentity) throws {
+        binding = try GatewaySubmissionBinding(ownerID: registration.ownerID, macID: registration.macID,
+            accountID: registration.accountID, gatewayID: registration.gatewayID, lifecycleEpoch: registration.lifecycleEpoch)
+    }
+    func install(_ feed: AuthorityWakeHintFeed) throws {
+        try state.withLock {
+            guard !$0.closed, $0.feed == nil, feed.binding == binding else { throw AuthorityWakeHintError.unavailable }
+            $0.generation &+= 1; $0.feed = feed
+        }
+    }
+    func clear(_ feed: AuthorityWakeHintFeed) {
+        state.withLock {
+            guard $0.feed === feed else { return }
+            $0.generation &+= 1; $0.feed = nil
+        }
+    }
+    func close() { state.withLock { $0.closed = true; $0.generation &+= 1; $0.feed = nil } }
+    func current() throws -> AuthorityWakeHints {
+        let captured = try state.withLock { value in
+            guard !value.closed else { throw AuthorityWakeHintError.unavailable }
+            return (value.generation, value.feed)
+        }
+        let result: Result<AuthorityWakeHints, any Error>
+        if let feed = captured.1 { result = Result { try feed.current() } }
+        else { result = .success(try AuthorityWakeHints(binding: binding, deliveryIDs: [])) }
+        return try state.withLock { value in
+            guard !value.closed else { throw AuthorityWakeHintError.unavailable }
+            guard value.generation == captured.0 else { return try AuthorityWakeHints(binding: binding, deliveryIDs: []) }
+            switch result {
+            case .success(let hints): return hints
+            case .failure(AuthorityWakeHintError.unavailable): return try AuthorityWakeHints(binding: binding, deliveryIDs: [])
+            case .failure(let error): throw error
+            }
+        }
+    }
+}
