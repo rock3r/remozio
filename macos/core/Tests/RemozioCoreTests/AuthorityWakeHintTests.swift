@@ -191,4 +191,84 @@ final class AuthorityWakeHintTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(wakeDriver.value.withLock { $0.challengeNumber }, 0)
         XCTAssertTrue(wakeDriver.value.withLock { $0.submissions.isEmpty })
     }
+    private func waitFor(_ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw GatewayWakeChannelError.timedOut }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+    func testRecoveringTransportUsesFreshChannelsAndOriginalHintWithoutClosingOrdinaryConnection() async throws {
+        let binding = try binding(), key = P256.Signing.PrivateKey(), id = UUID()
+        let trust = DirectApprovalTrust(macID: binding.macID, accountID: binding.accountID, revision: UUID(), peers: [])
+        let ordinaryDriver = OrdinaryDriver(try AuthorityTrustCodec.encodeSnapshot(trust))
+        let ordinary = AuthorityXPCChannel(driver: ordinaryDriver)
+        try await ordinary.start()
+        let firstHint = HintDriver(), secondHint = HintDriver(), firstWake = WakeDriver(), secondWake = WakeDriver()
+        let bytes = try AuthorityWakeHints(binding: binding, deliveryIDs: [id]).encode()
+        firstHint.value.withLock { $0.bytes = bytes }
+        secondHint.value.withLock { $0.bytes = bytes }
+        secondWake.value.withLock { $0.challengeNumber = 20 }
+        let attempts = Mutex(0)
+        let runner = try TransportWakeRunner(intervalMilliseconds: 10, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100,
+            makeAttempt: { [self] in
+                let number = attempts.withLock { $0 += 1; return $0 }
+                guard number <= 2 else { throw GatewayWakeSignerError.invalidConfiguration }
+                let hintDriver = number == 1 ? firstHint : secondHint
+                let wakeDriver = number == 1 ? firstWake : secondWake
+                let runtime = try TransportWakeRuntime(hints: AuthorityWakeHintChannel(driver: hintDriver, binding: binding),
+                    gateway: GatewayWakeChannel(driver: wakeDriver), signer: signer(binding, key: key))
+                return TransportWakeAttempt(start: { try await runtime.start() }, poll: { try await runtime.poll() },
+                    close: { await runtime.close() })
+            }, report: { _ in })
+        try await runner.start()
+        try await waitFor { firstWake.value.withLock { $0.submissions.count } == 1 }
+        firstHint.value.withLock { $0.bytes = nil }
+        try await waitFor { secondWake.value.withLock { $0.submissions.count } == 1 }
+        try await Task.sleep(for: .milliseconds(40))
+        let current = try await ordinary.fetchTrust(expectedMacID: binding.macID, expectedAccountID: binding.accountID)
+        XCTAssertEqual(current.revision, trust.revision)
+        XCTAssertEqual(ordinaryDriver.closes.withLock { $0 }, 0)
+        XCTAssertEqual(attempts.withLock { $0 }, 2)
+        for (driver, challenge) in [(firstWake, UInt8(1)), (secondWake, UInt8(21))] {
+            let submissions = driver.value.withLock { $0.submissions }
+            XCTAssertEqual(submissions.count, 1)
+            let sent = try XCTUnwrap(submissions.first)
+            let submission = try GatewayWakeSubmission.decode(sent.0)
+            XCTAssertEqual(submission.binding, binding)
+            XCTAssertEqual(submission.deliveryID, GatewayHostSnapshot.bytes(id))
+            XCTAssertEqual(submission.challenge, Data(repeating: challenge, count: 32))
+            XCTAssertTrue(try key.publicKey.isValidSignature(P256.Signing.ECDSASignature(rawRepresentation: sent.1),
+                for: submission.signingInput()))
+        }
+        let negotiation = secondHint.value.withLock { $0.calls.prefix(2).map { call in
+            switch call { case .hello: "hello"; case .version: "version"; case .hints: "hints" }
+        } }
+        XCTAssertEqual(negotiation, ["hello", "version"])
+        await runner.close()
+        // Driver invalidation also occurs when the channel is released.
+        for driver in [firstHint, secondHint] { XCTAssertEqual(driver.value.withLock { $0.closed }, 2) }
+        for driver in [firstWake, secondWake] { XCTAssertEqual(driver.value.withLock { $0.closed }, 2) }
+        await ordinary.close()
+    }
+    func testPermanentWakeSignerFailureLeavesOrdinaryConnectionUsableWithoutRetry() async throws {
+        let binding = try binding(), trust = DirectApprovalTrust(macID: binding.macID, accountID: binding.accountID, revision: UUID(), peers: [])
+        let ordinaryDriver = OrdinaryDriver(try AuthorityTrustCodec.encodeSnapshot(trust))
+        let ordinary = AuthorityXPCChannel(driver: ordinaryDriver)
+        try await ordinary.start()
+        let attempts = Mutex(0)
+        let runner = try TransportWakeRunner(initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100, makeAttempt: {
+            attempts.withLock { $0 += 1 }
+            throw GatewayWakeSignerError.wrongIdentity
+        }, report: { _ in })
+        try await runner.start()
+        try await waitFor { runner.status == .failed }
+        try await Task.sleep(for: .milliseconds(150))
+        let current = try await ordinary.fetchTrust(expectedMacID: binding.macID, expectedAccountID: binding.accountID)
+        XCTAssertEqual(current.revision, trust.revision)
+        XCTAssertEqual(attempts.withLock { $0 }, 1)
+        XCTAssertEqual(ordinaryDriver.closes.withLock { $0 }, 0)
+        await runner.close(); await ordinary.close()
+    }
+
 }
