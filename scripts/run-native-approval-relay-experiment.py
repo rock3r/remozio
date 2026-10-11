@@ -118,7 +118,7 @@ def framing(executable, mode):
                     seen.extend(chunk)
                     raw.sendall(chunk)
         except socket.timeout:
-            if mode not in ("wrongProtocol", "textRejected", "oversizeRejected", "fragmentedOversizeRejected", "extensionsNotNegotiated"):
+            if mode not in ("wrongProtocol", "textRejected", "oversizeRejected", "fragmentedOversizeRejected"):
                 failures.append("TCP fixture timed out")
         except OSError:
             if mode not in ("wrongProtocol", "textRejected", "oversizeRejected", "fragmentedOversizeRejected"):
@@ -137,8 +137,6 @@ def framing(executable, mode):
             if mode == "wrongProtocol":
                 if headers.startswith(b"HTTP/1.1 101"):
                     raise RuntimeError("Wrong subprotocol accepted")
-            elif mode == "extensionsNotNegotiated" and not headers.startswith(b"HTTP/1.1 101"):
-                pass
             else:
                 if not headers.startswith(b"HTTP/1.1 101") or b"remozio.ciphertext.v1" not in headers:
                     raise RuntimeError("Valid upgrade refused")

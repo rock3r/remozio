@@ -29,7 +29,7 @@
   "sourceSHA256": {
     "experiments/macos/Sources/ApprovalRelayProbe/main.swift": "a7547513146942f5bb59d3d3c4d789421bc7b9f95c56b114a3db0cf2917ac628",
     "macos/core/Sources/RemozioCore/ApprovalWebSocketRelay.swift": "8604e085f5b011cce36f99f37c20fc2276965b50f07979f4e76b36f40cae584f",
-    "scripts/run-native-approval-relay-experiment.py": "ac9a84f50c91fafdfe9899a50f1aef0a9da96644358ba9ef22bff852d1b16876"
+    "scripts/run-native-approval-relay-experiment.py": "9032378a134e03ffda2c2b54f554d9452ae286e527bc97b8663dac0d3e0b47cb"
   },
   "status": "passed",
   "tlsVersion": "TLSv1.3"
