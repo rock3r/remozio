@@ -49,3 +49,17 @@
 "Foreground retry interval (ms)" = "Foreground retry interval (ms)";
 "These settings apply to new CLI invocations. They do not limit command runtime or change approval expiry." = "These settings apply to new CLI invocations. They do not limit command runtime or change approval expiry.";
 "Use positive whole milliseconds. Intervals must not exceed 60000, and maximum backoff must be at least initial backoff." = "Use positive whole milliseconds. Intervals must not exceed 60000, and maximum backoff must be at least initial backoff.";
+"Automatic" = "Automatic";
+"Present" = "Present";
+"Away" = "Away";
+"Mac service unavailable" = "Mac service unavailable";
+"Reconnect to read this Mac’s current state." = "Reconnect to read this Mac’s current state.";
+"Set up this Mac to control request delivery." = "Set up this Mac to control request delivery.";
+"Presence detection is limited. You can set Present or Away here." = "Presence detection is limited. You can set Present or Away here.";
+"New requests stay on this Mac." = "New requests stay on this Mac.";
+"New requests go to your phones." = "New requests go to your phones.";
+"The mode changed elsewhere. Review the current mode and try again." = "The mode changed elsewhere. Review the current mode and try again.";
+"The reply was lost. Reconnecting will check whether the mode changed." = "The reply was lost. Reconnecting will check whether the mode changed.";
+"Automatic and Present can only be set on this Mac." = "Automatic and Present can only be set on this Mac.";
+"This Mac’s authority is connected" = "This Mac’s authority is connected";
+"This Mac’s authority is unavailable" = "This Mac’s authority is unavailable";

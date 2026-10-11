@@ -67,17 +67,17 @@ public final class AuthorityService: @unchecked Sendable {
         }
     }
 
-    static func openJournal(configuration: AuthorityServiceConfiguration) throws -> AuthorityJournal {
+    static func openJournal(configuration: AuthorityServiceConfiguration, routingPolicy: RoutingJournalPolicy? = nil) throws -> AuthorityJournal {
         let journal: AuthorityJournal
         if configuration.continuityDirectory != nil {
-            journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration),
+            journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration, routingPolicy: routingPolicy),
                 macID: configuration.macID, accountID: configuration.accountID)
         } else {
             let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
             journal = try AuthorityJournal(database: JournalDatabase.open(directoryPath: configuration.journalDirectory,
                 macID: configuration.macID, accountID: configuration.accountID,
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 1_000_000, busyMilliseconds: 5000))
+                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, routingPolicy: routingPolicy))
         }
         return journal
     }

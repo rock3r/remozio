@@ -419,6 +419,23 @@ public final class ApprovalRequestCoordinator {
         return receipt
     }
 
+    var routingScope: (macID: Data, accountID: Data) { (mac, account) }
+    /// Read the current persisted mode under the same continuity boundary as request delivery.
+    public func localRoutingState() throws -> RoutingState {
+        try running()
+        return try read { tx in _ = try head(tx); return try tx.routingState() }
+    }
+    /// The host authenticates the local Mac control surface. Phone and transport endpoints must never call this method.
+    public func setLocalRoutingMode(_ mode: RoutingMode, expectedRevision: UInt64, now: AuthorityMoment,
+                                    receiptTimeMs: UInt64?) throws -> RoutingState {
+        try checkClock(now)
+        let event = try random(16)
+        return try write { tx in
+            try tx.setLocalRoutingMode(mode, expectedRevision: expectedRevision, eventID: event, receiptTimeMs: receiptTimeMs,
+                writer: writer, expectedAuditHead: head(tx))
+        }
+    }
+
     /// Prepare bounded wake registrations and withdrawals from current retained requests and journal trust.
     /// The host serializes this operation with authority changes. No asynchronous work or gateway call belongs in this method.
     public func reconcileWakePublications(routing: PresenceRouting, now: AuthorityMoment,

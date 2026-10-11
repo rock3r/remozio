@@ -39,6 +39,107 @@ final class RoutingJournalTests: XCTestCase {
             receiptTimeMs: 1000, writer: writer, expectedAuditHead: 0) }
         return (db, writer, revision)
     }
+    private func requestOwner(_ db: JournalDatabase, writer: AuditEpochWriter) throws -> ApprovalRequestCoordinator {
+        try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: clock, maximumRequests: 4,
+            maximumRetainedBytes: 16384, requestLimits: limits, captureLimits: limits, decisionLimits: limits,
+            signingLimits: limits, auditLimits: limits)
+    }
+    private func presence(mac: UInt8 = 1, account: UInt8 = 2) throws -> AuthorityPresenceRuntime {
+        let policy = try PresenceConfiguration(idleMilliseconds: 500, observationLifetimeMilliseconds: 1000, unavailableGraceMilliseconds: 200)
+        return AuthorityPresenceRuntime(configuration: try .init(macID: id(mac), accountID: id(account), ownerUID: 501, policy: policy), clockEpoch: clock)
+    }
+    private func usableSnapshot(_ moment: UInt64 = 100) -> PresenceSnapshot {
+        let at = PresenceMoment(epoch: clock, milliseconds: moment)
+        return PresenceSnapshot(remoteWorkspace: .init(.usable, observedAt: at), locked: .init(true, observedAt: at),
+            displays: .init([.asleep], observedAt: at))
+    }
+    func testRequestOwnerCommitsLocalModeAndAuditBeforeReturning() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer)
+        defer { owner.close(); try? db.close() }
+        XCTAssertEqual(try owner.localRoutingState(), RoutingState(mode: .automatic, revision: 0))
+        XCTAssertEqual(try owner.setLocalRoutingMode(.present, expectedRevision: 0, now: now(), receiptTimeMs: 1200),
+            RoutingState(mode: .present, revision: 1))
+        fails(.conflict) { try owner.setLocalRoutingMode(.away, expectedRevision: 0, now: now(101), receiptTimeMs: 1201) }
+        XCTAssertEqual(try owner.localRoutingState(), RoutingState(mode: .present, revision: 1))
+        _ = try owner.setLocalRoutingMode(.away, expectedRevision: 1, now: now(102), receiptTimeMs: 1202)
+        let records = try db.read { try $0.page(epoch: id(3), after: 1, maximumRecords: 10, maximumBytes: 16384).canonicalRecords }
+        let events = try records.map { try AuditEventMetadata.decode($0, limits: limits) }
+        XCTAssertEqual(events.count, 2)
+        XCTAssertTrue(events.allSatisfy { $0.kind == .routingChanged && $0.authentication == .localUser && $0.requestID == nil })
+        owner.close()
+        XCTAssertThrowsError(try owner.localRoutingState())
+    }
+    func testPresenceRuntimeReadsDurableManualModesInsteadOfObserverClaims() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        XCTAssertTrue(try runtime.publish(usableSnapshot(), observer: UUID(), sampledAt: now(), now: now()))
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now()).reason, .remoteDesktop)
+        _ = try owner.setLocalRoutingMode(.away, expectedRevision: 0, now: now(200), receiptTimeMs: 1200)
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(201)),
+            PresenceRouting(destination: .phones, reason: .manualAway, detectionLimited: false))
+        _ = try owner.setLocalRoutingMode(.present, expectedRevision: 1, now: now(202), receiptTimeMs: 1202)
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(203)).reason, .manualPresent)
+        _ = try owner.setLocalRoutingMode(.automatic, expectedRevision: 2, now: now(204), receiptTimeMs: 1204)
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(205)).reason, .remoteDesktop)
+    }
+    func testOnlyCurrentObserverWithdrawalClearsPresenceAndGraceIsBounded() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let first = UUID(), second = UUID()
+        _ = try runtime.publish(usableSnapshot(), observer: first, sampledAt: now(), now: now())
+        _ = try runtime.publish(usableSnapshot(110), observer: second, sampledAt: now(110), now: now(110))
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(110)).reason, .remoteDesktop)
+        runtime.withdraw(observer: first)
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(111)).reason, .remoteDesktop)
+        runtime.withdraw(observer: second)
+        let grace = try runtime.routing(owner: owner, now: now(120))
+        XCTAssertEqual(grace.destination, .localMac); XCTAssertEqual(grace.reason, .detectorUnavailable); XCTAssertTrue(grace.detectionLimited)
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(320)).destination, .phones)
+    }
+    func testPresenceRejectsFutureStaleMixedEpochAndUnboundedSamplesWithoutReplacingCurrentData() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let observer = UUID()
+        _ = try runtime.publish(usableSnapshot(), observer: observer, sampledAt: now(), now: now())
+        XCTAssertFalse(try runtime.publish(usableSnapshot(99), observer: UUID(), sampledAt: now(99), now: now(110)))
+        XCTAssertThrowsError(try runtime.publish(usableSnapshot(111), observer: observer, sampledAt: now(111), now: now(110)))
+        XCTAssertThrowsError(try runtime.publish(usableSnapshot(), observer: observer, sampledAt: now(), now: now(1100)))
+        XCTAssertThrowsError(try runtime.publish(usableSnapshot(), observer: observer,
+            sampledAt: AuthorityMoment(epoch: UUID(), milliseconds: 100), now: now()))
+        var mixed = usableSnapshot()
+        mixed.locked = .init(false, observedAt: PresenceMoment(epoch: clock, milliseconds: 99))
+        XCTAssertThrowsError(try runtime.publish(mixed, observer: observer, sampledAt: now(), now: now()))
+        mixed = usableSnapshot(); mixed.displays = .init(Array(repeating: .asleep, count: 33), observedAt: PresenceMoment(epoch: clock, milliseconds: 100))
+        XCTAssertThrowsError(try runtime.publish(mixed, observer: observer, sampledAt: now(), now: now()))
+        mixed = usableSnapshot(); mixed.lastQualifyingInputMilliseconds = .init(101, observedAt: PresenceMoment(epoch: clock, milliseconds: 100))
+        XCTAssertThrowsError(try runtime.publish(mixed, observer: observer, sampledAt: now(), now: now()))
+        XCTAssertEqual(try runtime.routing(owner: owner, now: now(110)).reason, .remoteDesktop)
+    }
+    func testPreparedDeliveryRoutingRefreshesTimeWithoutARequestOwnerRead() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        _ = try runtime.publish(usableSnapshot(), observer: UUID(), sampledAt: now(), now: now())
+        let callback = try runtime.deliveryRouting(owner: owner)
+        XCTAssertEqual(try db.read { _ in try callback(now()) }.reason, .remoteDesktop)
+        XCTAssertEqual(try callback(now(1300)).destination, .phones)
+        runtime.close()
+        XCTAssertThrowsError(try callback(now(1301)))
+    }
+    func testMissingOrUnsupportedSignalsRemainExplicitAndCannotCrossAccountScope() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let unknown = try runtime.routing(owner: owner, now: now())
+        XCTAssertEqual(unknown.reason, .detectorUnavailable); XCTAssertEqual(unknown.destination, .phones); XCTAssertTrue(unknown.detectionLimited)
+        XCTAssertThrowsError(try presence(mac: 9).routing(owner: owner, now: now())) { XCTAssertEqual($0 as? AuthorityPresenceError, .wrongScope) }
+        XCTAssertThrowsError(try presence(account: 9).routing(owner: owner, now: now())) { XCTAssertEqual($0 as? AuthorityPresenceError, .wrongScope) }
+        let at = PresenceMoment(epoch: clock, milliseconds: 110)
+        let limited = PresenceSnapshot(remoteWorkspace: .init(.unsupported, observedAt: at), locked: .init(false, observedAt: at),
+            displays: .init([.awake(.unknown)], observedAt: at), lastQualifyingInputMilliseconds: .init(100, observedAt: at))
+        _ = try runtime.publish(limited, observer: UUID(), sampledAt: now(110), now: now(110))
+        let active = try runtime.routing(owner: owner, now: now(110))
+        XCTAssertEqual(active.reason, .active); XCTAssertEqual(active.destination, .localMac); XCTAssertTrue(active.detectionLimited)
+    }
+
     private func issue(_ db: JournalDatabase, trust: UUID, revision: UInt64 = 0, moment: UInt64 = 100) throws -> RoutingAwayControl {
         try db.write { try $0.issueRoutingChallenge(authenticatedPhoneID: id(5), authenticatedEnrollmentEpoch: id(4), expectedTrustRevision: trust,
             expectedRoutingRevision: revision, nowUnixMillis: 1000, now: now(moment)) }

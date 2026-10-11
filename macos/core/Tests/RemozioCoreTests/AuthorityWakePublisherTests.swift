@@ -63,7 +63,7 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         let writer: AuditEpochWriter
         let registration: GatewayRegistrationIdentity
         let request: IssuedRequestPayload
-        init(deadline: UInt64 = 200) throws {
+        init(deadline: UInt64 = 200, enablePresence: Bool = false) throws {
             let key = P256.Signing.PrivateKey()
             let limits = try CBORLimits(maxBytes: 4096, maxDepth: 12, maxItems: 256)
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
@@ -79,9 +79,14 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
                 let fd = Darwin.open(directory + "/" + name, O_CREAT | O_EXCL | O_WRONLY, 0o600)
                 guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }; Darwin.close(fd)
             }
+            let routingPolicy: RoutingJournalPolicy?
+            if enablePresence {
+                routingPolicy = try .init(clockEpoch: epoch, challengeLifetimeMillis: 1000, maximumOperations: 20,
+                    payloadLimits: limits, signingLimits: limits)
+            } else { routingPolicy = nil }
             let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                 macID: Self.id(1), accountID: Self.id(2), recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+                maximumConsumptions: 30, busyMilliseconds: 100, initialize: true, routingPolicy: routingPolicy)
             let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
             let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
                 0: .unsigned(1), 1: .bytes(Self.id(1)), 2: .bytes(Self.id(2)), 3: .bytes(Self.id(3)),
@@ -131,6 +136,39 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
                     expectedTrustRevision: revision, eventID: Self.id(31), receiptTimeMs: nil, writer: self.writer, expectedAuditHead: 2) }
             }
         }
+    }
+
+    func testAccountPresenceModeChangesReachPublisherAndLiveHintFeed() async throws {
+        let f = try Fixture(enablePresence: true), driver = Driver()
+        let presence = AuthorityPresenceRuntime(configuration: try .init(macID: f.registration.macID, accountID: f.registration.accountID,
+            ownerUID: 501, policy: .init(observationLifetimeMilliseconds: 50, unavailableGraceMilliseconds: 0)), clockEpoch: f.epoch)
+        let at = PresenceMoment(epoch: f.epoch, milliseconds: 100)
+        try presence.publish(.init(remoteWorkspace: .init(.usable, observedAt: at)), observer: UUID(),
+            sampledAt: .init(epoch: f.epoch, milliseconds: 100), now: f.now())
+        let publisher = try AuthorityWakePublisher(journal: f.journal, channel: GatewayRootChannel(driver: driver), registration: f.registration,
+            leaseMilliseconds: 1000, clock: { f.now() }, routing: { XCTFail("Account wake used a separate mode cache"); return try f.routing() },
+            ownerRouting: { owner, moment in try presence.routing(owner: owner, now: moment) })
+        try await publisher.start(); try await publisher.reconcile()
+        XCTAssertTrue(driver.value.withLock { $0.registrations.isEmpty })
+        XCTAssertEqual(driver.value.withLock { $0.snapshots.last?.phoneRouting }, false)
+        _ = try f.journal.withRequests { try $0.setLocalRoutingMode(.away, expectedRevision: 0, now: f.now(), receiptTimeMs: nil) }
+        try await publisher.reconcile()
+        let grant = try XCTUnwrap(driver.value.withLock { $0.registrations.first })
+        XCTAssertEqual(try publisher.hintFeed.current().deliveryIDs, [grant.id])
+        _ = try f.journal.withRequests { try $0.setLocalRoutingMode(.present, expectedRevision: 1, now: f.now(), receiptTimeMs: nil) }
+        // The feed consults the current durable mode before the next publisher tick.
+        XCTAssertTrue(try publisher.hintFeed.current().deliveryIDs.isEmpty)
+        try await publisher.reconcile()
+        XCTAssertEqual(driver.value.withLock { $0.snapshots.last?.phoneRouting }, false)
+        _ = try f.journal.withRequests { try $0.setLocalRoutingMode(.automatic, expectedRevision: 2, now: f.now(), receiptTimeMs: nil) }
+        XCTAssertTrue(try publisher.hintFeed.current().deliveryIDs.isEmpty)
+        f.state.withLock { $0.time = 150 }
+        XCTAssertTrue(try publisher.hintFeed.current().deliveryIDs.isEmpty)
+        try await publisher.reconcile()
+        XCTAssertEqual(try publisher.hintFeed.current().deliveryIDs, [grant.id])
+        XCTAssertEqual(driver.value.withLock { $0.registrations.count }, 1)
+        XCTAssertEqual(grant.deadlineMilliseconds, 200)
+        await publisher.close(); presence.close()
     }
 
     func testRegisteredGrantUsesCurrentJournalLeaseAndIsNotRegisteredAgain() async throws {

@@ -27,12 +27,12 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try .decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(epoch)),
             4: .unsigned(UInt64(epoch)), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
     }
-    private func open(_ fixture: Fixture, initialize: Bool) throws -> JournalDatabase {
+    private func open(_ fixture: Fixture, initialize: Bool, routingPolicy: RoutingJournalPolicy? = nil) throws -> JournalDatabase {
         try .init(lease: fixture.lease(), macID: id(1), accountID: id(2), recordLimits: limits, descriptorLimits: limits,
-            decisionLimits: limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: initialize)
+            decisionLimits: limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: initialize, routingPolicy: routingPolicy)
     }
-    private func setup(_ fixture: Fixture) throws -> (JournalDatabase, AuditEpochWriter) {
-        let db = try open(fixture, initialize: true)
+    private func setup(_ fixture: Fixture, routingPolicy: RoutingJournalPolicy? = nil) throws -> (JournalDatabase, AuditEpochWriter) {
+        let db = try open(fixture, initialize: true, routingPolicy: routingPolicy)
         let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
         let writer = try db.write { try $0.createEpoch(descriptor(3)) }
         let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
@@ -1432,6 +1432,48 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertTrue(try providers.pendingRequestIDs(owner, binding, clock).isEmpty)
         XCTAssertNotNil(try db.read { try $0.consumption(requestID: request.requestID) })
     }
+    func testAccountPresenceProvidersUseDurableModeAndRecheckDuringSigning() throws {
+        let fixture = try Fixture(), policy = try RoutingJournalPolicy(clockEpoch: clock, challengeLifetimeMillis: 100,
+            maximumOperations: 8, payloadLimits: limits, signingLimits: limits)
+        let (db, writer) = try setup(fixture, routingPolicy: policy), owner = try owner(db, writer)
+        defer { try? db.close() }
+        let first = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let second = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let binding = try frameBinding(db), environment = ProviderEnvironment(epoch: clock)
+        let source = AuthorityPresenceRuntime(configuration: try .init(macID: id(1), accountID: id(2), ownerUID: 502,
+            policy: .init(observationLifetimeMilliseconds: 50, unavailableGraceMilliseconds: 0)), clockEpoch: clock)
+        let providers = try AuthorityRequestProviders(configuration: providerConfiguration(fixture),
+            publicKey: environment.authorityKey.publicKey.x963Representation,
+            signing: { try environment.sign($0) }, routing: { XCTFail("Account routing used a separate mode cache"); return try environment.route() },
+            presence: source)
+        let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
+        let observer = UUID(), sampled = PresenceMoment(epoch: self.clock, milliseconds: 120)
+        try source.publish(.init(remoteWorkspace: .init(.usable, observedAt: sampled)), observer: observer,
+            sampledAt: now(120), now: now(120))
+        XCTAssertTrue(try providers.pendingRequestIDs(owner, binding, clock).isEmpty)
+        XCTAssertNil(try providers.requestFrame(owner, binding, first.requestID, clock))
+        XCTAssertEqual(environment.signatures, 0)
+        _ = try owner.setLocalRoutingMode(.away, expectedRevision: 0, now: now(120), receiptTimeMs: nil)
+        let frame = try XCTUnwrap(providers.requestFrame(owner, binding, first.requestID, clock))
+        _ = try verifyProviderFrame(frame, environment, type: .request)
+        _ = try owner.setLocalRoutingMode(.automatic, expectedRevision: 1, now: now(120), receiptTimeMs: nil)
+        XCTAssertEqual(try providers.pendingRequestIDs(owner, binding, clock), [first.requestID])
+        // A delivered request stays available when the Mac becomes present.
+        XCTAssertEqual(try providers.requestFrame(owner, binding, first.requestID, clock), frame)
+        environment.set(time: 170)
+        XCTAssertEqual(Set(try providers.pendingRequestIDs(owner, binding, clock)), Set([first.requestID, second.requestID]))
+        environment.afterSign = {
+            let sample = PresenceMoment(epoch: environment.epoch, milliseconds: 171)
+            environment.set(time: 171)
+            _ = try? source.publish(.init(remoteWorkspace: .init(.usable, observedAt: sample)), observer: observer,
+                sampledAt: environment.now(), now: environment.now())
+        }
+        XCTAssertNil(try providers.requestFrame(owner, binding, second.requestID, clock))
+        XCTAssertEqual(try owner.state(requestID: second.requestID).phase, .queued)
+        XCTAssertEqual(environment.signatures, 2)
+        XCTAssertNotNil(try providers.exchangeRequest(owner, binding, first.requestID, nil, clock))
+    }
+
     func testPublicHardwareBundleSignsRealRootRequestAndStatus() throws {
         guard SecureEnclave.isAvailable else { throw XCTSkip("Requires Secure Enclave hardware; production custody remains unproved") }
         let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
