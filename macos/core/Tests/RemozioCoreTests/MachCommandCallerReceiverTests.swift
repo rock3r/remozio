@@ -8584,3 +8584,90 @@ extension MachCommandCallerReceiverTests {
         }
     }
 }
+
+extension MachCommandCallerReceiverTests {
+    @MainActor func testRuntimeCloseJoinsLateAuthorizationBeforeDrainingExecutionAndClosingJournal() async throws {
+        try await delayedAuthorizationShutdown(releaseByDeinit: false)
+    }
+
+    @MainActor func testRuntimeDeinitJoinsLateAuthorizationBeforeDrainingExecutionAndClosingJournal() async throws {
+        try await delayedAuthorizationShutdown(releaseByDeinit: true)
+    }
+
+    @MainActor private func delayedAuthorizationShutdown(releaseByDeinit: Bool) async throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let journal = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            let (body, signature) = try noticeDecision(request, fixture: fixture), time = fixture.now(130)
+            let entered = Mutex(false), rejected = Mutex(false), closed = Mutex(false)
+            let resume = DispatchSemaphore(value: 0), requestID = request.requestID
+            let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail("A shutdown notice must never execute") },
+                rejectUnowned: { notice in
+                    XCTAssertTrue(try journal.cancelUnownedCommandExecution(notice, now: time, receiptTimeMs: nil))
+                    rejected.withLock { $0 = true }
+                })
+            defer { resume.signal(); worker.requestStop() }
+            let registration = try GatewayRegistrationIdentity(ownerID: Data(repeating: 3, count: 16),
+                macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+                gatewayID: Data(repeating: 4, count: 16), lifecycleEpoch: Data(repeating: 5, count: 16),
+                rootPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+            var service: AuthorityWakeService? = try .init(makePublisher: { throw GatewayRootChannelError.closed },
+                hints: AuthorityWakeHintSource(registration: registration), interval: 100, startRequests: {}, closeRequests: {
+                    XCTAssertTrue(rejected.withLock { $0 })
+                    XCTAssertEqual(try journal.withRequests { try $0.state(requestID: requestID).phase }, .cancelled)
+                    XCTAssertEqual(try journal.withRequests { try $0.historicalOutcome(requestID: requestID) }?.revision, 1)
+                    try journal.close(); closed.withLock { $0 = true }
+                }, commandExecutionWorker: worker, stopRequestProducers: { await journal.stopCommandExchanges() })
+            try await service?.start()
+            let exchange = Task.detached {
+                try journal.withValidatedCommandExchange(requestID: requestID, decisionSupplied: true, validate: { _ in }, body: { owner in
+                    _ = try owner.consume(canonicalDecision: body, signature: signature,
+                        authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                        now: time, receiptTimeMs: nil)
+                    return 17
+                }, onCommandAuthorized: { notice in
+                    entered.withLock { $0 = true }
+                    XCTAssertEqual(resume.wait(timeout: .now() + 10), .success)
+                    XCTAssertEqual(worker.enqueue(notice), .closed)
+                })
+            }
+            for _ in 0..<300 where !entered.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertTrue(entered.withLock { $0 })
+            var cleanup: Task<Void, any Error>?
+            weak var released = service
+            if releaseByDeinit { service = nil }
+            else {
+                let closingService = try XCTUnwrap(service)
+                cleanup = Task { try await closingService.close() }
+            }
+            var producerStopped = false
+            for _ in 0..<300 {
+                do { try journal.beginCommandExchange(); journal.endCommandExchange() }
+                catch ApprovalCoordinatorError.unavailable { producerStopped = true; break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertTrue(producerStopped)
+            if releaseByDeinit { XCTAssertNil(released) }
+            XCTAssertFalse(closed.withLock { $0 }); XCTAssertFalse(rejected.withLock { $0 })
+            XCTAssertEqual(try journal.withRequests { try $0.state(requestID: requestID).phase }, .authorized)
+            XCTAssertThrowsError(try journal.close()) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive) }
+            XCTAssertThrowsError(try journal.withValidatedCommandExchange(requestID: requestID, decisionSupplied: true,
+                validate: { _ in XCTFail("A stopped producer must not validate another exchange") },
+                body: { _ in XCTFail("A stopped producer must not consume another decision"); return 0 },
+                onCommandAuthorized: { _ in XCTFail("A stopped producer must not notify") })) {
+                    XCTAssertEqual($0 as? ApprovalCoordinatorError, .unavailable)
+                }
+            resume.signal()
+            let result = try await exchange.value; XCTAssertEqual(result, 17)
+            try await cleanup?.value
+            for _ in 0..<300 where !closed.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertTrue(closed.withLock { $0 }); XCTAssertTrue(rejected.withLock { $0 })
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .cancelledBeforeStart)
+            XCTAssertEqual(journal.activeCommandCount, 0)
+            XCTAssertThrowsError(try journal.read { _ in 0 })
+        }
+    }
+}

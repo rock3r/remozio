@@ -105,7 +105,8 @@ The preparation bound applies before target release. It does not impose a comman
 Version 1 retains its exact bytes and admission-only behavior. Missing or unknown version 2 fields fail; startup never falls back to version 1.
 
 The scheduler shares the request journal and clock. It starts before request listeners and reports its failure to the enclosing runtime.
-Shutdown prevents further attempts and joins queued work before closing the journal. Native resource disposal remains with the existing execution owner.
+Shutdown stops new decision exchanges and joins their post-lock authorization callbacks before draining the execution worker.
+It prevents further attempts and joins queued work before closing the journal. Native resource disposal remains with the existing execution owner.
 Each runtime retry builds a fresh scheduler. It never scans historical approvals to repeat a command.
 
 A scheduling notice is not an execution grant. The scheduler checks its original request ID, digest and challenge.
@@ -122,7 +123,8 @@ Saturation retires the enclosing runtime after rejection instead of silently dro
 The execution queue and active command limits remain explicit host settings. Installed Root behavior and complete target groups remain gates in issues 286 and 298.
 The app entry point and installer do not activate command mode as part of this integration change.
 
-Twenty-one focused checks cover the scheduler, versioned configuration, original-request rejection, native ownership and enclosing runtime lifecycle.
+Twenty-three focused checks cover the scheduler, versioned configuration, original-request rejection, native ownership and enclosing runtime lifecycle.
 The native cases execute disposable ordinary-account targets through both current mapped profiles.
 They preserve one effect after a handler failure and a duplicate notice. They also retain a monitor after a failed start attempt.
+Late-callback fixtures cover both explicit shutdown and deinitialization with a real signed approval and original frontend reply.
 A frozen public-only version 1 fixture checks exact byte compatibility. These results do not prove installed Root execution or complete target-group semantics.

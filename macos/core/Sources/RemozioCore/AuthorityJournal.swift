@@ -13,6 +13,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
     private var requestStartupAttempted = false
+    private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var commandCleanupTimer: DispatchSourceTimer?
     private var commandPollIntervalMilliseconds: Int?
@@ -390,9 +391,16 @@ public final class AuthorityJournal: @unchecked Sendable {
             return try withStorageFailureCleanup { try database.write(body) }
         }
     }
+    /// Stop the authorization producer and await its post-lock callbacks before draining execution.
+    func stopCommandExchanges() async { await commandExchanges.stopAndDrain() }
+    func beginCommandExchange() throws { try lock.withLock { try commandExchanges.begin() } }
+    func endCommandExchange() { commandExchanges.end() }
+
     public func close() throws {
         try lock.withLock {
             try requireNoRequestOperation()
+            guard !commandExchanges.hasActive else { throw JournalDatabaseError.transactionActive }
+            commandExchanges.stop()
             try database.close()
             storage?.continuity.close()
             retireRequests()

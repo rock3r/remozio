@@ -16,6 +16,7 @@ public actor AuthorityWakeService {
     private let requestsRetired: @Sendable () -> Bool
     private let startRequests: @Sendable () throws -> Void
     private let closeRequests: @Sendable () throws -> Void
+    private let stopRequestProducers: @Sendable () async -> Void
     private let interval: UInt64
     private let initialRetry: UInt64
     private let maximumRetry: UInt64
@@ -35,20 +36,23 @@ public actor AuthorityWakeService {
          startRequests: @escaping @Sendable () throws -> Void, closeRequests: @escaping @Sendable () throws -> Void,
          requestsRetired: @escaping @Sendable () -> Bool = { false }, presence: AuthorityPresenceRuntime? = nil,
          commandReceiver: AuthorityCommandReceiveWorker? = nil,
-         commandExecutionWorker: AuthorityCommandExecutionWorker? = nil) throws {
+         commandExecutionWorker: AuthorityCommandExecutionWorker? = nil,
+         stopRequestProducers: @escaping @Sendable () async -> Void = {}) throws {
         guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
               (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
         self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
+        self.stopRequestProducers = stopRequestProducers
         self.startRequests = startRequests; self.closeRequests = closeRequests; self.commandReceiver = commandReceiver; self.commandExecutionWorker = commandExecutionWorker
         self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
     }
     deinit {
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
-        let worker = task, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let worker = task, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
                 await commandReceiver?.close()
+                await stopRequestProducers()
                 await commandExecutionWorker?.close()
                 await observer?.value
                 await executionObserver?.value
@@ -147,7 +151,8 @@ public actor AuthorityWakeService {
             return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,
                 startRequests: { try service.start(); try presenceListener?.start() },
                 closeRequests: { presenceListener?.close(); try service.close() },
-                requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker)
+                requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
+                stopRequestProducers: { await journal.stopCommandExchanges() })
         } catch { presence?.close(); try? journal.close(); throw error }
     }
     /// Start direct request listeners before attempting the optional gateway connection.
@@ -197,9 +202,10 @@ public actor AuthorityWakeService {
         let observer = receiverObserver; receiverObserver = nil; observer?.cancel()
         let executionObserver = executionObserver; self.executionObserver = nil; executionObserver?.cancel()
         hints.close(); presence?.close()
-        let publisher = publisher, closeRequests = closeRequests, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let publisher = publisher, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         let work = Task {
             await commandReceiver?.close()
+            await stopRequestProducers()
             await commandExecutionWorker?.close()
             await publisher?.close()
             await previous?.value
