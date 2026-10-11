@@ -267,9 +267,26 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         raw.close()
         let final = client(), unchanged = try await final.start()
         XCTAssertEqual(unchanged.state, .init(mode: .automatic, revision: 3))
+        do { _ = try await final.publish(publication, sampledAt: environment.now()); XCTFail("Discarded publication returned success") } catch { }
         await final.close()
+        environment.time.value = 101
+        let freshObserver = client()
+        _ = try await freshObserver.start()
+        let freshSnapshot = PresenceSnapshot(remoteWorkspace: .init(.usable, observedAt: .init(epoch: environment.epoch, milliseconds: 101)))
+        let freshStatus = try await freshObserver.publish(freshSnapshot, sampledAt: environment.now())
+        XCTAssertEqual(freshStatus.routing.reason, .remoteDesktop)
+        await freshObserver.close()
+        let reader = client()
+        var withdrawn = try await reader.start()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while withdrawn.routing.reason != .detectorUnavailable, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+            withdrawn = try await reader.current()
+        }
+        XCTAssertEqual(withdrawn.routing.reason, .detectorUnavailable)
+        await reader.close()
         XCTAssertEqual(try f.records().count, 3)
-        XCTAssertGreaterThanOrEqual(environment.verified.value, 13)
+        XCTAssertGreaterThanOrEqual(environment.verified.value, 19)
         if let output = ProcessInfo.processInfo.environment["REMOZIO_PRESENCE_XPC_EVIDENCE"] {
             let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "account-presence-anonymous-native-xpc", "status": "passed",
                 "osVersion": ProcessInfo.processInfo.operatingSystemVersionString, "guiSessionAvailable": true,
@@ -277,6 +294,7 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
                 "invocationConnectionChecked": true, "verifiedInvocations": environment.verified.value,
                 "modeChangesAudited": 3, "conflictReturnedCurrentState": true, "lostReplyCommittedModeRecovered": true,
                 "freshConnectionBinding": true, "crossedConnectionMutationRejected": true, "observerWithdrawnOnClose": true,
+                "discardedPublicationRejected": true, "freshPublicationAfterRejectionAccepted": true,
                 "installedRootAccountsTested": false, "developerIDPolicyTested": false, "physicalPresenceSignalsTested": false,
                 "serviceInstalled": false, "realApprovalIssued": false]
             try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output), options: .atomic)
@@ -374,6 +392,33 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try f.access.status(binding: f.binding).routing.reason, .detectorUnavailable)
         XCTAssertTrue(try f.records().isEmpty)
     }
+    func testDiscardedReplacementPublicationCannotReturnSuccessOrWithdrawAnotherObserver() throws {
+        for timestamp: UInt64 in [90, 100] {
+            let f = try Fixture(), first = try f.endpoint()
+            first.hello { XCTAssertEqual($0, 1) }
+            first.publish(try f.publication()) { XCTAssertNotNil($0) }
+            let replacementBinding = try AuthorityPresenceBinding(macID: f.mac, accountID: f.account,
+                clockEpoch: f.binding.clockEpoch, connectionID: UUID())
+            let replacement = try f.endpoint(binding: replacementBinding)
+            replacement.hello { XCTAssertEqual($0, 1) }
+            replacement.publish(try f.publication(sampledAt: timestamp, binding: replacementBinding)) { XCTAssertNil($0) }
+            XCTAssertEqual(f.environment.invalidated.value, 1)
+            XCTAssertEqual(try f.current(first).routing.reason, .remoteDesktop)
+            first.close()
+            XCTAssertEqual(try f.access.status(binding: f.binding).routing.reason, .detectorUnavailable)
+            f.environment.time.value = 101
+            let freshBinding = try AuthorityPresenceBinding(macID: f.mac, accountID: f.account,
+                clockEpoch: f.binding.clockEpoch, connectionID: UUID())
+            let fresh = try f.endpoint(binding: freshBinding)
+            fresh.hello { XCTAssertEqual($0, 1) }
+            fresh.publish(try f.publication(binding: freshBinding)) { XCTAssertNotNil($0) }
+            replacement.close(); first.close()
+            XCTAssertEqual(try f.current(fresh).routing.reason, .remoteDesktop)
+            XCTAssertTrue(try f.records().isEmpty)
+            fresh.close()
+        }
+    }
+
     func testOldConnectionClosureCannotRemoveNewerObservation() throws {
         let f = try Fixture(), first = try f.endpoint()
         let next = try AuthorityPresenceBinding(macID: f.mac, accountID: f.account, clockEpoch: f.binding.clockEpoch, connectionID: UUID())

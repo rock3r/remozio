@@ -2,8 +2,10 @@
   "conflictReturnedCurrentState": true,
   "crossedConnectionMutationRejected": true,
   "developerIDPolicyTested": false,
+  "discardedPublicationRejected": true,
   "experiment": "account-presence-anonymous-native-xpc",
   "freshConnectionBinding": true,
+  "freshPublicationAfterRejectionAccepted": true,
   "guiSessionAvailable": true,
   "installedRootAccountsTested": false,
   "invocationConnectionChecked": true,
@@ -17,9 +19,9 @@
   "sameProcessNativeConnection": true,
   "schemaVersion": 1,
   "serviceInstalled": false,
-  "sourceCommit": "4c0b2758f05f3afca73eccc601bc62abd67f6b73",
+  "sourceCommit": "92f85454fcb24f9c64a2eed3771af954dadcb173",
   "sourceWorktreeModified": true,
   "status": "passed",
   "testCodeHashRequirementApplied": true,
-  "verifiedInvocations": 13
+  "verifiedInvocations": 19
 }

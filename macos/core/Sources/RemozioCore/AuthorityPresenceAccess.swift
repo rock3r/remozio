@@ -37,8 +37,8 @@ final class AuthorityPresenceAccess: Sendable {
     func publish(_ publication: AuthorityPresencePublication) throws -> AuthorityPresenceStatus {
         try requireBinding(publication.binding)
         return try withOwner { owner in
-            _ = try self.presence.publish(publication.snapshot, observer: publication.binding.connectionID,
-                sampledAt: publication.sampledAt, now: self.now())
+            guard try self.presence.publish(publication.snapshot, observer: publication.binding.connectionID,
+                sampledAt: publication.sampledAt, now: self.now()) else { throw AuthorityPresenceError.invalidObservation }
             return try self.status(owner: owner, binding: publication.binding, conflict: false)
         }
     }

@@ -21,7 +21,7 @@ Each mutation contains the configured Mac/account IDs, Root clock epoch, connect
 
 The app displays only confirmed Root state. Connection loss clears current state. Reconnection reloads Root-owned public metadata and reads the mode again. No UserDefaults value can claim a successful mode change. This app slice reads `/Library/Application Support/Remozio/presence-client-<uid>.cbor`; protected installation must create that metadata.
 
-Observations contain coarse signals only: usable remote workspace, lock state, bounded display states and last qualifying input time. Missing values stay unknown. All supplied values share one sample moment. Root rejects stale/future samples and mixed epochs. An old connection cannot withdraw a newer connection's observation. Automatic fallback and its grace interval use the existing presence policy.
+Observations contain coarse signals only: usable remote workspace, lock state, bounded display states and last qualifying input time. Missing values stay unknown. All supplied values share one sample moment. Root rejects stale/future samples and mixed epochs. A discarded old or equal-time publication cannot return success. An old connection cannot withdraw a newer connection's observation. Automatic fallback and its grace interval use the existing presence policy.
 
 ## Component evidence
 
@@ -45,7 +45,7 @@ The [retained result](evidence/2026-10-11-account-presence-xpc.json) records a s
 
 The fixture uses real `NSXPCConnection` messages, the production interface, codec, endpoint, client channel and journal access. Both ends run in the same test process. The listener pins the running test binary's code hash. It checks kernel peer credentials and the current invocation connection for every selector.
 
-The run proves mode commits, revision conflicts and fresh connection bindings. It commits a mode change before discarding the reply, then reads the committed state after reconnect. An old connection's mutation is rejected on a new connection. The final mode remains Automatic at revision 3, with exactly three audit events. Closing the observation connection leaves the detector unavailable.
+The run proves mode commits, revision conflicts and fresh connection bindings. It commits a mode change before discarding the reply, then reads the committed state after reconnect. An old connection's mutation is rejected on a new connection. A discarded equal-time publication fails over the native connection. A fresh sample succeeds after reconnect. The final mode remains Automatic at revision 3, with exactly three audit events. Closing the observation connection leaves the detector unavailable.
 
 This fixture does not register a Mach service or launch the app GUI. It uses seams for retained app policy and Root self-code validation. It does not prove Developer ID validation, Root or separate service accounts, audit-session isolation, or physical presence signals. The runner rejects a skipped test as evidence. A timeout or interruption retires the owned fixture process tree. The runner retains the log outside its temporary directory when invocation fails, skips, times out, is interrupted, or cannot clean up.
 

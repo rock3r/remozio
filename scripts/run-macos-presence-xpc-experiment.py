@@ -58,7 +58,8 @@ def main():
         report = json.loads(evidence.read_text())
         required = ['guiSessionAvailable', 'testCodeHashRequirementApplied', 'kernelPeerCredentialsChecked',
             'invocationConnectionChecked', 'conflictReturnedCurrentState', 'lostReplyCommittedModeRecovered',
-            'freshConnectionBinding', 'crossedConnectionMutationRejected', 'observerWithdrawnOnClose']
+            'freshConnectionBinding', 'crossedConnectionMutationRejected', 'observerWithdrawnOnClose',
+            'discardedPublicationRejected', 'freshPublicationAfterRejectionAccepted']
         if report.get('status') != 'passed' or not all(report.get(key) is True for key in required):
             raise SystemExit('Native presence fixture did not prove its required wire checks.')
         if any(report.get(key) is not False for key in ['installedRootAccountsTested', 'developerIDPolicyTested',
