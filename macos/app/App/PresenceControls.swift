@@ -91,6 +91,7 @@ final class PresenceControls {
             let current = try await next.start()
             guard incarnation == id else { return }
             status = current
+            notice = nil
         } catch { disconnect(id: id) }
     }
     private func disconnect(id: UUID) {

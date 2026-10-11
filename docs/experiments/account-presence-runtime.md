@@ -30,7 +30,24 @@ Observations contain coarse signals only: usable remote workspace, lock state, b
 - Client tests check negotiation, reply freshness, cancellation, invalid receipts and lost replies. The combined client/endpoint test commits a mode change, discards its reply and confirms it after reconnect without another write.
 - Mac Debug and Release build checks compile the controls and inspect bundle/signature/runtime metadata. They do not launch the GUI or prove Developer ID deployment.
 
-The in-process fixtures replace kernel invocation validation and Root self-code validation with explicit seams. Their results do not prove those platform checks. Software fixture signing is not a production custody fallback.
+The component fixtures replace kernel invocation validation and Root self-code validation with explicit seams. Their results do not prove those platform checks. Software fixture signing is not a production custody fallback.
+
+## Live native wire evidence
+
+Run the owned anonymous listener fixture from a supported Mac GUI session:
+
+```sh
+python3 scripts/run-macos-presence-xpc-experiment.py \
+    --evidence docs/experiments/evidence/account-presence-xpc.json
+```
+
+The [retained result](evidence/2026-10-11-account-presence-xpc.json) records a successful run on Apple Silicon with macOS 27.0.1. The build targets macOS 26. The source commit identifies the base of the modified worktree that produced the result.
+
+The fixture uses real `NSXPCConnection` messages, the production interface, codec, endpoint, client channel and journal access. Both ends run in the same test process. The listener pins the running test binary's code hash. It checks kernel peer credentials and the current invocation connection for every selector.
+
+The run proves mode commits, revision conflicts and fresh connection bindings. It commits a mode change before discarding the reply, then reads the committed state after reconnect. An old connection's mutation is rejected on a new connection. The final mode remains Automatic at revision 3, with exactly three audit events. Closing the observation connection leaves the detector unavailable.
+
+This fixture does not register a Mach service or launch the app GUI. It uses seams for retained app policy and Root self-code validation. It does not prove Developer ID validation, Root or separate service accounts, audit-session isolation, or physical presence signals. The runner rejects a skipped test as evidence and retains a diagnostic log when the test fails.
 
 ## Remaining integration and physical gates
 

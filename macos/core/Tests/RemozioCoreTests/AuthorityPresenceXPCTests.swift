@@ -1,4 +1,6 @@
 import Darwin
+import CoreGraphics
+import Security
 import Foundation
 import RemozioProtocol
 import XCTest
@@ -11,6 +13,9 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         private var stored: T
         init(_ value: T) { stored = value }
         var value: T { get { lock.withLock { stored } } set { lock.withLock { stored = newValue } } }
+        func take<Value>() -> Value? where T == Value? {
+            lock.withLock { let result = stored; stored = nil; return result }
+        }
     }
     private final class Environment: @unchecked Sendable {
         let epoch = UUID()
@@ -37,6 +42,110 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         }
         func close() { endpoint.close() }
     }
+    /// Test-only native transport. The exact running test binary is pinned; Developer ID activation is not simulated.
+    private final class NativeDriver: PresenceClientDriver, @unchecked Sendable {
+        private let connection: NSXPCConnection
+        private let policy: XPCPeerPolicy
+        init(endpoint: NSXPCListenerEndpoint, policy: XPCPeerPolicy, requirement: String) {
+            connection = NSXPCConnection(listenerEndpoint: endpoint); self.policy = policy
+            connection.remoteObjectInterface = NSXPCInterface(with: AuthorityPresenceXPCProtocol.self)
+            connection.setCodeSigningRequirement(requirement)
+        }
+        func start(closed: @escaping @Sendable () -> Void) {
+            connection.interruptionHandler = closed; connection.invalidationHandler = closed; connection.activate()
+        }
+        func invoke(_ call: PresenceClientCall, reply: @escaping @Sendable (PresenceClientReply) -> Void) {
+            let completion = Box<(@Sendable (PresenceClientReply) -> Void)?>(reply)
+            let reply: @Sendable (PresenceClientReply) -> Void = { value in
+                let callback = completion.take()
+                callback?(value)
+            }
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(.failed) }) as? any AuthorityPresenceXPCProtocol else {
+                reply(.failed); return
+            }
+            switch call {
+            case .hello: proxy.hello { [self] in checked(.version($0), reply: reply) }
+            case .current: proxy.current { [self] in checked(.status($0), reply: reply) }
+            case .publish(let bytes): proxy.publish(bytes) { [self] in checked(.status($0), reply: reply) }
+            case .setMode(let bytes): proxy.setMode(bytes) { [self] in checked(.status($0), reply: reply) }
+            }
+        }
+        private func checked(_ value: PresenceClientReply, reply: @Sendable (PresenceClientReply) -> Void) {
+            do {
+                let credentials = try policy.verifyCredentials(connection)
+                guard credentials.processID == getpid() else { throw Failure.denied }
+                reply(value)
+            } catch { reply(.failed) }
+        }
+        func close() { connection.invalidate() }
+        deinit { connection.invalidate() }
+    }
+    /// Anonymous listener owned by this test. No Mach service is registered and no Root process runs.
+    private final class NativeServer: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
+        private let lock = NSRecursiveLock()
+        let listener = NSXPCListener.anonymous()
+        private let access: AuthorityPresenceAccess
+        let environment: Environment
+        let mac: Data
+        let account: Data
+        let policy: XPCPeerPolicy
+        private let requirement: String
+        private var connections: [(NSXPCConnection, AuthorityPresenceXPCEndpoint)] = []
+        private var closed = false
+        let loseNextModeReply = Box(false)
+        init(fixture: Fixture, requirement: String) {
+            access = fixture.access; environment = fixture.environment; mac = fixture.mac; account = fixture.account
+            policy = fixture.policy; self.requirement = requirement
+            super.init()
+            listener.setConnectionCodeSigningRequirement(requirement); listener.delegate = self; listener.activate()
+        }
+        deinit { close() }
+        func close() {
+            let removed = lock.withLock {
+                closed = true; listener.invalidate(); listener.delegate = nil
+                let result = connections; connections.removeAll(); return result
+            }
+            for (connection, endpoint) in removed { endpoint.close(); connection.invalidate() }
+        }
+        func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+            lock.withLock {
+                guard !closed, listener === self.listener, connections.count < 8 else { return false }
+                do {
+                    let credentials = try policy.verifyCredentials(connection)
+                    guard credentials.processID == getpid() else { throw Failure.denied }
+                    let invocation = XPCInvocationGuard(connection: connection, policy: policy)
+                    let binding = try AuthorityPresenceBinding(macID: mac, accountID: account, clockEpoch: environment.epoch, connectionID: UUID())
+                    let access = self.access, environment = self.environment, loseReply = loseNextModeReply
+                    let endpoint = try AuthorityPresenceXPCEndpoint(binding: binding, budget: .init(maximum: 1), verify: {
+                        let current = try invocation.verifyInvocation()
+                        guard current == credentials else { throw Failure.denied }
+                        try environment.verify()
+                    }, verifyCurrent: { try access.verifyCurrent() }, invalidate: { [weak connection] in connection?.invalidate() },
+                       withdraw: { access.withdraw(observer: binding.connectionID) }, status: { try access.status(binding: binding) },
+                       publish: { try access.publish($0) }, setMode: { change in
+                           let status = try access.setMode(change)
+                           if loseReply.value { loseReply.value = false; throw Failure.denied }
+                           return status
+                       })
+                    connection.setCodeSigningRequirement(requirement)
+                    connection.exportedInterface = NSXPCInterface(with: AuthorityPresenceXPCProtocol.self)
+                    connection.exportedObject = endpoint
+                    connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }
+                    connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
+                    connections.append((connection, endpoint)); connection.activate(); return true
+                } catch { connection.invalidate(); return false }
+            }
+        }
+    }
+    private func runningTestRequirement() throws -> String {
+        var code: SecCode?, staticCode: SecStaticCode?, info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, [], &info) == errSecSuccess, let fields = info as? [String: Any],
+              let hash = fields[kSecCodeInfoUnique as String] as? Data, hash.count == 20 else { throw Failure.fixture }
+        return "cdhash H\"" + hash.map { String(format: "%02x", $0) }.joined() + "\""
+    }
+
     private final class Fixture {
         let root: URL
         let environment = Environment()
@@ -48,7 +157,7 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         let limits: CBORLimits
         var mac: Data { Data(repeating: 1, count: 16) }
         var account: Data { Data(repeating: 2, count: 16) }
-        init() throws {
+        init(ownerUID: UInt32 = 501) throws {
             let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), environment = self.environment
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.fixture }
             defer { free(canonical) }
@@ -77,9 +186,9 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
                 maximumRequests: 4, maximumRetainedBytes: 16384, requestLimits: limits, captureLimits: limits,
                 decisionLimits: limits, signingLimits: limits, auditLimits: limits)
             journal = AuthorityJournal(requests: owner)
-            presence = AuthorityPresenceRuntime(configuration: try .init(macID: mac, accountID: account, ownerUID: 501,
+            presence = AuthorityPresenceRuntime(configuration: try .init(macID: mac, accountID: account, ownerUID: ownerUID,
                 policy: .init(observationLifetimeMilliseconds: 1000, unavailableGraceMilliseconds: 0)), clockEpoch: environment.epoch)
-            policy = try .init(teamID: app.teamID, componentIdentifier: app.identifier, approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: 501)
+            policy = try .init(teamID: app.teamID, componentIdentifier: app.identifier, approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: ownerUID)
             access = try AuthorityPresenceAccess(journal: journal, presence: presence, appPolicy: policy, now: { environment.now() },
                 validateSelf: { _ in if environment.selfDenied.value { throw Failure.denied } })
             binding = try .init(macID: mac, accountID: account, clockEpoch: environment.epoch, connectionID: UUID())
@@ -114,6 +223,63 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
             let limits = self.limits
             return try journal.read { try $0.page(epoch: Data(repeating: 3, count: 16), after: 0,
                 maximumRecords: 10, maximumBytes: 16384).canonicalRecords.map { try AuditEventMetadata.decode($0, limits: limits) } }
+        }
+    }
+
+    func testLiveAnonymousPresenceWireCommitsAndReconnectsInGuiSession() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires a supported unprivileged Mac GUI session; installed account checks remain separate")
+        }
+        let f = try Fixture(ownerUID: getuid()), requirement = try runningTestRequirement(), environment = f.environment
+        let server = NativeServer(fixture: f, requirement: requirement)
+        defer { server.close() }
+        func client() -> AuthorityPresenceChannel {
+            AuthorityPresenceChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: server.policy, requirement: requirement),
+                macID: f.mac, accountID: f.account, timeoutMilliseconds: 3000, sample: { _ in environment.now() })
+        }
+        let first = client(), initial = try await first.start()
+        XCTAssertEqual(initial.state, .init(mode: .automatic, revision: 0))
+        let present = try await first.setMode(.present, expectedRevision: 0)
+        XCTAssertEqual(present.state, .init(mode: .present, revision: 1)); XCTAssertEqual(present.routing.destination, .localMac)
+        let publication = PresenceSnapshot(remoteWorkspace: .init(.usable, observedAt: .init(epoch: environment.epoch, milliseconds: 100)))
+        _ = try await first.publish(publication, sampledAt: environment.now())
+        let conflict = try await first.setMode(.away, expectedRevision: 0)
+        XCTAssertTrue(conflict.conflict); XCTAssertEqual(conflict.state.mode, .present)
+        server.loseNextModeReply.value = true
+        do { _ = try await first.setMode(.away, expectedRevision: 1); XCTFail("Lost reply confirmed a mode") } catch { }
+        await first.close()
+        let second = client(), recovered = try await second.start()
+        XCTAssertNotEqual(recovered.binding.connectionID, initial.binding.connectionID)
+        XCTAssertEqual(recovered.state, .init(mode: .away, revision: 2)); XCTAssertEqual(recovered.routing.destination, .phones)
+        let automatic = try await second.setMode(.automatic, expectedRevision: 2)
+        XCTAssertEqual(automatic.state, .init(mode: .automatic, revision: 3)); XCTAssertEqual(automatic.routing.reason, .detectorUnavailable)
+        await second.close()
+        let raw = NativeDriver(endpoint: server.listener.endpoint, policy: server.policy, requirement: requirement)
+        raw.start(closed: {})
+        let hello = await withCheckedContinuation { continuation in raw.invoke(.hello) { continuation.resume(returning: $0) } }
+        guard case .version(1) = hello else { raw.close(); return XCTFail("Native replay fixture did not negotiate") }
+        let crossed = try AuthorityPresenceCodec.encodeModeChange(binding: initial.binding, sequence: 1, mode: .present, expectedRevision: 3)
+        let refused = await withCheckedContinuation { continuation in raw.invoke(.setMode(crossed)) { continuation.resume(returning: $0) } }
+        switch refused {
+        case .status(nil), .failed: break
+        default: raw.close(); return XCTFail("Old connection binding reached a new native connection")
+        }
+        raw.close()
+        let final = client(), unchanged = try await final.start()
+        XCTAssertEqual(unchanged.state, .init(mode: .automatic, revision: 3))
+        await final.close()
+        XCTAssertEqual(try f.records().count, 3)
+        XCTAssertGreaterThanOrEqual(environment.verified.value, 13)
+        if let output = ProcessInfo.processInfo.environment["REMOZIO_PRESENCE_XPC_EVIDENCE"] {
+            let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "account-presence-anonymous-native-xpc", "status": "passed",
+                "osVersion": ProcessInfo.processInfo.operatingSystemVersionString, "guiSessionAvailable": true,
+                "sameProcessNativeConnection": true, "testCodeHashRequirementApplied": true, "kernelPeerCredentialsChecked": true,
+                "invocationConnectionChecked": true, "verifiedInvocations": environment.verified.value,
+                "modeChangesAudited": 3, "conflictReturnedCurrentState": true, "lostReplyCommittedModeRecovered": true,
+                "freshConnectionBinding": true, "crossedConnectionMutationRejected": true, "observerWithdrawnOnClose": true,
+                "installedRootAccountsTested": false, "developerIDPolicyTested": false, "physicalPresenceSignalsTested": false,
+                "serviceInstalled": false, "realApprovalIssued": false]
+            try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output), options: .atomic)
         }
     }
 
