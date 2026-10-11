@@ -15,6 +15,8 @@ flowchart LR
   C --> A
   S --> D[Direct approval listeners]
   D --> J
+  W -->|Buffered failure signal| R[Retire service and cancel wake work]
+  R --> S
   S --> G[Wake publisher and gateway recovery]
   G --> J
 ```
@@ -52,7 +54,7 @@ sequenceDiagram
 
 Concurrent close calls await the same queue work. Shutdown waits for a late factory and the active receive turn. It never destroys the host from another thread. The worker does not close the journal.
 
-Cancelled startup stops any host created late. A service closed during asynchronous startup cannot create a late wake publisher. Failed host policy retires the shared service, including while its gateway is healthy. Gateway recovery does not clear this failure.
+Cancelled startup stops any host created late. A service closed during asynchronous startup cannot create a late wake publisher. Failed host policy retires the shared service, including while its gateway is healthy. An owned observer receives a buffered failure signal and cancels wake work immediately. Publication sleeps and retry delays cannot postpone retirement. Gateway recovery does not clear this failure.
 
 Status callbacks are diagnostics. They must return promptly and must not start or stop the worker. Resolve and draft callbacks retain the journal's existing rules against reentry.
 
@@ -80,7 +82,7 @@ The product does not add a check-in bridge or registration fallback in this chan
 
 ## Test evidence
 
-The focused native tests pass 36 cases: ten receive-worker cases, 25 wake-publisher cases, and one existing admission compatibility case. They use anonymous Mach receive rights, software fixture keys, private journals, and synthetic gateway drivers.
+The focused native tests pass 39 cases: ten receive-worker cases, 28 wake-publisher cases, and one existing admission compatibility case. They use anonymous Mach receive rights, software fixture keys, private journals, and synthetic gateway drivers.
 
 | Check | Evidence |
 |---|---|
@@ -90,11 +92,12 @@ The focused native tests pass 36 cases: ten receive-worker cases, 25 wake-publis
 | Worker lifetime | Dropping the worker releases its receive right without a self-retention cycle. |
 | Shared shutdown | An active policy read can finish before the shared journal closes. |
 | Startup race | Closing during readiness prevents creation of a late publisher. |
-| Policy retirement | Both a healthy gateway and an unavailable gateway lead to service shutdown. Retirement during a gateway handshake prevents the first publication. |
+| Policy retirement | A failure signal interrupts 30-second publication sleeps and retry backoff. Retirement during a gateway handshake prevents the first publication. |
+| Observer lifetime | Service deinitialization cancels and drains the observer before closing the journal. The observer does not retain the service. |
 | Receipt sampling | Idle polls and hello messages do not sample receipt time. Actual command input samples the provider after receive. |
 | Production account gate | A normal account cannot construct the public worker or invoke its host factory. |
 
-The full `./scripts/check.sh` gate passed after the review fixes, including 1,649 core tests, the Debug and Release app builds, and native experiments. All six required Kotlin and Android tasks passed.
+The full `./scripts/check.sh` gate passed after the review fixes, including 1,652 core tests, the Debug and Release app builds, and native experiments. All six required Kotlin and Android tasks passed.
 
 The healthy-gateway retirement regression failed before its fix with a timeout. It passes after the publisher checks shared authority retirement before each publication turn.
 
@@ -103,6 +106,8 @@ The handshake regression also failed before its fix: it observed snapshots and w
 The receipt regression observed repeated start-of-poll timestamps before any command input. Receipt sampling now runs inside the authenticated input handler. The fixture verifies sampling time; its normal-user admission remains blocked and does not prove a persisted Root audit event.
 
 Cancellation checks remain inside the active handler. Cancellation normalization also signals stop before returning an error. The readiness fixture proves automatic cleanup with a retained worker; it does not instrument the instruction gap after handler removal.
+
+Two long-sleep regressions failed before the signal fix because cleanup waited for the next polling turn. Both pass with the owned observer. Normal shutdown completes the signal without reporting failure.
 
 ## Remaining product integration
 

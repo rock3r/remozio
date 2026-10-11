@@ -16,6 +16,8 @@ private final class CommandReceiveWorkerOwnership: Sendable {
     }
     private let state = Mutex(State())
     private let completion = DispatchGroup()
+    private let retirement = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    var retirementStream: AsyncStream<Void> { retirement.stream }
     private let report: @Sendable (AuthorityCommandReceiveWorker.Status) -> Void
     init(report: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void) { self.report = report }
     var stopping: Bool { state.withLock { $0.stopping } }
@@ -52,14 +54,21 @@ private final class CommandReceiveWorkerOwnership: Sendable {
             return (state.stop, changed ? next : nil)
         }
         result.0?.requestStop()
-        if let next = result.1 { report(next) }
+        if let next = result.1 {
+            if next == .closed { retirement.continuation.finish() }
+            report(next)
+        }
     }
     func fail() {
         let changed = state.withLock {
             guard !$0.stopping else { return false }
             $0.failed = true; $0.status = .failed; return true
         }
-        if changed { report(.failed) }
+        if changed {
+            retirement.continuation.yield(())
+            retirement.continuation.finish()
+            report(.failed)
+        }
     }
     func finish() {
         let changed = state.withLock {
@@ -69,6 +78,7 @@ private final class CommandReceiveWorkerOwnership: Sendable {
             $0.status = .closed; return changed
         }
         if changed { report(.closed) }
+        retirement.continuation.finish()
         completion.leave()
     }
     func wait() async {
@@ -102,6 +112,8 @@ public final class AuthorityCommandReceiveWorker: Sendable {
     private let onAdmission: @Sendable (Result<IssuedRequestPayload, any Error>) -> Void
     public var status: Status { ownership.status }
     public var isRetired: Bool { ownership.failed }
+    /// One enclosing service observes the buffered failure. Normal shutdown ends without a failure event.
+    var retirement: AsyncStream<Void> { ownership.retirementStream }
 
     /// The factory creates a fresh host on this worker's queue. It must clean up before throwing.
     /// It must not infer protected registration from successful bootstrap check-in alone.

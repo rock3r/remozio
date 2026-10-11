@@ -220,6 +220,64 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         try await close.value
         XCTAssertEqual(publishers.withLock { $0 }, 0); XCTAssertEqual(closes.withLock { $0 }, 1)
     }
+    func testServiceDeinitDrainsReceiverObserverWithoutRetainingService() async throws {
+        let f = try Fixture(deadline: 5000), port = ReceivePort(), closes = Mutex(0)
+        let worker = try commandWorker(f, port: port)
+        let driver = Driver(); driver.value.withLock { $0.failHello = true }
+        var service: AuthorityWakeService? = try AuthorityWakeService(makePublisher: { try f.publisher(driver) },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 100,
+            initialRetryMilliseconds: 30_000, maximumRetryMilliseconds: 30_000, startRequests: {}, closeRequests: {
+                XCTAssertEqual(worker.status, .closed)
+                XCTAssertFalse(Self.hasReceiveRight(port.value.withLock { $0 }))
+                closes.withLock { $0 += 1 }; try f.journal.close()
+            }, commandReceiver: worker)
+        weak let reference = service
+        try await XCTUnwrap(service).start()
+        try await waitUntil { await reference?.wakeStatus == .waiting(retryMilliseconds: 30_000) }
+        service = nil
+        XCTAssertNil(reference)
+        try await waitUntil { closes.withLock { $0 == 1 } }
+        XCTAssertFalse(worker.isRetired)
+    }
+    func testCommandPolicyRetirementInterruptsLongGatewayBackoff() async throws {
+        let f = try Fixture(deadline: 5000), port = ReceivePort(), failed = Mutex(false), closes = Mutex(0)
+        let worker = try commandWorker(f, port: port, policyRead: {
+            if failed.withLock({ $0 }) { throw CommandSessionRegistryError.invalidCodePolicy }
+        })
+        let driver = Driver(); driver.value.withLock { $0.failHello = true }
+        let service = try AuthorityWakeService(makePublisher: { try f.publisher(driver) },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 100,
+            initialRetryMilliseconds: 30_000, maximumRetryMilliseconds: 30_000, startRequests: {}, closeRequests: {
+                closes.withLock { $0 += 1 }; try f.journal.close()
+            }, commandReceiver: worker)
+        try await service.start()
+        try await waitUntil { await service.wakeStatus == .waiting(retryMilliseconds: 30_000) }
+        failed.withLock { $0 = true }
+        do { try await waitUntil { closes.withLock { $0 == 1 } } }
+        catch { try await service.close(); throw error }
+        try await service.close()
+        let retired = await service.isRetired
+        XCTAssertTrue(retired); XCTAssertTrue(worker.isRetired)
+    }
+    func testCommandPolicyRetirementInterruptsLongPublicationSleep() async throws {
+        let f = try Fixture(deadline: 5000), port = ReceivePort(), failed = Mutex(false), closes = Mutex(0)
+        let worker = try commandWorker(f, port: port, policyRead: {
+            if failed.withLock({ $0 }) { throw CommandSessionRegistryError.invalidCodePolicy }
+        })
+        let driver = Driver()
+        let service = try AuthorityWakeService(makePublisher: { try f.publisher(driver, lease: 60_000) },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 30_000, startRequests: {}, closeRequests: {
+                closes.withLock { $0 += 1 }; try f.journal.close()
+            }, commandReceiver: worker)
+        try await service.start()
+        try await waitUntil { driver.value.withLock { $0.snapshots.count >= 4 } }
+        failed.withLock { $0 = true }
+        do { try await waitUntil { closes.withLock { $0 == 1 } } }
+        catch { try await service.close(); throw error }
+        try await service.close()
+        let retired = await service.isRetired
+        XCTAssertTrue(retired); XCTAssertTrue(worker.isRetired)
+    }
     func testCommandRetirementDuringGatewayHelloPreventsInitialPublication() async throws {
         let f = try Fixture(deadline: 5000), port = ReceivePort(), failed = Mutex(false), closes = Mutex(0)
         let worker = try commandWorker(f, port: port, policyRead: {

@@ -19,6 +19,7 @@ public actor AuthorityWakeService {
     private let initialRetry: UInt64
     private let maximumRetry: UInt64
     private var task: Task<Void, Never>?
+    private var receiverObserver: Task<Void, Never>?
     private var publisher: AuthorityWakePublisher?
     private var closing: Task<Void, any Error>?
     private var cleanupComplete = false
@@ -40,11 +41,12 @@ public actor AuthorityWakeService {
         self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true }
     }
     deinit {
-        task?.cancel(); commandReceiver?.requestStop(); presence?.close(); hints.close()
-        let worker = task, publisher = publisher, pending = closing, closeRequests = closeRequests, commandReceiver = commandReceiver
+        task?.cancel(); receiverObserver?.cancel(); commandReceiver?.requestStop(); presence?.close(); hints.close()
+        let worker = task, observer = receiverObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, commandReceiver = commandReceiver
         if !cleanupComplete {
             Task {
                 await commandReceiver?.close()
+                await observer?.value
                 if let pending {
                     do { try await pending.value } catch { try? closeRequests() }
                 } else {
@@ -138,6 +140,15 @@ public actor AuthorityWakeService {
         do {
             try Task.checkCancellation()
             try startRequests()
+            if let commandReceiver {
+                receiverObserver = Task { [weak self, commandReceiver] in
+                    for await _ in commandReceiver.retirement {
+                        guard !Task.isCancelled else { return }
+                        await self?.commandReceiverDidRetire()
+                        return
+                    }
+                }
+            }
             try await commandReceiver?.start()
             try Task.checkCancellation()
             guard !closed else { throw AuthorityWakePublisherError.closed }
@@ -156,12 +167,14 @@ public actor AuthorityWakeService {
         guard !cleanupComplete else { return }
         if let closing { try await closing.value; return }
         let previous = task; task = nil; previous?.cancel(); commandReceiver?.requestStop()
+        let observer = receiverObserver; receiverObserver = nil; observer?.cancel()
         hints.close(); presence?.close()
         let publisher = publisher, closeRequests = closeRequests, commandReceiver = commandReceiver
         let work = Task {
             await commandReceiver?.close()
             await publisher?.close()
             await previous?.value
+            await observer?.value
             try closeRequests()
         }
         closing = work
@@ -172,6 +185,12 @@ public actor AuthorityWakeService {
         guard !closed, !retired else { return false }
         self.publisher = publisher; wakeStatus = status
         return true
+    }
+    private func commandReceiverDidRetire() async {
+        guard !closed else { return }
+        retired = true
+        receiverObserver = nil // This callback belongs to the observer that is now terminating.
+        try? await close()
     }
     private func publisherDidStop() async {
         guard !closed else { return }
