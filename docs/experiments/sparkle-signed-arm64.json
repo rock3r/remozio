@@ -143,7 +143,13 @@
     "scripts/run-sparkle-boundary-experiment.py": "a7b74cada145f85bed26b8e54273cd15ad1c5413c557c6fd190aaeb5a3866f54",
     "scripts/run-sparkle-signed-boundary-experiment.py": "1f5548d12cc8301af419900f6cfd474b10cca92ed95cb464f75d873988e867da",
     "scripts/sparkle_sdk_fixture.py": "48da8b441b7bb5713f0b810b05fd9f3ec2260077da425a0abac576a0d8fce56d",
-    "tests/test_sparkle_sdk_fixture.py": "6093adc4ade0883fcd31471d7639b7a331aca1a14856021489326181ba9a496d"
+    "tests/test_sparkle_sdk_fixture.py": "08752457ce32f98ddfbfced8364fa9b1c193092fe64a76cbaa807871bf12e1b1"
   },
-  "sparkleVersion": "2.10.0"
+  "sparkleVersion": "2.10.0",
+  "unitGuardValidation": {
+    "SDKTestsWithSimulatedRootRunner": 9,
+    "combinedFixtureAndGuardTests": 15,
+    "realRootFixtureRun": false,
+    "recordedAt": "2026-10-11T22:16:34.768603+00:00"
+  }
 }

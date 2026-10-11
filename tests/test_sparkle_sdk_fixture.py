@@ -11,6 +11,45 @@ spec=importlib.util.spec_from_file_location('sparkle_sdk_fixture_guards',str(Pat
 fixture=importlib.util.module_from_spec(spec);sys.modules[spec.name]=fixture;spec.loader.exec_module(fixture)
 
 class SDKFixtureGuards(unittest.TestCase):
+    def setUp(self):
+        original_lstat = Path.lstat
+        def ordinary_owner(path, *args, **kwargs):
+            metadata = original_lstat(path, *args, **kwargs)
+            values = list(metadata)
+            values[4] = 501
+            return os.stat_result(values)
+        for patcher in [patch.object(fixture.os, 'getuid', return_value=501),
+                        patch.object(fixture.os, 'geteuid', return_value=501),
+                        patch.object(Path, 'lstat', ordinary_owner)]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_ordinary_fixture_context_reaches_owner_checks(self):
+        with tempfile.TemporaryDirectory(prefix='remozio-sparkle-boundary-') as temporary:
+            root = Path(temporary).resolve()
+            self.assertEqual(fixture.owned_root(root), root)
+            code = root / 'code'
+            code.write_bytes(b'fixture')
+            self.assertEqual(fixture.owned_file(root, code), code)
+
+    def test_foreign_root_and_file_owner_are_refused_before_lipo(self):
+        with tempfile.TemporaryDirectory(prefix='remozio-sparkle-boundary-') as temporary:
+            root = Path(temporary).resolve()
+            code = root / 'code'
+            code.write_bytes(b'fixture')
+            original_lstat = Path.lstat
+            for foreign_path in [root, code]:
+                def foreign_owner(path, *args, **kwargs):
+                    metadata = original_lstat(path, *args, **kwargs)
+                    values = list(metadata)
+                    if path == foreign_path:
+                        values[4] = 502
+                    return os.stat_result(values)
+                boundary = SimpleNamespace(command=Mock())
+                with self.subTest(path=foreign_path), patch.object(Path, 'lstat', foreign_owner), self.assertRaises(ValueError):
+                    fixture.thin_file(boundary, root, code)
+                boundary.command.assert_not_called()
+
     def test_signing_configuration_never_selects_an_implicit_identity(self):
         for identity,team in [('', 'ABCDEFGHIJ'), ('certificate name', 'ABCDEFGHIJ'), ('0'*40,'wrong-team'), ('a'*40,'ABCDEFGHIJ')]:
             with self.subTest(identity=identity,team=team),self.assertRaises(ValueError):fixture.SigningConfig(identity,team)
