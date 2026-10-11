@@ -7882,6 +7882,24 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(reads.withLock { $0 }, 0); XCTAssertFalse(receiveRightPresent(destination))
         XCTAssertFalse(worker.isRetired)
     }
+    @MainActor func testReceiveWorkerCancellationAtReadinessStopsRetainedWorkerWithoutExplicitClose() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let ready = Mutex(false), gate = DispatchSemaphore(value: 0)
+        let worker = try receiveWorker(fixture, port: port, report: {
+            if $0 == .running { ready.withLock { $0 = true }; gate.wait() }
+        })
+        let start = Task { try await worker.start() }
+        defer { start.cancel(); gate.signal(); worker.requestStop() }
+        try await waitForReceiveWorker { ready.withLock { $0 } }
+        start.cancel(); gate.signal()
+        do { try await start.value; XCTFail("Cancelled startup succeeded") }
+        catch is CancellationError {} catch { throw error }
+        try await waitForReceiveWorker { worker.status == .closed }
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertFalse(receiveRightPresent(destination)); XCTAssertFalse(worker.isRetired)
+        XCTAssertEqual(try XCTUnwrap(fixture.authority).read { _ in 17 }, 17)
+        await worker.close()
+    }
     @MainActor func testReceiveWorkerIdlePolicyFailureRetiresAfterInitialReady() async throws {
         let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), failed = Mutex(false)
         let worker = try receiveWorker(fixture, port: port, policyRead: {

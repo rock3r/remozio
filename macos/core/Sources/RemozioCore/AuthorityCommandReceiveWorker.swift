@@ -165,10 +165,10 @@ public final class AuthorityCommandReceiveWorker: Sendable {
                         ownership.finish()
                     }
                 }
+                try Task.checkCancellation()
             } onCancel: { ownership.requestStop() }
-            try Task.checkCancellation()
         } catch {
-            if Task.isCancelled { throw CancellationError() }
+            if Task.isCancelled { ownership.requestStop(); throw CancellationError() }
             throw error
         }
     }
