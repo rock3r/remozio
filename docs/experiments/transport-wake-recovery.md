@@ -53,8 +53,10 @@ Concurrent close calls share one cleanup attempt. Successful close is idempotent
 
 ## Evidence and remaining gates
 
-The focused gate passed 20 tests on 2026-10-11. Eleven runner tests cover retry bounds, signer outage, channel startup and polling failure, permanent identity errors, cancellation, concurrent close, and release cleanup. Nine hint/runtime tests cover negotiation, scope, signing, and connection independence.
+The focused gate passed 21 tests on 2026-10-11. Eleven runner tests cover retry bounds, signer outage, channel startup and polling failure, permanent identity errors, cancellation, concurrent close, and release cleanup. Ten hint/runtime tests cover negotiation, scope, signing, and connection independence.
 
 The recovery composition uses the actual client actors with synthetic drivers and software fixture keys. It proves fresh handshake ordering and signatures for the original grant ID. An ordinary approval connection stays usable through recovery and a permanent wake signer failure. Accepted hints are not repeatedly submitted during a healthy attempt.
+
+The malformed-response regression first failed for invalid CBOR, unknown fields, noncanonical IDs, wrong scope, and invalid IDs. The channel now classifies all hint decoding failures as an invalid message. Each case rejects the payload without requesting a challenge or signing it, closes that attempt, and recovers through fresh channels using the original pinned scope.
 
 These checks do not prove installed account custody, real IPC reconnection, provider delivery, or enrolled phone behavior. The embedded app build verifies compilation and rejection paths only. [Issue 286](https://github.com/rock3r/remozio/issues/286) retains installed and physical platform gates.

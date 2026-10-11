@@ -121,7 +121,8 @@ final class AuthorityWakeHintTests: XCTestCase, @unchecked Sendable {
         let current = try await channel.current(); XCTAssertEqual(current.deliveryIDs, ids)
         let other = try self.binding(2)
         driver.value.withLock { $0.bytes = try? AuthorityWakeHints(binding: other, deliveryIDs: ids).encode() }
-        do { _ = try await channel.current(); XCTFail("Cross-gateway hint") } catch {}
+        do { _ = try await channel.current(); XCTFail("Cross-gateway hint") }
+        catch { XCTAssertEqual(error as? AuthorityWakeHintChannelError, .invalidMessage) }
         XCTAssertEqual(driver.value.withLock { $0.closed }, 1)
     }
     func testEndpointNegotiationAndInvocationChecksPrecedeHintHandler() throws {
@@ -251,6 +252,59 @@ final class AuthorityWakeHintTests: XCTestCase, @unchecked Sendable {
         for driver in [firstWake, secondWake] { XCTAssertEqual(driver.value.withLock { $0.closed }, 2) }
         await ordinary.close()
     }
+    func testMalformedHintPayloadsCloseWithoutSigningAndRecoverWithThePinnedScope() async throws {
+        let binding = try binding(), key = P256.Signing.PrivateKey()
+        let ids = [UUID(), UUID()], good = try AuthorityWakeHints(binding: binding, deliveryIDs: ids).encode()
+        let limits = try CBORLimits(maxBytes: 20_000, maxDepth: 2, maxItems: 1040)
+        guard case .map(let fields) = try DeterministicCBOR.decode(good, limits: limits) else { return XCTFail() }
+        var unknown = fields; unknown[7] = .unsigned(1)
+        var noncanonical = fields
+        guard case .array(let orderedIDs) = fields[6] else { return XCTFail() }
+        noncanonical[6] = .array(Array(orderedIDs.reversed()))
+        var invalidID = fields; invalidID[6] = .array([.bytes(Data(repeating: 0, count: 15))])
+        let cases: [(String, Data)] = [
+            ("invalid CBOR", Data([0xff])),
+            ("unknown field", try DeterministicCBOR.encode(.map(unknown), limits: limits)),
+            ("noncanonical IDs", try DeterministicCBOR.encode(.map(noncanonical), limits: limits)),
+            ("wrong scope", try AuthorityWakeHints(binding: self.binding(2), deliveryIDs: ids).encode()),
+            ("invalid ID", try DeterministicCBOR.encode(.map(invalidID), limits: limits))
+        ]
+        for (label, bad) in cases {
+            let firstHint = HintDriver(), secondHint = HintDriver(), firstWake = WakeDriver(), secondWake = WakeDriver()
+            firstHint.value.withLock { $0.bytes = bad }; secondHint.value.withLock { $0.bytes = good }
+            let attempts = Mutex(0)
+            let runner = try TransportWakeRunner(intervalMilliseconds: 10, initialRetryMilliseconds: 100, maximumRetryMilliseconds: 100,
+                makeAttempt: { [self] in
+                    let number = attempts.withLock { $0 += 1; return $0 }
+                    guard number <= 2 else { throw GatewayWakeSignerError.invalidConfiguration }
+                    let runtime = try TransportWakeRuntime(
+                        hints: AuthorityWakeHintChannel(driver: number == 1 ? firstHint : secondHint, binding: binding),
+                        gateway: GatewayWakeChannel(driver: number == 1 ? firstWake : secondWake), signer: signer(binding, key: key))
+                    return TransportWakeAttempt(start: { try await runtime.start() }, poll: { try await runtime.poll() },
+                        close: { await runtime.close() })
+                }, report: { _ in })
+            try await runner.start()
+            try await waitFor { runner.status == .failed || secondWake.value.withLock { $0.submissions.count } == ids.count }
+            await runner.close()
+            XCTAssertEqual(attempts.withLock { $0 }, 2, label)
+            XCTAssertEqual(firstWake.value.withLock { $0.challengeNumber }, 0, label)
+            XCTAssertTrue(firstWake.value.withLock { $0.submissions.isEmpty }, label)
+            XCTAssertEqual(firstHint.value.withLock { $0.closed }, 2, label)
+            XCTAssertEqual(firstWake.value.withLock { $0.closed }, 2, label)
+            let submissions = secondWake.value.withLock { $0.submissions }
+            XCTAssertEqual(submissions.count, ids.count, label)
+            var delivered = Set<UUID>()
+            for sent in submissions {
+                let submission = try GatewayWakeSubmission.decode(sent.0)
+                XCTAssertEqual(submission.binding, binding, label)
+                delivered.insert(try GatewayHostSnapshot.uuid(submission.deliveryID))
+                XCTAssertTrue(try key.publicKey.isValidSignature(P256.Signing.ECDSASignature(rawRepresentation: sent.1),
+                    for: submission.signingInput()), label)
+            }
+            XCTAssertEqual(delivered, Set(ids), label)
+        }
+    }
+
     func testPermanentWakeSignerFailureLeavesOrdinaryConnectionUsableWithoutRetry() async throws {
         let binding = try binding(), trust = DirectApprovalTrust(macID: binding.macID, accountID: binding.accountID, revision: UUID(), peers: [])
         let ordinaryDriver = OrdinaryDriver(try AuthorityTrustCodec.encodeSnapshot(trust))
