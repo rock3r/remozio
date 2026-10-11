@@ -85,4 +85,39 @@ final class MacLoginItemControlsTests: XCTestCase {
         controls.openSettings()
         XCTAssertEqual(driver.settings, 1)
     }
+    @MainActor func testRegistrationNoticeSurvivesUnknownStateThenClearsOnEnabledRefresh() async {
+        let driver = LoginDriver()
+        let subject = MacLoginItemControls(driver: driver)
+        driver.registration = { throw LoginDriver.Failure.refused }
+        await subject.setEnabled(true)
+        XCTAssertEqual(subject.notice, .enableFailed)
+        for state in [MacLoginItemState.unknown, .requiresApproval] {
+            driver.value = state; subject.refresh()
+            XCTAssertEqual(subject.notice, .enableFailed)
+        }
+        driver.value = .enabled; subject.refresh()
+        XCTAssertEqual(subject.state, .enabled)
+        XCTAssertNil(subject.notice)
+        await subject.setEnabled(true)
+        XCTAssertEqual(driver.registrations, 1)
+        XCTAssertEqual(driver.removals, 0)
+    }
+    @MainActor func testRemovalNoticeSurvivesUnknownStateThenClearsOnConfirmedUnregistration() async {
+        let driver = LoginDriver(); driver.value = .enabled
+        let controls = MacLoginItemControls(driver: driver)
+        driver.removal = { throw LoginDriver.Failure.refused }
+        await controls.setEnabled(false)
+        XCTAssertEqual(controls.notice, .disableFailed)
+        for state in [MacLoginItemState.unknown, .requiresApproval] {
+            driver.value = state; controls.refresh()
+            XCTAssertEqual(controls.notice, .disableFailed)
+        }
+        driver.value = .notRegistered; controls.refresh()
+        XCTAssertEqual(controls.state, .notRegistered)
+        XCTAssertNil(controls.notice)
+        await controls.setEnabled(false)
+        XCTAssertEqual(driver.registrations, 0)
+        XCTAssertEqual(driver.removals, 1)
+    }
+
 }

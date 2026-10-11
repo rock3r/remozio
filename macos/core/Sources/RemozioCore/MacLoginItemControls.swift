@@ -43,13 +43,17 @@ public final class MacLoginItemControls {
     public func refresh() {
         guard !changing else { return }
         state = driver.status()
+        switch (notice, state) {
+        case (.enableFailed?, .enabled), (.disableFailed?, .notRegistered): notice = nil
+        default: break
+        }
     }
     public func setEnabled(_ enabled: Bool) async {
         guard !changing else { return }
         refresh()
         guard state.registered != enabled else { return }
         changing = true; notice = nil
-        defer { changing = false; state = driver.status() }
+        defer { changing = false; refresh() }
         do {
             if enabled { try driver.register() }
             else { try await driver.unregister() }
