@@ -74,6 +74,61 @@ final class SignedReleaseInspectionTests: XCTestCase {
             XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
         }
     }
+    func testUndeclaredExecutableCannotBecomeCompleteReleaseEvidence() throws {
+        let original = repository.appendingPathComponent(".build/macos-app/DerivedData/Build/Products/Debug/Remozio.app")
+        guard FileManager.default.fileExists(atPath: original.path) else { throw XCTSkip("Build the app before inventory checks.") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for relativePath in ["Contents/Helpers/UnlistedHelper", "Contents/Resources/UnlistedHelper", "Contents/Resources/UnlistedScript", "Contents/Helpers/UnlistedAlias", "Contents/Resources/UnlistedDirectoryAlias"] {
+            let copy = root.appendingPathComponent(UUID().uuidString + ".app")
+            try FileManager.default.copyItem(at: original, to: copy)
+            let extra = copy.appendingPathComponent(relativePath)
+            if relativePath.hasSuffix("DirectoryAlias") {
+                try FileManager.default.createSymbolicLink(atPath: extra.path, withDestinationPath: "../Helpers")
+            } else if relativePath.hasSuffix("Alias") {
+                try FileManager.default.createSymbolicLink(atPath: extra.path, withDestinationPath: "RemozioCommandChild")
+            } else if relativePath.hasSuffix("Script") {
+                try Data("#!/bin/sh\nexit 0\n".utf8).write(to: extra)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: extra.path)
+            } else {
+                try FileManager.default.copyItem(at: copy.appendingPathComponent("Contents/Helpers/RemozioCommandChild"), to: extra)
+            }
+            let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            sign.arguments = ["--force", "--sign", "-", "--options", "runtime", "--identifier", "dev.remozio.mac.debug", copy.path]
+            sign.standardOutput = FileHandle.nullDevice; sign.standardError = FileHandle.nullDevice
+            try sign.run(); sign.waitUntilExit(); XCTAssertEqual(sign.terminationStatus, 0)
+            let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            verify.arguments = ["--verify", "--deep", "--strict", copy.path]
+            verify.standardOutput = FileHandle.nullDevice; verify.standardError = FileHandle.nullDevice
+            try verify.run(); verify.waitUntilExit(); XCTAssertEqual(verify.terminationStatus, 0)
+            XCTAssertThrowsError(try inspect(copy, identifier: "dev.remozio.mac.debug"), relativePath) {
+                XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
+            }
+        }
+    }
+    func testInventoryBoundsAndInternalAliasesDoNotHideCode() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let contents = root.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: false)
+        let code = contents.appendingPathComponent("code")
+        // Even a non-executable Mach-O file belongs to the code inventory.
+        try Data([0xcf, 0xfa, 0xed, 0xfe]).write(to: code)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: code.path)
+        try FileManager.default.createSymbolicLink(at: contents.appendingPathComponent("alias"), withDestinationURL: code)
+        XCTAssertEqual(try SignedReleaseInspection.executableInventory(root), ["Contents/code", "Contents/alias"])
+        let data = contents.appendingPathComponent("data")
+        try Data("plain resource".utf8).write(to: data)
+        try FileManager.default.createSymbolicLink(at: contents.appendingPathComponent("data-alias"), withDestinationURL: data)
+        XCTAssertEqual(try SignedReleaseInspection.executableInventory(root), ["Contents/code", "Contents/alias"])
+        XCTAssertThrowsError(try SignedReleaseInspection.executableInventory(root, maximumEntries: 1))
+        try FileManager.default.createSymbolicLink(at: contents.appendingPathComponent("external"), withDestinationURL: repository)
+        XCTAssertThrowsError(try SignedReleaseInspection.executableInventory(root)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .unsafePath)
+        }
+    }
     func testSymlinkBundleCannotBecomeInspectionEvidence() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Security
 
@@ -34,6 +35,9 @@ public enum SignedReleaseInspection {
               app.plist["CFBundleVersion"] as? String == manifest.build,
               app.plist["CFBundleShortVersionString"] as? String == manifest.release,
               app.plist["LSMinimumSystemVersion"] as? String == "26.0" else { throw ReleaseManifestError.identityMismatch }
+        guard try executableInventory(root) == Set(manifest.components.map(\.relativePath)) else {
+            throw ReleaseManifestError.identityMismatch
+        }
         var hashes: [AuthorityCodeRole: Data] = [:]
         for component in manifest.components {
             var path = root
@@ -112,10 +116,87 @@ public enum SignedReleaseInspection {
         }
         return true
     }
+    /// Schema 1 inventories native code and executable files. It does not infer a role from a directory name.
+    static func executableInventory(_ bundle: URL, maximumEntries: Int = 8192) throws -> Set<String> {
+        guard (1...8192).contains(maximumEntries) else { throw ReleaseManifestError.invalidDeclaration }
+        let root = try canonicalURL(bundle)
+        let prefix = root.path + "/"
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        var failed = false
+        guard let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys),
+            errorHandler: { _, _ in failed = true; return false }) else { throw ReleaseManifestError.unsafePath }
+        var paths = Set<String>(), count = 0
+        var aliases: [(path: String, target: String)] = []
+        for case let url as URL in entries {
+            count += 1
+            guard count <= maximumEntries, url.path.hasPrefix(prefix) else { throw ReleaseManifestError.unsafePath }
+            let relative = String(url.path.dropFirst(prefix.count))
+            guard relative.utf8.count <= 1024, relative.split(separator: "/").count <= 16 else {
+                throw ReleaseManifestError.unsafePath
+            }
+            let values = try url.resourceValues(forKeys: keys)
+            if values.isSymbolicLink == true {
+                let target = try canonicalURL(url)
+                guard target.path == root.path || target.path.hasPrefix(prefix) else {
+                    throw ReleaseManifestError.unsafePath
+                }
+                aliases.append((relative, target.path == root.path ? "" : String(target.path.dropFirst(prefix.count))))
+                entries.skipDescendants()
+                continue
+            }
+            if values.isDirectory == true { continue }
+            guard values.isRegularFile == true else { throw ReleaseManifestError.unsafePath }
+            if try containsExecutableCode(url) { paths.insert(relative) }
+            guard paths.count <= AuthorityCodeRole.allCases.count else { throw ReleaseManifestError.identityMismatch }
+        }
+        guard !failed else { throw ReleaseManifestError.unsafePath }
+        let canonicalPaths = paths
+        for alias in aliases {
+            for code in canonicalPaths {
+                if code == alias.target { paths.insert(alias.path) }
+                else if alias.target.isEmpty || code.hasPrefix(alias.target + "/") {
+                    let suffix = alias.target.isEmpty ? code : String(code.dropFirst(alias.target.count + 1))
+                    paths.insert(alias.path + "/" + suffix)
+                }
+            }
+            guard paths.count <= AuthorityCodeRole.allCases.count else { throw ReleaseManifestError.identityMismatch }
+        }
+        return paths
+    }
+    private static func canonicalURL(_ url: URL) throws -> URL {
+        guard let path = realpath(url.path, nil) else { throw ReleaseManifestError.unsafePath }
+        defer { free(path) }
+        return URL(fileURLWithPath: String(cString: path))
+    }
+    private static func readHeader(_ url: URL) throws -> (mode: mode_t, bytes: Data) {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw ReleaseManifestError.unsafePath }
+        defer { close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG else {
+            throw ReleaseManifestError.unsafePath
+        }
+        var bytes = [UInt8](repeating: 0, count: 8), offset = 0
+        while offset < bytes.count {
+            let received = bytes.withUnsafeMutableBytes { read(descriptor, $0.baseAddress!.advanced(by: offset), $0.count - offset) }
+            if received < 0, errno == EINTR { continue }
+            guard received >= 0 else { throw ReleaseManifestError.unsafePath }
+            if received == 0 { break }
+            offset += received
+        }
+        return (status.st_mode, Data(bytes.prefix(offset)))
+    }
+    private static func containsExecutableCode(_ url: URL) throws -> Bool {
+        let header = try readHeader(url)
+        let magic = Data(header.bytes.prefix(4))
+        let codeMagic: Set<Data> = [Data([0xce, 0xfa, 0xed, 0xfe]), Data([0xcf, 0xfa, 0xed, 0xfe]),
+            Data([0xfe, 0xed, 0xfa, 0xce]), Data([0xfe, 0xed, 0xfa, 0xcf]),
+            Data([0xca, 0xfe, 0xba, 0xbe]), Data([0xbe, 0xba, 0xfe, 0xca]),
+            Data([0xca, 0xfe, 0xba, 0xbf]), Data([0xbf, 0xba, 0xfe, 0xca])]
+        return header.mode & 0o111 != 0 || codeMagic.contains(magic)
+    }
     private static func thinArm64(_ url: URL) throws {
-        let file = try FileHandle(forReadingFrom: url)
-        defer { try? file.close() }
-        guard try file.read(upToCount: 8) == Data([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1]) else {
+        guard try readHeader(url).bytes == Data([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1]) else {
             throw ReleaseManifestError.identityMismatch
         }
     }

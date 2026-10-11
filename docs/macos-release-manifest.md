@@ -68,6 +68,13 @@ It reads `kSecCodeInfoPList`, the secured dictionary from signing information.
 It does not use `Bundle.infoDictionary` as authenticated metadata or request private signing-information flags.
 
 Inspection compares each helper's actual signed identifier, Team ID, generation, build, and CDHash with the declaration.
+A bounded filesystem inventory must match the declared executable paths exactly.
+It detects Mach-O files anywhere in the bundle, including files without an executable mode bit, and executable scripts.
+Unlisted code cannot silently appear as an absent role. Schema 1 requires every code file to have a declared native role.
+Additional dependency layouts need explicit manifest support before updater or bridge integration.
+The inventory permits aliases to plain internal resources. Aliases exposing code count as executable locations too.
+Schema 1 requires declared code paths without symlinks. Later dependency layouts must declare their code and alias relationships explicitly.
+The inventory rejects external links and special files, and limits traversal to 8,192 entries and depth 16.
 It rejects symlinks within the declared executable paths and requires thin arm64 executables.
 It rechecks the enclosing signature and declaration before returning candidate evidence.
 
@@ -80,7 +87,7 @@ This change enables no installation, service registration, automatic update, or 
 
 The repository gate builds both Debug and Release before the Core tests inspect the real artifacts.
 Focused tests check canonical schema handling, exact sets, compiled command versions, missing roles, and ad-hoc rejection by the production API.
-Artifact tests detect plist tampering, helper tampering, and a re-signed helper whose CDHash no longer matches the manifest.
+Artifact tests detect plist tampering, helper tampering, a re-signed helper whose CDHash no longer matches the manifest, and validly signed bundles containing unlisted helpers or scripts.
 The re-signing test uses only disposable copies and ad-hoc signatures.
 
 Standalone Core tests skip artifact cases when the app has not been built.
