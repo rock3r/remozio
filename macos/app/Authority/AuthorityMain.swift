@@ -4,29 +4,73 @@ import RemozioCore
 
 @main
 struct AuthorityMain {
-    static func main() {
-        guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--configuration" else {
-            fail("Usage: RemozioAuthority --configuration /absolute/protected/configuration.cbor", code: EX_USAGE)
+    private enum RunFailure: Error { case startup(AuthorityStartupFailure), retired, shutdown }
+    static func main() async {
+        guard CommandLine.arguments.count == 3,
+              ["--configuration", "--presence-configuration"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioAuthority --configuration|--presence-configuration /absolute/protected/configuration.cbor", code: EX_USAGE)
         }
-        guard geteuid() == 0 else { fail("Authority startup requires root.", code: EX_NOPERM) }
-        do {
-            let runner = try AuthorityServiceRunner(configurationPath: CommandLine.arguments[2], report: report)
-            // Dispatch sources retain the owner until orderly shutdown completes.
-            signal(SIGTERM, SIG_IGN)
-            signal(SIGINT, SIG_IGN)
-            let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-            let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-            let shutdown: @Sendable () -> Void = {
-                do { try runner.close(); exit(EX_OK) }
-                catch { fail("Authority shutdown failed.", code: EX_SOFTWARE) }
+        guard getuid() == 0, geteuid() == 0 else { fail("Authority startup requires the Root account.", code: EX_NOPERM) }
+        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
+        let presenceMode = CommandLine.arguments[1] == "--presence-configuration", path = CommandLine.arguments[2]
+        let worker = Task {
+            if presenceMode { try await runPresence(path: path) }
+            else { try await runLegacy(path: path) }
+        }
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        termination.setEventHandler { worker.cancel() }; interruption.setEventHandler { worker.cancel() }
+        termination.resume(); interruption.resume()
+        defer { termination.cancel(); interruption.cancel() }
+        do { try await worker.value }
+        catch is CancellationError { exit(EX_OK) }
+        catch RunFailure.retired { fail("Authority service stopped after a runtime failure.", code: EX_SOFTWARE) }
+        catch RunFailure.shutdown { fail("Authority shutdown failed.", code: EX_SOFTWARE) }
+        catch RunFailure.startup(let failure) {
+            switch failure {
+            case .historyRecoveryRequired: fail("Authority starting: history recovery is pending.", code: EX_TEMPFAIL)
+            case .repairRequired: fail("Authority continuity requires repair.", code: EX_CONFIG)
+            case .temporaryStorageFailure: fail("Authority starting: storage is temporarily unavailable.", code: EX_TEMPFAIL)
+            case .configurationFailure: fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG)
             }
-            termination.setEventHandler(handler: shutdown)
-            interruption.setEventHandler(handler: shutdown)
-            termination.resume(); interruption.resume()
-            try runner.start()
-            withExtendedLifetime((runner, termination, interruption)) { dispatchMain() }
+        } catch { fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG) }
+    }
+    private static func runPresence(path: String) async throws {
+        let runner = try AuthorityRuntimeRunner(presenceConfigurationPath: path, report: reportRuntime)
+        do {
+            try await runner.start()
+            while true {
+                try Task.checkCancellation()
+                switch runner.status {
+                case .failed(let failure): throw RunFailure.startup(failure)
+                case .retired: throw RunFailure.retired
+                case .shutdownFailed: throw RunFailure.shutdown
+                case .closed: return
+                default: try await Task.sleep(for: .milliseconds(250))
+                }
+            }
         } catch {
-            fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG)
+            let failure = error
+            do { try await runner.close() } catch { throw RunFailure.shutdown }
+            throw failure
+        }
+    }
+    private static func runLegacy(path: String) async throws {
+        let runner = try AuthorityServiceRunner(configurationPath: path, report: report)
+        do {
+            try runner.start()
+            while true { try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(250)) }
+        } catch {
+            let failure = error
+            do { try runner.close() } catch { throw RunFailure.shutdown }
+            throw failure
+        }
+    }
+    private static func reportRuntime(_ status: AuthorityRuntimeRunner.Status) {
+        switch status {
+        case .running: log("Authority request service started. Wake publication connects separately.")
+        case .waiting(let milliseconds): log("Authority starting: storage is temporarily unavailable. Retrying in \(milliseconds) milliseconds.")
+        default: break
         }
     }
     private static func report(_ status: AuthorityServiceRunner.Status) {

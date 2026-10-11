@@ -38,6 +38,7 @@ public struct ApprovalRequestDraft: Sendable {
 
 /// Local state observation. It is not a signed status response or an execution permit.
 public struct ApprovalRequestState: Equatable, Sendable {
+    public let requestKind: RequestKind
     public let macID: Data
     public let accountID: Data
     public let requestDigest: Data
@@ -317,7 +318,7 @@ public final class ApprovalRequestCoordinator {
             try append(tx, requestID: payload.requestID, category: category, kind: .requestCreated, outcome: .pending,
                 reason: .none, receiptTimeMs: receiptTimeMs)
         }
-        entries[payload.requestID] = Entry(state: ApprovalRequestState(macID: mac, accountID: account, requestDigest: digest, challenge: payload.challenge,
+        entries[payload.requestID] = Entry(state: ApprovalRequestState(requestKind: payload.contract.requestKind, macID: mac, accountID: account, requestDigest: digest, challenge: payload.challenge,
             reason: .none, terminalAt: nil, decisionPhoneID: nil, requestID: payload.requestID, phase: .queued,
             revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
             contract: payload.contract, permittedActions: Set(payload.permittedActions), observationID: observationID,
@@ -818,7 +819,7 @@ public final class ApprovalRequestCoordinator {
     private func replace(_ id: Data, phase: RequestPhase, reason: RequestStatusReason, now: AuthorityMoment,
                          decisionPhoneID: Data? = nil) throws -> ApprovalRequestState {
         guard var entry = entries[id] else { throw ApprovalCoordinatorError.unknownRequest }
-        entry.state = ApprovalRequestState(macID: entry.state.macID, accountID: entry.state.accountID,
+        entry.state = ApprovalRequestState(requestKind: entry.state.requestKind, macID: entry.state.macID, accountID: entry.state.accountID,
             requestDigest: entry.state.requestDigest, challenge: entry.state.challenge, reason: reason,
             terminalAt: phase.isTerminal ? now : nil, decisionPhoneID: decisionPhoneID ?? entry.state.decisionPhoneID,
             requestID: id, phase: phase, revision: entry.state.revision + 1,

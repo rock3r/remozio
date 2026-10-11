@@ -65,4 +65,4 @@ The full local gate passed 1,609 core tests and the Debug and Release app builds
 
 These fixtures use synthetic gateway drivers and private test journals. They do not prove installed service restart, launchd ordering, real provider delivery, hardware signer restoration, or device behavior.
 
-The Root executable still selects its trust-only runner. Executable selection, transport-worker recovery, and protected installation remain separate integration work. [Issue 286](https://github.com/rock3r/remozio/issues/286) retains the installed XPC and physical validation gates.
+The Root executable can now select the [presence and wake runtime](authority-runtime-entrypoint.md) with explicit protected configuration. Transport-worker recovery and protected installation remain separate integration work. [Issue 286](https://github.com/rock3r/remozio/issues/286) retains the installed XPC and physical validation gates.
