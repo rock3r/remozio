@@ -20,7 +20,8 @@ EXPECTED = {
         "lateExecErrorBeforeTerminal": True,
         "observedExecErrorNotRepeated": True,
         "normalEOFReportsWait": True,
-        "partialErrorBlocksTerminal": True,
+        "partialFinalErrorBlocksTerminal": True,
+        "partialPreWaitErrorBlocksTerminal": True,
     },
     "native_leader": {
         "foregroundSIGTSTPStoppedLeader": False,

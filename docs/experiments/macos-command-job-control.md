@@ -103,11 +103,13 @@ The [issue 309 diagnosis](https://github.com/rock3r/remozio/issues/309#issuecomm
 
 After reaping, the prototype now reconciles the private error pipe before reporting terminal status.
 It reports a late error first, preserves an already reported error, and accepts normal EOF.
-A partial final error record blocks the terminal report. Interrupted reads retry without changing a fixture deadline.
+The same reader checks errors before waiting and after reaping. A partial record in either path blocks the terminal report.
+Interrupted reads retry without changing a fixture deadline.
 
 The completion probe holds its child at a private gate while the first nonblocking error read proves the pipe is empty.
 It then releases and reaps the child before calling the prototype's actual completion function.
-Ten trials check late error ordering, no duplicate error, normal EOF, and partial-record rejection.
+Ten trials check late error ordering, no duplicate error, normal EOF, and partial-record rejection in both paths.
+For the pre-wait case, a child acknowledgement proves its partial record is readable before the first wait.
 A compiled legacy terminal-only control must fail the first case. No timing delay creates this regression.
 
 This repair changes only the disposable prototype. It adds no experiment retry and changes no product monitor, service, or execution policy.

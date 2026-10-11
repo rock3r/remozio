@@ -10,12 +10,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 static int report(uint32_t tag,uint32_t detail){uint32_t r[3]={0x524d5431,tag,detail};return write(5,r,sizeof r)==sizeof r?0:1;}
-static int report_reaped_target(int failure_fd,uint32_t status){
+static int report_exec_error(int failure_fd,int pending_allowed){
  int failed=0;ssize_t count;
  do{count=read(failure_fd,&failed,sizeof failed);}while(count<0&&errno==EINTR);
- if(count<0||(count!=0&&count!=sizeof failed))return 1;
+ if(count<0)return pending_allowed&&errno==EAGAIN?0:1;
+ if(count!=0&&count!=sizeof failed)return 1;
  if(count==sizeof failed&&(failed<=0||report('F',(uint32_t)failed)))return 1;
- return report('X',status);
+ return 0;
+}
+static int report_reaped_target(int failure_fd,uint32_t status){
+ return report_exec_error(failure_fd,0)||report('X',status);
 }
 int main(int argc,char **argv){
  if(argc!=2||getsid(0)!=getpid()||ioctl(0,TIOCSCTTY,0))return 70;
@@ -44,8 +48,7 @@ int main(int argc,char **argv){
   struct kevent event;struct timespec immediate={0,0};int count=kevent(events,NULL,0,&event,1,&immediate);
   if(count<0&&errno!=EINTR){error=1;kill(-target,SIGKILL);}
   if(count==1&&(event.fflags&NOTE_EXEC)&&!exec_seen){exec_seen=1;if(report('E',0))error=1;}
-  int failed=0;ssize_t received=read(failure[0],&failed,sizeof failed);
-  if(received==sizeof failed){if(report('F',(uint32_t)failed))error=1;}
+  if(report_exec_error(failure[0],1)){error=1;break;}
   pid_t got=waitpid(target,&status,WNOHANG|WUNTRACED|WCONTINUED);
   if(got==target){
    if(WIFSTOPPED(status)){if(report('S',(uint32_t)WSTOPSIG(status)))error=1;}
