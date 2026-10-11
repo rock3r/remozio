@@ -151,7 +151,18 @@ public final class CommandReceiveHost {
                               now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                               checkCancellation: @escaping @Sendable () throws -> Void = {},
                               onResult: (Result<IssuedRequestPayload, Error>) throws -> Void) throws -> CommandReceiveEvent {
+        try pollAdmission(journal: journal, submissionLimits: submissionLimits, resolve: resolve, draft: draft,
+            now: now, receiptTime: { receiptTimeMs }, checkCancellation: checkCancellation, onResult: onResult)
+    }
+    /// Sample receipt time only after an authenticated input arrives, before its admission work.
+    func pollAdmission(journal: AuthorityJournal, submissionLimits: CBORLimits,
+                       resolve: (CommandSubmission) throws -> CommandAdmissionResolution,
+                       draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                       now: () throws -> AuthorityMoment, receiptTime: () -> UInt64?,
+                       checkCancellation: @escaping @Sendable () throws -> Void = {},
+                       onResult: (Result<IssuedRequestPayload, Error>) throws -> Void) throws -> CommandReceiveEvent {
         try poll { received in
+            let receiptTimeMs = receiptTime()
             let result: Result<IssuedRequestPayload, Error>
             do {
                 let attempt = try prepareAdmission(received: received, submissionLimits: submissionLimits)

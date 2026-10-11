@@ -80,7 +80,7 @@ The product does not add a check-in bridge or registration fallback in this chan
 
 ## Test evidence
 
-The focused native tests pass 32 cases: eight receive-worker cases and 24 wake-publisher cases. They use anonymous Mach receive rights, software fixture keys, private journals, and synthetic gateway drivers.
+The focused native tests pass 35 cases: nine receive-worker cases, 25 wake-publisher cases, and one existing admission compatibility case. They use anonymous Mach receive rights, software fixture keys, private journals, and synthetic gateway drivers.
 
 | Check | Evidence |
 |---|---|
@@ -90,12 +90,17 @@ The focused native tests pass 32 cases: eight receive-worker cases and 24 wake-p
 | Worker lifetime | Dropping the worker releases its receive right without a self-retention cycle. |
 | Shared shutdown | An active policy read can finish before the shared journal closes. |
 | Startup race | Closing during readiness prevents creation of a late publisher. |
-| Policy retirement | Both a healthy gateway and an unavailable gateway lead to service shutdown. |
+| Policy retirement | Both a healthy gateway and an unavailable gateway lead to service shutdown. Retirement during a gateway handshake prevents the first publication. |
+| Receipt sampling | Idle polls and hello messages do not sample receipt time. Actual command input samples the provider after receive. |
 | Production account gate | A normal account cannot construct the public worker or invoke its host factory. |
 
-The full `./scripts/check.sh` gate also passed, including 1,646 core tests, the Debug and Release app builds, and native experiments. All six required Kotlin and Android tasks passed.
+The full `./scripts/check.sh` gate passed after the review fixes, including 1,648 core tests, the Debug and Release app builds, and native experiments. All six required Kotlin and Android tasks passed.
 
 The healthy-gateway retirement regression failed before its fix with a timeout. It passes after the publisher checks shared authority retirement before each publication turn.
+
+The handshake regression also failed before its fix: it observed snapshots and wakes after receiver retirement. A second check now runs after the gateway handshake and before initial reconciliation.
+
+The receipt regression observed repeated start-of-poll timestamps before any command input. Receipt sampling now runs inside the authenticated input handler. The fixture verifies sampling time; its normal-user admission remains blocked and does not prove a persisted Root audit event.
 
 ## Remaining product integration
 

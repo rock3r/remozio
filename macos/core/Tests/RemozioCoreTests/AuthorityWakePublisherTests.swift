@@ -19,6 +19,8 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
             var onRegistration: (@Sendable () throws -> Void)?
             var closed = 0
             var failHello = false
+            var holdHello = false
+            var heldHello: (@Sendable (GatewayRootResponse) -> Void)?
             var lost: (@Sendable () -> Void)?
         }
         let value = Mutex(State())
@@ -28,7 +30,11 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
                 let response: GatewayRootResponse?
                 switch call {
                 case .hello:
-                    response = value.withLock { $0.calls += 1; return $0.failHello ? .failed : .version(3) }
+                    response = value.withLock {
+                        $0.calls += 1
+                        if $0.holdHello { $0.heldHello = reply; return nil }
+                        return $0.failHello ? .failed : .version(3)
+                    }
                 case .synchronize(let bytes):
                     let snapshot = try GatewayHostSnapshot.decode(bytes)
                     value.withLock { $0.calls += 1; $0.snapshots.append(snapshot) }
@@ -213,6 +219,28 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         catch { XCTAssertEqual(error as? AuthorityWakePublisherError, .closed) }
         try await close.value
         XCTAssertEqual(publishers.withLock { $0 }, 0); XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+    func testCommandRetirementDuringGatewayHelloPreventsInitialPublication() async throws {
+        let f = try Fixture(deadline: 5000), port = ReceivePort(), failed = Mutex(false), closes = Mutex(0)
+        let worker = try commandWorker(f, port: port, policyRead: {
+            if failed.withLock({ $0 }) { throw CommandSessionRegistryError.invalidCodePolicy }
+        })
+        let driver = Driver(); driver.value.withLock { $0.holdHello = true }
+        let service = try AuthorityWakeService(makePublisher: { try f.publisher(driver) },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 100, startRequests: {}, closeRequests: {
+                closes.withLock { $0 += 1 }; try f.journal.close()
+            }, commandReceiver: worker)
+        try await service.start()
+        try await waitUntil { driver.value.withLock { $0.heldHello != nil } }
+        failed.withLock { $0 = true }
+        try await waitUntil { worker.isRetired }
+        let hello = try XCTUnwrap(driver.value.withLock { $0.heldHello })
+        hello(.version(3))
+        try await waitUntil { await service.wakeStatus == .closed }
+        try await service.close()
+        XCTAssertTrue(driver.value.withLock { $0.snapshots.isEmpty })
+        XCTAssertTrue(driver.value.withLock { $0.registrations.isEmpty })
+        XCTAssertEqual(closes.withLock { $0 }, 1)
     }
     func testCommandPolicyRetirementClosesServiceWithHealthyGateway() async throws {
         let f = try Fixture(deadline: 5000), port = ReceivePort(), failed = Mutex(false), closes = Mutex(0)

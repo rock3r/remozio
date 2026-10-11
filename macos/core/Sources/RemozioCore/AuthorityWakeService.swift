@@ -192,6 +192,7 @@ public actor AuthorityWakeService {
                 guard await update(next, .connecting) else { throw CancellationError() }
                 try await next.start()
                 try Task.checkCancellation()
+                guard !requestsRetired() else { throw AuthorityXPCEndpointError.unavailable }
                 try await next.reconcile()
                 try hints.install(next.hintFeed)
                 guard await update(next, .running) else { throw CancellationError() }

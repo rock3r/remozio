@@ -155,7 +155,7 @@ public final class AuthorityCommandReceiveWorker: Sendable {
                             ready = true; continuation.resume()
                             while !ownership.stopping {
                                 _ = try host.pollAdmission(journal: journal, submissionLimits: limits,
-                                    resolve: resolve, draft: draft, now: clock, receiptTimeMs: receiptTime(),
+                                    resolve: resolve, draft: draft, now: clock, receiptTime: receiptTime,
                                     checkCancellation: { try ownership.check() }, onResult: onAdmission)
                             }
                         } catch {
