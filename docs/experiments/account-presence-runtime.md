@@ -47,7 +47,7 @@ The fixture uses real `NSXPCConnection` messages, the production interface, code
 
 The run proves mode commits, revision conflicts and fresh connection bindings. It commits a mode change before discarding the reply, then reads the committed state after reconnect. An old connection's mutation is rejected on a new connection. The final mode remains Automatic at revision 3, with exactly three audit events. Closing the observation connection leaves the detector unavailable.
 
-This fixture does not register a Mach service or launch the app GUI. It uses seams for retained app policy and Root self-code validation. It does not prove Developer ID validation, Root or separate service accounts, audit-session isolation, or physical presence signals. The runner rejects a skipped test as evidence and retains a diagnostic log when the test fails.
+This fixture does not register a Mach service or launch the app GUI. It uses seams for retained app policy and Root self-code validation. It does not prove Developer ID validation, Root or separate service accounts, audit-session isolation, or physical presence signals. The runner rejects a skipped test as evidence. A timeout or interruption retires the owned fixture process tree. The runner retains the log outside its temporary directory when invocation fails, skips, times out, is interrupted, or cannot clean up.
 
 ## Remaining integration and physical gates
 

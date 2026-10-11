@@ -8,7 +8,19 @@ import platform
 import subprocess
 import tempfile
 
+from macos_fixture_cleanup import retire_owned_tree
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def run_fixture(arguments, environment, output):
+    process = subprocess.Popen(arguments, cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        return process.wait(timeout=300)
+    finally:
+        if process.poll() is None:
+            retire_owned_tree(process)
 
 
 def main():
@@ -22,16 +34,27 @@ def main():
         log = Path(directory) / 'test.log'
         environment = os.environ.copy()
         environment['REMOZIO_PRESENCE_XPC_EVIDENCE'] = str(evidence)
-        with log.open('w') as output:
-            result = subprocess.run(['swift', 'test', '--package-path', str(ROOT / 'macos/core'), '--triple', 'arm64-apple-macosx26.0',
-                '--filter', 'AuthorityPresenceXPCTests.testLiveAnonymousPresenceWireCommitsAndReconnectsInGuiSession'],
-                cwd=ROOT, env=environment, stdout=output, stderr=subprocess.STDOUT, timeout=300)
-        if result.returncode or not evidence.is_file():
+        failure = None
+        try:
+            with log.open('w') as output:
+                result = run_fixture(['swift', 'test', '--package-path', str(ROOT / 'macos/core'), '--triple', 'arm64-apple-macosx26.0',
+                    '--filter', 'AuthorityPresenceXPCTests.testLiveAnonymousPresenceWireCommitsAndReconnectsInGuiSession'], environment, output)
+            if result or not evidence.is_file():
+                failure = 'failed or lacked a supported GUI session'
+        except subprocess.TimeoutExpired:
+            failure = 'timed out'
+        except KeyboardInterrupt:
+            failure = 'was interrupted'
+        except Exception as error:
+            failure = 'failed to run or clean up'
+            with log.open('a') as output:
+                output.write(f'Runner failure: {type(error).__name__}: {error}\n')
+        if failure:
             # A headless-session skip does not provide live evidence. Keep failed diagnostics outside the temporary directory.
             with tempfile.NamedTemporaryFile(prefix='remozio-presence-wire-failure-', suffix='.log', delete=False) as retained:
                 retained.write(log.read_bytes())
                 diagnostic = retained.name
-            raise SystemExit(f'Native presence fixture failed or lacked a supported GUI session. Diagnostics: {diagnostic}')
+            raise SystemExit(f'Native presence fixture {failure}. Diagnostics: {diagnostic}')
         report = json.loads(evidence.read_text())
         required = ['guiSessionAvailable', 'testCodeHashRequirementApplied', 'kernelPeerCredentialsChecked',
             'invocationConnectionChecked', 'conflictReturnedCurrentState', 'lostReplyCommittedModeRecovered',
