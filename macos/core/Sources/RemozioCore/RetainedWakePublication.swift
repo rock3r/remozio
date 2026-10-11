@@ -22,6 +22,7 @@ final class RetainedWakePublication {
     private var registered: Set<UUID> = []
     private var withdrawals: [UUID: PhoneRequestDelivery] = [:]
     private var closed = false
+    private var session: UUID?
 
     init(maximumDeliveries: Int) { self.maximumDeliveries = maximumDeliveries }
 
@@ -78,9 +79,21 @@ final class RetainedWakePublication {
             readyDeliveryIDs: routing.destination == .phones ? registered.sorted { $0.uuidString < $1.uuidString } : [],
             capacityLimitedRecipients: capacityLimitedRecipients)
     }
-    /// Root channel loss retires the gateway lease. No transient grant or acknowledgment is restored after restart.
+    /// A replacement channel keeps original grant identities and deadlines, but must register them again.
+    func beginSession(_ id: UUID) throws {
+        guard !closed, session == nil else { throw ApprovalCoordinatorError.unavailable }
+        session = id; registered.removeAll()
+    }
+    func requireSession(_ id: UUID) throws {
+        guard !closed, session == id else { throw ApprovalCoordinatorError.unavailable }
+    }
+    func endSession(_ id: UUID) {
+        guard session == id else { return }
+        session = nil; registered.removeAll()
+    }
+    /// Authority shutdown discards transient grants. Channel replacement preserves the retained request work.
     func close() {
-        closed = true
+        closed = true; session = nil
         controllers.removeAll(); deliveries.removeAll(); registered.removeAll(); withdrawals.removeAll()
     }
 }

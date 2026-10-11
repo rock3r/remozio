@@ -119,6 +119,7 @@ public final class AuthorityService: @unchecked Sendable {
          exchangeRequest: AuthorityRequestExchangeProvider? = nil,
          requestProviders: AuthorityRequestProviders? = nil,
          wakeHintFeed: AuthorityWakeHintFeed? = nil,
+         wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
          onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
         self.journal = journal
@@ -153,7 +154,9 @@ public final class AuthorityService: @unchecked Sendable {
                 exchangeHandler = { owner, binding, id, decision in try selectedExchange(owner, binding, id, decision, frameClock) }
             } else { exchangeHandler = nil }
             let hintHandler: (@Sendable () throws -> AuthorityWakeHints)?
-            if let wakeHintFeed { hintHandler = { try wakeHintFeed.current() } }
+            guard wakeHintFeed == nil || wakeHints == nil else { throw AuthorityServiceConfigurationError.invalidConfiguration }
+            if let wakeHints { hintHandler = wakeHints }
+            else if let wakeHintFeed { hintHandler = { try wakeHintFeed.current() } }
             else { hintHandler = nil }
             listener = try AuthorityXPCListener(serviceName: configuration.serviceName,
                 peerPolicy: configuration.transportPolicy, macID: configuration.macID,
