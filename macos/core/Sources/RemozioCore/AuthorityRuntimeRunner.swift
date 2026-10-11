@@ -120,7 +120,7 @@ public actor AuthorityRuntimeRunner {
     }
     /// Command expiry already closes original resources under the request lock. External adapters need their own registered cleanup.
     static func reconcileCoordinatorExpiration(_ states: [ApprovalRequestState]) throws {
-        guard states.allSatisfy({ $0.requestKind == .command && $0.phase == .expired && $0.reason == .authorizationExpired }) else {
+        guard states.allSatisfy({ $0.requestKind == .command && $0.phase == .expired }) else {
             throw AuthorityRuntimeError.unmanagedExpiration
         }
     }

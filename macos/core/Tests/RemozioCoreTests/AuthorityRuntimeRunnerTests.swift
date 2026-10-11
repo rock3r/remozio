@@ -177,13 +177,15 @@ final class AuthorityRuntimeRunnerTests: XCTestCase, @unchecked Sendable {
         try await waitUntil { await probe.snapshot().2 == 1 }
     }
     func testExpirationPolicyAcceptsOwnedCommandsAndRejectsUnattachedAdapters() throws {
-        func state(kind: RequestKind, phase: RequestPhase = .expired) -> ApprovalRequestState {
+        func state(kind: RequestKind, phase: RequestPhase = .expired, reason: RequestStatusReason = .authorizationExpired) -> ApprovalRequestState {
             let now = AuthorityMoment(epoch: UUID(), milliseconds: 100)
             return .init(requestKind: kind, macID: Data(), accountID: Data(), requestDigest: Data(), challenge: Data(),
-                reason: .authorizationExpired, terminalAt: now, decisionPhoneID: nil, requestID: Data(), phase: phase,
+                reason: reason, terminalAt: now, decisionPhoneID: nil, requestID: Data(), phase: phase,
                 revision: 1, firstObservedAt: now, deadlineMilliseconds: 100)
         }
-        XCTAssertNoThrow(try AuthorityRuntimeRunner.reconcileCoordinatorExpiration([state(kind: .command)]))
+        for reason in [RequestStatusReason.authorizationExpired, .targetTimedOut] {
+            XCTAssertNoThrow(try AuthorityRuntimeRunner.reconcileCoordinatorExpiration([state(kind: .command, reason: reason)]))
+        }
         for kind in [RequestKind.onePasswordAccess, .onePasswordUnlock, .littleSnitch] {
             XCTAssertThrowsError(try AuthorityRuntimeRunner.reconcileCoordinatorExpiration([state(kind: kind)]))
         }

@@ -34,8 +34,12 @@ Command expiry already closes the original command resources in the coordinator.
 
 ## Evidence and remaining gates
 
-The focused runtime suite passed 11 tests on 2026-10-11. It covers bounded retries, permanent failures, startup cancellation, cleanup retry, concurrent shutdown, early retirement, release cleanup, and request-kind expiry handling.
+The focused runtime suite passed 11 tests on 2026-10-11. A regression first reproduced rejection of a target-timeout expiry. The corrected callback accepts both coordinator-owned expiry paths. It covers bounded retries, permanent failures, startup cancellation, cleanup retry, concurrent shutdown, early retirement, release cleanup, and request-kind expiry handling.
 
 The app check builds Debug and Release products and verifies their embedded signatures. It tests usage rejection and both modes' unprivileged rejection. These checks do not install or activate the authority.
+
+[The existing live XPC probe](evidence/2026-10-11-runtime-entrypoint-xpc.json) passed all 19 synthetic cases on macOS 27.0.1. Its temporary per-user agent was removed. The committed report redacts the disposable service name. This checks the existing native protocol selectors and handshake boundaries. It does not exercise the installed authority executable or prove its signal behavior.
+
+[The anonymous presence wire fixture](evidence/2026-10-11-runtime-presence-xpc.json) also passed. It checked native peer credentials, connection binding, conflict state, recovery after a lost reply, and observer withdrawal. It installed no service and issued no approval. Its source record marks the pending review fix as an uncommitted worktree change.
 
 This entrypoint does not attach the native command receive host, 1Password adapters, or Little Snitch adapters. Those producers must share the existing journal and clock. Protected provisioning, installed service signal behavior, hardware restoration, and physical device approval remain unproven. [Issue 286](https://github.com/rock3r/remozio/issues/286) retains those platform gates.
