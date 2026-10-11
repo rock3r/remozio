@@ -85,4 +85,7 @@ It does not register a service or start a receiver.
 Protected registration and dispatch integration remain pending.
 The native target-group experiment remains an activation gate.
 
-Seven tests cover canonical decoding, protocol declarations, scope, bounds, redaction and ordinary-account loading refusal.
+Nine tests cover canonical decoding, protocol declarations, scope, bounds, redaction and ordinary-account loading refusal.
+Startup also sizes pipe and terminal records with the actual codecs, including its configured environment and the request wrapper.
+This rejects permanently unusable budgets. Larger command records remain subject to the configured limits.
+The sizing examples carry no OS provenance or execution authority.

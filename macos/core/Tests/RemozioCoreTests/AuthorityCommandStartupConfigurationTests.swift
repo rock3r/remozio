@@ -34,6 +34,20 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
     }
     private var limits: CBORLimits { get throws { try .init(maxBytes: 65_536, maxDepth: 4, maxItems: 1024) } }
 
+    func testRejectsPermanentlyUnusableProtocolBudgets() throws {
+        let baseline = try config()
+        for (submission, capture) in [
+            (try CBORLimits(maxBytes: 1, maxDepth: 8, maxItems: 1024), baseline.captureLimits),
+            (baseline.submissionLimits, try CBORLimits(maxBytes: 1, maxDepth: 8, maxItems: 4096)),
+            (baseline.submissionLimits, try CBORLimits(maxBytes: 65_536, maxDepth: 8, maxItems: 128)),
+            (baseline.submissionLimits, try CBORLimits(maxBytes: 65_536, maxDepth: 4, maxItems: 4096))
+        ] {
+            XCTAssertThrowsError(try AuthorityCommandStartupConfiguration(presence: baseline.presence,
+                serviceName: baseline.serviceName, policyPath: baseline.policyPath, environment: [],
+                submissionLimits: submission, captureLimits: capture))
+        }
+    }
+
     func testCanonicalCompositionKeepsOriginalScopeAndExplicitModernProtocolSupport() throws {
         let value = try config(environment: [entry("Z"), entry("A")]), decoded = try AuthorityCommandStartupConfiguration.decode(value.canonicalBytes)
         XCTAssertEqual(decoded.canonicalBytes, value.canonicalBytes)
@@ -99,6 +113,21 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
             }
         }
     }
+    func testConfiguredEnvironmentMustFitTheCaptureCodecBudget() throws {
+        let baseline = try config()
+        for (environment, limits) in [
+            ([entry("A", Data(repeating: 1, count: 1024))], try CBORLimits(maxBytes: 1024, maxDepth: 8, maxItems: 4096)),
+            ((0..<64).map { entry("E\($0)") }, try CBORLimits(maxBytes: 65_536, maxDepth: 8, maxItems: 256))
+        ] {
+            XCTAssertThrowsError(try AuthorityCommandStartupConfiguration(presence: baseline.presence,
+                serviceName: baseline.serviceName, policyPath: baseline.policyPath, environment: environment,
+                submissionLimits: baseline.submissionLimits, captureLimits: limits))
+        }
+        guard case .map(var fields) = try DeterministicCBOR.decode(baseline.canonicalBytes, limits: self.limits) else { return XCTFail() }
+        fields[5] = .map([0: .unsigned(1), 1: .unsigned(8), 2: .unsigned(1024)])
+        XCTAssertThrowsError(try AuthorityCommandStartupConfiguration.decode(DeterministicCBOR.encode(.map(fields), limits: self.limits)))
+    }
+
     func testZeroAncestryAndTunableApprovalLifetimeDoNotSetCommandRuntimeLimit() throws {
         let value = try config(ancestry: 0, lifetime: 86_400_000)
         let decoded = try AuthorityCommandStartupConfiguration.decode(value.canonicalBytes)

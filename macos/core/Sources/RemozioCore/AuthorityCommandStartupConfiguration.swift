@@ -66,6 +66,11 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
             }
             previous = entry.name
         }
+        do {
+            try Self.validateProtocolBudgets(environment: environment, callerUID: presence.presence.ownerUID,
+                submissionLimits: submissionLimits, captureLimits: captureLimits,
+                maximumRequestBodyBytes: service.maximumRequestBodyBytes)
+        } catch { throw AuthorityCommandStartupError.invalidConfiguration }
         self.presence = presence; self.serviceName = serviceName; self.policyPath = policyPath; self.environment = environment
         self.submissionLimits = submissionLimits; self.captureLimits = captureLimits; self.maximumSessions = maximumSessions
         self.receiveWaitMilliseconds = receiveWaitMilliseconds; self.replyTimeoutMilliseconds = replyTimeoutMilliseconds
@@ -120,6 +125,46 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
             approvalLifetimeMilliseconds: number(11))
         guard result.canonicalBytes == bytes else { throw AuthorityCommandStartupError.invalidConfiguration }; return result
     }
+    /// Size checks use the real codecs for both advertised profiles, including the configured environment.
+    /// These records are sizing examples only. They carry no OS provenance or execution authority.
+    private static func validateProtocolBudgets(environment: [CapturedEnvironmentEntry], callerUID: UInt32,
+        submissionLimits: CBORLimits, captureLimits: CBORLimits, maximumRequestBodyBytes: Int) throws {
+        let binding = CapturedSubmission(id: Data(repeating: 1, count: 16), nonce: Data(repeating: 2, count: 32),
+            callerBinding: Data(repeating: 3, count: 16))
+        let file = CapturedFileIdentity(device: 1, inode: 1)
+        let path = Data("/usr/bin/true".utf8), arguments = [Data("true".utf8)]
+        let requester = CapturedRequester(executablePath: Data("/Applications/Remozio.app/Contents/MacOS/remozio".utf8),
+            realUID: callerUID, effectiveUID: callerUID, pid: 1, pidVersion: 1,
+            signing: .init(status: .validated, identifier: "dev.remozio.frontend", team: "TEAMID1234",
+                cdHash: Data(repeating: 4, count: 20)), sessionID: 1, ttyPath: nil)
+        for mode in [CommandIOMode.pipes, .pty] {
+            _ = try CommandSubmission(schemaVersion: 1, executablePath: path, arguments: arguments,
+                directoryPath: Data("/".utf8), requestedTargetUID: 0, environmentAdditions: [], ioMode: mode,
+                disconnectBehavior: .terminate, unverifiedRationale: nil, binding: binding, limits: submissionLimits)
+            let source = CapturedCommandInput(kind: mode == .pty ? .pty : .pipe,
+                streamBinding: Data(repeating: 5, count: 16), observedPath: nil, identity: file)
+            let input = CapturedCommandStream(source: source, access: mode == .pty ? .readWrite : .readOnly, flags: [])
+            let output = CapturedCommandStream(source: source, access: mode == .pty ? .readWrite : .writeOnly, flags: [])
+            let terminal: CapturedCommandTerminal? = mode == .pty ? .init(stream: input, sessionID: 1, terminalDevice: 1) : nil
+            let layout = CapturedCommandStdioLayout(input: input, output: output, error: output,
+                terminal: terminal, ptyMask: mode == .pty ? 7 : 0)
+            let capture = try CommandCapture(schemaVersion: captureSchemaVersion,
+                executable: .init(path: path, identity: file, sha256: Data(repeating: 6, count: 32)), arguments: arguments,
+                directory: .init(path: Data("/".utf8), identity: file),
+                target: .init(uid: 0, gid: 0, supplementaryGroups: [0], observedName: "root"),
+                environment: environment, input: source, ioMode: mode, disconnectBehavior: .terminate,
+                requester: requester, ancestry: .init(completeness: .unavailable, entries: [], reason: .unsupported),
+                unverifiedRationale: nil, submission: binding, stdioLayout: layout, limits: captureLimits)
+            let bodyLimits = try CBORLimits(maxBytes: maximumRequestBodyBytes, maxDepth: 16, maxItems: 4096)
+            _ = try IssuedRequestPayload(contract: .init(requestKind: .command, wireVersion: 1, schemaVersion: captureSchemaVersion),
+                macID: Data(repeating: 7, count: 16), accountID: Data(repeating: 8, count: 16),
+                requestID: Data(repeating: 9, count: 16), challenge: Data(repeating: 10, count: 32),
+                requiredFeatures: [], createdUnixMilliseconds: 1, expiresUnixMilliseconds: 2,
+                canonicalCapture: capture.canonicalBytes, permittedActions: [.init(choice: .execute, scope: .currentRequest)],
+                bodyLimits: bodyLimits, captureLimits: captureLimits)
+        }
+    }
+
     private static func encodeLimits(_ limits: CBORLimits) -> CBORValue {
         .map([0: .unsigned(UInt64(limits.maxBytes)), 1: .unsigned(UInt64(limits.maxDepth)), 2: .unsigned(UInt64(limits.maxItems))])
     }
