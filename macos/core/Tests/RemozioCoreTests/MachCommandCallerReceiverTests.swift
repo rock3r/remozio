@@ -8362,3 +8362,182 @@ extension MachCommandCallerReceiverTests {
             }
     }
 }
+
+extension MachCommandCallerReceiverTests {
+    private func executionNotice(_ request: IssuedRequestPayload, journal: AuthorityJournal) throws -> AuthorityCommandAuthorizationNotice {
+        try journal.withRequests { .init(state: try $0.state(requestID: request.requestID)) }
+    }
+
+    func testUnownedExecutionRejectionPreservesOriginalBindingsAndCommitsNoDispatchOnce() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let journal = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            let original = try executionNotice(request, journal: journal)
+            let time = fixture.now(130)
+            try journal.validateCommandAuthorizationNotice(original, now: time)
+            let current = try journal.withRequests { try $0.state(requestID: request.requestID) }
+            for (digest, challenge) in [(Data(repeating: 0xff, count: 32), current.challenge), (current.requestDigest, Data(repeating: 0xff, count: 32))] {
+                let wrong = AuthorityCommandAuthorizationNotice(state: .init(requestKind: .command, macID: current.macID,
+                    accountID: current.accountID, requestDigest: digest, challenge: challenge, reason: .none,
+                    terminalAt: nil, decisionPhoneID: current.decisionPhoneID, requestID: current.requestID,
+                    phase: .authorized, revision: current.revision, firstObservedAt: current.firstObservedAt,
+                    deadlineMilliseconds: current.deadlineMilliseconds))
+                XCTAssertThrowsError(try journal.validateCommandAuthorizationNotice(wrong, now: time))
+                XCTAssertFalse(try journal.cancelUnownedCommandExecution(wrong, now: time, receiptTimeMs: nil))
+                XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .authorized)
+            }
+            XCTAssertTrue(try journal.cancelUnownedCommandExecution(original, now: time, receiptTimeMs: nil))
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .cancelledBeforeStart)
+            XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .cancelled)
+            XCTAssertEqual(try journal.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 1)
+            XCTAssertEqual(journal.activeCommandCount, 0)
+            XCTAssertFalse(try journal.cancelUnownedCommandExecution(original, now: time, receiptTimeMs: nil))
+            XCTAssertThrowsError(try receiver(terminal).receiveTerminalReply(timeoutMilliseconds: 10))
+        }
+    }
+
+    func testUnownedRejectionCannotCancelAnExistingNativeExecutionOwner() throws {
+        for checkpointed in [false, true] {
+            let fixture = try nativeDispatchFixture(checkpointed: checkpointed, path: "/bin/sh",
+                arguments: [Data("sh".utf8), Data("-c".utf8), Data("/bin/sleep 0.1; exit 7".utf8)])
+            let notice = try executionNotice(fixture.request, journal: fixture.authority)
+            try beginDispatch(fixture.fixture, request: fixture.request, launcher: fixture.launcher)
+            XCTAssertEqual(fixture.authority.activeCommandCount, 1)
+            XCTAssertFalse(try fixture.authority.cancelUnownedCommandExecution(notice, now: fixture.fixture.now(130), receiptTimeMs: nil))
+            XCTAssertEqual(try nativeDispatchOutcome(fixture), .exited(7))
+            try awaitDispatchCleanup(fixture.authority)
+            let requestID = fixture.request.requestID
+            XCTAssertEqual(try fixture.authority.withRequests { try $0.historicalOutcome(requestID: requestID) }?.revision, 2)
+        }
+    }
+
+    @MainActor func testExecutionWorkerRejectionUsesOriginalDurableRequestAndFrontendReply() async throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let journal = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminal = try Endpoint()
+            let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal)
+            let request = try admitOwnedCommand(command, fixture: fixture)
+            let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+            _ = try ownerDecision(request, fixture: fixture, decline: false)
+            let notice = try executionNotice(request, journal: journal), time = fixture.now(130)
+            let attempted = DispatchSemaphore(value: 0)
+            let worker = try AuthorityCommandExecutionWorker(begin: { notice, check in
+                try check(); try journal.validateCommandAuthorizationNotice(notice, now: time)
+                throw CommandExecutionError.unavailable
+            }, rejectUnowned: { notice in
+                XCTAssertTrue(try journal.cancelUnownedCommandExecution(notice, now: time, receiptTimeMs: nil))
+            }, report: { _, result in
+                if case .success = result { XCTFail("A rejected attempt must not report success") }
+                attempted.signal()
+            })
+            try worker.start(); XCTAssertEqual(worker.enqueue(notice), .queued)
+            XCTAssertEqual(attempted.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .cancelledBeforeStart)
+            await worker.close()
+            XCTAssertFalse(worker.isRetired); XCTAssertEqual(journal.activeCommandCount, 0)
+            XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .cancelled)
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    private func nativeSchedulingWorker(_ fixture: CommandRequestFixture, launcher: String, failAfterPreparation: Bool,
+        report: @escaping @Sendable (AuthorityCommandAuthorizationNotice, Result<Void, any Error>) -> Void) throws -> AuthorityCommandExecutionWorker {
+        let journal = try XCTUnwrap(fixture.authority), expression = try selfExpression()
+        let monitor = try dispatchMonitor(fixture), time = fixture.now(130)
+        return try AuthorityCommandExecutionWorker(begin: { notice, check in
+            try check(); try journal.validateCommandAuthorizationNotice(notice, now: time)
+            try journal.beginCommandExecution(requestID: notice.requestID, monitorPath: monitor, childPath: launcher,
+                preparationMilliseconds: 5000, fileCreationMask: 0o077, validateElevation: { _ in try check() }, clock: { time },
+                runtime: { transaction, approval, capture in
+                    try approval.requireCurrent(transaction.requestDeliveryTrust())
+                    let snapshot = try XCTUnwrap(transaction.codePolicy())
+                    let frontend = try XCTUnwrap(snapshot.policy.entries.first { $0.role == .commandFrontend })
+                    let revision = try XCTUnwrap(snapshot.roleRevisions[.commandFrontend])
+                    return CommandExecutionRuntime(child: frontend, childRevision: revision, monitor: frontend,
+                        monitorRevision: revision, frontendRevision: revision, callerExpression: expression,
+                        userID: capture.requester.effectiveUID, sessionID: nil)
+                }, launcher: { _ in { try check() } })
+            if failAfterPreparation { throw CommandExecutionError.unavailable }
+        }, rejectUnowned: { notice in
+            _ = try journal.cancelUnownedCommandExecution(notice, now: time, receiptTimeMs: nil)
+        }, report: report)
+    }
+
+    @MainActor func testSignedCommandNoticeSchedulesMappedNativeExecutionOnceAfterHandlerFailure() async throws {
+        for wire: UInt64 in [10, 11] {
+            for failAfterPreparation in [false, true] {
+                let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandSchema: 3)
+                let journal = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
+                let admissionPort = try Endpoint(), terminal = try Endpoint(), null = Darwin.open("/dev/null", O_RDWR | O_CLOEXEC)
+                XCTAssertGreaterThanOrEqual(null, 0); defer { _ = Darwin.close(null) }
+                let marker = fixture.root.appendingPathComponent("executed-once")
+                let (command, submission, profile) = try ownerMappedCommand(admission: admissionPort, terminal: terminal,
+                    input: null, output: null, error: null, path: "/bin/sh",
+                    arguments: [Data("sh".utf8), Data("-c".utf8), Data("printf once >> \"$1\"; exit 7".utf8),
+                        Data("sh".utf8), Data(marker.path.utf8)], wire: wire, ioMode: wire == 10 ? .pty : .pipes)
+                let request = try admitOwnedCommand(command, fixture: fixture)
+                let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+                guard case .admitted(let admitted) = admission.outcome else { return XCTFail("The exact mapped request must be admitted") }
+                let binding = CommandStreamBinding(profile: profile, submission: submission.binding,
+                    submissionDigest: admission.submissionDigest, request: admitted)
+                let completed = DispatchSemaphore(value: 0), notices = Mutex<[AuthorityCommandAuthorizationNotice]>([])
+                let worker = try nativeSchedulingWorker(fixture, launcher: launcher, failAfterPreparation: failAfterPreparation,
+                    report: { _, _ in completed.signal() })
+                try worker.start()
+                let (body, signature) = try noticeDecision(request, fixture: fixture), time = fixture.now(120)
+                XCTAssertThrowsError(try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                    validate: { _ in }, body: { owner in
+                        _ = try owner.consume(canonicalDecision: body, signature: signature,
+                            authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                            now: time, receiptTimeMs: nil)
+                        throw ApprovalCoordinatorError.unavailable
+                    }, onCommandAuthorized: { notice in
+                        notices.withLock { $0.append(notice) }; XCTAssertEqual(worker.enqueue(notice), .queued)
+                    }))
+                XCTAssertEqual(completed.wait(timeout: .now() + 3), .success)
+                let notice = try XCTUnwrap(notices.withLock { $0.first })
+                XCTAssertEqual(notices.withLock { $0.count }, 1)
+                let receive = try receiver(terminal, maximum: 8192)
+                var control: MachCommandAuthorityPort?, sequence = CommandStreamReceiveSequence(direction: .toFrontend)
+                var acknowledged = false, result: VerifiedCommandTerminalResult?
+                defer { control?.close() }
+                let deadline = Date().addingTimeInterval(5)
+                while result == nil {
+                    guard Date() < deadline else { throw MachCommandCallerError.timeout }
+                    switch try receive.receiveExecutionEvent(timeoutMilliseconds: 1000) {
+                    case .stream(let reply, let carried):
+                        defer { reply.caller.close(); carried?.close() }
+                        let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                        try sequence.accept(frame)
+                        switch frame.body {
+                        case .opened: control = try XCTUnwrap(carried).takeControlRight()
+                        case .outputEnd:
+                            let acknowledgment = try CommandStreamFrame(sequence: 0, body: .outputDrained).encode(binding: binding)
+                            try Self.waitQueued { try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true) }
+                            acknowledged = true
+                        case .inputCredit, .jobState: break
+                        default: XCTFail("The mapped fixture must receive only its negotiated control events")
+                        }
+                    case .terminal(let reply):
+                        defer { reply.caller.close() }
+                        result = try CommandTerminalResultPayload.decode(reply.payload, profile: profile, original: submission, admission: admission)
+                    }
+                }
+                XCTAssertEqual(result?.outcome, .exited(7)); XCTAssertEqual(acknowledged, wire == 10)
+                try awaitDispatchCleanup(journal)
+                XCTAssertEqual(try Data(contentsOf: marker), Data("once".utf8))
+                XCTAssertEqual(try journal.withRequests { try $0.historicalOutcome(requestID: request.requestID) }?.revision, 2)
+                XCTAssertEqual(worker.enqueue(notice), .queued)
+                XCTAssertEqual(completed.wait(timeout: .now() + 3), .success)
+                await worker.close()
+                XCTAssertEqual(try Data(contentsOf: marker), Data("once".utf8)); XCTAssertEqual(journal.activeCommandCount, 0)
+                XCTAssertThrowsError(try receive.receiveTerminalReply(timeoutMilliseconds: 10))
+            }
+        }
+    }
+}
