@@ -24,8 +24,7 @@ static long now(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
-static pid_t await(pid_t child, int *status) {
-    long end = now() + 5000;
+static pid_t await_until(pid_t child, int *status, long end) {
     while (now() < end) {
         pid_t result = waitpid(child, status, WNOHANG);
         if (result > 0 || (result < 0 && errno != EINTR)) return result;
@@ -33,6 +32,7 @@ static pid_t await(pid_t child, int *status) {
     }
     return 0;
 }
+static pid_t await(pid_t child, int *status) { return await_until(child, status, now() + 5000); }
 static bool same(const struct termios *a, const struct termios *b) {
     return a->c_iflag == b->c_iflag && a->c_oflag == b->c_oflag && a->c_cflag == b->c_cflag &&
         (a->c_lflag & ~PENDIN) == (b->c_lflag & ~PENDIN) && a->c_ispeed == b->c_ispeed &&
@@ -46,8 +46,9 @@ static int worker(int slave, int command, int report, int control) {
     if (sigprocmask(SIG_UNBLOCK, &mask, NULL)) return 12;
     char byte;
     if (transfer(command, &byte, false)) return 13;
-    if (control == 1) return 87;
+    if (control == 1) { close(report); usleep(20000); return 87; }
     if (control == 2) {
+        close(report); usleep(20000);
         sigset_t death; sigemptyset(&death); sigaddset(&death, SIGTERM);
         if (signal(SIGTERM, SIG_DFL) == SIG_ERR || sigprocmask(SIG_UNBLOCK, &death, NULL)) return 88;
         kill(getpid(), SIGTERM); return 89;
@@ -117,6 +118,7 @@ static int receive_report(int fd, char expected, struct worker_diagnostics *d) {
     return result != 1 || byte != expected;
 }
 static int supervise(int slave, int diagnostics_fd, int control, struct worker_diagnostics *d) {
+    const long cleanup_deadline = now() + 5000;
     if (setsid() < 0 || ioctl(slave, TIOCSCTTY, 0) || signal(SIGTTOU, SIG_IGN) == SIG_ERR) return 30;
     int command[2], report[2]; if (pipe(command) || pipe(report)) return 31;
     pid_t child = fork(); if (child < 0) return 32;
@@ -142,7 +144,11 @@ static int supervise(int slave, int diagnostics_fd, int control, struct worker_d
     }
     if (owned) {
         pid_t result;
-        do { result = waitpid(child, &status, WNOHANG); } while (result < 0 && errno == EINTR);
+        if ((d->phase == 2 || d->phase == 3) && d->report_result == 0 && d->report_byte == -1) {
+            result = await_until(child, &status, cleanup_deadline);
+        } else {
+            do { result = waitpid(child, &status, WNOHANG); } while (result < 0 && errno == EINTR);
+        }
         if (result == child) { owned = false; record_status(d, status, true); }
         else if (result < 0) { owned = false; d->wait_errno = errno; }
         if (owned) {
