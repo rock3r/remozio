@@ -35,6 +35,8 @@ enum DescriptorTreeCopy {
     static func copy(source: URL, parent: URL, name: String, limits: ReleaseCopyLimits,
                      checkCancellation: @escaping () throws -> Void = {}, borrowedParent: Int32? = nil,
                      validateCopy: (ReleaseCopyCounts) throws -> Void = { _ in },
+                     openOutput: (Int32, String, Int32) -> Int32 = { openat($0, $1, $2) },
+                     outputStatus: (Int32) throws -> stat = { try status($0) },
                      openedFile: @escaping (Int32, String, Int32) throws -> Void) throws -> ReleaseCopyCounts {
         guard source.isFileURL, parent.isFileURL, validName(name) else { throw ReleaseCopyError.invalidInput }
         let sourcePath = try canonical(source), parentPath = try canonical(parent)
@@ -48,11 +50,15 @@ enum DescriptorTreeCopy {
         guard parentInfo.st_uid == geteuid(), parentInfo.st_mode & 0o022 == 0 else { throw ReleaseCopyError.unsafeDestination }
         try checkCancellation()
         guard mkdirat(dstParent, name, 0o700) == 0 else { throw ReleaseCopyError.system(errno) }
-        let dst = try opened(openat(dstParent, name, flags))
-        defer { Darwin.close(dst) }
-        let outputInfo = try status(dst)
+        var dst: Int32 = -1
+        var initialOutputInfo: stat?
+        defer { if dst >= 0 { Darwin.close(dst) } }
         let walker = Walker(limits: limits, checkCancellation: checkCancellation, openedFile: openedFile)
         do {
+            let outputInfo = try named(dstParent, name)
+            initialOutputInfo = outputInfo
+            dst = try opened(openOutput(dstParent, name, flags))
+            guard sameNode(outputInfo, try outputStatus(dst)) else { throw ReleaseCopyError.changedDestination }
             try walker.directory(source: src, destination: dst, depth: 0, path: [])
             try walker.validateLinks(root: dst)
             guard fchmod(dst, 0o755) == 0, fsync(dst) == 0, fsync(dstParent) == 0 else { throw ReleaseCopyError.system(errno) }
@@ -65,7 +71,8 @@ enum DescriptorTreeCopy {
         } catch {
             let original = error
             do {
-                try walker.cleanup(root: dst)
+                if dst >= 0 { try walker.cleanup(root: dst) }
+                guard let outputInfo = initialOutputInfo else { throw ReleaseCopyError.changedDestination }
                 guard sameNode(outputInfo, try named(dstParent, name)) else { throw ReleaseCopyError.changedDestination }
                 guard unlinkat(dstParent, name, AT_REMOVEDIR) == 0, fsync(dstParent) == 0 else { throw ReleaseCopyError.system(errno) }
             } catch { throw ReleaseCopyCleanupFailure(original: original, cleanup: error) }

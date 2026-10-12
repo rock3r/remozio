@@ -242,4 +242,58 @@ final class DescriptorTreeCopyTests: XCTestCase {
             XCTAssertTrue(validated); XCTAssertEqual(counts.bytes, 7)
         }
     }
+    func testOutputOpenFailureRemovesTheOwnedEmptyDirectory() throws {
+        try fixture { _, source, target in
+            let sibling = target.appendingPathComponent("keep")
+            try Data("keep".utf8).write(to: sibling)
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                openOutput: { _, _, _ in errno = EMFILE; return -1 }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .system(EMFILE))
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+            XCTAssertEqual(try Data(contentsOf: sibling), Data("keep".utf8))
+        }
+    }
+    func testOutputInspectionFailureRemovesTheDirectoryAndClosesItsDescriptor() throws {
+        try fixture { _, source, target in
+            var descriptor: Int32 = -1
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                outputStatus: { fd in descriptor = fd; throw ReleaseCopyError.system(EIO) }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .system(EIO))
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+            var info = stat(); XCTAssertEqual(fstat(descriptor, &info), -1); XCTAssertEqual(errno, EBADF)
+        }
+    }
+    func testInitializationCleanupPreservesAReplacementDirectory() throws {
+        try fixture { _, source, target in
+            let copy = target.appendingPathComponent("Fixture.app"), moved = target.appendingPathComponent("moved")
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                openOutput: { _, _, _ in
+                    do {
+                        try FileManager.default.moveItem(at: copy, to: moved)
+                        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: false)
+                        try Data("keep".utf8).write(to: copy.appendingPathComponent("keep"))
+                    } catch { XCTFail("Fixture replacement failed: \(error)") }
+                    errno = EMFILE; return -1
+                }, openedFile: { _, _, _ in })) {
+                    let failure = $0 as? ReleaseCopyCleanupFailure
+                    XCTAssertEqual(failure?.original as? ReleaseCopyError, .system(EMFILE))
+                    XCTAssertEqual(failure?.cleanup as? ReleaseCopyError, .changedDestination)
+                }
+            XCTAssertEqual(try Data(contentsOf: copy.appendingPathComponent("keep")), Data("keep".utf8))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: moved.path))
+        }
+    }
+    func testOpenedOutputMustMatchTheRecordedCreatedDirectory() throws {
+        try fixture { _, source, target in
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                outputStatus: { fd in
+                    var info = stat(); XCTAssertEqual(fstat(fd, &info), 0); info.st_ino += 1; return info
+                }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .changedDestination)
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+        }
+    }
 }
