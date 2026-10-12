@@ -36,6 +36,9 @@ It checks the protected app, exact manifests, Developer ID publisher, hardened r
 A service invocation also requires a native root security session without graphic access.
 Those flags alone do not prove pre-login operation.
 The report always leaves `preLoginProven` false.
+Interactive commands write their sanitized JSON to stdout.
+Service mode emits the complete JSON through Unified Logging, at notice level with public fields.
+Both successful and blocked service outcomes use that channel; they do not depend on a launchd stdout file.
 
 The access policy is `after-first-unlock-this-device-only` with private-key usage.
 Authentication UI is disabled during creation, restoration and signing.
@@ -128,6 +131,19 @@ TASK_ENCLAVE_HELPER="$TASK_PROBE_APP/Contents/Helpers/RemozioLifecycleEnclave"
 ```
 
 No privileged command above has run in automated validation.
+Retrieve service evidence promptly in the operator session:
+
+```sh
+/usr/bin/log show --style json --last 1h \
+  --predicate 'subsystem == "dev.remozio.experiments.lifecycle" AND category == "enclave-lifecycle"'
+```
+
+The `Enclave lifecycle evidence:` message contains the complete sanitized JSON.
+Check that it parses fully, then retain the report with the verified job, signed artifact and process provenance.
+Logging retention is bounded. Missing or truncated evidence leaves that case unproven.
+A matching log message alone cannot authenticate the process or establish pre-login timing.
+Actual daemon logging and retention remain part of the unrun operator tests.
+
 Reports contain the public fingerprint, stage, OS, numeric process identity, security-session booleans and numeric error information.
 They omit wrapped keys, signatures, passwords, private paths and error descriptions.
 

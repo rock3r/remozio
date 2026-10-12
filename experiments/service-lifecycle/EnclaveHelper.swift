@@ -6,9 +6,15 @@ import os
 import Security
 
 @main struct EnclaveLifecycleHelper {
-    static func emit(_ values: [String: Any]) {
+    static func emit(_ values: [String: Any], daemonEvidence: Bool = false) {
         guard let data = try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]) else { exit(EX_SOFTWARE) }
-        FileHandle.standardOutput.write(data + Data([10]))
+        if daemonEvidence {
+            let logger = Logger(subsystem: ServiceProbeContract.appID, category: "enclave-lifecycle")
+            let json = String(decoding: data, as: UTF8.self)
+            logger.notice("Enclave lifecycle evidence: \(json, privacy: .public)")
+        } else {
+            FileHandle.standardOutput.write(data + Data([10]))
+        }
     }
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
@@ -79,15 +85,11 @@ import Security
             report["publicFingerprint"] = record.publicFingerprint
             report["signatureVerifiedAgainstRetainedPublicKey"] = true
             report["stage"] = "complete"; report["status"] = "passed"
-            emit(report)
+            emit(report, daemonEvidence: service)
         } catch {
             let error = error as NSError
             report["failureDomain"] = error.domain; report["failureCode"] = error.code
-            emit(report); exit(EX_CONFIG)
-        }
-        if service {
-            let logger = Logger(subsystem: ServiceProbeContract.appID, category: "enclave-lifecycle")
-            logger.notice("Disposable enclave restore and fixed-message signature passed. Physical lifecycle remains unproven.")
+            emit(report, daemonEvidence: service); exit(EX_CONFIG)
         }
     }
 }
