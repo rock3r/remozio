@@ -35,8 +35,8 @@ enum DescriptorTreeCopy {
     static func copy(source: URL, parent: URL, name: String, limits: ReleaseCopyLimits,
                      checkCancellation: @escaping () throws -> Void = {}, borrowedParent: Int32? = nil,
                      validateCopy: (ReleaseCopyCounts) throws -> Void = { _ in },
-                     openOutput: (Int32, String, Int32) -> Int32 = { openat($0, $1, $2) },
-                     outputStatus: (Int32) throws -> stat = { try status($0) },
+                     openOutput: @escaping (Int32, String, Int32) -> Int32 = { openat($0, $1, $2) },
+                     outputStatus: @escaping (Int32) throws -> stat = { try status($0) },
                      openedFile: @escaping (Int32, String, Int32) throws -> Void) throws -> ReleaseCopyCounts {
         guard source.isFileURL, parent.isFileURL, validName(name) else { throw ReleaseCopyError.invalidInput }
         let sourcePath = try canonical(source), parentPath = try canonical(parent)
@@ -53,7 +53,8 @@ enum DescriptorTreeCopy {
         var dst: Int32 = -1
         var initialOutputInfo: stat?
         defer { if dst >= 0 { Darwin.close(dst) } }
-        let walker = Walker(limits: limits, checkCancellation: checkCancellation, openedFile: openedFile)
+        let walker = Walker(limits: limits, checkCancellation: checkCancellation, openedFile: openedFile,
+            openOutput: openOutput, outputStatus: outputStatus)
         do {
             let outputInfo = try named(dstParent, name)
             initialOutputInfo = outputInfo
@@ -98,6 +99,8 @@ enum DescriptorTreeCopy {
         let limits: ReleaseCopyLimits
         let checkCancellation: () throws -> Void
         let openedFile: (Int32, String, Int32) throws -> Void
+        let openOutput: (Int32, String, Int32) -> Int32
+        let outputStatus: (Int32) throws -> stat
         var counts = ReleaseCopyCounts()
         var created: [Created] = []
         var identities: [[String]: stat] = [:]
@@ -106,8 +109,10 @@ enum DescriptorTreeCopy {
             identities[path] = identity
         }
         init(limits: ReleaseCopyLimits, checkCancellation: @escaping () throws -> Void,
-             openedFile: @escaping (Int32, String, Int32) throws -> Void) {
+             openedFile: @escaping (Int32, String, Int32) throws -> Void,
+             openOutput: @escaping (Int32, String, Int32) -> Int32, outputStatus: @escaping (Int32) throws -> stat) {
             self.limits = limits; self.checkCancellation = checkCancellation; self.openedFile = openedFile
+            self.openOutput = openOutput; self.outputStatus = outputStatus
         }
         func directory(source: Int32, destination: Int32, depth: Int, path: [String]) throws {
             guard depth <= limits.depth else { throw ReleaseCopyError.limit }
@@ -151,9 +156,11 @@ enum DescriptorTreeCopy {
             defer { Darwin.close(src) }
             guard stable(before, try status(src)) else { throw ReleaseCopyError.changedSource }
             guard mkdirat(destination, name, 0o700) == 0 else { throw ReleaseCopyError.system(errno) }
-            let dst = try opened(openat(destination, name, flags))
+            let outputInfo = try named(destination, name)
+            record(path + [name], outputInfo)
+            let dst = try opened(openOutput(destination, name, flags))
             defer { Darwin.close(dst) }
-            record(path + [name], try status(dst))
+            guard sameNode(outputInfo, try outputStatus(dst)) else { throw ReleaseCopyError.changedDestination }
             try directory(source: src, destination: dst, depth: depth, path: path + [name])
             guard fchmod(dst, 0o755) == 0, fsync(dst) == 0 else { throw ReleaseCopyError.system(errno) }
         }
@@ -163,7 +170,9 @@ enum DescriptorTreeCopy {
             guard before.st_nlink == 1, before.st_size >= 0, stable(before, try status(src)) else { throw ReleaseCopyError.unsafeSource }
             let dst = try opened(openat(destination, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
             defer { Darwin.close(dst) }
-            record(path + [name], try status(dst))
+            let outputInfo = try named(destination, name)
+            record(path + [name], outputInfo)
+            guard sameNode(outputInfo, try outputStatus(dst)) else { throw ReleaseCopyError.changedDestination }
             try openedFile(source, name, src)
             var buffer = [UInt8](repeating: 0, count: 65_536), copied: UInt64 = 0
             while true {

@@ -296,4 +296,67 @@ final class DescriptorTreeCopyTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
         }
     }
+    func testNestedDirectoryOpenFailureCleansTheWholeOwnedCopy() throws {
+        try fixture { _, source, target in
+            try FileManager.default.createDirectory(at: source.appendingPathComponent("nested"), withIntermediateDirectories: false)
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                openOutput: { parent, name, flags in
+                    if name == "nested" { errno = EMFILE; return -1 }
+                    return openat(parent, name, flags)
+                }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .system(EMFILE))
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+        }
+    }
+    func testNestedDirectoryInspectionFailureCleansTheWholeOwnedCopy() throws {
+        try fixture { _, source, target in
+            try FileManager.default.createDirectory(at: source.appendingPathComponent("nested"), withIntermediateDirectories: false)
+            var rootDescriptor: Int32?
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                outputStatus: { fd in
+                    var info = stat(); XCTAssertEqual(fstat(fd, &info), 0)
+                    if rootDescriptor == nil { rootDescriptor = fd }
+                    else if info.st_mode & S_IFMT == S_IFDIR { throw ReleaseCopyError.system(EIO) }
+                    return info
+                }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .system(EIO))
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+        }
+    }
+    func testNewFileInspectionFailureCleansTheWholeOwnedCopy() throws {
+        try fixture { _, source, target in
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                outputStatus: { fd in
+                    var info = stat(); XCTAssertEqual(fstat(fd, &info), 0)
+                    if info.st_mode & S_IFMT == S_IFREG { throw ReleaseCopyError.system(EIO) }
+                    return info
+                }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .system(EIO))
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+        }
+    }
+    func testNestedInitializationCleanupPreservesAReplacement() throws {
+        try fixture { _, source, target in
+            try FileManager.default.createDirectory(at: source.appendingPathComponent("nested"), withIntermediateDirectories: false)
+            let nested = target.appendingPathComponent("Fixture.app/nested")
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                openOutput: { parent, name, flags in
+                    if name != "nested" { return openat(parent, name, flags) }
+                    do {
+                        try FileManager.default.moveItem(at: nested, to: nested.deletingLastPathComponent().appendingPathComponent("moved"))
+                        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+                        try Data("keep".utf8).write(to: nested.appendingPathComponent("keep"))
+                    } catch { XCTFail("Nested fixture replacement failed: \(error)") }
+                    errno = EMFILE; return -1
+                }, openedFile: { _, _, _ in })) {
+                    let failure = $0 as? ReleaseCopyCleanupFailure
+                    XCTAssertEqual(failure?.original as? ReleaseCopyError, .system(EMFILE))
+                    XCTAssertEqual(failure?.cleanup as? ReleaseCopyError, .changedDestination)
+                }
+            XCTAssertEqual(try Data(contentsOf: nested.appendingPathComponent("keep")), Data("keep".utf8))
+        }
+    }
 }
