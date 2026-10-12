@@ -37,6 +37,7 @@ enum DescriptorTreeCopy {
                      validateCopy: (ReleaseCopyCounts) throws -> Void = { _ in },
                      openOutput: @escaping (Int32, String, Int32) -> Int32 = { openat($0, $1, $2) },
                      outputStatus: @escaping (Int32) throws -> stat = { try status($0) },
+                     outputNameStatus: @escaping (Int32, String) throws -> stat = { try named($0, $1) },
                      openedFile: @escaping (Int32, String, Int32) throws -> Void) throws -> ReleaseCopyCounts {
         guard source.isFileURL, parent.isFileURL, validName(name) else { throw ReleaseCopyError.invalidInput }
         let sourcePath = try canonical(source), parentPath = try canonical(parent)
@@ -54,7 +55,7 @@ enum DescriptorTreeCopy {
         var initialOutputInfo: stat?
         defer { if dst >= 0 { Darwin.close(dst) } }
         let walker = Walker(limits: limits, checkCancellation: checkCancellation, openedFile: openedFile,
-            openOutput: openOutput, outputStatus: outputStatus)
+            openOutput: openOutput, outputStatus: outputStatus, outputNameStatus: outputNameStatus)
         do {
             let outputInfo = try named(dstParent, name)
             initialOutputInfo = outputInfo
@@ -101,6 +102,7 @@ enum DescriptorTreeCopy {
         let openedFile: (Int32, String, Int32) throws -> Void
         let openOutput: (Int32, String, Int32) -> Int32
         let outputStatus: (Int32) throws -> stat
+        let outputNameStatus: (Int32, String) throws -> stat
         var counts = ReleaseCopyCounts()
         var created: [Created] = []
         var identities: [[String]: stat] = [:]
@@ -110,9 +112,11 @@ enum DescriptorTreeCopy {
         }
         init(limits: ReleaseCopyLimits, checkCancellation: @escaping () throws -> Void,
              openedFile: @escaping (Int32, String, Int32) throws -> Void,
-             openOutput: @escaping (Int32, String, Int32) -> Int32, outputStatus: @escaping (Int32) throws -> stat) {
+             openOutput: @escaping (Int32, String, Int32) -> Int32, outputStatus: @escaping (Int32) throws -> stat,
+             outputNameStatus: @escaping (Int32, String) throws -> stat) {
             self.limits = limits; self.checkCancellation = checkCancellation; self.openedFile = openedFile
             self.openOutput = openOutput; self.outputStatus = outputStatus
+            self.outputNameStatus = outputNameStatus
         }
         func directory(source: Int32, destination: Int32, depth: Int, path: [String]) throws {
             guard depth <= limits.depth else { throw ReleaseCopyError.limit }
@@ -170,9 +174,10 @@ enum DescriptorTreeCopy {
             guard before.st_nlink == 1, before.st_size >= 0, stable(before, try status(src)) else { throw ReleaseCopyError.unsafeSource }
             let dst = try opened(openat(destination, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600))
             defer { Darwin.close(dst) }
-            let outputInfo = try named(destination, name)
+            let outputInfo = try status(dst)
             record(path + [name], outputInfo)
-            guard sameNode(outputInfo, try outputStatus(dst)) else { throw ReleaseCopyError.changedDestination }
+            guard sameNode(outputInfo, try outputNameStatus(destination, name)),
+                  sameNode(outputInfo, try outputStatus(dst)) else { throw ReleaseCopyError.changedDestination }
             try openedFile(source, name, src)
             var buffer = [UInt8](repeating: 0, count: 65_536), copied: UInt64 = 0
             while true {

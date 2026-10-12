@@ -359,4 +359,33 @@ final class DescriptorTreeCopyTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: nested.appendingPathComponent("keep")), Data("keep".utf8))
         }
     }
+    func testNewFileNamedLookupFailureUsesTheRecordedDescriptorIdentityForCleanup() throws {
+        try fixture { _, source, target in
+            let sibling = target.appendingPathComponent("keep")
+            try Data("keep".utf8).write(to: sibling)
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                outputNameStatus: { _, _ in throw ReleaseCopyError.system(EIO) }, openedFile: { _, _, _ in })) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .system(EIO))
+                }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Fixture.app").path))
+            XCTAssertEqual(try Data(contentsOf: sibling), Data("keep".utf8))
+        }
+    }
+    func testNewFileNamedReplacementCannotBecomeTheRecordedCreation() throws {
+        try fixture { _, source, target in
+            let output = target.appendingPathComponent("Fixture.app/file")
+            XCTAssertThrowsError(try DescriptorTreeCopy.copy(source: source, parent: target, name: "Fixture.app", limits: .init(),
+                outputNameStatus: { parent, name in
+                    try FileManager.default.removeItem(at: output)
+                    try Data("keep".utf8).write(to: output)
+                    var info = stat(); XCTAssertEqual(fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW), 0)
+                    return info
+                }, openedFile: { _, _, _ in })) {
+                    let failure = $0 as? ReleaseCopyCleanupFailure
+                    XCTAssertEqual(failure?.original as? ReleaseCopyError, .changedDestination)
+                    XCTAssertEqual(failure?.cleanup as? ReleaseCopyError, .changedDestination)
+                }
+            XCTAssertEqual(try Data(contentsOf: output), Data("keep".utf8))
+        }
+    }
 }

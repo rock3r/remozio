@@ -25,7 +25,7 @@ The original SDK must remain unchanged.
 | Source descriptor stays writable | A later source mutation cannot change copied bytes or signing evidence |
 | Copied file gains a mutation ACL | The whole-tree placement check rejects it; removing the fixture ACL restores the check |
 
-The 43 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
+The 45 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
 They check cleanup against unknown entries and replacement inodes.
 They check destination lease retirement and the public Root refusal before source or policy access.
 
