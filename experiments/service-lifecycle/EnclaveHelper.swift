@@ -67,12 +67,14 @@ import Security
                     .privateKeyUsage, &accessError) else { throw EnclaveProbeError.unavailable }
                 let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access, authenticationContext: context)
                 record = try EnclaveProbeRecord(publicKey: key.publicKey.x963Representation, wrappedKey: key.dataRepresentation)
+                report["publicFingerprint"] = record.publicFingerprint
                 report["stage"] = "persist-state"; report["statePersistence"] = "attemptedOutcomeUnknown"
                 try namespace.create(record)
                 report["statePersistence"] = "confirmed"
             } else {
                 report["stage"] = "read-existing-state"
                 record = try namespace.read()
+                report["publicFingerprint"] = record.publicFingerprint
             }
             report["stage"] = "restore-and-sign"
             let key = try record.restore(context: context)
@@ -82,7 +84,6 @@ import Security
                 throw EnclaveProbeError.invalidState
             }
             try placement.validate()
-            report["publicFingerprint"] = record.publicFingerprint
             report["signatureVerifiedAgainstRetainedPublicKey"] = true
             report["stage"] = "complete"; report["status"] = "passed"
             emit(report, daemonEvidence: service)

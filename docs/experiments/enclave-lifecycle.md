@@ -63,6 +63,9 @@ Named identities and metadata are rechecked around file access.
 Creation uses an exclusive new-file open. It never truncates an existing file.
 It writes the bounded record, flushes the file and directory, then reads back the exact bytes.
 A failed write can leave partial state. The report retains an uncertain persistence outcome.
+The creation report retains the generated public fingerprint before persistence or later signing can fail.
+A decoded existing record also reports its fingerprint before restoration.
+A fingerprint in a blocked report is not proof of a successful signature or committed state.
 Do not delete or recreate that file to turn a failure into a pass.
 
 The private record contains a version marker, the explicit access-policy tag, a valid public key and bounded wrapped-key bytes.

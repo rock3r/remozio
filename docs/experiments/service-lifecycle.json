@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "results": [
     {
-      "recordedAt": "2026-10-12T20:59:20.366350+00:00",
+      "recordedAt": "2026-10-12T21:30:55.829217+00:00",
       "os": "27.0.1",
       "architecture": "arm64",
       "deploymentTarget": "26.0",
@@ -41,7 +41,7 @@
       "sourceSHA256": {
         "experiments/service-lifecycle/AccountControls.swift": "e11c3e6865526aa9e969ea8540dd25f235339d54c76845789fced07339ee00a3",
         "experiments/service-lifecycle/Controller.swift": "9857cc7c35ed26d679e1ed81615141dccb6ec00b4cd4888fa47004ccd81e4418",
-        "experiments/service-lifecycle/EnclaveHelper.swift": "b548daf440c99948e44744935743f0fe670c58b71183076da9132d8558b5abb6",
+        "experiments/service-lifecycle/EnclaveHelper.swift": "f52950137af1caf76d1d524472198b69644b4f06f3206b1c1471b7189727e6fd",
         "experiments/service-lifecycle/EnclaveNamespace.swift": "0bcfe355f8cb3b38f4866f3f98bebd814eb124da5f9d8e6e1c170b3b63e7b057",
         "experiments/service-lifecycle/EnclaveRecord.swift": "95465490fb383ad947e088f189d0c4965468eaea348e976a48267f9b6c23e9aa",
         "experiments/service-lifecycle/Preflight.swift": "12b6a205152ef8068d632e45d3dbb7f01b3b1d279f4f5c515ec1ea18339c46b3",
@@ -54,7 +54,7 @@
       }
     },
     {
-      "recordedAt": "2026-10-12T20:59:59.330626+00:00",
+      "recordedAt": "2026-10-12T21:31:28.180407+00:00",
       "os": "27.0.1",
       "architecture": "arm64",
       "deploymentTarget": "26.0",
@@ -94,7 +94,7 @@
       "sourceSHA256": {
         "experiments/service-lifecycle/AccountControls.swift": "e11c3e6865526aa9e969ea8540dd25f235339d54c76845789fced07339ee00a3",
         "experiments/service-lifecycle/Controller.swift": "9857cc7c35ed26d679e1ed81615141dccb6ec00b4cd4888fa47004ccd81e4418",
-        "experiments/service-lifecycle/EnclaveHelper.swift": "b548daf440c99948e44744935743f0fe670c58b71183076da9132d8558b5abb6",
+        "experiments/service-lifecycle/EnclaveHelper.swift": "f52950137af1caf76d1d524472198b69644b4f06f3206b1c1471b7189727e6fd",
         "experiments/service-lifecycle/EnclaveNamespace.swift": "0bcfe355f8cb3b38f4866f3f98bebd814eb124da5f9d8e6e1c170b3b63e7b057",
         "experiments/service-lifecycle/EnclaveRecord.swift": "95465490fb383ad947e088f189d0c4965468eaea348e976a48267f9b6c23e9aa",
         "experiments/service-lifecycle/Preflight.swift": "12b6a205152ef8068d632e45d3dbb7f01b3b1d279f4f5c515ec1ea18339c46b3",
