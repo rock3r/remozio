@@ -8104,9 +8104,22 @@ extension MachCommandCallerReceiverTests {
         try await worker.start()
         let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        func waitForOutcome(_ expected: Int, phase: String) async throws {
+            do { try await waitForReceiveWorker { outcomes.withLock { $0 == expected } } }
+            catch {
+                let observation = "\(phase): status=\(worker.status), retired=\(worker.isRetired), "
+                    + "outcomes=\(outcomes.withLock { $0 }), reads=\(box.state.withLock { $0.reads }), "
+                    + "bindings=\(bindings.withLock { $0 })"
+                XCTFail(observation)
+                await worker.close()
+                XCTAssertEqual(worker.status, .closed)
+                XCTAssertFalse(receiveRightPresent(destination), "Timed-out worker retained its receive right")
+                throw error
+            }
+        }
         let profile = try workerElevationProfile(destination), first = try Endpoint(), second = try Endpoint()
         let allowed = try workerElevationSubmission(destination, reply: first, profile: profile, descriptor: descriptor, id: 0xb2)
-        try await waitForReceiveWorker { outcomes.withLock { $0 == 1 } }
+        try await waitForOutcome(1, phase: "initial admission")
         guard case .admitted = try typedOutcome(first, submission: allowed, profile: profile) else {
             await worker.close(); return XCTFail("The original authenticated attempt must reach current policy admission")
         }
@@ -8114,7 +8127,7 @@ extension MachCommandCallerReceiverTests {
         box.state.withLock { $0.targets = [] }
         let denied = try workerElevationSubmission(destination, reply: second, profile: profile,
             descriptor: descriptor, id: 0xb4, executable: "/missing-before-policy")
-        try await waitForReceiveWorker { outcomes.withLock { $0 == 2 } }
+        try await waitForOutcome(2, phase: "revoked grant")
         XCTAssertEqual(try typedOutcome(second, submission: denied, profile: profile), .notAdmitted(.policyRejected, .never))
         XCTAssertNil(try fixture.reservation(denied.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
         XCTAssertEqual(box.state.withLock { $0.reads }, 4); XCTAssertEqual(bindings.withLock { $0 }, 1)
