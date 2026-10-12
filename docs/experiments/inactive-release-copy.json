@@ -4,7 +4,7 @@
   "status": "passed",
   "hostMacOS": "27.0.1",
   "deploymentTarget": "macOS 26.0",
-  "unitTests": 67,
+  "unitTests": 71,
   "nativeControls": 6,
   "cases": [
     {
@@ -28,10 +28,10 @@
         "schema": 2
       },
       "counts": {
-        "entries": 160,
+        "links": 9,
         "bytes": 2895219,
-        "files": 89,
-        "links": 9
+        "entries": 160,
+        "files": 89
       },
       "ordinaryPlacementMetadataVerified": true,
       "unsafeSourceModeAndACLNotCopied": true,
@@ -78,7 +78,7 @@
   ],
   "sourceSHA256": {
     "macos/core/Sources/RemozioCore/DescriptorTreeCopy.swift": "548a826695ca77ca65eb5eb90b876fb32454357a252f772155e4b212cd4dff1f",
-    "macos/core/Sources/RemozioCore/ReleaseDestinationLease.swift": "6d6b815ad0bbe87d08be6c712aa6b9d0e25f89c136f25239a04a41a91c21ebf7",
+    "macos/core/Sources/RemozioCore/ReleaseDestinationLease.swift": "79cbf8741419887d56c9c04cfed81e49fcab905756702e51be559aa1932d652b",
     "macos/core/Sources/RemozioCore/ProtectedReleaseTreeInspection.swift": "0a608677d2963d51b725590e328530cba18860348273dd54e86c42cd46c9e1c8",
     "macos/core/Sources/RemozioCore/ProtectedReleasePreparation.swift": "d5185e383bc2ee722d3b3dd8247390709d3596258f38ae6217869d72d083fd9f",
     "macos/core/Tests/RemozioCoreTests/DescriptorTreeCopyTests.swift": "a0ef8e6904433d305e5588647d48850a3d4ca26b9ccad3c05ae7e68b6a9bcb4c",
@@ -87,12 +87,12 @@
     "experiments/release-copy/Sources/ReleaseCopyProbe/main.swift": "1cf2becdcce664f155b2e0768034058eadd6643e616235a7ec3f8d36b4a918d1",
     "scripts/run-release-copy-experiment.py": "1a4349684ee1fdc5f7eb343164fde9dfa462725afad28df1cec5bd2eeee23002",
     "macos/core/Sources/RemozioCore/CopiedReleaseMetadata.swift": "cf229a79691860ba263fc68e924683e466d050e1d3537be9c9f53d59a86f33ab",
-    "macos/core/Sources/RemozioCore/DurableReleasePreparation.swift": "1784ea62057c0bfa81e139544cd2eb5a0343581a912d45c20f5857afc9549c98",
+    "macos/core/Sources/RemozioCore/DurableReleasePreparation.swift": "170f6d551ec0ad82177faac9675029e89845cae606ea83e483637f592a2f2120",
     "macos/core/Sources/RemozioCore/InstallationStorageLease.swift": "d5e974e9b5aa88c8269d2f663ea8ddc8c57b27f7ad098cc8b32ff71cdfe9054a",
     "macos/core/Sources/RemozioCore/PreparationIntentRecord.swift": "0e71f63c91e00e83ae561c62a6fc0fbd06112de62dd8106e2d457dfd14e37291",
-    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "e4065b2a27bcab43636c5dff5edd54966968b0f110516eef3ec8d38b8b8c8750",
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "0e9a3b203fe1dc6c0257705aeaeaea03d510a81563c07753307b965bd06e42cc",
     "macos/core/Sources/RemozioCore/ProtectedStorageLease.swift": "bd5abf7042f522bb04f91fe99c72eb25eef8589d2bff92dc72b9ada1c961f0ae",
-    "macos/core/Tests/RemozioCoreTests/DurableReleasePreparationTests.swift": "2df26877c1d47f26f730aa48ea38e879b1458d30698b6dd8a5320f2bbdcaf477"
+    "macos/core/Tests/RemozioCoreTests/DurableReleasePreparationTests.swift": "431f0c44f7881b41c6ba41c5ad94f2c692703c03f96887b5b747f3b576465cb1"
   },
   "publicOrdinaryIdentityRefusalTested": true,
   "RootOwnershipAndIsolationTested": false,
@@ -142,7 +142,7 @@
   },
   "durablePreparation": {
     "storageSchema": 1,
-    "focusedRecoveryTests": 16,
+    "focusedRecoveryTests": 20,
     "nativeSignedReopenPassed": true,
     "freshNativeInspectorUsed": true,
     "advancedFloorRejected": true,
@@ -152,6 +152,7 @@
     "processExitPrototypeControls": 2,
     "rejectedCommitPrototypeControls": 2,
     "prototypeControlsAreCoreTests": false,
-    "nativeSQLiteCorruptionRetiresConnection": true
+    "nativeSQLiteCorruptionRetiresConnection": true,
+    "absentAbandonedRecordsReconciled": true
   }
 }

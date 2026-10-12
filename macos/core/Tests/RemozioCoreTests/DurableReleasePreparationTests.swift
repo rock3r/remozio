@@ -193,6 +193,9 @@ final class DurableReleasePreparationTests: XCTestCase {
                 store: store, readPolicy: { reads += 1; return try self.policy() })) {
                 XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
             }
+            XCTAssertThrowsError(try DurableReleasePreparation.reconcileAbandoned(destination: destination, store: store)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
             XCTAssertEqual(reads, 0); XCTAssertTrue(try store.records().isEmpty)
         }
     }
@@ -292,6 +295,67 @@ final class DurableReleasePreparationTests: XCTestCase {
                 XCTAssertTrue([SQLITE_CORRUPT, SQLITE_NOTADB].contains(code & 0xff))
             }
             XCTAssertThrowsError(try store.records()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
+        }
+    }
+
+    func testRepeatedFailedPreparationsReclaimOnlyAbsentAbandonedRecords() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true, maximum: 1), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            for _ in 0..<65 {
+                XCTAssertThrowsError(try DurableReleasePreparation.prepareInLease(source: f.root.appendingPathComponent("missing.app"),
+                    destination: destination, store: store, readPolicy: { try self.policy() })) {
+                    XCTAssertNotEqual($0 as? PreparationStoreError, .capacity)
+                }
+                let records = try store.records()
+                XCTAssertEqual(records.count, 1); XCTAssertEqual(records.first?.phase, .abandoned)
+                XCTAssertFalse(try destination.preparationCopyExists(name: XCTUnwrap(records.first).bundleName))
+            }
+            try DurableReleasePreparation.reconcileAbandonedInLease(destination: destination, store: store)
+            XCTAssertTrue(try store.records().isEmpty)
+            XCTAssertNoThrow(try store.begin(parent: destination.path, ancestry: destination.preparationAncestry()))
+        }
+    }
+    func testReconciliationRetainsAbandonedRecordAndExistingCopy() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true, maximum: 1), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            let record = try recordedCopy(store, destination, signature: signature())
+            let abandoned = try store.abandon(id: record.id, expectedRevision: record.revision)
+            try DurableReleasePreparation.reconcileAbandonedInLease(destination: destination, store: store)
+            XCTAssertEqual(try store.records(), [abandoned])
+            XCTAssertTrue(try destination.preparationCopyExists(name: record.bundleName))
+        }
+    }
+    func testReconciliationRetainsMismatchedAncestryAndTarget() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            let original = try destination.preparationAncestry()
+            var changed = original
+            changed[changed.count - 1] = .init(device: original.last!.device, inode: UInt64.max)
+            let first = try store.begin(parent: destination.path, ancestry: changed)
+            _ = try store.abandon(id: first.id, expectedRevision: first.revision)
+            let second = try store.begin(parent: destination.path + "-other", ancestry: original)
+            _ = try store.abandon(id: second.id, expectedRevision: second.revision)
+            let before = try store.records()
+            try DurableReleasePreparation.reconcileAbandonedInLease(destination: destination, store: store)
+            XCTAssertEqual(try store.records(), before)
+        }
+    }
+    func testReconciliationCannotForgetLiveOrStaleRecords() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            let record = try store.begin(parent: destination.path, ancestry: destination.preparationAncestry())
+            XCTAssertThrowsError(try store.forgetAbsentAbandoned(id: record.id, expectedRevision: record.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            let abandoned = try store.abandon(id: record.id, expectedRevision: record.revision)
+            XCTAssertThrowsError(try store.forgetAbsentAbandoned(id: record.id, expectedRevision: record.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertEqual(try store.records(), [abandoned])
         }
     }
 }

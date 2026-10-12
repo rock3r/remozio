@@ -82,6 +82,16 @@ public final class ReleaseDestinationLease {
         try validate()
         return nodes.map { .init(device: UInt32(bitPattern: $0.identity.st_dev), inode: $0.identity.st_ino) }
     }
+    func preparationCopyExists(name: String) throws -> Bool {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
+              !name.utf8.contains(0), name.utf8.count <= 255 else { throw ReleaseCopyError.invalidInput }
+        return try withDirectory { parent in
+            var info = stat()
+            if fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) == 0 { return true }
+            guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
+            return false
+        }
+    }
     func preparationCopyIdentity(name: String) throws -> PreparationFileIdentity {
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
               !name.utf8.contains(0), name.utf8.count <= 255 else { throw ReleaseCopyError.invalidInput }

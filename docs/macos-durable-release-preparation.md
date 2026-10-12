@@ -37,6 +37,10 @@ The default capacity is 64 records, with a hard maximum of 4,096.
 Reducing the configured capacity preserves existing records and blocks only new preparation.
 Each canonical record permits at most 16 KiB, 64 ancestor identities and a bounded absolute destination path.
 Revision checks reject stale updates. An abandoned attempt cannot return to a completed state.
+Before a new preparation, reconciliation reclaims abandoned bookkeeping only when the target path and retained ancestry still match and the copy is absent.
+It never removes filesystem objects. Existing copies, unknown entries, mismatched targets and changed ancestry retain their records.
+The public reconciliation entry point requires Root. Successful or incomplete live records cannot be forgotten.
+The hard record limit is checked before insertion, so reaching it returns capacity rather than creating an unreadable store.
 
 ## Recovery boundary
 
@@ -63,11 +67,11 @@ A copy that completes before a persistence failure can remain on disk.
 The error preserves the preparation and record failures when both occur.
 A directory alone never grants evidence. Unknown orphan entries remain untouched.
 
-Sixteen Core tests cover recovery, fresh inspection, inode replacement, floor advancement, revisions, scope, capacity and corruption.
+Twenty Core tests cover recovery, fresh inspection, inode replacement, floor advancement, revisions, scope, capacity and corruption.
 The internal unit inspector seam checks control flow; it does not prove native signing or Root isolation.
 The guarded SDK experiment uses the actual copier and native inspector across store reopen.
 It checks signing equality, advanced floors, changed metadata, restored metadata and preserved records.
-All 67 focused copy and recovery tests and six native controls passed on the recorded host.
+All 71 focused copy and recovery tests and six native controls passed on the recorded host.
 
 Standalone ordinary-owner prototypes also check committed intent and copy metadata across process exit without explicit close.
 A fixture-only commit rejection retires its connection and preserves the prior intent.

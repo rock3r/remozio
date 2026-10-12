@@ -78,7 +78,8 @@ public final class PreparationIntentStore {
     func records() throws -> [PreparationIntentRecord] { try transaction(write: false) { try loadAll() } }
     func begin(parent: String, ancestry: [PreparationFileIdentity]) throws -> PreparationIntentRecord {
         try transaction(write: true) {
-            guard try loadAll().count < maximumRecords else { throw PreparationStoreError.capacity }
+            let retained = try loadAll()
+            guard retained.count < maximumRecords, retained.count < 4096 else { throw PreparationStoreError.capacity }
             let value = try PreparationIntentRecord(id: UUID(), revision: UUID(), parent: parent, ancestry: ancestry, phase: .intent)
             try statement("INSERT INTO preparation_intents_v1 VALUES(?,?,?)") { row in
                 try bind(bytes(value.id), column: 1, row: row)
@@ -95,6 +96,19 @@ public final class PreparationIntentStore {
     }
     func abandon(id: UUID, expectedRevision: UUID) throws -> PreparationIntentRecord {
         try change(id: id, expectedRevision: expectedRevision, phase: .abandoned, identity: nil, digest: nil)
+    }
+    // Only the Core reconciler calls this after confirming copy absence under the bound destination lease.
+    func forgetAbsentAbandoned(id: UUID, expectedRevision: UUID) throws {
+        try transaction(write: true) {
+            guard let previous = try loadAll().first(where: { $0.id == id }) else { throw PreparationStoreError.notFound }
+            guard previous.revision == expectedRevision else { throw PreparationStoreError.staleRevision }
+            guard previous.phase == .abandoned else { throw PreparationStoreError.invalidTransition }
+            try statement("DELETE FROM preparation_intents_v1 WHERE id=? AND revision=?") { row in
+                try bind(bytes(id), column: 1, row: row)
+                try bind(bytes(expectedRevision), column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        }
     }
     private func change(id: UUID, expectedRevision: UUID, phase: PreparationRecordPhase,
                         identity: PreparationFileIdentity?, digest: Data?) throws -> PreparationIntentRecord {

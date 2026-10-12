@@ -25,6 +25,7 @@ public enum DurableReleasePreparation {
     static func prepareInLease(source: URL, destination: ReleaseDestinationLease, store: PreparationIntentStore,
                                limits: ReleaseCopyLimits = try! .init(), readPolicy: () throws -> AuthorityCodePolicy,
                                checkCancellation: @escaping () throws -> Void = {}) throws -> DurableInactiveCopyEvidence {
+        try reconcileAbandonedInLease(destination: destination, store: store)
         let attempt = try store.begin(parent: destination.path, ancestry: destination.preparationAncestry())
         do {
             let copy = try ProtectedReleasePreparation.prepareInLease(source: source, destination: destination,
@@ -38,6 +39,19 @@ public enum DurableReleasePreparation {
             do { _ = try store.abandon(id: attempt.id, expectedRevision: attempt.revision) }
             catch { throw DurablePreparationError.preparationAndRecordFailure(preparationFailure, error) }
             throw preparationFailure
+        }
+    }
+    /// Reclaims only abandoned bookkeeping whose bound copy is absent. It never removes filesystem objects.
+    public static func reconcileAbandoned(destination: ReleaseDestinationLease, store: PreparationIntentStore) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try reconcileAbandonedInLease(destination: destination, store: store)
+    }
+    static func reconcileAbandonedInLease(destination: ReleaseDestinationLease, store: PreparationIntentStore) throws {
+        let ancestry = try destination.preparationAncestry()
+        for record in try store.records() where record.phase == .abandoned {
+            guard record.parent == destination.path, record.ancestry == ancestry,
+                  try !destination.preparationCopyExists(name: record.bundleName) else { continue }
+            try store.forgetAbsentAbandoned(id: record.id, expectedRevision: record.revision)
         }
     }
     public static func recover(attemptID: UUID, destination: ReleaseDestinationLease, store: PreparationIntentStore,
