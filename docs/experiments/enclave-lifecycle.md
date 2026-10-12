@@ -114,7 +114,25 @@ Keep real provider credentials, enrollment keys and approval payloads outside th
 7. Approve only this experiment if macOS requests approval. Verify the actual job, signed executable and Root process.
    A matching JSON report or log string alone is not provenance.
    The daemon exits after its one-shot result; status eligibility does not claim that it remains running.
-8. Repeat after lock, logout and reboot before GUI login. Record the actual security-session flags and timing.
+8. Establish an operator-approved control channel that remains available while the GUI locks or logs out.
+   Verify the registered system job and wait for its previous one-shot process to exit.
+   Lock the Mac, then explicitly start a new probe through that control channel:
+
+   ```sh
+   # Authorized Root operator session only. The exact job must already be verified.
+   TASK_ENCLAVE_JOB='system/dev.remozio.experiments.lifecycle.enclave'
+   /bin/launchctl print "$TASK_ENCLAVE_JOB"
+   /bin/launchctl kickstart -p "$TASK_ENCLAVE_JOB"
+   ```
+
+   Retain the returned PID and trigger time. Match the complete report and verified process provenance to that run.
+   Wait for completion, then repeat the explicit trigger after GUI logout.
+   Do not unlock or log into the GUI to issue those triggers.
+   Do not use `-k`; it kills an existing process instead of preserving the preceding probe.
+   `RunAtLoad` starts this job when it loads. Lock and logout do not reload a system daemon.
+   For reboot, retain the automatic startup report from before GUI login.
+   If it is absent or incomplete, that reboot case remains unproven; a later kickstart does not replace it.
+   Record the actual security-session flags and timing for each separate case.
    Compare every reported fingerprint with the original. FileVault preboot remains outside scope.
 9. Test a second protected, signed and notarized app build while preserving the same private state.
    Use completed unregister and re-registration boundaries from the lifecycle procedure.
