@@ -11,6 +11,7 @@
   "ownedFixturesRemoved": true,
   "productionPolicyChanged": false,
   "rootExecuted": false,
+  "runnerGuardTests": 3,
   "runtime": "27.0.1",
   "schema": 1,
   "sdkBytesAndLinksPreserved": true,
@@ -48,10 +49,9 @@
     "experiments/release-attributes/Sources/AttributeInspection/AttributeInspection.swift": "ccad45136ef0c12ae3434e904b04ffbebe053b539118de2dffa79b1021359180",
     "experiments/release-attributes/Sources/AttributeProbe/main.swift": "03c701410eba6dae731371029f549ac35e81814403d7862420e2340c2961b647",
     "experiments/release-attributes/Tests/AttributeInspectionTests/AttributeInspectionTests.swift": "2429a35937b6758f8e38c4568b18328a623e34d18b4fb8461423d1ed4879d15f",
-    "scripts/run-release-attributes-experiment.py": "0e731f34d819109423a697269ee0e0ab847e8cfcd0d100b7ae58baa0c7258dc9",
-    "tests/test_release_attribute_runner.py": "521a35057db13cd5bf94f3b3005fdb605e9d331384cfc170f1160cbe8cfe04b5",
-    "scripts/check.sh": "3713f328a1bfc394183ed53ca97ae909a6c16dfd8f883066f23ed37b0f5d27e7"
+    "scripts/check.sh": "3713f328a1bfc394183ed53ca97ae909a6c16dfd8f883066f23ed37b0f5d27e7",
+    "scripts/run-release-attributes-experiment.py": "ff93c980bd056caf769374ed280911fdb35ae4049e074686173f7ade46e12c01",
+    "tests/test_release_attribute_runner.py": "521a35057db13cd5bf94f3b3005fdb605e9d331384cfc170f1160cbe8cfe04b5"
   },
-  "unitTests": 8,
-  "runnerGuardTests": 3
+  "unitTests": 8
 }

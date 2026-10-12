@@ -8,12 +8,22 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import subprocess
+import sys
 import tempfile
 
 
 def run(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def measured_test_count(pattern, *args):
+    result = subprocess.run(args, check=True, capture_output=True, text=True)
+    counts = [int(value) for value in re.findall(pattern, result.stdout + result.stderr)]
+    if not counts or max(counts) < 1:
+        raise ValueError("The test command did not report a positive test count")
+    return max(counts)
 
 
 def tree_digest(root):
@@ -105,6 +115,10 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     package = repo / "experiments/release-attributes"
     sdk_package = repo / "experiments/sparkle-boundary"
+    guard_tests = measured_test_count(r"\bRan (\d+) tests?\b", sys.executable, "-m", "unittest", "discover",
+                                     "-s", str(repo / "tests"), "-p", "test_release_attribute_runner.py")
+    unit_tests = measured_test_count(r"Executed (\d+) tests, with 0 failures", "swift", "test", "--package-path",
+                                    str(package), "--triple", "arm64-apple-macosx26.0")
     for item in [package, sdk_package]:
         run("swift", "build", "--package-path", str(item), "--disable-keychain", "--disable-netrc")
     probe = Path(run("swift", "build", "--package-path", str(package), "--show-bin-path")) / "AttributeProbe"
@@ -124,6 +138,7 @@ def main():
     if root.exists() or tree_digest(sdk) != before:
         raise ValueError("Fixture cleanup or original SDK preservation failed")
     record = {"schema": 1, "runtime": platform.mac_ver()[0], "architecture": platform.machine(),
+              "unitTests": unit_tests, "runnerGuardTests": guard_tests,
               "sdkInventory": inventory, "sdkTree": before, "signedControls": controls, "sdkBytesAndLinksPreserved": True,
               "ownedFixturesRemoved": True, "fixtureExecuted": False, "rootExecuted": False,
               "inventoryReadsAttributeValues": False, "attributeValuesReported": False, "productionPolicyChanged": False,
@@ -133,7 +148,8 @@ def main():
     paths = ["scripts/run-release-attributes-experiment.py", "experiments/release-attributes/Package.swift",
              "experiments/release-attributes/Sources/AttributeInspection/AttributeInspection.swift",
              "experiments/release-attributes/Sources/AttributeProbe/main.swift",
-             "experiments/release-attributes/Tests/AttributeInspectionTests/AttributeInspectionTests.swift"]
+             "experiments/release-attributes/Tests/AttributeInspectionTests/AttributeInspectionTests.swift",
+             "tests/test_release_attribute_runner.py", "scripts/check.sh"]
     record["sourceSHA256"] = {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in paths}
     print(json.dumps(record, sort_keys=True))
 

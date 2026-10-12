@@ -25,6 +25,7 @@ python3 scripts/run-release-attributes-experiment.py \
 ```
 
 The runner builds its probe and reuses the existing Sparkle SDK dependency.
+It prints the complete evidence record, including measured test counts and hashes for all seven validation sources.
 It verifies the fixture Team, removes its private directories, and checks the original SDK bytes and links.
 It never executes the signed app.
 
