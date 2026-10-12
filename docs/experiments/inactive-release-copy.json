@@ -5,7 +5,7 @@
   "hostMacOS": "27.0.1",
   "deploymentTarget": "macOS 26.0",
   "unitTests": 45,
-  "nativeControls": 4,
+  "nativeControls": 5,
   "cases": [
     {
       "control": "compressed-resource-data-fork",
