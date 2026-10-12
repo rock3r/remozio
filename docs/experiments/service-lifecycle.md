@@ -82,14 +82,21 @@ The app never creates an account or changes existing account records.
 Do not reuse an existing account to make the experiment pass.
 
 The account must use `/usr/bin/false` as its shell.
-The resolver reads its UID, primary GID and complete bounded group lookup through native account APIs.
+The resolver reads its UID, primary GID and bounded group list through native account APIs.
 It rejects Root, invalid identifiers, and wheel or admin group membership.
+The flat group list does not establish nested membership.
+It resolves both named groups and uses Apple's [membership API](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/mbr_check_membership.3.html).
+That API checks direct and nested membership.
+A missing group, conversion error, query error or invalid result refuses registration.
+The helper and each registration recheck use the same native checks.
 Registration also rejects the invoking GUI account's UID.
 It rechecks the same resolved UID, GID and group set immediately before registration.
 The transport helper requires that account's actual real/effective UID and primary GID before its service path.
 
 Synthetic controls check valid records and thirteen unsafe records.
-They do not change process credentials or prove actual account provisioning.
+They also reject injected nested membership and membership lookup failures.
+Read-only native queries run for the current ordinary account.
+These controls do not change credentials or prove target-account provisioning or actual nested-group fixtures.
 Native lookup does not prove exclusive UID ownership, absence of alternate login methods, or actual launchd group credentials.
 Verify those properties separately during the operator session.
 A matching username is not proof of isolation.

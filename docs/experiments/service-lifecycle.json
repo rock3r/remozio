@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "results": [
     {
-      "recordedAt": "2026-10-12T19:37:51.394828+00:00",
+      "recordedAt": "2026-10-12T19:53:33.823099+00:00",
       "os": "27.0.1",
       "architecture": "arm64",
       "deploymentTarget": "26.0",
@@ -10,6 +10,8 @@
       "signing": "ad-hoc",
       "checks": [
         "transport:synthetic-account-controls",
+        "transport:nested-membership-and-lookup-error-controls",
+        "transport:native-current-account-membership-queries",
         "session:description-and-default-refusal",
         "authority:description-and-default-refusal",
         "transport:description-and-default-refusal",
@@ -30,17 +32,18 @@
       "dedicatedTransportAccountTested": false,
       "status": "passed",
       "sourceSHA256": {
-        "experiments/service-lifecycle/AccountControls.swift": "6c8afe2efc31453007ff9230176492195d55e464bcd91e7358a301ef2491f5f9",
+        "experiments/service-lifecycle/AccountControls.swift": "e11c3e6865526aa9e969ea8540dd25f235339d54c76845789fced07339ee00a3",
         "experiments/service-lifecycle/Controller.swift": "c3fc2440821772c40da8234a1cceff18b94a13af7df9ba0b47361c3730e36bc1",
         "experiments/service-lifecycle/Preflight.swift": "efc601ac0c61d7f130ef3ebdb5d927510edcb1f81e4486504911cfe26981a6df",
         "experiments/service-lifecycle/Probe.swift": "c741197f29cd6c73580d266d6f59d09842e160c07cf2b6337725e50858c6da80",
-        "experiments/service-lifecycle/TransportAccount.swift": "c1c9e57fdda81d26b8eb6e6fac038f5a929515f63fcfe05c8c1e5aa9e7c9440c",
+        "experiments/service-lifecycle/TransportAccount.swift": "4c37900ca606be8faccab18978ef80be21762d46963ee943042da43c1b1fff50",
+        "experiments/service-lifecycle/MembershipBridge.h": "8b09b06f4ef77f5d25a175da3511ff169e12ebc3fc4f13b5973130d532a45f6b",
         "macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift": "bc7520823b72f365dd4b505bd7f5b3ceaf4615cfda1ad70f7d951da26f0cbf53",
-        "scripts/check-service-lifecycle.py": "1b83289bd6aeb3b4eb327ba5ea944c4f77e7f32452408a085519fc29a32d1459"
+        "scripts/check-service-lifecycle.py": "f2da21da79672b9a829317caed0324b4203a933094ccd3b1ee70e3c28b90bdde"
       }
     },
     {
-      "recordedAt": "2026-10-12T19:38:18.761001+00:00",
+      "recordedAt": "2026-10-12T19:54:08.684020+00:00",
       "os": "27.0.1",
       "architecture": "arm64",
       "deploymentTarget": "26.0",
@@ -48,6 +51,8 @@
       "signing": "developer-id",
       "checks": [
         "transport:synthetic-account-controls",
+        "transport:nested-membership-and-lookup-error-controls",
+        "transport:native-current-account-membership-queries",
         "session:description-and-default-refusal",
         "authority:description-and-default-refusal",
         "transport:description-and-default-refusal",
@@ -69,13 +74,14 @@
       "dedicatedTransportAccountTested": false,
       "status": "passed",
       "sourceSHA256": {
-        "experiments/service-lifecycle/AccountControls.swift": "6c8afe2efc31453007ff9230176492195d55e464bcd91e7358a301ef2491f5f9",
+        "experiments/service-lifecycle/AccountControls.swift": "e11c3e6865526aa9e969ea8540dd25f235339d54c76845789fced07339ee00a3",
         "experiments/service-lifecycle/Controller.swift": "c3fc2440821772c40da8234a1cceff18b94a13af7df9ba0b47361c3730e36bc1",
         "experiments/service-lifecycle/Preflight.swift": "efc601ac0c61d7f130ef3ebdb5d927510edcb1f81e4486504911cfe26981a6df",
         "experiments/service-lifecycle/Probe.swift": "c741197f29cd6c73580d266d6f59d09842e160c07cf2b6337725e50858c6da80",
-        "experiments/service-lifecycle/TransportAccount.swift": "c1c9e57fdda81d26b8eb6e6fac038f5a929515f63fcfe05c8c1e5aa9e7c9440c",
+        "experiments/service-lifecycle/TransportAccount.swift": "4c37900ca606be8faccab18978ef80be21762d46963ee943042da43c1b1fff50",
+        "experiments/service-lifecycle/MembershipBridge.h": "8b09b06f4ef77f5d25a175da3511ff169e12ebc3fc4f13b5973130d532a45f6b",
         "macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift": "bc7520823b72f365dd4b505bd7f5b3ceaf4615cfda1ad70f7d951da26f0cbf53",
-        "scripts/check-service-lifecycle.py": "1b83289bd6aeb3b4eb327ba5ea944c4f77e7f32452408a085519fc29a32d1459"
+        "scripts/check-service-lifecycle.py": "f2da21da79672b9a829317caed0324b4203a933094ccd3b1ee70e3c28b90bdde"
       }
     }
   ]

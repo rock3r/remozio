@@ -53,7 +53,7 @@ def build(app, identity):
     (app / 'Contents/MacOS').mkdir(parents=True)
     (app / 'Contents/Helpers').mkdir()
     shared = [str(SOURCE / 'Preflight.swift'), str(SOURCE / 'TransportAccount.swift'), str(METADATA)]
-    common = ['xcrun', 'swiftc', '-swift-version', '6', '-target', 'arm64-apple-macosx26.0', '-parse-as-library']
+    common = ['xcrun', 'swiftc', '-import-objc-header', str(SOURCE / 'MembershipBridge.h'), '-swift-version', '6', '-target', 'arm64-apple-macosx26.0', '-parse-as-library']
     run(*common, str(SOURCE / 'Controller.swift'), *shared, '-o', str(app / 'Contents/MacOS/RemozioServiceLifecycle'))
     for role, (folder, executable) in ROLES.items():
         directory = app / 'Contents/Library' / folder
@@ -75,11 +75,12 @@ def controls(app, identity):
     verify_executable(controller, APP_ID)
     checks = []
     account_controls = app.parent / 'account-controls'
-    run('xcrun', 'swiftc', '-warnings-as-errors', '-swift-version', '6', '-target', 'arm64-apple-macosx26.0',
+    run('xcrun', 'swiftc', '-import-objc-header', str(SOURCE / 'MembershipBridge.h'), '-warnings-as-errors', '-swift-version', '6', '-target', 'arm64-apple-macosx26.0',
         '-parse-as-library', str(SOURCE / 'AccountControls.swift'), str(SOURCE / 'Preflight.swift'),
         str(SOURCE / 'TransportAccount.swift'), str(METADATA), '-o', str(account_controls))
     run(str(account_controls))
-    checks.append('transport:synthetic-account-controls')
+    checks.extend(['transport:synthetic-account-controls', 'transport:nested-membership-and-lookup-error-controls',
+                   'transport:native-current-account-membership-queries'])
     for role, (_, executable) in ROLES.items():
         binary = app / 'Contents/Helpers' / executable
         verify_executable(binary, f'{APP_ID}.{role}')
@@ -163,7 +164,7 @@ def main():
                   'notarizationTested': False, 'bootTested': False, 'updateTested': False,
                   'dedicatedTransportAccountTested': False, 'status': 'passed',
                   'sourceSHA256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                   for path in [*sorted(SOURCE.glob('*.swift')), METADATA, Path(__file__).resolve()]}}
+                                   for path in [*sorted(SOURCE.glob('*.swift')), *sorted(SOURCE.glob('*.h')), METADATA, Path(__file__).resolve()]}}
         if args.keep_output:
             require(not args.keep_output.exists() and not args.keep_output.is_symlink(), 'Kept output must be new')
             shutil.copytree(app, args.keep_output)

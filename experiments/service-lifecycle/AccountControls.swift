@@ -23,6 +23,27 @@ import Foundation
                 fatalError("Invalid account accepted")
             } catch ServiceProbeError.account {}
         }
-        print("Synthetic account controls passed: 2 valid and 13 refused. No OS account created or service operation attempted.")
+        var queried: [String] = []
+        try ServiceProbeTransportAccount.rejectAdministrators(uid: other) { uid, name in
+            precondition(uid == other); queried.append(name); return false
+        }
+        precondition(queried == ["wheel", "admin"])
+        for rejectedGroup in ["wheel", "admin"] {
+            do {
+                try ServiceProbeTransportAccount.rejectAdministrators(uid: other) { _, name in name == rejectedGroup }
+                fatalError("Nested administrative membership accepted")
+            } catch ServiceProbeError.account {}
+            do {
+                try ServiceProbeTransportAccount.rejectAdministrators(uid: other) { _, name in
+                    if name == rejectedGroup { throw ServiceProbeError.account }
+                    return false
+                }
+                fatalError("Membership lookup failure accepted")
+            } catch ServiceProbeError.account {}
+        }
+        for name in ["wheel", "admin"] {
+            _ = try ServiceProbeTransportAccount.groupMembership(uid: own, name: name)
+        }
+        print("Account controls passed: synthetic records, nested membership, lookup errors and native current-account queries. No account or service changed.")
     }
 }
