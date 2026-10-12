@@ -4,7 +4,7 @@
   "status": "passed",
   "hostMacOS": "27.0.1",
   "deploymentTarget": "macOS 26.0",
-  "unitTests": 66,
+  "unitTests": 67,
   "nativeControls": 6,
   "cases": [
     {
@@ -28,10 +28,10 @@
         "schema": 2
       },
       "counts": {
-        "files": 89,
         "entries": 160,
-        "links": 9,
-        "bytes": 2895219
+        "bytes": 2895219,
+        "files": 89,
+        "links": 9
       },
       "ordinaryPlacementMetadataVerified": true,
       "unsafeSourceModeAndACLNotCopied": true,
@@ -90,9 +90,9 @@
     "macos/core/Sources/RemozioCore/DurableReleasePreparation.swift": "1784ea62057c0bfa81e139544cd2eb5a0343581a912d45c20f5857afc9549c98",
     "macos/core/Sources/RemozioCore/InstallationStorageLease.swift": "d5e974e9b5aa88c8269d2f663ea8ddc8c57b27f7ad098cc8b32ff71cdfe9054a",
     "macos/core/Sources/RemozioCore/PreparationIntentRecord.swift": "0e71f63c91e00e83ae561c62a6fc0fbd06112de62dd8106e2d457dfd14e37291",
-    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "056c352c243739b59c46bd9ab37737cafffcb5a7a0f72afc4bb56afa4859afab",
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "e4065b2a27bcab43636c5dff5edd54966968b0f110516eef3ec8d38b8b8c8750",
     "macos/core/Sources/RemozioCore/ProtectedStorageLease.swift": "bd5abf7042f522bb04f91fe99c72eb25eef8589d2bff92dc72b9ada1c961f0ae",
-    "macos/core/Tests/RemozioCoreTests/DurableReleasePreparationTests.swift": "f6bc6c295614601c5211aaac8b8ed27e381c1ed8b13208e3fec95b499d04555a"
+    "macos/core/Tests/RemozioCoreTests/DurableReleasePreparationTests.swift": "2df26877c1d47f26f730aa48ea38e879b1458d30698b6dd8a5320f2bbdcaf477"
   },
   "publicOrdinaryIdentityRefusalTested": true,
   "RootOwnershipAndIsolationTested": false,
@@ -142,7 +142,7 @@
   },
   "durablePreparation": {
     "storageSchema": 1,
-    "focusedRecoveryTests": 15,
+    "focusedRecoveryTests": 16,
     "nativeSignedReopenPassed": true,
     "freshNativeInspectorUsed": true,
     "advancedFloorRejected": true,
@@ -151,6 +151,7 @@
     "RootIsolationTested": false,
     "processExitPrototypeControls": 2,
     "rejectedCommitPrototypeControls": 2,
-    "prototypeControlsAreCoreTests": false
+    "prototypeControlsAreCoreTests": false,
+    "nativeSQLiteCorruptionRetiresConnection": true
   }
 }

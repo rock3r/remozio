@@ -256,4 +256,42 @@ final class DurableReleasePreparationTests: XCTestCase {
             XCTAssertThrowsError(try second.records()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
         }
     }
+
+    func testSQLiteBtreeCorruptionPermanentlyRetiresConnection() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            _ = try store.begin(parent: destination.path, ancestry: destination.preparationAncestry())
+            var database: OpaquePointer?
+            XCTAssertEqual(sqlite3_open_v2(f.root.appendingPathComponent("State/installation.sqlite").path, &database,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOFOLLOW, nil), SQLITE_OK)
+            let opened = try XCTUnwrap(database)
+            var statement: OpaquePointer?
+            XCTAssertEqual(sqlite3_prepare_v2(opened, "SELECT rootpage FROM sqlite_master WHERE name='preparation_intents_v1'", -1, &statement, nil), SQLITE_OK)
+            let query = try XCTUnwrap(statement)
+            XCTAssertEqual(sqlite3_step(query), SQLITE_ROW)
+            let rootPage = sqlite3_column_int64(query, 0)
+            XCTAssertGreaterThan(rootPage, 1)
+            XCTAssertEqual(sqlite3_finalize(query), SQLITE_OK)
+            XCTAssertEqual(sqlite3_prepare_v2(opened, "PRAGMA page_size", -1, &statement, nil), SQLITE_OK)
+            let pageQuery = try XCTUnwrap(statement)
+            XCTAssertEqual(sqlite3_step(pageQuery), SQLITE_ROW)
+            let pageSize = sqlite3_column_int64(pageQuery, 0)
+            XCTAssertGreaterThanOrEqual(pageSize, 512)
+            XCTAssertEqual(sqlite3_finalize(pageQuery), SQLITE_OK)
+            XCTAssertEqual(sqlite3_close(opened), SQLITE_OK)
+            let fd = open(f.root.appendingPathComponent("State/installation.sqlite").path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(fd, 0); defer { close(fd) }
+            var invalidPage: UInt8 = 0xff
+            XCTAssertEqual(pwrite(fd, &invalidPage, 1, off_t((rootPage - 1) * pageSize)), 1)
+            var counter = UInt32(9999).bigEndian
+            XCTAssertEqual(pwrite(fd, &counter, 4, 24), 4)
+            XCTAssertEqual(fsync(fd), 0)
+            XCTAssertThrowsError(try store.records()) {
+                guard case PreparationStoreError.storage(let code) = $0 else { return XCTFail("Wrong error: \($0)") }
+                XCTAssertTrue([SQLITE_CORRUPT, SQLITE_NOTADB].contains(code & 0xff))
+            }
+            XCTAssertThrowsError(try store.records()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
+        }
+    }
 }

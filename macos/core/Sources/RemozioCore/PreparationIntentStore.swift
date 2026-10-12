@@ -147,7 +147,11 @@ public final class PreparationIntentStore {
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
         do { try lease.validate() } catch { unavailable = true; shutdown(); throw error }
-        try exec(write ? "BEGIN IMMEDIATE" : "BEGIN")
+        do { try exec(write ? "BEGIN IMMEDIATE" : "BEGIN") }
+        catch {
+            if Self.isSQLiteCorruption(error) { unavailable = true; shutdown() }
+            throw error
+        }
         active = true; defer { active = false }
         do {
             let value = try body()
@@ -156,13 +160,20 @@ public final class PreparationIntentStore {
             try lease.validate()
             return value
         } catch {
-            if error as? PreparationStoreError == .corruptRecord || error is JournalLeaseError { unavailable = true }
+            if error as? PreparationStoreError == .corruptRecord || error is JournalLeaseError || Self.isSQLiteCorruption(error) {
+                unavailable = true
+            }
             if let db, sqlite3_get_autocommit(db) == 0 {
                 if sqlite3_exec(db, "ROLLBACK", nil, nil, nil) != SQLITE_OK { unavailable = true }
             } else if write { unavailable = true }
             if unavailable { shutdown() }
             throw error
         }
+    }
+    private static func isSQLiteCorruption(_ error: any Error) -> Bool {
+        guard case PreparationStoreError.storage(let code) = error else { return false }
+        let primary = code & 0xff
+        return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB
     }
     private func bytes(_ id: UUID) -> Data {
         var value = id.uuid

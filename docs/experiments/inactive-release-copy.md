@@ -27,7 +27,7 @@ The original SDK must remain unchanged.
 | Durable signed copy after store reopen | Fresh native signing and placement match; advanced floors and unexpected copied metadata reject recovery |
 | Copied file gains a mutation ACL | The whole-tree placement check rejects it; removing the fixture ACL restores the check |
 
-The 66 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
+The 67 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
 They check cleanup against unknown entries and replacement inodes.
 They check destination lease retirement and the public Root refusal before source or policy access.
 

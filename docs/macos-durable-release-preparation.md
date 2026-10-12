@@ -29,7 +29,8 @@ The storage schema is version 1. It is independent of account request and consum
 SQLite uses delete journaling, extra synchronous writes and full filesystem sync.
 The store fixes its application identity and Mac ID. It rejects unknown schemas and implicit reinitialization.
 Rows bind their IDs and revisions to canonical bounded records.
-Malformed records or changed storage identities retire the connection.
+Malformed records, native SQLite corruption or changed storage identities retire the connection.
+Primary and extended `SQLITE_CORRUPT` and `SQLITE_NOTADB` results retire the store, including failures while starting a transaction.
 An unsuccessful commit retires the connection; the caller must reopen and reconcile retained state.
 
 The default capacity is 64 records, with a hard maximum of 4,096.
@@ -62,11 +63,11 @@ A copy that completes before a persistence failure can remain on disk.
 The error preserves the preparation and record failures when both occur.
 A directory alone never grants evidence. Unknown orphan entries remain untouched.
 
-Fifteen Core tests cover recovery, fresh inspection, inode replacement, floor advancement, revisions, scope, capacity and corruption.
+Sixteen Core tests cover recovery, fresh inspection, inode replacement, floor advancement, revisions, scope, capacity and corruption.
 The internal unit inspector seam checks control flow; it does not prove native signing or Root isolation.
 The guarded SDK experiment uses the actual copier and native inspector across store reopen.
 It checks signing equality, advanced floors, changed metadata, restored metadata and preserved records.
-All 66 focused copy and recovery tests and six native controls passed on the recorded host.
+All 67 focused copy and recovery tests and six native controls passed on the recorded host.
 
 Standalone ordinary-owner prototypes also check committed intent and copy metadata across process exit without explicit close.
 A fixture-only commit rejection retires its connection and preserves the prior intent.
