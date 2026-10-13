@@ -125,7 +125,7 @@ enum SetupAdministratorNative {
               boolean("authenticate-user", equals: true), boolean("session-owner", equals: false),
               boolean("shared", equals: false),
               let timeout = definition["timeout"] as? NSNumber, CFGetTypeID(timeout) != CFBooleanGetTypeID(),
-              timeout.doubleValue.isFinite, (0...300).contains(timeout.doubleValue) else {
+              timeout.doubleValue.isFinite, timeout.doubleValue > 0, timeout.doubleValue <= 300 else {
             throw SetupAdministratorAuthorizationError.incompatiblePolicy
         }
     }

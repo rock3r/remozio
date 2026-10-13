@@ -23,9 +23,10 @@ sequenceDiagram
 ```
 
 The native gate uses `system.privilege.admin`. It never changes the authorization database.
-It accepts only a user-class rule with authenticated administrator membership, no session-owner shortcut, no shared rights and a timeout up to 300 seconds.
+It accepts only a user-class rule with authenticated administrator membership, no session-owner shortcut, no shared rights and a positive timeout up to 300 seconds.
 A different managed policy reports failure. The app must explain this condition; it must not replace the policy.
-A stricter timeout remains subject to the native rights check. No successful operation is promised from policy metadata alone.
+A zero timeout is incompatible with this existing-rights-only flow. It fails before the client requests a prompt.
+A shorter positive timeout remains subject to the native rights check. No successful operation is promised from policy metadata alone.
 
 The client may allow interaction and extend its rights only when the user requests authorization.
 Export checks current rights without interaction or extension.

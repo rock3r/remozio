@@ -14,7 +14,7 @@ final class SetupAdministratorAuthorizationTests: XCTestCase {
         for replacement: (String, Any) in [("class", "allow"), ("class", "rule"), ("group", "staff"),
             ("authenticate-user", false), ("session-owner", true), ("shared", true),
             ("authenticate-user", 1), ("session-owner", 0), ("shared", 0),
-            ("timeout", true), ("timeout", -1), ("timeout", 301), ("timeout", Double.infinity)] {
+            ("timeout", true), ("timeout", -1), ("timeout", 0), ("timeout", 301), ("timeout", Double.infinity)] {
             var changed = rule; changed[replacement.0] = replacement.1
             XCTAssertThrowsError(try SetupAdministratorNative.validatePolicy(changed as NSDictionary))
         }
@@ -22,7 +22,7 @@ final class SetupAdministratorAuthorizationTests: XCTestCase {
             var changed = rule; changed.removeValue(forKey: key)
             XCTAssertThrowsError(try SetupAdministratorNative.validatePolicy(changed as NSDictionary))
         }
-        for timeout in [0, 1, 30, 300] {
+        for timeout in [1, 30, 300] {
             var changed = rule; changed["timeout"] = timeout
             try SetupAdministratorNative.validatePolicy(changed as NSDictionary)
         }
