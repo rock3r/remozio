@@ -68,7 +68,7 @@ class NativeBootstrapSigningTests(unittest.TestCase):
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
 
     def profile(self):
-        return {'TeamIdentifier': [self.team], 'Platform': ['OSX'],
+        return {'TeamIdentifier': [self.team], 'ApplicationIdentifierPrefix': [self.team], 'Platform': ['OSX'],
                 'ExpirationDate': self.now + timedelta(days=1),
                 'DeveloperCertificates': [self.certificate],
                 'Entitlements': {PROBE.ENTITLEMENT: True,
@@ -133,3 +133,19 @@ class NativeBootstrapSigningTests(unittest.TestCase):
         for values in invalid:
             with self.subTest(values=values):
                 with self.assertRaises(RuntimeError): self.verify(values, expected)
+
+    def test_app_identifier_prefix_can_differ_from_the_team(self):
+        profile = self.profile()
+        profile['ApplicationIdentifierPrefix'] = ['KLMNOPQRST']
+        app = 'KLMNOPQRST.' + PROBE.IDENTITY
+        profile['Entitlements']['com.apple.application-identifier'] = app
+        actual = PROBE.profile_entitlements(profile, self.identity, self.team, self.now)
+        self.assertEqual(actual['com.apple.application-identifier'], app)
+        self.assertEqual(actual['com.apple.developer.team-identifier'], self.team)
+
+    def test_absent_malformed_or_mismatched_app_prefix_metadata_is_rejected(self):
+        for prefixes in (None, [], self.team, ['KLMNOPQRST'], [None], ['']):
+            with self.subTest(prefixes=prefixes):
+                profile = self.profile(); profile['ApplicationIdentifierPrefix'] = prefixes
+                with self.assertRaises(RuntimeError):
+                    PROBE.profile_entitlements(profile, self.identity, self.team, self.now)

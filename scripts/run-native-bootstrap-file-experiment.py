@@ -63,8 +63,13 @@ def profile_entitlements(profile, signing_identity, team_id, now=None):
             'Profile does not authorize the selected certificate')
     values = profile.get('Entitlements')
     require(isinstance(values, dict) and values.get(ENTITLEMENT) is True, 'Profile lacks the approved privileged file operations entitlement')
-    app = team_id + '.' + IDENTITY
-    require(values.get('com.apple.application-identifier') == app, 'Profile is not bound to this probe app')
+    app = values.get('com.apple.application-identifier')
+    suffix = '.' + IDENTITY
+    require(isinstance(app, str) and app.endswith(suffix), 'Profile is not bound to this probe app')
+    prefixes = profile.get('ApplicationIdentifierPrefix')
+    require(isinstance(prefixes, list) and prefixes and all(isinstance(p, str) and p for p in prefixes),
+            'Profile has no valid App ID prefixes')
+    require(app[:-len(suffix)] in prefixes, 'Profile application identifier has an unapproved prefix')
     expected = plistlib.loads((PACKAGE / 'PrivilegedFiles.entitlements').read_bytes())
     require(expected == {ENTITLEMENT: True} and expected[ENTITLEMENT] is True, 'Unexpected probe entitlement declaration')
     expected['com.apple.application-identifier'] = app

@@ -62,6 +62,7 @@ python3 scripts/run-native-bootstrap-file-experiment.py \
 ```
 
 The builder checks the profile's team, app identifier, certificate, expiration and privileged entitlement.
+It preserves the profile's App ID prefix, which can differ from its Team ID.
 These field checks do not establish Apple approval. Platform validation and the live authorization result remain separate gates.
 The builder verifies the signature and exact entitlements. It runs only modes that require no authorization.
 It records `interactive-signing-evidence.json`, which does not claim a successful privileged operation.
