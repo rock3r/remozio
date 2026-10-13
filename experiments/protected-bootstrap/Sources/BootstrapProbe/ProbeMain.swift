@@ -15,12 +15,16 @@ struct BootstrapProbe {
         switch Array(CommandLine.arguments.dropFirst()) {
         case ["--describe"]:
             emit(["schemaVersion": 1, "capability": "disposable-bootstrap-file-experiment",
-                  "defaultPrompts": false, "productionInstallation": false])
+                  "defaultPrompts": false, "productionInstallation": false, "interactiveSigningPresent": ProbeSigning.hasPrivilegedSigning])
         case ["--preflight"]: emit(AuthorizedReplacement.preflight())
         case ["--ordinary"]:
             do { emit(try OrdinaryReplacement.run()) }
             catch { emit(["schemaVersion": 1, "ordinaryProbeFailed": true]); exit(EX_SOFTWARE) }
         case ["--authorize-file-operations", "--confirm-disposable-only"]:
+            guard ProbeSigning.hasPrivilegedSigning else {
+                FileHandle.standardError.write(Data("Interactive mode needs Apple-approved signing with the privileged file operations entitlement. The ordinary artifact cannot request authorization.\n".utf8))
+                exit(EX_CONFIG)
+            }
             let app = NSApplication.shared
             app.setActivationPolicy(.regular)
             Task { @MainActor in

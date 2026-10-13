@@ -5,10 +5,21 @@ The app needs a protected bundle before the configured administrative host can s
 Apple exposes authorization for atomic replacement and limited ownership and permission changes through NSWorkspace and FileManager.
 Its authorization does not enable general privileged directory creation or copying.
 
+## Apple availability gate
+
+Apple requires `com.apple.developer.security.privileged-file-operations` before the app can request authorization.
+Apple documents entitlement requests for apps on, or intended for, the Mac App Store.
+Its availability for this Developer ID homelab app remains unverified. A signing certificate alone does not establish eligibility.
+The ordinary artifact has no privileged entitlement. It refuses interactive mode before creating a fixture or showing a prompt.
+Do not inject the entitlement into an ad-hoc signature to bypass this gate.
+This experiment does not change Remozio's distribution plan or select a different setup flow.
+
 ```mermaid
 flowchart TD
     O[Ordinary replacement baseline] --> P[Read-only protected-parent check]
-    P --> A[Interactive native authorization for replaceFile]
+    P --> E{Apple entitlement and distribution eligibility verified?}
+    E -->|No| G[Keep interactive experiment blocked]
+    E -->|Yes| A[Interactive native authorization for replaceFile]
     A --> R[Promote a disposable directory into the protected parent]
     R --> B[Interactive native authorization for setAttributes]
     B --> N[Set Root ownership from parent to child]
@@ -35,14 +46,30 @@ The probe targets macOS 26 on Apple Silicon. Runtime evidence currently comes fr
 Run the noninteractive gate with `python3 scripts/run-native-bootstrap-file-experiment.py`.
 It builds the signed development app and writes `.build/protected-bootstrap/ordinary-evidence.json`.
 The normal repository gate runs only these noninteractive checks.
-Five Python controls reject incomplete, altered or incorrectly classified evidence.
+Python controls reject altered evidence, mismatched signing profiles and unexpected entitlements.
+The default signature checks for other Mac artifacts remain unchanged.
 
 ## Prepared interactive procedure
 
-Run this only during the agreed interactive Mac session:
+First establish Apple approval and distribution eligibility for the probe's exact app identifier.
+Then prepare the interactive artifact with its approved profile and matching certificate:
 
 ```sh
-.build/protected-bootstrap/RemozioBootstrapProbe.app/Contents/MacOS/remozio-bootstrap-probe \
+python3 scripts/run-native-bootstrap-file-experiment.py \
+  --interactive-signing-identity <certificate-SHA1> \
+  --provisioning-profile <approved-profile-path> \
+  --team-id <Apple-Team-ID>
+```
+
+The builder checks the profile's team, app identifier, certificate, expiration and privileged entitlement.
+These field checks do not establish Apple approval. Platform validation and the live authorization result remain separate gates.
+The builder verifies the signature and exact entitlements. It runs only modes that require no authorization.
+It records `interactive-signing-evidence.json`, which does not claim a successful privileged operation.
+
+Run this only during the agreed interactive Mac session, after those gates pass:
+
+```sh
+.build/protected-bootstrap/RemozioBootstrapProbeInteractive.app/Contents/MacOS/remozio-bootstrap-probe \
   --authorize-file-operations --confirm-disposable-only
 ```
 
@@ -61,7 +88,7 @@ The probe leaves any protected fixture for inspection. It does not attempt privi
 Read `disposableDestination` from the result and remove only that exact generated directory after inspection.
 A cancelled or failed operation may still leave a fixture. `cleanupComplete` must be true before treating cleanup as finished.
 Native cancellation, directory promotion, ownership normalization, write refusal and the actual prompt count remain unrun.
-Ad-hoc development signing does not prove the final Developer ID setup behavior.
+Neither ordinary evidence nor successful signing proves Developer ID entitlement eligibility or final setup behavior.
 
 ## Decision gate
 
@@ -71,6 +98,7 @@ Measure prompt count, cancellation, interruption, stale paths and recovery befor
 The checks do not prove atomic path binding inside the authorized FileManager calls. Test source replacement races before production use.
 Consult the user before adding prompts or other UX costs beyond the approved setup behavior.
 
-Official API references: [authorization types](https://developer.apple.com/documentation/appkit/nsworkspace/authorizationtype),
+Official API references: [privileged entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.security.privileged-file-operations),
+[authorization types](https://developer.apple.com/documentation/appkit/nsworkspace/authorizationtype),
 [authorization requests](https://developer.apple.com/documentation/appkit/nsworkspace/requestauthorization%28to%3Acompletionhandler%3A%29).
 The current SDK's `NSWorkspace.h` lists the supported FileManager methods and owner, group and permission attributes.
