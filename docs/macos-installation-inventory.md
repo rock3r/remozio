@@ -32,7 +32,11 @@ This is metadata validation; native account isolation still uses the separate st
 
 Main-app registration uses the app role and its actual user domain, without a plist name.
 GUI-agent registration uses the GUI role, matching user and execution UIDs, and a plist basename.
-Each domain permits one declaration per role and unique job labels.
+Each domain permits one declaration per account and role, with unique job labels.
+Authority, transport and gateway declarations retain their configured account ID.
+User declarations bind that ID to the domain owner.
+Machine-wide optional roles can omit an account association.
+Two accounts can retain distinct authority and transport jobs in the same system domain.
 The same app label can occur in two distinct user domains.
 This matches the SDK requirement to register agents from each user's session.
 
@@ -60,7 +64,7 @@ No database table, storage migration or registration side effect is introduced.
 ## Integration gates
 
 A Root-owned file alone does not prove current service registration, live process identity, code placement or generation floors.
-The installer must validate the signed service plists against each declaration before retaining an authoritative inventory.
+The installer must validate the signed service plists and protected account configurations against each declaration before retaining an authoritative inventory.
 Protected durable mutation, revision comparison and crash recovery remain to be implemented.
 Inventory changes and admissions must serialize with update closure before this record can participate in activation.
 
@@ -69,6 +73,6 @@ A missing row, zero count, expired lease or eligibility status cannot establish 
 The inventory grants no freeze, drain, replacement or rollback authority.
 The approved automatic-update and optional-drain behavior stays unchanged.
 
-Fourteen tests cover scope, canonical decoding, bounds, release changes, dependency bindings and ordinary-user refusal.
+Sixteen tests cover scope, canonical decoding, bounds, release changes, dependency bindings and ordinary-user refusal.
 Signing-evidence fixtures use the internal constructor; they do not prove native signatures or installed registration.
 Protected Root loading, service installation, pre-login operation and real update continuity remain platform gates.

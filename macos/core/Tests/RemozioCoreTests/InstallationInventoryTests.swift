@@ -9,11 +9,11 @@ final class InstallationInventoryTests: XCTestCase {
     private func account(_ n: UInt8 = 1, uid: uid_t = 501) throws -> InstallationAccount {
         try .init(accountID: id(n), ownerUID: uid)
     }
-    private func daemon(_ role: AuthorityCodeRole = .authority, uid: uid_t = 0, label: String = "dev.remozio.authority") throws -> InstallationService {
-        try .init(role: role, kind: .daemon, domainUID: nil, executionUID: uid, label: label, plistName: label + ".plist")
+    private func daemon(_ role: AuthorityCodeRole = .authority, uid: uid_t = 0, label: String = "dev.remozio.authority", accountID: Data = Data(repeating: 1, count: 16)) throws -> InstallationService {
+        try .init(role: role, kind: .daemon, domainUID: nil, executionUID: uid, label: label, plistName: label + ".plist", accountID: accountID)
     }
-    private func app(_ uid: uid_t = 501, label: String = "dev.remozio.mac") throws -> InstallationService {
-        try .init(role: .app, kind: .mainApp, domainUID: uid, executionUID: uid, label: label, plistName: nil)
+    private func app(_ uid: uid_t = 501, label: String = "dev.remozio.mac", accountID: Data? = nil) throws -> InstallationService {
+        try .init(role: .app, kind: .mainApp, domainUID: uid, executionUID: uid, label: label, plistName: nil, accountID: accountID ?? id(uid == 502 ? 2 : 1))
     }
     private func inventory(accounts: [InstallationAccount]? = nil, services: [InstallationService]? = nil,
                            path: String = "/Library/Remozio/Remozio.app", digest: Data = Data(repeating: 3, count: 32)) throws -> InstallationInventory {
@@ -56,11 +56,11 @@ final class InstallationInventoryTests: XCTestCase {
 
     func testAgentScopeMustUseItsConfiguredUserAndPlist() throws {
         let agent = try InstallationService(role: .guiAgent, kind: .agent, domainUID: 501, executionUID: 501,
-            label: "dev.remozio.gui", plistName: "dev.remozio.gui.plist")
+            label: "dev.remozio.gui", plistName: "dev.remozio.gui.plist", accountID: id(1))
         _ = try inventory(services: [daemon(), app(), agent])
         for (domain, execution): (uid_t?, uid_t) in [(nil, 501), (0, 0), (501, 502), (UInt32.max, UInt32.max)] {
             XCTAssertThrowsError(try InstallationService(role: .guiAgent, kind: .agent, domainUID: domain, executionUID: execution,
-                label: "dev.remozio.gui", plistName: "dev.remozio.gui.plist"))
+                label: "dev.remozio.gui", plistName: "dev.remozio.gui.plist", accountID: id(1)))
         }
         XCTAssertThrowsError(try InstallationService(role: .guiAgent, kind: .agent, domainUID: 501, executionUID: 501,
             label: "dev.remozio.gui", plistName: nil))
@@ -150,7 +150,7 @@ final class InstallationInventoryTests: XCTestCase {
         guard case .map(let original) = try DeterministicCBOR.decode(value.canonicalBytes, limits: InstallationInventory.limits),
               case .array(let services) = original[7], case .map(let service) = services[0] else { return XCTFail() }
         for (key, value): (UInt64, CBORValue?) in [(0, .unsigned(99)), (1, .unsigned(99)), (2, .unsigned(0)),
-                                                (3, .unsigned(UInt64.max)), (5, nil), (6, .null)] {
+                                                (3, .unsigned(UInt64.max)), (5, nil), (6, nil), (7, .null)] {
             var changed = service; changed[key] = value
             var entries = services; entries[0] = .map(changed)
             var fields = original; fields[7] = .array(entries)
@@ -170,6 +170,30 @@ final class InstallationInventoryTests: XCTestCase {
         XCTAssertThrowsError(try InstallationInventory.digest(.init(manifest: manifest, codeDirectoryHashes: base.codeDirectoryHashes)))
         XCTAssertThrowsError(try InstallationInventory.digest(.init(manifest: manifest, codeDirectoryHashes: base.codeDirectoryHashes,
             dependencyCodeDirectoryHashes: [path: Data(repeating: 6, count: 20)])))
+    }
+
+    func testAccountScopedDaemonsRetainEveryAuthorityAndTransportInstance() throws {
+        let services = try [daemon(), daemon(label: "dev.remozio.authority.two", accountID: id(2)),
+            daemon(.transport, uid: 401, label: "dev.remozio.transport.one"),
+            daemon(.transport, uid: 402, label: "dev.remozio.transport.two", accountID: id(2)), app(), app(502)]
+        let value = try inventory(accounts: [account(), account(2, uid: 502)], services: services)
+        let decoded = try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1))
+        XCTAssertEqual(decoded.services.filter { $0.role == .authority }.map(\.accountID), [id(1), id(2)])
+        XCTAssertEqual(decoded.services.filter { $0.role == .transport }.map(\.executionUID), [401, 402])
+        XCTAssertEqual(decoded.services.count, 6)
+        XCTAssertEqual(decoded.canonicalBytes, try inventory(accounts: value.accounts.reversed(), services: services.reversed()).canonicalBytes)
+    }
+
+    func testAccountAssociationCannotBeMissingUnknownOrCrossUser() throws {
+        for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway] {
+            XCTAssertThrowsError(try InstallationService(role: role, kind: .daemon, domainUID: nil,
+                executionUID: role == .authority ? 0 : 401, label: "dev.remozio.service", plistName: "dev.remozio.service.plist"))
+        }
+        XCTAssertThrowsError(try inventory(services: [daemon(accountID: id(9)), app()]))
+        XCTAssertThrowsError(try inventory(accounts: [account(), account(2, uid: 502)],
+            services: [daemon(), app(502, accountID: id(1))]))
+        XCTAssertThrowsError(try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
+            label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: Data([1])))
     }
 
     func testNativeLoaderRejectsOrdinaryUserBeforeReadingAnyPath() throws {

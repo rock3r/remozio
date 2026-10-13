@@ -29,37 +29,41 @@ public struct InstallationService: Equatable, Sendable {
     /// Nil denotes the system domain. User domains retain their actual owner UID.
     public let domainUID: uid_t?
     public let executionUID: uid_t
+    /// Nil is reserved for machine-wide roles without an account configuration.
+    public let accountID: Data?
     public let label: String
     public let plistName: String?
 
     public init(role: AuthorityCodeRole, kind: InstallationServiceKind, domainUID: uid_t?, executionUID: uid_t,
-                label: String, plistName: String?) throws {
-        guard Self.token(label), executionUID < UInt32.max,
+                label: String, plistName: String?, accountID: Data? = nil) throws {
+        guard Self.token(label), executionUID < UInt32.max, accountID == nil || accountID?.count == 16,
               domainUID == nil || (domainUID! > 0 && domainUID! < UInt32.max) else {
             throw InstallationInventoryError.invalidRecord
         }
         switch kind {
         case .mainApp:
-            guard role == .app, domainUID == executionUID, plistName == nil else {
+            guard role == .app, domainUID == executionUID, plistName == nil, accountID != nil else {
                 throw InstallationInventoryError.invalidRecord
             }
         case .agent:
-            guard role == .guiAgent, domainUID == executionUID, let plistName,
+            guard role == .guiAgent, domainUID == executionUID, accountID != nil, let plistName,
                   Self.token(plistName), plistName.hasSuffix(".plist") else { throw InstallationInventoryError.invalidRecord }
         case .daemon:
-            guard domainUID == nil, let plistName, Self.token(plistName), plistName.hasSuffix(".plist"),
+            guard domainUID == nil,
+                  ![.authority, .transport, .notificationGateway].contains(role) || accountID != nil, let plistName, Self.token(plistName), plistName.hasSuffix(".plist"),
                   [.authority, .transport, .notificationGateway, .tunnelClient, .setupController, .bridgeEndpoint].contains(role),
                   [.authority, .setupController].contains(role) ? executionUID == 0 : executionUID > 0 else {
                 throw InstallationInventoryError.invalidRecord
             }
         }
         self.role = role; self.kind = kind; self.domainUID = domainUID; self.executionUID = executionUID
-        self.label = label; self.plistName = plistName
+        self.label = label; self.plistName = plistName; self.accountID = accountID
     }
     fileprivate var value: CBORValue {
         .map([0: .unsigned(role.rawValue), 1: .unsigned(kind.rawValue),
               2: domainUID.map { .unsigned(UInt64($0)) } ?? .null, 3: .unsigned(UInt64(executionUID)),
-              4: .text(label), 5: plistName.map(CBORValue.text) ?? .null])
+              4: .text(label), 5: plistName.map(CBORValue.text) ?? .null,
+              6: accountID.map(CBORValue.bytes) ?? .null])
     }
     fileprivate static func token(_ value: String) -> Bool {
         value.hasPrefix("dev.remozio.") && value.utf8.count <= 255 && value.utf8.allSatisfy {
@@ -92,21 +96,27 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
             throw InstallationInventoryError.invalidRecord
         }
         let owners = Set(accounts.map(\.ownerUID))
-        var domains: [UInt64: Set<String>] = [:], roles: [UInt64: Set<AuthorityCodeRole>] = [:]
+        var domains: [UInt64: Set<String>] = [:]
+        var roles: [UInt64: [Data?: Set<AuthorityCodeRole>]] = [:]
         for service in services {
             let domain = service.domainUID.map(UInt64.init) ?? 0
-            guard service.domainUID == nil || owners.contains(service.domainUID!),
+            let account = service.accountID.flatMap { id in accounts.first { $0.accountID == id } }
+            guard service.accountID == nil || account != nil,
+                  service.domainUID == nil || account?.ownerUID == service.domainUID,
+                  service.domainUID == nil || owners.contains(service.domainUID!),
                   service.kind != .daemon || service.executionUID == 0 || !owners.contains(service.executionUID),
                   domains[domain, default: []].insert(service.label).inserted,
-                  roles[domain, default: []].insert(service.role).inserted else { throw InstallationInventoryError.invalidRecord }
+                  roles[domain, default: [:]][service.accountID, default: []].insert(service.role).inserted else { throw InstallationInventoryError.invalidRecord }
         }
-        guard roles[0]?.contains(.authority) == true else { throw InstallationInventoryError.invalidRecord }
+        guard services.contains(where: { $0.role == .authority && $0.kind == .daemon }) else { throw InstallationInventoryError.invalidRecord }
         self.macID = macID; self.installationID = installationID; self.revision = revision
         self.bundlePath = bundlePath; self.releaseDigest = releaseDigest
         self.accounts = accounts.sorted { $0.accountID.lexicographicallyPrecedes($1.accountID) }
         self.services = services.sorted {
             let a = $0.domainUID ?? 0, b = $1.domainUID ?? 0
-            return a == b ? $0.role.rawValue < $1.role.rawValue : a < b
+            if a != b { return a < b }
+            let x = $0.accountID ?? Data(), y = $1.accountID ?? Data()
+            return x == y ? $0.role.rawValue < $1.role.rawValue : x.lexicographicallyPrecedes(y)
         }
         canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(macID), 2: .bytes(installationID),
             3: .bytes(revision), 4: .text(bundlePath), 5: .bytes(releaseDigest),
@@ -136,12 +146,12 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
             return try InstallationAccount(accountID: id, ownerUID: uid)
         }
         let services = try serviceValues.map { value in
-            guard case .map(let s) = value, Set(s.keys) == Set(UInt64(0)...5),
+            guard case .map(let s) = value, Set(s.keys) == Set(UInt64(0)...6),
                   case .unsigned(let rawRole) = s[0], let role = AuthorityCodeRole(rawValue: rawRole),
                   case .unsigned(let rawKind) = s[1], let kind = InstallationServiceKind(rawValue: rawKind),
                   case .unsigned(let rawUID) = s[3], let uid = uid_t(exactly: rawUID),
                   case .text(let label) = s[4] else { throw InstallationInventoryError.corruptRecord }
-            let domain: uid_t?, plist: String?
+            let domain: uid_t?, plist: String?, accountID: Data?
             switch s[2] {
             case .null?: domain = nil
             case .unsigned(let raw)?: guard let value = uid_t(exactly: raw) else { throw InstallationInventoryError.corruptRecord }; domain = value
@@ -152,7 +162,13 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
             case .text(let name)?: plist = name
             default: throw InstallationInventoryError.corruptRecord
             }
-            return try InstallationService(role: role, kind: kind, domainUID: domain, executionUID: uid, label: label, plistName: plist)
+            switch s[6] {
+            case .null?: accountID = nil
+            case .bytes(let id)?: accountID = id
+            default: throw InstallationInventoryError.corruptRecord
+            }
+            return try InstallationService(role: role, kind: kind, domainUID: domain, executionUID: uid,
+                                           label: label, plistName: plist, accountID: accountID)
         }
         let result = try Self(macID: mac, installationID: installation, revision: revision, bundlePath: path,
                               releaseDigest: digest, accounts: accounts, services: services)
