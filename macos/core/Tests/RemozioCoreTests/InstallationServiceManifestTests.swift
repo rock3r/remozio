@@ -102,4 +102,41 @@ final class InstallationServiceManifestTests: XCTestCase {
         XCTAssertThrowsError(try expected(path, user: "root", arguments: [component.relativePath, "--configuration", "/other"]))
     }
 
+    func testInvocationRequiresSupportedModeAndActualConfigurationSlot() throws {
+        let (_, inventory, release, _) = try fixture()
+        let service = inventory.services[0], component = try XCTUnwrap(release.manifest.components.first { $0.role == .authority })
+        let path = "/Library/Remozio/authority.cbor"
+        let malformed = [[component.relativePath, path], [component.relativePath, path, "--configuration"],
+            [component.relativePath, "--configuration", "/other", path],
+            [component.relativePath, "--unsupported", path], [component.relativePath, "--command-configuration", path]]
+        for arguments in malformed {
+            XCTAssertThrowsError(try InstallationServiceManifest(declaration: service, component: component,
+                configurationPath: path, userName: "root", arguments: arguments, machServices: [], runAtLoad: true, keepAlive: true))
+        }
+        for mode in ["--configuration", "--presence-configuration"] {
+            XCTAssertNoThrow(try InstallationServiceManifest(declaration: service, component: component,
+                configurationPath: path, userName: "root", arguments: [component.relativePath, mode, path],
+                machServices: [], runAtLoad: true, keepAlive: true))
+        }
+    }
+    func testTransportAndGatewayModeSetsMatchCurrentEntryPoints() throws {
+        let path = "/Library/Remozio/service.cbor", account = Data(repeating: 3, count: 16)
+        for role in [AuthorityCodeRole.transport, .notificationGateway] {
+            let component = try ReleaseComponent(role: role, identifier: "dev.remozio.service", generation: 1,
+                relativePath: "Contents/Helpers/Service", codeDirectoryHash: Data(repeating: 3, count: 20), build: "1", teamID: nil, formats: [])
+            let service = try InstallationService(role: role, kind: .daemon, domainUID: nil, executionUID: 600,
+                label: "dev.remozio.service", plistName: "dev.remozio.service.plist", accountID: account)
+            for mode in ["--configuration", "--wake-configuration", "--remote-configuration"] {
+                let build = { try InstallationServiceManifest(declaration: service, component: component,
+                    configurationPath: path, userName: "_remozio_service", arguments: [component.relativePath, mode, path],
+                    machServices: [], runAtLoad: true, keepAlive: true) }
+                if role == .transport || mode == "--configuration" { XCTAssertNoThrow(try build()) }
+                else { XCTAssertThrowsError(try build()) }
+            }
+            XCTAssertThrowsError(try InstallationServiceManifest(declaration: service, component: component,
+                configurationPath: path, userName: "_remozio_service", arguments: [component.relativePath, "--presence-configuration", path],
+                machServices: [], runAtLoad: true, keepAlive: true))
+        }
+    }
+
 }

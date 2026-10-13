@@ -20,9 +20,10 @@ public struct InstallationServiceManifest {
         guard declaration.kind != .mainApp, declaration.role == component.role,
               configurationPath.hasPrefix("/"), configurationPath.utf8.count < 4096,
               !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) }),
-              !arguments.isEmpty, arguments.count <= 32,
+              arguments.count == 3,
               arguments[0] == component.relativePath,
-              arguments.contains(configurationPath),
+              Self.modes(for: component.role).contains(arguments[1]),
+              arguments[2] == configurationPath,
               arguments.allSatisfy({ !$0.utf8.contains(0) && $0.utf8.count < 4096 }),
               machServices.count <= 32,
               machServices.allSatisfy({ ReleaseManifest.validToken($0) && $0.hasPrefix("dev.remozio.") }) else {
@@ -45,6 +46,14 @@ public struct InstallationServiceManifest {
         if !machServices.isEmpty { values["MachServices"] = Dictionary(uniqueKeysWithValues: machServices.map { ($0, true) }) }
         self.declaration = declaration; self.configurationPath = configurationPath; self.userName = userName
         self.values = values; self.component = component
+    }
+
+    private static func modes(for role: AuthorityCodeRole) -> Set<String> {
+        switch role {
+        case .authority: ["--configuration", "--presence-configuration"]
+        case .transport: ["--configuration", "--wake-configuration", "--remote-configuration"]
+        default: ["--configuration"]
+        }
     }
 
     /// Compare only bytes already obtained from the freshly verified, protected bundle.
