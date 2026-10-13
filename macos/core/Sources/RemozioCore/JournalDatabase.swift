@@ -163,6 +163,50 @@ public final class JournalDatabase {
         return UInt64(version)
     }
 
+    func requireInitializationPath(_ path: String) throws {
+        try validateLease()
+        guard lease.databasePath == path else { throw AuthorityInitializationError.conflictingIntent }
+    }
+    func initialAuthorityCheckpoint(initial: AuthorityJournalInitialization, databasePath: String) throws -> ContinuityCheckpoint {
+        try requireInitializationPath(databasePath)
+        return try read { transaction in
+            guard try transaction.storageSchemaVersion == (initial.installCommandReplay ? 15 : 13),
+                  let boundary = try transaction.epoch(initial.descriptor.epoch), boundary.head == 0, boundary.retainedAfter == 0,
+                  try boundary.descriptor.encode(limits: self.recordLimits) == initial.descriptor.encode(limits: self.recordLimits),
+                  try transaction.codePolicy()?.policy == initial.codePolicy else { throw AuthorityInitializationError.invalidBoundary }
+            let trust = try transaction.approvalTrustSnapshot()
+            guard trust.macID == initial.descriptor.macID, trust.accountID == initial.descriptor.accountID,
+                  trust.authorityCapabilities.contracts == initial.capabilities.contracts,
+                  trust.allowedContracts == initial.allowedContracts, trust.enrollments.isEmpty else {
+                throw AuthorityInitializationError.invalidBoundary
+            }
+            // Count every table in the catalog. Inactive enrollment and old outcome rows also prevent bootstrap recovery.
+            let populated: Set<String> = ["journal_identity_v1", "audit_epochs_v1", "approval_authority_v1", "authority_code_policy_v1", "routing_state_v1"]
+            guard try self.integer("SELECT count(*) FROM main.routing_state_v1 WHERE id=1 AND mode=0 AND revision=zeroblob(8)") == 1 else {
+                throw AuthorityInitializationError.invalidBoundary
+            }
+            var names = [String]()
+            try self.statement("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'") { row in
+                while true {
+                    let result = sqlite3_step(row)
+                    if result == SQLITE_DONE { break }
+                    guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+                    guard let name = sqlite3_column_text(row, 0) else { throw JournalDatabaseError.incompatibleStore }
+                    names.append(String(cString: name))
+                }
+            }
+            _ = try transaction.continuityDigests()
+            for name in names {
+                guard name.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }),
+                      try self.integer("SELECT count(*) FROM main.\(name)") == (populated.contains(name) ? 1 : 0) else {
+                    throw AuthorityInitializationError.invalidBoundary
+                }
+            }
+            return try CheckpointedJournal.checkpoint(transaction: transaction, epoch: initial.descriptor.epoch,
+                generation: 1, authorityGeneration: 1)
+        }
+    }
+
     fileprivate func continuityDigests(_ token: UUID) throws -> JournalContinuityDigests {
         _ = try access(token)
         guard let db else { throw JournalDatabaseError.expiredTransaction }
