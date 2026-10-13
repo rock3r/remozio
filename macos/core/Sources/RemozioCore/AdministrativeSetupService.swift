@@ -111,7 +111,8 @@ public final class AdministrativeSetupService {
             guard let inventory = try store.loadInventory(), inventory.bundlePath == bundle.path else {
                 throw AdministrativeSetupServiceError.wrongRelease
             }
-            func verifyHost() throws {
+            func verifyHost(_ inventory: InstallationInventory) throws {
+                guard inventory.bundlePath == bundle.path else { throw AdministrativeSetupServiceError.wrongRelease }
                 guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
                 guard try AdministrativeSetupConfiguration.load(path: configurationPath).canonicalBytes == configuration.canonicalBytes else {
                     throw AdministrativeSetupServiceError.changedConfiguration
@@ -130,7 +131,7 @@ public final class AdministrativeSetupService {
                 try manifest.validate(ProtectedServiceConfiguration.readPublic(path: plist.path), inventory: inventory, release: release)
                 try placement.validate()
             }
-            try verifyHost()
+            try verifyHost(inventory)
             let next = try SetupAccountOwner(machine: store, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost)
             owner = next

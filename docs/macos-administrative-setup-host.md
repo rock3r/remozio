@@ -28,7 +28,8 @@ A newer signed candidate that clears a floor cannot substitute for the retained 
 Security.framework supplies the running code path. Command arguments do not supply the bundle location.
 The host verifies its own dynamic code identity before opening machine storage.
 It verifies Root ownership, local metadata, signed bundle contents and the current inventory before opening the listener.
-The setup owner repeats host validation before checking account progress or resuming storage.
+The setup owner passes its freshly read inventory to host validation before checking progress or resuming storage.
+Moving the recorded bundle or removing or changing its setup declaration refuses the operation.
 Listener shutdown precedes machine-store and protected-placement lease closure.
 
 The fixed plist binds the helper path, Root account, configuration argument and local Mach name.
@@ -37,9 +38,9 @@ The installer must independently verify registration and authorization before pu
 No check in this change registers a job, creates an OS account or initializes fresh machine inventory.
 Missing protected setup state prevents startup. No fallback launches Root code from the downloaded app location.
 
-Eight new controls cover canonical input, exact release policy, installation and service scope,
+Nine new controls cover canonical input, exact release policy, installation and service scope,
 Root refusal, native self-code inspection, and host changes before storage mutation.
-The combined host, client, endpoint, listener, manifest and signed bundle controls pass 55 tests.
+The combined host, client, endpoint, listener, manifest and signed bundle controls pass 56 tests.
 Removing the retained hash check makes the release-policy control fail. Restoring it passes.
 Both app build configurations verify the embedded executable, signed generation, daemon bytes and refusal behavior.
 These builds use development signatures; they do not prove Developer ID installation or native Root execution.
