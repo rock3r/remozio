@@ -14,6 +14,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let installationID: Data
     private let expectedReleaseDigest: Data
     private let resume: (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent
+    private let verifyHost: () throws -> Void
     private var closed = false
 
     public static func open(machineDirectory: String, macID: Data, expectedReleaseDigest: Data) throws -> SetupAccountOwner {
@@ -24,8 +25,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     // Ordinary-owner fixtures retain actual protected storage. They cannot establish native administrator consent.
     init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
-         resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent) throws {
-        self.machine = machine; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume
+         resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
+         verifyHost: @escaping () throws -> Void = {}) throws {
+        self.machine = machine; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
         do {
             guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
                   inventory.releaseDigest == expectedReleaseDigest else { throw AdministrativeSetupError.invalidConfiguration }
@@ -62,6 +64,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
     private func currentInventory() throws -> InstallationInventory {
+        try verifyHost()
         guard !closed, let inventory = try machine.inventory() else { throw AdministrativeSetupError.unavailable }
         guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {
             throw AdministrativeSetupError.changedInstallation

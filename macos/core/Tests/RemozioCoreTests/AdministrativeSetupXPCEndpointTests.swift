@@ -302,4 +302,26 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
             XCTAssertThrowsError(try SetupAccountProgress.decode(DeterministicCBOR.encode(value, limits: limits)))
         }
     }
+    func testChangedHostPolicyRefusesStorageBeforeResume() throws {
+        try fixture { root in
+            let machine = try store(root, initialize: true)
+            let installed = try inventory(machine)
+            let expected = try begin(root, machine, installed)
+            var changed = false, resumes = 0
+            let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: installed.releaseDigest,
+                resume: { _, _ in resumes += 1; throw AdministrativeSetupError.unavailable },
+                verifyHost: { if changed { throw AdministrativeSetupServiceError.changedConfiguration } })
+            defer { try? owner.close() }
+            XCTAssertNoThrow(try owner.verifyCurrent())
+            changed = true
+            XCTAssertThrowsError(try owner.verifyCurrent())
+            XCTAssertThrowsError(try owner.progress(accountID: expected.accountID, callerUID: getuid()))
+            XCTAssertThrowsError(try owner.resumeAccount(accountID: expected.accountID, setupID: expected.setupID,
+                expectedRevision: expected.revision, callerUID: getuid()))
+            XCTAssertEqual(resumes, 0)
+            changed = false
+            XCTAssertNoThrow(try owner.verifyCurrent())
+        }
+    }
+
 }
