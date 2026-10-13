@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum InstallationServiceManifestError: Error, Equatable {
@@ -18,8 +19,8 @@ public struct InstallationServiceManifest {
                 userName: String?, arguments: [String], machServices: Set<String>, runAtLoad: Bool, keepAlive: Bool) throws {
         let parts = configurationPath.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         guard declaration.kind != .mainApp, declaration.role == component.role,
-              configurationPath.hasPrefix("/"), configurationPath.utf8.count < 4096,
-              !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) }),
+              configurationPath.hasPrefix("/"), configurationPath.utf8.count + 1 < Int(PATH_MAX),
+              !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
               arguments.count == 3,
               arguments[0] == component.relativePath,
               Self.modes(for: component.role).contains(arguments[1]),

@@ -17,6 +17,7 @@ flowchart TD
 ```
 
 The supported job profile uses `BundleProgram`, exact arguments, a configuration path, explicit restart flags and optional Mach endpoints.
+Configuration paths use the protected startup reader’s total and per-component byte limits.
 Arguments have three slots: the declared executable, a supported mode and the configuration path.
 Authority supports configuration and presence modes. Transport supports configuration, wake and remote modes.
 Gateway supports configuration mode. Other planned profiles use configuration mode; their actual entry points remain an integration gate.
@@ -32,7 +33,7 @@ A constructor-selected component outside the verified release cannot pass valida
 The comparison does not read a path or authenticate arbitrary caller-supplied plist bytes.
 Protected placement, fresh signature inspection, current configuration and retained generation floors remain prerequisites.
 
-Eight focused tests cover matching metadata, tampering, malformed records, undeclared components, user agents and invalid expectations.
+Nine focused tests cover matching metadata, tampering, malformed records, undeclared components, user agents and invalid expectations.
 Signing evidence uses internal fixtures; these tests do not certify native signatures or installed launchd jobs.
 The current product app does not select this profile or register a service.
 Complete owner enumeration, account configuration matching and coordinated activation remain pending.

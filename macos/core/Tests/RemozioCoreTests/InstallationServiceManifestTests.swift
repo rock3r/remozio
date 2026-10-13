@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import RemozioCore
@@ -137,6 +138,30 @@ final class InstallationServiceManifestTests: XCTestCase {
                 configurationPath: path, userName: "_remozio_service", arguments: [component.relativePath, "--presence-configuration", path],
                 machServices: [], runAtLoad: true, keepAlive: true))
         }
+    }
+
+    func testConfigurationPathMatchesProtectedReaderByteLimits() throws {
+        let (_, inventory, release, _) = try fixture()
+        let service = inventory.services[0], component = try XCTUnwrap(release.manifest.components.first { $0.role == .authority })
+        func expected(_ path: String) throws -> InstallationServiceManifest {
+            try .init(declaration: service, component: component, configurationPath: path, userName: "root",
+                arguments: [component.relativePath, "--configuration", path], machServices: [], runAtLoad: true, keepAlive: false)
+        }
+        func path(bytes: Int) -> String {
+            var remaining = bytes - 1, parts: [String] = []
+            while remaining > 255 { parts.append(String(repeating: "a", count: 255)); remaining -= 256 }
+            parts.append(String(repeating: "b", count: remaining))
+            return "/" + parts.joined(separator: "/")
+        }
+        let accepted = path(bytes: Int(PATH_MAX) - 2), rejected = path(bytes: Int(PATH_MAX) - 1)
+        XCTAssertEqual(accepted.utf8.count, Int(PATH_MAX) - 2)
+        XCTAssertEqual(rejected.utf8.count, Int(PATH_MAX) - 1)
+        XCTAssertNoThrow(try expected(accepted))
+        XCTAssertThrowsError(try expected(rejected))
+        XCTAssertNoThrow(try expected("/" + String(repeating: "a", count: 255)))
+        XCTAssertThrowsError(try expected("/" + String(repeating: "a", count: 256)))
+        XCTAssertNoThrow(try expected("/" + String(repeating: "é", count: 127)))
+        XCTAssertThrowsError(try expected("/" + String(repeating: "é", count: 128)))
     }
 
 }
