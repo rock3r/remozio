@@ -72,33 +72,49 @@ final class AuthorityAccountInitializationTests: XCTestCase {
     private func resume(_ root: URL, machine: PreparationIntentStore, expected: AuthorityInitializationIntent,
                         observe: (String) throws -> Void = { _ in },
                         hook: (AuthorityAccountInitialization.Stage) throws -> Void = { _ in }) throws -> AuthorityInitializationIntent {
-        try AuthorityAccountInitialization.resume(machine: machine, expected: expected,
+        let journalRelative = String((expected.journalPath as NSString).deletingLastPathComponent.dropFirst(root.path.count + 1))
+        let continuityRelative = String((expected.continuityPath as NSString).deletingLastPathComponent.dropFirst(root.path.count + 1))
+        return try AuthorityAccountInitialization.resume(machine: machine, expected: expected,
             prepareJournal: {
                 try observe("prepareJournal")
-                let directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: "journal", owner: getuid())
+                let directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: journalRelative, owner: getuid())
                 defer { directory.close() }
                 _ = try SetupDatabaseFileProvisioning.prepare(directory: directory, kind: .journal, owner: getuid())
             },
-            openJournal: { initialize, seed in
+            openDirectories: {
+                let journal = try ProtectedSetupDirectory(anchor: root.path, relativePath: journalRelative, owner: getuid(), createIfMissing: false)
+                do {
+                    return try .init(journal: journal,
+                        continuity: ProtectedSetupDirectory(anchor: root.path, relativePath: continuityRelative, owner: getuid()))
+                } catch { journal.close(); throw error }
+            },
+            openJournal: { initialize, seed, scope in
                 try observe(initialize ? "initializeJournal" : "openJournal")
-                return try journal(root, seed: initialize ? seed : nil)
+                let lease = try ProtectedJournalLease(anchor: root.path, relativeDirectory: journalRelative, owner: getuid())
+                do { try scope.validate(journal: lease) } catch { lease.close(); throw error }
+                return try JournalDatabase(lease: lease,
+                    macID: expected.macID, accountID: expected.accountID, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                    maximumConsumptions: 10, busyMilliseconds: 100, initialize: initialize, initialAuthority: initialize ? seed : nil)
             },
             prepareContinuity: {
                 try observe("prepareContinuity")
-                let directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: "continuity", owner: getuid())
+                let directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: continuityRelative, owner: getuid())
                 defer { directory.close() }
                 _ = try SetupDatabaseFileProvisioning.prepare(directory: directory, kind: .continuity, owner: getuid())
             },
-            openContinuity: { checkpoint in
+            openContinuity: { checkpoint, scope in
                 try observe(checkpoint == nil ? "openContinuity" : "initializeContinuity")
-                return try continuity(root, checkpoint: checkpoint)
+                let lease = try ProtectedContinuityLease(anchor: root.path, relativeDirectory: continuityRelative, owner: getuid())
+                do { try scope.validate(continuity: lease) } catch { lease.close(); throw error }
+                return try ContinuityStore(lease: lease,
+                    macID: expected.macID, accountID: expected.accountID, initialize: checkpoint)
             }, didStage: hook)
     }
     private func requireReleasedAccountLeases(_ root: URL) throws {
         let journal = try ProtectedJournalLease(anchor: root.path, relativeDirectory: "journal", owner: getuid())
         defer { journal.close() }
         let continuity = try ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid())
-        defer { continuity.close() }
+        continuity.close()
     }
     func testCompleteCompositionProvisionsInitializesAndReopensBothActualStores() throws {
         try fixture { root in
@@ -139,7 +155,7 @@ final class AuthorityAccountInitializationTests: XCTestCase {
                     if $0.hasPrefix("initialize") { initialized.append($0) }
                 })
                 XCTAssertTrue(completed.complete)
-                if stage != .journalProvisioned { XCTAssertFalse(initialized.contains("initializeJournal")) }
+                if stage != .journalProvisioned && stage != .directoriesOpened { XCTAssertFalse(initialized.contains("initializeJournal")) }
                 if stage == .continuityOpened || stage == .completed { XCTAssertFalse(initialized.contains("initializeContinuity")) }
                 try requireReleasedAccountLeases(root)
             }
@@ -188,7 +204,7 @@ final class AuthorityAccountInitializationTests: XCTestCase {
         }
     }
     func testCapturedJournalLossCannotRecreateOrReinitializeIt() throws {
-        for remove in [false, true] {
+        for loss in ["emptyFile", "missingFile", "missingDirectory"] {
             try fixture { root in
                 let machine = try store(root, initialize: true); defer { try? machine.close() }
                 let inventory = try inventory(machine), expected = try begin(root, machine, inventory)
@@ -198,12 +214,15 @@ final class AuthorityAccountInitializationTests: XCTestCase {
                 let retained = try XCTUnwrap(machine.initialization(accountID: account))
                 XCTAssertNotNil(retained.checkpoint)
                 let path = root.appendingPathComponent("journal/journal.sqlite")
-                if remove { try FileManager.default.removeItem(at: path) } else { try Data().write(to: path) }
+                if loss == "missingDirectory" { try FileManager.default.removeItem(at: root.appendingPathComponent("journal")) }
+                else if loss == "missingFile" { try FileManager.default.removeItem(at: path) }
+                else { try Data().write(to: path) }
                 var steps = [String]()
                 XCTAssertThrowsError(try resume(root, machine: machine, expected: retained, observe: { steps.append($0) }))
-                XCTAssertEqual(steps, ["openJournal"])
-                XCTAssertEqual(FileManager.default.fileExists(atPath: path.path), !remove)
-                if !remove { XCTAssertEqual(try Data(contentsOf: path), Data()) }
+                XCTAssertEqual(steps, loss == "missingDirectory" ? [] : ["openJournal"])
+                XCTAssertEqual(FileManager.default.fileExists(atPath: path.path), loss == "emptyFile")
+                if loss == "emptyFile" { XCTAssertEqual(try Data(contentsOf: path), Data()) }
+                if loss == "missingDirectory" { XCTAssertFalse(FileManager.default.fileExists(atPath: root.path + "/journal")) }
                 XCTAssertEqual(try machine.initialization(accountID: account), retained)
             }
         }
@@ -253,6 +272,30 @@ final class AuthorityAccountInitializationTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("journal/journal.sqlite")), Data())
             owner.close()
             XCTAssertTrue(try resume(root, machine: machine, expected: expected).complete)
+        }
+    }
+    func testCaseAliasedNestedDirectoriesRefuseBeforeEitherDatabaseInitializes() throws {
+        for nestedJournal in [false, true] {
+            try fixture { root in
+                guard FileManager.default.fileExists(atPath: root.path + "/JOURNAL"),
+                      FileManager.default.fileExists(atPath: root.path + "/CONTINUITY") else { throw XCTSkip("Case-sensitive fixture volume") }
+                let relative = nestedJournal ? "continuity/nested" : "journal/nested"
+                let nested = try ProtectedSetupDirectory(anchor: root.path, relativePath: relative, owner: getuid())
+                defer { nested.close() }
+                _ = try SetupDatabaseFileProvisioning.prepare(directory: nested, kind: nestedJournal ? .journal : .continuity, owner: getuid())
+                let machine = try store(root, initialize: true); defer { try? machine.close() }
+                let inventory = try inventory(machine)
+                let journalPath = root.path + (nestedJournal ? "/CONTINUITY/nested/journal.sqlite" : "/journal/journal.sqlite")
+                let continuityPath = root.path + (nestedJournal ? "/continuity/continuity.sqlite" : "/JOURNAL/nested/continuity.sqlite")
+                let expected = try machine.beginInitialization(initial: initial(), journalPath: journalPath,
+                    continuityPath: continuityPath, expectedInventoryRevision: inventory.revision)
+                var steps = [String]()
+                XCTAssertThrowsError(try resume(root, machine: machine, expected: expected, observe: { steps.append($0) }))
+                XCTAssertFalse(steps.contains("initializeJournal")); XCTAssertFalse(steps.contains("initializeContinuity"))
+                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: journalPath)), Data())
+                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: continuityPath)), Data())
+                XCTAssertEqual(try machine.initialization(accountID: account), expected)
+            }
         }
     }
     func testPublicCompositionRefusesOrdinaryUserBeforeFileProvisioning() throws {
