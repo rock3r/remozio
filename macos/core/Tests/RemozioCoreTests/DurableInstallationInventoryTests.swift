@@ -85,60 +85,68 @@ final class DurableInstallationInventoryTests: XCTestCase {
     func testInventoryAndPreparationKeepOneExclusiveWriter() throws {
         try fixture { f in
             let store = try f.store(initialize: true); defer { try? store.close() }
-            try store.upgradeInventoryStorage(); try store.writeInventory(value(), expectedRevision: nil)
+            try store.upgradeInventoryStorage(); let saved = try store.writeInventory(value(), expectedRevision: nil)
             XCTAssertThrowsError(try f.store()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
             _ = try intent(f, store)
-            XCTAssertEqual(try store.inventory(), try value())
+            XCTAssertEqual(try store.inventory(), saved)
         }
     }
     func testInitializationRefusesExistingInventoryAndReplacementRequiresRevision() throws {
         try fixture { f in
             let store = try f.store(initialize: true); defer { try? store.close() }
-            try store.upgradeInventoryStorage(); try store.writeInventory(value(), expectedRevision: nil)
+            try store.upgradeInventoryStorage(); let first = try store.writeInventory(value(), expectedRevision: nil)
             XCTAssertThrowsError(try store.writeInventory(value(5), expectedRevision: nil)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
             }
             XCTAssertThrowsError(try store.writeInventory(value(5), expectedRevision: id(9))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
             }
-            XCTAssertEqual(try store.inventory(), try value())
-            try store.writeInventory(value(5), expectedRevision: id(4))
-            XCTAssertEqual(try store.inventory(), try value(5))
+            XCTAssertEqual(try store.inventory(), first)
+            let second = try store.writeInventory(value(5), expectedRevision: first.revision)
+            XCTAssertEqual(try store.inventory(), second)
+            XCTAssertNotEqual(second.revision, first.revision)
         }
     }
-    func testMissingUnchangedAndMalformedExpectedRevisionsAreRejected() throws {
+
+    func testMissingMalformedAndStaleExpectedRevisionsAreRejected() throws {
         try fixture { f in
             let store = try f.store(initialize: true); defer { try? store.close() }
             try store.upgradeInventoryStorage()
             XCTAssertThrowsError(try store.writeInventory(value(), expectedRevision: id(4))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .notFound)
             }
-            try store.writeInventory(value(), expectedRevision: nil)
-            XCTAssertThrowsError(try store.writeInventory(value(), expectedRevision: id(4)))
+            let first = try store.writeInventory(value(), expectedRevision: nil)
             XCTAssertThrowsError(try store.writeInventory(value(5), expectedRevision: Data()))
-            XCTAssertEqual(try store.inventory(), try value())
+            XCTAssertEqual(try store.inventory(), first)
+            let second = try store.writeInventory(first, expectedRevision: first.revision)
+            XCTAssertNotEqual(second.revision, first.revision)
+            XCTAssertThrowsError(try store.writeInventory(value(5), expectedRevision: first.revision))
+            XCTAssertEqual(try store.inventory(), second)
         }
     }
+
     func testCrossMacAndInstallationReplacementCannotChangeRetainedRecord() throws {
         try fixture { f in
             let store = try f.store(initialize: true); defer { try? store.close() }
-            try store.upgradeInventoryStorage(); try store.writeInventory(value(), expectedRevision: nil)
-            XCTAssertThrowsError(try store.writeInventory(value(5, mac: 9), expectedRevision: id(4)))
-            XCTAssertThrowsError(try store.writeInventory(value(5, installation: 9), expectedRevision: id(4))) {
+            try store.upgradeInventoryStorage(); let saved = try store.writeInventory(value(), expectedRevision: nil)
+            XCTAssertThrowsError(try store.writeInventory(value(5, mac: 9), expectedRevision: saved.revision))
+            XCTAssertThrowsError(try store.writeInventory(value(5, installation: 9), expectedRevision: saved.revision)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .wrongInstallation)
             }
-            XCTAssertEqual(try store.inventory(), try value())
+            XCTAssertEqual(try store.inventory(), saved)
         }
     }
+
     func testReopenKeepsScopeAndRejectsWrongMac() throws {
         try fixture { f in
             let store = try f.store(initialize: true)
-            try store.upgradeInventoryStorage(); try store.writeInventory(value(), expectedRevision: nil); try store.close()
+            try store.upgradeInventoryStorage(); let saved = try store.writeInventory(value(), expectedRevision: nil); try store.close()
             XCTAssertThrowsError(try f.store(mac: id(9))) { XCTAssertEqual($0 as? PreparationStoreError, .wrongMac) }
             let reopened = try f.store(); defer { try? reopened.close() }
-            XCTAssertEqual(try reopened.inventory(), try value())
+            XCTAssertEqual(try reopened.inventory(), saved)
         }
     }
+
     func testCorruptRowBindingsRetireInventoryAndPreparationAccess() throws {
         for column in ["installation", "revision"] {
             try fixture { f in
@@ -172,7 +180,7 @@ final class DurableInstallationInventoryTests: XCTestCase {
         try fixture { f in
             let store = try f.store(initialize: true); defer { try? store.close() }
             for operation in [{ try store.enableInventoryStorage() }, { _ = try store.loadInventory() },
-                              { try store.initializeInventory(self.value()) }, { try store.replaceInventory(self.value(5), expectedRevision: self.id(4)) }] {
+                              { _ = try store.initializeInventory(self.value()) }, { _ = try store.replaceInventory(self.value(5), expectedRevision: self.id(4)) }] {
                 XCTAssertThrowsError(try operation()) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
             }
             XCTAssertEqual(try f.sql("PRAGMA user_version"), 1)
@@ -184,14 +192,18 @@ final class DurableInstallationInventoryTests: XCTestCase {
             var armed = false
             let store = try f.store(initialize: true, didCommit: { if armed { throw LostAcknowledgment() } })
             try store.upgradeInventoryStorage(); let retained = try intent(f, store)
-            try store.writeInventory(value(), expectedRevision: nil); armed = true
-            XCTAssertThrowsError(try store.writeInventory(value(5), expectedRevision: id(4))) { XCTAssertTrue($0 is LostAcknowledgment) }
+            let first = try store.writeInventory(value(), expectedRevision: nil); armed = true
+            XCTAssertThrowsError(try store.writeInventory(value(5), expectedRevision: first.revision)) { XCTAssertTrue($0 is LostAcknowledgment) }
             XCTAssertThrowsError(try store.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
             XCTAssertThrowsError(try store.records()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
             let reopened = try f.store(); defer { try? reopened.close() }
-            XCTAssertEqual(try reopened.inventory(), try value(5)); XCTAssertEqual(try reopened.records(), [retained])
+            let saved = try XCTUnwrap(reopened.inventory())
+            XCTAssertNotEqual(saved.revision, first.revision); XCTAssertNotEqual(saved.revision, id(5))
+            XCTAssertEqual(saved.installationID, first.installationID); XCTAssertEqual(saved.accounts, first.accounts)
+            XCTAssertEqual(try reopened.records(), [retained])
         }
     }
+
     func testUncertainMigrationReopenUsesVersionTwoWithoutRepeatingInitialization() throws {
         struct LostAcknowledgment: Error {}
         try fixture { f in
@@ -221,9 +233,27 @@ final class DurableInstallationInventoryTests: XCTestCase {
                 bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 9, count: 32), accounts: accounts, services: services)
             XCTAssertGreaterThan(large.canonicalBytes.count, 32768)
             let store = try f.store(initialize: true)
-            try store.upgradeInventoryStorage(); try store.writeInventory(large, expectedRevision: nil); try store.close()
+            try store.upgradeInventoryStorage(); let saved = try store.writeInventory(large, expectedRevision: nil); try store.close()
             let reopened = try f.store(); defer { try? reopened.close() }
-            XCTAssertEqual(try reopened.inventory(), large)
+            XCTAssertEqual(try reopened.inventory(), saved)
         }
     }
+    func testCallerCannotReuseHistoricalRevisionToReviveAStaleWriter() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true); defer { try? store.close() }
+            try store.upgradeInventoryStorage()
+            let proposed = try value()
+            let first = try store.writeInventory(proposed, expectedRevision: nil)
+            XCTAssertNotEqual(first.revision, proposed.revision)
+            let second = try store.writeInventory(value(5), expectedRevision: first.revision)
+            let third = try store.writeInventory(first, expectedRevision: second.revision)
+            XCTAssertNotEqual(third.revision, first.revision)
+            XCTAssertNotEqual(third.revision, second.revision)
+            XCTAssertThrowsError(try store.writeInventory(value(6), expectedRevision: first.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertEqual(try store.inventory(), third)
+        }
+    }
+
 }

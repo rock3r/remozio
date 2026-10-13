@@ -87,11 +87,13 @@ public final class PreparationIntentStore {
     public func loadInventory() throws -> InstallationInventory? {
         try requireRoot(); return try inventory()
     }
-    public func initializeInventory(_ value: InstallationInventory) throws {
-        try requireRoot(); try writeInventory(value, expectedRevision: nil)
+    @discardableResult
+    public func initializeInventory(_ value: InstallationInventory) throws -> InstallationInventory {
+        try requireRoot(); return try writeInventory(value, expectedRevision: nil)
     }
-    public func replaceInventory(_ value: InstallationInventory, expectedRevision: Data) throws {
-        try requireRoot(); try writeInventory(value, expectedRevision: expectedRevision)
+    @discardableResult
+    public func replaceInventory(_ value: InstallationInventory, expectedRevision: Data) throws -> InstallationInventory {
+        try requireRoot(); return try writeInventory(value, expectedRevision: expectedRevision)
     }
     private func requireRoot() throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -112,22 +114,28 @@ public final class PreparationIntentStore {
     func inventory() throws -> InstallationInventory? {
         try transaction(write: false) { try requireInventorySchema(); return try loadInventoryRecord() }
     }
-    func writeInventory(_ value: InstallationInventory, expectedRevision: Data?) throws {
+    @discardableResult
+    func writeInventory(_ value: InstallationInventory, expectedRevision: Data?) throws -> InstallationInventory {
         guard value.macID == macID, expectedRevision == nil || expectedRevision?.count == 16 else {
             throw PreparationStoreError.invalidConfiguration
         }
-        try transaction(write: true) {
+        return try transaction(write: true) {
             try requireInventorySchema()
             let previous = try loadInventoryRecord()
+            var revision = bytes(UUID())
+            while revision == value.revision || revision == previous?.revision { revision = bytes(UUID()) }
+            let retained = try InstallationInventory(macID: value.macID, installationID: value.installationID,
+                revision: revision, bundlePath: value.bundlePath, releaseDigest: value.releaseDigest,
+                accounts: value.accounts, services: value.services)
             if let expectedRevision {
                 guard let previous else { throw PreparationStoreError.notFound }
-                guard previous.revision == expectedRevision, value.revision != previous.revision else {
+                guard previous.revision == expectedRevision else {
                     throw PreparationStoreError.staleRevision
                 }
                 guard previous.installationID == value.installationID else { throw PreparationStoreError.wrongInstallation }
                 try statement("UPDATE installation_inventory_v1 SET revision=?,record=? WHERE id=1 AND installation=? AND revision=?") { row in
-                    try bind(value.revision, column: 1, row: row)
-                    try bind(value.canonicalBytes, column: 2, row: row)
+                    try bind(retained.revision, column: 1, row: row)
+                    try bind(retained.canonicalBytes, column: 2, row: row)
                     try bind(value.installationID, column: 3, row: row)
                     try bind(expectedRevision, column: 4, row: row)
                     guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
@@ -136,11 +144,12 @@ public final class PreparationIntentStore {
                 guard previous == nil else { throw PreparationStoreError.invalidTransition }
                 try statement("INSERT INTO installation_inventory_v1 VALUES(1,?,?,?)") { row in
                     try bind(value.installationID, column: 1, row: row)
-                    try bind(value.revision, column: 2, row: row)
-                    try bind(value.canonicalBytes, column: 3, row: row)
+                    try bind(retained.revision, column: 2, row: row)
+                    try bind(retained.canonicalBytes, column: 3, row: row)
                     guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
                 }
             }
+            return retained
         }
     }
     private func configureInventoryLimit() {

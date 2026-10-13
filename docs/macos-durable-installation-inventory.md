@@ -34,7 +34,9 @@ The current app does not select or perform this migration.
 
 The inventory table has one bounded canonical record.
 `initializeInventory` refuses an existing row.
-`replaceInventory` requires the retained revision, the same installation ID, the same Mac ID and a new revision.
+`replaceInventory` requires the retained revision, the same installation ID and the same Mac ID.
+The store generates a fresh random UUID revision for each write and returns the retained record.
+It never uses the caller-proposed revision, so a caller cannot revive a stale token by restoring an older value.
 A missing record, stale revision or attempted identity change does not overwrite retained state.
 There is no implicit reset, erase or inventory-removal API.
 
@@ -56,7 +58,7 @@ The caller must reopen and compare retained state before deciding what happened.
 A later observed revision is current-state evidence; it does not recreate a missing acknowledgment.
 The test-only post-commit hook is unavailable through public initialization.
 
-Fourteen new tests cover migration, writer exclusion, scope, revision checks, large records, corrupt rows, Root refusal and uncertain commits.
+Fifteen new tests cover migration, writer exclusion, scope, revision checks, large records, corrupt rows, Root refusal and uncertain commits.
 The twenty existing preparation tests also pass.
 Fixtures use ordinary-owner private directories and the internal lease seam.
 They do not prove Root isolation, native I/O fault behavior or power-loss durability.
