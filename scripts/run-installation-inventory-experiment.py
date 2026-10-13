@@ -15,16 +15,18 @@ SOURCES = [
     "experiments/installation-inventory/Package.resolved",
     "experiments/installation-inventory/Sources/InventoryProbe/main.swift",
     "scripts/run-installation-inventory-experiment.py",
-    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift",
-    "macos/core/Sources/RemozioCore/PreparationIntentRecord.swift",
-    "macos/core/Sources/RemozioCore/InstallationInventory.swift",
-    "macos/core/Sources/RemozioCore/InstallationStorageLease.swift",
-    "macos/core/Sources/RemozioCore/ProtectedStorageLease.swift",
-    "macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift",
+    "macos/core/Package.swift",
+    "macos/core/Package.resolved",
+    "protocol/swift/Package.swift",
 ]
+SOURCE_TREES = ["macos/core/Sources", "protocol/swift/Sources"]
 
 def hashes():
-    return {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in SOURCES}
+    paths = {REPO / name for name in SOURCES}
+    for name in SOURCE_TREES:
+        paths.update(path for path in (REPO / name).rglob("*") if path.is_file())
+    return {str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(paths)}
 
 def command(arguments, timeout):
     process = subprocess.Popen(arguments, cwd=REPO, stdout=subprocess.PIPE,

@@ -31,7 +31,9 @@ Use an ordinary Apple Silicon macOS account:
 python3 scripts/run-installation-inventory-experiment.py --output experiment-results/installation-inventory.json
 ```
 
-The runner compiles for macOS 26 and binds its result to hashes of the inspected sources.
+The runner compiles for macOS 26 and hashes all repository code inputs.
+These include the full Core and Protocol source trees, package manifests and dependency locks.
+Third-party revisions are pinned by the locks. SDK and toolchain bytes are outside this source attribution.
 It enables test visibility only in the experiment dependency build, not the shipped app.
 This permits the existing internal ordinary-owner lease seam.
 The public store API still requires real and effective Root identity.
