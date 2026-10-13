@@ -19,6 +19,9 @@ flowchart TD
 ```
 
 Private state uses mode 0700. Shared metadata uses mode 0755 so ordinary clients can traverse the container.
+Shared ancestry must permit ordinary directory reads, search and metadata inspection.
+Applicable ACL denials of those operations cause refusal before creation or retire an existing lease.
+Unrelated deletion denials and inheritance-only entries remain accepted. Ancestor permissions and ACLs are never rewritten.
 Files still need their own ownership, confidentiality and publication checks.
 Creation starts with an empty staging directory. It removes inherited ACL entries only from that new object.
 An existing destination never receives chmod, chown, ACL repair or replacement.
@@ -35,9 +38,9 @@ A prepared interruption leaves an empty staging directory; a new attempt can cre
 Unknown remnants are preserved. This API does not delete or rotate retained state.
 Directory synchronization is implemented, but the controls do not prove power-loss durability.
 
-Thirteen ordinary-owner controls cover private and shared visibility, retained contents and permissions, inherited ACL handling, symlinks, missing parents, replaced ancestry and interrupted publication.
+Seventeen ordinary-owner controls cover private and shared visibility, retained contents and permissions, inherited ACL handling, symlinks, missing parents, replaced ancestry and interrupted publication.
 Removing native no-replace protection causes the empty-destination regression control to fail.
-Restoring it passes the focused suite. The fixtures create no Root state or production key.
+Restoring it passes the focused suite. The fixtures create no Root state or production key. Cross-UID reading remains an interactive check; the reader fixture uses one UID.
 
 The product setup controller still needs to compose this API with account creation, configuration publication and service registration.
 Real Root placement, installed behavior and physical Mac–Pixel approval remain interactive gates.

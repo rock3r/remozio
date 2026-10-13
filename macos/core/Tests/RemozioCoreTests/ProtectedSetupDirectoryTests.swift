@@ -38,12 +38,66 @@ final class ProtectedSetupDirectoryTests: XCTestCase {
     }
     func testSharedMetadataCreationSupportsProtectedPublicReader() throws {
         try fixture { root in
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
             let directory = try open(root, visibility: .sharedMetadata); defer { directory.close() }
             XCTAssertEqual(try mode(root.appendingPathComponent("state")), 0o755)
             let file = root.appendingPathComponent("state/frontend.cbor"), bytes = Data([1, 2, 3])
             try bytes.write(to: file); XCTAssertEqual(chmod(file.path, 0o644), 0)
             XCTAssertEqual(try ProtectedServiceConfiguration.read(anchor: root.path, relativePath: "state/frontend.cbor",
                 owner: getuid(), privateFile: false), bytes)
+        }
+    }
+    func testSharedMetadataRejectsNontraversableAncestorsBeforeCreation() throws {
+        try fixture { root in
+            for requestedMode in [0o700, 0o750, 0o705, 0o711] {
+                XCTAssertEqual(chmod(root.path, mode_t(requestedMode)), 0)
+                let name = "blocked-" + String(requestedMode)
+                XCTAssertThrowsError(try open(root, path: name, visibility: .sharedMetadata))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.path + "/" + name))
+                XCTAssertEqual(try mode(root), requestedMode)
+            }
+        }
+    }
+    func testSharedAncestorLosingTraversalRetiresTheLease() throws {
+        try fixture { root in
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
+            let directory = try open(root, visibility: .sharedMetadata); defer { directory.close() }
+            XCTAssertEqual(chmod(root.path, 0o700), 0)
+            XCTAssertThrowsError(try directory.validate())
+            XCTAssertThrowsError(try directory.validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        }
+    }
+    private func chmodACL(_ arguments: [String], path: String) throws {
+        let command = Process(); command.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        command.arguments = arguments + [path]
+        try command.run(); command.waitUntilExit(); XCTAssertEqual(command.terminationStatus, 0)
+    }
+    func testPublicAccessRejectsACLReadSearchAndMetadataDenials() throws {
+        try fixture { root in
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
+            let fd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+            for permission in ["search", "list", "readattr", "readsecurity"] {
+                try chmodACL(["+a", "everyone deny " + permission], path: root.path)
+                do {
+                    var info = stat(); XCTAssertEqual(fstat(fd, &info), 0)
+                    XCTAssertThrowsError(try ProtectedStorageMetadata.validatePublicDirectoryAccess(fd, info))
+                }
+                try chmodACL(["-N"], path: root.path)
+            }
+        }
+    }
+    func testPublicAccessKeepsUnrelatedAndInheritanceOnlyDenials() throws {
+        try fixture { root in
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
+            try chmodACL(["+a", "everyone deny delete"], path: root.path)
+            try chmodACL(["+a", "everyone deny search,directory_inherit,only_inherit"], path: root.path)
+            let fd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+            var info = stat(); XCTAssertEqual(fstat(fd, &info), 0)
+            try ProtectedStorageMetadata.validatePublicDirectoryAccess(fd, info)
+            let directory = try open(root, visibility: .sharedMetadata); defer { directory.close() }
+            try directory.validate()
         }
     }
     func testReopenRetainsInodeContentsAndPermissionsWithoutPreparation() throws {
@@ -66,6 +120,7 @@ final class ProtectedSetupDirectoryTests: XCTestCase {
                 XCTAssertEqual(try mode(state), requestedMode)
             }
             XCTAssertEqual(chmod(state.path, 0o700), 0)
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
             XCTAssertThrowsError(try open(root, visibility: .sharedMetadata))
             XCTAssertEqual(try mode(state), 0o700)
         }

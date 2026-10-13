@@ -98,6 +98,7 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
     private func inspect(_ fd: Int32, info: stat, final: Bool) throws {
         try ProtectedStorageMetadata.validate(fd, info, directory: true,
             privateObject: final && visibility == .privateState, owner: owner, ancestorOwner: owner)
+        if visibility == .sharedMetadata { try ProtectedStorageMetadata.validatePublicDirectoryAccess(fd, info) }
         if final { guard info.st_mode & 0o777 == mode else { throw JournalLeaseError.unsafeMetadata } }
     }
     public func validate() throws {
