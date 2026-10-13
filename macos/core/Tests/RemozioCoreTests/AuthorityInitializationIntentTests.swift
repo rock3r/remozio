@@ -49,9 +49,9 @@ final class AuthorityInitializationIntentTests: XCTestCase {
         try store.beginInitialization(initial: seed ?? initial(), journalPath: root.path + "/journal/journal.sqlite",
             continuityPath: root.path + "/continuity/continuity.sqlite", expectedInventoryRevision: inventory.revision)
     }
-    private func journal(_ root: URL, seed: AuthorityJournalInitialization? = nil) throws -> JournalDatabase {
+    private func journal(_ root: URL, seed: AuthorityJournalInitialization? = nil, recordByteLimit: Int = 16384) throws -> JournalDatabase {
         try .init(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "journal", owner: getuid()),
-            macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+            macID: mac, accountID: account, recordLimits: .init(maxBytes: recordByteLimit, maxDepth: 8, maxItems: 512), descriptorLimits: limits, decisionLimits: limits,
             maximumConsumptions: 10, busyMilliseconds: 100, initialize: seed != nil, initialAuthority: seed)
     }
     private func continuity(_ root: URL, checkpoint: ContinuityCheckpoint? = nil) throws -> ContinuityStore {
@@ -216,6 +216,33 @@ final class AuthorityInitializationIntentTests: XCTestCase {
             XCTAssertThrowsError(try machine.beginInitialization(initial: seed, journalPath: root.path + "/journal/journal.sqlite",
                 continuityPath: root.path + "/continuity/continuity.sqlite", expectedInventoryRevision: Data(repeating: 9, count: 16)))
             XCTAssertEqual(try sql(root, query: "PRAGMA user_version"), 2)
+        }
+    }
+    func testValidDescriptorLargerThanRecordLimitCanCaptureAndComplete() throws {
+        try fixture { root in
+            let machine = try store(root, initialize: true); defer { try? machine.close() }
+            let inventory = try inventory(machine), seed = try initial(), intent = try begin(root, machine, inventory, seed: seed)
+            XCTAssertGreaterThan(try seed.descriptor.encode(limits: limits).count, 64)
+            let liveJournal = try journal(root, seed: seed, recordByteLimit: 64); defer { try? liveJournal.close() }
+            let captured = try machine.captureInitialization(expected: intent, initial: seed, journal: liveJournal)
+            let liveContinuity = try continuity(root, checkpoint: XCTUnwrap(captured.checkpoint)); defer { liveContinuity.close() }
+            XCTAssertTrue(try machine.completeInitialization(expected: captured, journal: liveJournal, continuity: liveContinuity).complete)
+        }
+    }
+    func testJournalNestedWithinContinuityCannotBeginSetupEvenWithProvisionedFiles() throws {
+        try fixture { root in
+            let nested = try ProtectedSetupDirectory(anchor: root.path, relativePath: "continuity/nested", owner: getuid())
+            defer { nested.close() }
+            _ = try SetupDatabaseFileProvisioning.prepare(directory: nested, kind: .journal, owner: getuid())
+            let machine = try store(root, initialize: true); defer { try? machine.close() }
+            let inventory = try inventory(machine)
+            XCTAssertThrowsError(try machine.beginInitialization(initial: initial(),
+                journalPath: root.path + "/continuity/nested/journal.sqlite", continuityPath: root.path + "/continuity/continuity.sqlite",
+                expectedInventoryRevision: inventory.revision)) { XCTAssertEqual($0 as? AuthorityInitializationError, .invalidIntent) }
+            XCTAssertNil(try machine.initialization(accountID: account))
+            XCTAssertEqual(try sql(root, query: "PRAGMA user_version"), 2)
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("continuity/nested/journal.sqlite")), Data())
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("continuity/continuity.sqlite")), Data())
         }
     }
     func testPublicOperationsRequireBothRootIdentitiesBeforeAccess() throws {

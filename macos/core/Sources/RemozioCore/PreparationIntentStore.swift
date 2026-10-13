@@ -235,7 +235,8 @@ public final class PreparationIntentStore {
             guard let journalDirectory = try journal.directoryIdentities().last,
                   let continuityDirectory = try continuity.directoryIdentities().last,
                   journalDirectory != continuityDirectory,
-                  !(try continuity.directoryIdentities()).contains(journalDirectory) else { throw AuthorityInitializationError.invalidBoundary }
+                  !(try continuity.directoryIdentities()).contains(journalDirectory),
+                  !(try journal.directoryIdentities()).contains(continuityDirectory) else { throw AuthorityInitializationError.invalidBoundary }
             let state = try continuity.read()
             guard !state.recoveryRequired, state.pending == nil, state.committed == checkpoint,
                   try journal.read({ try CheckpointedJournal.checkpoint(transaction: $0, epoch: checkpoint.journalEpoch,

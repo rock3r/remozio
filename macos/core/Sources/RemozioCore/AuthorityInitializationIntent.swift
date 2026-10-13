@@ -33,6 +33,7 @@ public struct AuthorityInitializationIntent: Equatable, Sendable, CustomStringCo
               Self.path(journalPath, basename: "journal.sqlite"), Self.path(continuityPath, basename: "continuity.sqlite"),
               (journalPath as NSString).deletingLastPathComponent != (continuityPath as NSString).deletingLastPathComponent,
               !(continuityPath as NSString).deletingLastPathComponent.hasPrefix((journalPath as NSString).deletingLastPathComponent + "/"),
+              !(journalPath as NSString).deletingLastPathComponent.hasPrefix((continuityPath as NSString).deletingLastPathComponent + "/"),
               !complete || checkpoint != nil else { throw AuthorityInitializationError.invalidIntent }
         let initial = try AuthorityJournalInitialization.decodeInitialization(initializationBytes)
         guard initial.descriptor.macID == macID, initial.descriptor.accountID == accountID,

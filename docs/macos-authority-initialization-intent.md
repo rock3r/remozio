@@ -31,16 +31,16 @@ The candidate cannot change after capture. A stale revision cannot advance the i
 A changed installation, release or account cannot resume it.
 
 Completion verifies both protected paths and separate directory identities.
-The continuity directory must remain outside the journal directory and its descendants.
+Neither account store directory can contain the other. Setup and runtime enforce the same invariant.
 It reads the live journal and continuity store and requires the exact retained checkpoint.
 Pending checkpoint changes, recovery state and journal mismatches refuse completion.
 This check does not repair, reinitialize or alter either account store.
 An uncertain commit retires the machine connection. Reopening observes whichever state committed.
 Completed intents remain retained and cannot be replaced by a new begin operation.
 
-Nine new controls cover restart gaps, lost acknowledgments, changed inputs, stale revisions, retained history,
-checkpoint mismatches, corrupt records, path validation and the public Root requirement.
-The combined suite passes 31 controls, including existing inventory and atomic journal initialization controls.
+Eleven new controls cover restart gaps, lost acknowledgments, changed inputs, stale revisions, retained history,
+checkpoint mismatches, corrupt records, directory containment, distinct descriptor limits and the public Root requirement.
+The combined suite passes 33 controls, including existing inventory and atomic journal initialization controls.
 These tests use ordinary-owner files and real SQLite transactions. They do not prove power-loss durability.
 
 The product setup controller must resume each stage from retained progress and existing store state.

@@ -23,6 +23,7 @@ public final class JournalDatabase {
     private var enrollment: EnrollmentJournal?
     private var routing: RoutingJournal?
     private let recordLimits: CBORLimits
+    private let descriptorLimits: CBORLimits
     private var active: UUID?
     private var unavailable = false
 
@@ -53,6 +54,7 @@ public final class JournalDatabase {
          didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }) throws {
         self.lease = lease
         self.recordLimits = recordLimits
+        self.descriptorLimits = descriptorLimits
         do {
             guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max),
@@ -172,7 +174,7 @@ public final class JournalDatabase {
         return try read { transaction in
             guard try transaction.storageSchemaVersion == (initial.installCommandReplay ? 15 : 13),
                   let boundary = try transaction.epoch(initial.descriptor.epoch), boundary.head == 0, boundary.retainedAfter == 0,
-                  try boundary.descriptor.encode(limits: self.recordLimits) == initial.descriptor.encode(limits: self.recordLimits),
+                  try boundary.descriptor.encode(limits: self.descriptorLimits) == initial.descriptor.encode(limits: self.descriptorLimits),
                   try transaction.codePolicy()?.policy == initial.codePolicy else { throw AuthorityInitializationError.invalidBoundary }
             let trust = try transaction.approvalTrustSnapshot()
             guard trust.macID == initial.descriptor.macID, trust.accountID == initial.descriptor.accountID,
