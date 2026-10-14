@@ -25,6 +25,7 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
         guard machineDirectory.hasPrefix("/"), machineDirectory.utf8.count < Int(PATH_MAX), !parts.isEmpty,
               parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
               installationID.count == 16, releaseDigest.count == 32, command.execution != nil,
+              command.presence.wake.request.service.continuityDirectory != nil,
               GatewayWakeEndpointConfiguration.validServiceName(label),
               GatewayWakeEndpointConfiguration.validServiceName(plistName), plistName.hasSuffix(".plist") else {
             throw InstalledAuthorityCommandError.invalidConfiguration

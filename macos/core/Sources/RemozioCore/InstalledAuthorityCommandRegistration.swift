@@ -59,10 +59,11 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         guard let inventory = try machine.loadInventory() else { throw InstalledAuthorityCommandError.wrongInstallation }
         let declaration = try configuration.validate(inventory: inventory, release: release, bundlePath: bundle.path)
         let service = configuration.command.presence.wake.request.service
-        guard let intent = try machine.initialization(accountID: configuration.command.accountID), intent.complete,
+        guard let continuityDirectory = service.continuityDirectory,
+              let intent = try machine.initialization(accountID: configuration.command.accountID), intent.complete,
               intent.installationID == configuration.installationID,
               intent.journalPath == service.journalDirectory + "/journal.sqlite",
-              intent.continuityPath == service.continuityDirectory! + "/continuity.sqlite" else {
+              intent.continuityPath == continuityDirectory + "/continuity.sqlite" else {
             throw InstalledAuthorityCommandError.wrongInstallation
         }
         let component = release.manifest.components.first(where: { $0.role == .authority })!

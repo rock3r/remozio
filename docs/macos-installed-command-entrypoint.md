@@ -47,6 +47,12 @@ executor paths, exact Mach names, and ordinary-user refusal before configuration
 Build checks verify the new mode's ordinary-user refusal and the sealed daemon bytes in both app configurations.
 These checks do not install the daemon or execute a Root command.
 
+[The synthetic live XPC run](experiments/evidence/2026-10-14-command-entrypoint-xpc.json) passed all 19 cases on macOS 27.0.1.
+The temporary per-user agent was removed. Its report records exact source hashes and the pending continuity guards.
+The live probe and its imported selector declaration match the merged base.
+This verifies existing selector bridging and handshake behavior with ad-hoc signatures.
+It does not test the new registered Root receive right or replace installed IPC evidence.
+
 The native API does not register a job, create an account, provision a key or initialize storage.
 Actual first installation remains blocked by [issue 363](https://github.com/rock3r/remozio/issues/363).
 Installed code and IPC evidence remains open in [issue 286](https://github.com/rock3r/remozio/issues/286).
