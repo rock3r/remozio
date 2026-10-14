@@ -37,7 +37,8 @@ final class MacPairingControls {
     @ObservationIgnored private var generation: UUID?
     @ObservationIgnored private var jobs: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var cleanup: Task<Void, Never>?
-    deinit { for job in jobs.values { job.cancel() }; session?.abort() }
+    @ObservationIgnored private var polling: Task<MacPairingSessionSnapshot, Error>?
+    deinit { polling?.cancel(); for job in jobs.values { job.cancel() }; session?.abort() }
 
     func start() {
         guard session == nil, !closing else { return }
@@ -54,7 +55,21 @@ final class MacPairingControls {
                     let value = try await next.start(label: String(localized: "This Mac"))
                     self?.accept(value, id: id)
                     while !Task.isCancelled {
-                        let current = try await next.current()
+                        if self?.working == true {
+                            try await Task.sleep(for: .milliseconds(500))
+                            continue
+                        }
+                        let refresh = Task { try await next.current() }
+                        self?.polling = refresh
+                        let current: MacPairingSessionSnapshot
+                        do {
+                            current = try await withTaskCancellationHandler(operation: { try await refresh.value },
+                                onCancel: { refresh.cancel() })
+                        } catch {
+                            self?.polling = nil
+                            throw error
+                        }
+                        self?.polling = nil
                         self?.accept(current, id: id)
                         if current.phase == .waitingForBiometric, current.phoneProofAvailable, self?.working == false {
                             self?.working = true
@@ -77,7 +92,11 @@ final class MacPairingControls {
     }
     func select(_ candidate: Data) {
         guard let session, let id = generation, !working else { return }; working = true
+        let refresh = polling
         launch { [weak self] in
+            _ = try? await refresh?.value
+            guard !Task.isCancelled, self?.generation == id else { return }
+            self?.presentation.phase = .authorizing
             do { self?.accept(try await session.select(candidateID: candidate), id: id) }
             catch {
                 self?.accept(await session.snapshot(), id: id)
@@ -90,7 +109,10 @@ final class MacPairingControls {
     }
     func confirm() {
         guard let session, let id = generation, !working else { return }; working = true
+        let refresh = polling
         launch { [weak self] in
+            _ = try? await refresh?.value
+            guard !Task.isCancelled, self?.generation == id else { return }
             do { self?.accept(try await session.confirmComparison(), id: id) }
             catch { self?.accept(await session.snapshot(), id: id) }
             self?.working = false
@@ -99,13 +121,15 @@ final class MacPairingControls {
     func stop() {
         guard !closing else { return }
         generation = nil; session?.abort(); closing = true
-        let owned = Array(jobs.values), session = session
+        let owned = Array(jobs.values), session = session, refresh = polling
+        refresh?.cancel()
         for job in owned { job.cancel() }
         cleanup = Task { [weak self] in
             await session?.close()
+            _ = try? await refresh?.value
             for job in owned { await job.value }
             guard let self else { return }
-            self.session = nil; self.jobs.removeAll(); self.working = false; self.closing = false; self.cleanup = nil
+            self.session = nil; self.polling = nil; self.jobs.removeAll(); self.working = false; self.closing = false; self.cleanup = nil
         }
     }
     private func accept(_ snapshot: MacPairingSessionSnapshot, id: UUID) {
