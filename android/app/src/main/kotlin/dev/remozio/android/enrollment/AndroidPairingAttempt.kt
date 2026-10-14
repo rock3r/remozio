@@ -18,7 +18,7 @@ import java.security.SecureRandom
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
+import dev.remozio.phone.transport.authenticatePairingRoutes
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -80,14 +80,14 @@ internal class AndroidPairingAttempt(
             setOf(1uL), commandInspectionCapabilities(), emptySet())
         fun claim(ref: EnrollmentKeyReference) = PairingKey(ref.keyID.copyBytes(), ref.publicKey.copyBytes().takeLast(65).toByteArray())
         val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)), claim(checkNotNull(biometricKey)))
-        val route = withTimeout(LocalNetworkSettings(app).timeoutSeconds() * 1000L) {
-            androidPairingRoutes(app, selected.macID.copyBytes(), selected.accountID.copyBytes()).first()
-        }
-        val carrier = route.open(scope)
-        val opened = PairingSetupChannel.connect(scope, carrier, arrayOf(checkNotNull(identity).identity.keyManager), selected, proposal)
+        val opened = authenticatePairingRoutes(scope,
+            androidPairingRoutes(app, selected.macID.copyBytes(), selected.accountID.copyBytes()),
+            arrayOf(checkNotNull(identity).identity.keyManager), selected, proposal,
+            LocalNetworkSettings(app).timeoutSeconds() * 1000L)
         channel = opened; active()
-        selected.validateMacClaims(opened.transcript); proposal.validate(opened.transcript)
-        opened.transcript
+        val transcript = opened.awaitTranscript()
+        active(); selected.validateMacClaims(transcript); proposal.validate(transcript)
+        transcript
     }
 
     /** Invoke only after explicit code comparison. Durable PREPARED state precedes construction of the biometric signer. */
