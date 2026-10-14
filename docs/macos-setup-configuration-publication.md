@@ -27,7 +27,9 @@ It compares the configuration with retained installation identity and fresh sign
 The protected bundle lease remains open and is rechecked before and after publication.
 
 The file has private permissions and empty access-control entries.
-An identical existing file is read and synchronized without changing its bytes or identity.
+An identical existing file is opened through the retained directory descriptor.
+Its content, identity and metadata are checked before and after file synchronization.
+The directory is also synchronized without changing the file bytes or identity.
 A conflicting file, link or unsafe permission stops publication.
 There is no overwrite or configuration-reset path.
 

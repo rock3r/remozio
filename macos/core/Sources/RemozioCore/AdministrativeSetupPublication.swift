@@ -48,6 +48,7 @@ public enum AdministrativeSetupPublication {
             var existing = stat()
             if fstatat(parent, name, &existing, AT_SYMLINK_NOFOLLOW) == 0 {
                 try match(configuration, directory: directory, owner: owner)
+                try synchronizeRetained(parent: parent, name: name, bytes: bytes, owner: owner)
                 guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
                 try match(configuration, directory: directory, owner: owner)
                 try verify(); try directory.validate()
@@ -90,7 +91,7 @@ public enum AdministrativeSetupPublication {
                   staged.st_size == bytes.count else { throw JournalLeaseError.identityChanged }
             try ProtectedStorageMetadata.validate(fd, staged, directory: false, privateObject: true, owner: owner, ancestorOwner: owner)
             try directory.validate(); try didStage(.staged); try verify(); try directory.validate()
-            try validateStaging(fd: fd, parent: parent, name: staging, bytes: bytes, owner: owner)
+            try validateNamedFile(fd: fd, parent: parent, name: staging, bytes: bytes, owner: owner)
             guard renameatx_np(parent, staging, parent, name, UInt32(RENAME_EXCL)) == 0 else {
                 throw JournalLeaseError.system(errno)
             }
@@ -103,7 +104,16 @@ public enum AdministrativeSetupPublication {
         }
     }
 
-    private static func validateStaging(fd: Int32, parent: Int32, name: String, bytes: Data, owner: uid_t) throws {
+    private static func synchronizeRetained(parent: Int32, name: String, bytes: Data, owner: uid_t) throws {
+        let fd = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+        defer { _ = Darwin.close(fd) }
+        try validateNamedFile(fd: fd, parent: parent, name: name, bytes: bytes, owner: owner)
+        guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+        try validateNamedFile(fd: fd, parent: parent, name: name, bytes: bytes, owner: owner)
+    }
+
+    private static func validateNamedFile(fd: Int32, parent: Int32, name: String, bytes: Data, owner: uid_t) throws {
         var before = stat(), named = stat()
         guard fstat(fd, &before) == 0, fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0 else {
             throw JournalLeaseError.system(errno)
