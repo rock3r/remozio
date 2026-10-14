@@ -57,6 +57,8 @@ public actor PairingSetupNetworkSession {
         }
         proposalValue = value; state = .proposed
     }
+    /// Reports owner closure only. It grants no enrollment or action authority.
+    public var isClosed: Bool { state == .closed || !cancellation.ifActive({}) }
     public func proposal() throws -> PairingPhoneProposal {
         try active(); guard let proposalValue else { throw PairingSetupChannelError.closed }; return proposalValue
     }
