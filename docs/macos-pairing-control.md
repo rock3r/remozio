@@ -42,7 +42,8 @@ The transport constructor checks its dedicated account. The app constructor chec
 
 One control connection owns one temporary listener. It can expose two candidates by default; configuration permits one through eight.
 The network listener opens only after the signed app requests setup. Closing the app connection aborts its candidate I/O and cancels its tasks.
-Shutdown joins the actual RPC tasks, proof readers, and network handlers. Concurrent owner shutdown calls join the same drain operation.
+Shutdown joins the actual RPC tasks, proof readers, network byte readers, and network handlers. Concurrent owner shutdown calls join the same drain operation.
+A bounded byte reader remains active while setup waits for local authorization. It detects peer EOF without another app operation.
 Expired or disconnected candidates disappear from the next snapshot. Their disappearance grants no denial, activation, or commit claim.
 
 A lost receipt reply is ambiguous. This control incarnation never repeats receipt submission or Root commit.

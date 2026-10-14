@@ -239,9 +239,9 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         let id = try XCTUnwrap(snapshot.candidates.first?.id)
         try await owner.stage(candidateID: id, transcript: f.transcript); try await until { await peer.reading }
         let complete = Mutex(0)
-        let first = Task { await owner.closeAndWait(); complete.withLock { $0 += 1 } }
+        let first = Task { @Sendable in await owner.closeAndWait(); complete.withLock { $0 += 1 } }
         try await until { await peer.isClosed }
-        let second = Task { await owner.closeAndWait(); complete.withLock { $0 += 1 } }
+        let second = Task { @Sendable in await owner.closeAndWait(); complete.withLock { $0 += 1 } }
         try await Task.sleep(for: .milliseconds(40)); XCTAssertEqual(complete.withLock { $0 }, 0)
         try await peer.release(f.proof()); await first.value; await second.value
         XCTAssertEqual(complete.withLock { $0 }, 2)
@@ -282,6 +282,32 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         driver.deliverLateSnapshot(try TransportPairingSnapshot(port: 4321, candidates: []).encode())
         do { _ = try await client.current(); XCTFail() } catch {}
         XCTAssertEqual(driver.counts("snapshot"), 1); await owner.closeAndWait()
+    }
+    func testUnderlyingByteChannelFailureReleasesAnUnstagedCandidate() async throws {
+        let f = try TransportPairingFixture(), ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)
+        _ = try await owner.begin(f.invitation)
+        let proposal = try PairingSetupFrame.proposal(f.proposal).encode(), size = UInt32(proposal.count)
+        let bytes = Data([UInt8(size >> 24), UInt8((size >> 16) & 255), UInt8((size >> 8) & 255), UInt8(size & 255)]) + proposal
+        final class Driver: ByteConnectionDriver, @unchecked Sendable {
+            let event = Mutex<(@Sendable (ByteConnectionEvent) -> Void)?>(nil)
+            let bytes: Data
+            init(_ bytes: Data) { self.bytes = bytes }
+            func start(_ callback: @escaping @Sendable (ByteConnectionEvent) -> Void) { event.withLock { $0 = callback }; callback(.ready) }
+            func receive(_ result: @escaping @Sendable (Data?, Bool, Bool) -> Void) { result(bytes, false, false) }
+            func send(_ data: Data, result: @escaping @Sendable (Bool) -> Void) { result(false) }
+            func cancel() {}
+            func fail() { let callback = event.withLock { $0 }; callback?(.failed) }
+        }
+        let driver = Driver(bytes), channel = NetworkByteChannel(driver: driver)
+        try await channel.start()
+        let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: f.invitation,
+            peerPoint: f.transport.publicKey.x963Representation, timeoutMilliseconds: 300000)
+        ingress.accept(session)
+        try await until { try await owner.snapshot().candidates.count == 1 }
+        driver.fail()
+        try await until { await session.isClosed }
+        try await until { try await owner.snapshot().candidates.isEmpty }
+        await owner.closeAndWait()
     }
     func testEndpointVerifiesTheOriginalInvocationBeforeSchedulingSetup() async throws {
         let f = try TransportPairingFixture(), ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)
