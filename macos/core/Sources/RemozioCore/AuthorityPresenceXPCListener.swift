@@ -40,7 +40,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     public init(configuration: AuthorityPresenceEndpointConfiguration, journal: AuthorityJournal,
                 presence: AuthorityPresenceRuntime, clock: AuthorityClock,
                 pairingConfiguration: AuthorityPairingSetupConfiguration? = nil, signer: EnclaveAuthorityRequestSigner? = nil,
-                minimumEnvelopeVersion: UInt64 = 1, maximumConnections: Int = 4, handshakeTimeoutMilliseconds: UInt64 = 5000, maximumOperations: Int = 4) throws {
+                minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [], maximumConnections: Int = 4, handshakeTimeoutMilliseconds: UInt64 = 5000, maximumOperations: Int = 4) throws {
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         policy = configuration.appPolicy; self.presence = presence; self.clock = clock
@@ -51,7 +51,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
                 throw AuthorityPairingSetupError.wrongScope
             }
             pairingAccess = try .init(journal: journal, signer: signer, appPolicy: configuration.appPolicy,
-                configuration: pairingConfiguration, minimumEnvelopeVersion: minimumEnvelopeVersion, now: { try clock.now() })
+                configuration: pairingConfiguration, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions, now: { try clock.now() })
         } else { pairingAccess = nil }
         listener = NSXPCListener(machServiceName: configuration.serviceName)
         super.init()

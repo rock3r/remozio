@@ -148,7 +148,7 @@ public actor AuthorityWakeService {
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock,
                     pairingConfiguration: pairingConfiguration, signer: pairingConfiguration == nil ? nil : signer,
-                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion)
+                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: configuration.request.service.auditVersions)
             } else { presenceListener = nil }
             let commandReceiver = try commandReceiverFactory?(journal, clock)
             return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,

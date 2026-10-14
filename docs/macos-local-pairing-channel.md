@@ -39,7 +39,7 @@ The existing app Mach channel and presence selectors remain unchanged. Its optio
 
 Only a verified signed app invocation can stage or commit. Root imports current native administrator rights on the original exported invocation stack. No external form is retained in the staged attempt or returned to the phone.
 
-The proposal supplies phone claims only. Root rebuilds the Mac offer from current allowed contracts and creates fresh setup values. Its authority key, transport pin, revision, lifetime and protocol floor come from trusted local state. The app and phone must verify the returned transcript, not the proposal.
+The proposal supplies phone claims only. Root rebuilds the Mac offer from current allowed contracts and creates fresh setup values. Its authority key, transport pin, revision, lifetime and protocol floor come from trusted local state. Its audit versions match the configured service and live channel offers. The app and phone must verify the returned transcript, not the proposal.
 
 Each connection retains at most one uncommitted attempt. Commit requires its setup ID, exact confirmed digest and phone biometric proof. The Root transaction rechecks the app role and administrator rights. Signing uses the existing checkpointed pairing path only after durable success.
 
@@ -49,7 +49,7 @@ Cancellation discards only an uncommitted attempt. It requires no biometric or a
 
 ## Evidence and remaining work
 
-Seventeen pairing controls cover configuration bounds, fresh Root values, authorization, confirmation, expiry, cancellation, crossed connections, policy changes and client lifecycle. Two additional controls cover startup compatibility. The anonymous native XPC test verifies the legacy presence handshake, new pairing selectors and original-invocation kernel identity checks.
+Nineteen pairing controls cover configuration bounds, fresh Root values, authorization, confirmation, expiry, cancellation, crossed connections, policy changes and client lifecycle. Two additional controls cover startup compatibility. The anonymous native XPC test verifies the legacy presence handshake, new pairing selectors and original-invocation kernel identity checks.
 
 Native wire tests pin the running test binary and use same-user disposable stores. They use software fixture signatures and logical administrator checks. They do not establish deployed Root identity, Developer ID enforcement, hardware custody or native administrator consent.
 

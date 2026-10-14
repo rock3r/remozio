@@ -43,6 +43,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     private let authorityPublicKey: Data
     private let configuration: AuthorityPairingSetupConfiguration
     private let minimumEnvelopeVersion: UInt64
+    private let auditVersions: Set<UInt64>
     private let appEntry: AuthorityCodeEntry
     private let appRevision: UUID
     private let now: @Sendable () throws -> AuthorityMoment
@@ -52,11 +53,11 @@ final class AuthorityPairingSetupAccess: Sendable {
     private let commitPairing: Commit
 
     convenience init(journal: AuthorityJournal, signer: EnclaveAuthorityRequestSigner, appPolicy: XPCPeerPolicy,
-                     configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64,
+                     configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64, auditVersions: Set<UInt64>,
                      now: @escaping @Sendable () throws -> AuthorityMoment) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try self.init(journal: journal, macID: signer.macID, accountID: signer.accountID, authorityPublicKey: signer.publicKey,
-            appPolicy: appPolicy, configuration: configuration, minimumEnvelopeVersion: minimumEnvelopeVersion, now: now,
+            appPolicy: appPolicy, configuration: configuration, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions, now: now,
             unixMilliseconds: {
                 let value = Date().timeIntervalSince1970 * 1000
                 guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityPairingSetupError.unavailable }
@@ -70,12 +71,12 @@ final class AuthorityPairingSetupAccess: Sendable {
 
     // Logical fixtures can inject software signing and code checks. Product construction requires the existing enclave signer.
     init(journal: AuthorityJournal, macID: Data, accountID: Data, authorityPublicKey: Data, appPolicy: XPCPeerPolicy,
-         configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64,
+         configuration: AuthorityPairingSetupConfiguration, minimumEnvelopeVersion: UInt64, auditVersions: Set<UInt64>,
          now: @escaping @Sendable () throws -> AuthorityMoment, unixMilliseconds: @escaping @Sendable () throws -> UInt64,
          random: @escaping @Sendable (Int) throws -> Data = AuthorityPairingSetupAccess.secureRandom,
          validateSelf: @escaping @Sendable (JournalTransaction) throws -> Void, commit: @escaping Commit) throws {
         guard macID.count == 16, accountID.count == 16, appPolicy.expectedUserID > 0, appPolicy.expectedUserID < UInt32.max,
-              minimumEnvelopeVersion == 1, authorityPublicKey.count == 65,
+              minimumEnvelopeVersion == 1, auditVersions.count <= 16, !auditVersions.contains(0), authorityPublicKey.count == 65,
               (try? P256.Signing.PublicKey(x963Representation: authorityPublicKey)) != nil,
               authorityPublicKey != configuration.transportPublicKey else { throw AuthorityPairingSetupError.invalidConfiguration }
         let retained = try journal.read { tx in
@@ -91,7 +92,7 @@ final class AuthorityPairingSetupAccess: Sendable {
             return (entry, revision)
         }
         self.journal = journal; self.macID = macID; self.accountID = accountID; self.authorityPublicKey = authorityPublicKey
-        self.configuration = configuration; self.minimumEnvelopeVersion = minimumEnvelopeVersion
+        self.configuration = configuration; self.minimumEnvelopeVersion = minimumEnvelopeVersion; self.auditVersions = auditVersions
         appEntry = retained.0; appRevision = retained.1
         self.now = now; self.unixMilliseconds = unixMilliseconds; self.random = random; self.validateSelf = validateSelf; self.commitPairing = commit
     }
@@ -134,7 +135,7 @@ final class AuthorityPairingSetupAccess: Sendable {
             }
             let nonce = try self.random(32)
             guard nonce != proposal.phone.nonce else { throw AuthorityPairingSetupError.unavailable }
-            let offer = try ChannelOffer(role: .mac, scope: scope, nonce: nonce, envelopeVersions: [1], requests: requests, auditVersions: [1])
+            let offer = try ChannelOffer(role: .mac, scope: scope, nonce: nonce, envelopeVersions: [1], requests: requests, auditVersions: self.auditVersions)
             var revision = trust.revision.uuid
             let transcript = try PairingTranscript(setupID: self.random(16), challenge: self.random(32), phone: proposal.phone, mac: offer,
                 minimumEnvelopeVersion: self.minimumEnvelopeVersion, selectedEnvelopeVersion: CompatibilityPolicy.envelopeVersion(

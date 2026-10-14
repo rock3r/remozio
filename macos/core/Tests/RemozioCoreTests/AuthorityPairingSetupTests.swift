@@ -33,8 +33,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 12, maxItems: 1024)
         var mac: Data { Data(repeating: 1, count: 16) }
         var account: Data { Data(repeating: 2, count: 16) }
-        init() throws {
+        init(auditVersions: Set<UInt64> = [1]) throws {
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
+            let ownedRoot = root
+            var complete = false
+            defer { if !complete { try? FileManager.default.removeItem(at: ownedRoot) } }
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             for name in ["store", "continuity"] {
                 let directory = root.appendingPathComponent(name)
@@ -69,7 +72,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             let journal = journal, environment = environment, authority = authority
             access = try .init(journal: journal, macID: mac, accountID: account, authorityPublicKey: authority.publicKey.x963Representation,
                 appPolicy: policy, configuration: .init(transportPublicKey: transport.publicKey.x963Representation, lifetimeMilliseconds: 1000),
-                minimumEnvelopeVersion: 1, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
+                minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
                     if environment.selfDenied.value { throw Failure.denied }
                 }, commit: { attempt, proof, event, authorize, validate in
                     try journal.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: authority.publicKey.x963Representation,
@@ -78,6 +81,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                             return try authority.signature(for: $0).rawRepresentation
                         })
                 })
+            complete = true
         }
         deinit { try? journal.close(); continuity.close(); try? FileManager.default.removeItem(at: root) }
         static func appEntry(active: Bool = true) throws -> AuthorityCodeEntry {
@@ -434,6 +438,25 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             XCTAssertThrowsError(try AuthorityPairingSetupConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
         }
     }
+    func testConfiguredAuditVersionsMatchStagedAndLiveEnrollmentOffers() throws {
+        for versions: Set<UInt64> in [[], [1], [2, 3]] {
+            let f = try Fixture(auditVersions: versions), endpoint = try f.endpoint(); try hello(endpoint)
+            let value = try staged(endpoint, proposal: f.proposal())
+            XCTAssertEqual(value.mac.auditVersions, versions)
+            XCTAssertNotNil(try commit(endpoint, transcript: value, fixture: f))
+            let trust = try f.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096, auditVersions: versions) }
+            XCTAssertEqual(trust.peers.count, 1); XCTAssertEqual(trust.peers.first?.auditVersions, versions)
+            try f.assertCheckpoint()
+        }
+    }
+    func testInvalidAuditConfigurationIsRejectedBeforeSetup() throws {
+        for versions in [Set([UInt64(0)]), Set(UInt64(1)...17)] {
+            XCTAssertThrowsError(try Fixture(auditVersions: versions)) {
+                XCTAssertEqual($0 as? AuthorityPairingSetupError, .invalidConfiguration)
+            }
+        }
+    }
+
     func testStageUsesFreshRootValuesAndNoAuthorityWrite() throws {
         let f = try Fixture(), endpoint = try f.endpoint(), proposal = try f.proposal()
         try hello(endpoint)
