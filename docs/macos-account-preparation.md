@@ -213,13 +213,15 @@ The app does not modify its signed bundle or require a central Mac.
 Installed host format 1 retains bundled-job validation. Format 2 explicitly selects protected system jobs for the account.
 
 Native commands receive a minimal environment, no caller descriptors, a time limit and bounded output.
-The helper compares launchd's reported source path, program and arguments when it reconciles a lost registration reply.
+The helper compares launchd's reported source path, program, arguments, user and group when it reconciles a lost registration reply.
+It also requires the exact Mach service names, managed endpoint settings, and the saved startup flags.
 These operational fields are not proof of complete loaded settings, process credentials or runtime health.
 Actual request admission still requires protected metadata, the signed role, kernel credentials and the existing runtime checks.
 Unknown inspection output fails without a mutation. A conflicting loaded job is not removed.
 
 The [owned-job experiment](experiments/evidence/2026-10-15-owned-job-registration.json) confirms these fields across a real GUI-job registration.
-It also confirms that changing the plist does not change the loaded program, and that a same-label bootstrap does not replace it.
+It also confirms that changing the plist preserves the loaded program, endpoints and flags. A same-label bootstrap does not replace the job.
+Wrong user/group declarations have fixture coverage; their system-domain behavior remains an installed test gate.
 The probe removes its exact temporary job and retains no raw job environment.
 The [version 5 selector evidence](experiments/macos-xpc.md#runtime-activation-selectors) checks the new XPC methods across separate ordinary-user processes.
 

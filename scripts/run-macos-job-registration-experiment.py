@@ -18,7 +18,8 @@ SOURCES = [
     'scripts/run-macos-job-registration-experiment.py',
 ]
 FACTS = {'unknownOwnedLabelAbsent', 'loadedFieldsMatchOriginal', 'sameLabelBootstrapRejected',
-         'conflictDidNotReplaceOwnedJob', 'loadedConfigurationIndependentOfDisk', 'temporaryJobRemoved'}
+         'conflictDidNotReplaceOwnedJob', 'loadedConfigurationIndependentOfDisk', 'temporaryJobRemoved',
+         'loadedEndpointSettingsMatch', 'loadedPropertiesMatch', 'changedFileRetainsLoadedEndpointsAndProperties'}
 
 
 def main():

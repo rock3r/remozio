@@ -40,9 +40,9 @@ final class LiveOwnedJobInspectionTests: XCTestCase {
                 } catch { facts["temporaryJobRemoved"] = false; XCTFail("Owned cleanup failed for \(target)") }
             } else { try? FileManager.default.removeItem(at: directory) }
         }
-        func write(_ url: URL, program: String, arguments: [String]) throws {
+        func write(_ url: URL, program: String, arguments: [String], suffix: String = ".original") throws {
             let values: [String: Any] = ["Label": label, "Program": program, "ProgramArguments": arguments,
-                                         "RunAtLoad": true, "KeepAlive": false]
+                                         "RunAtLoad": true, "KeepAlive": true, "MachServices": [label + suffix: true]]
             try PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0).write(to: url)
         }
         try write(first, program: "/bin/sleep", arguments: ["/bin/sleep", "60"])
@@ -58,15 +58,21 @@ final class LiveOwnedJobInspectionTests: XCTestCase {
         facts["loadedFieldsMatchOriginal"] = observation.kind == "LaunchAgent" && observation.path == first.path
             && observation.program == "/bin/sleep" && observation.arguments == ["/bin/sleep", "60"]
         XCTAssertTrue(facts["loadedFieldsMatchOriginal"] == true)
+        facts["loadedEndpointSettingsMatch"] = observation.endpoints == [label + ".original"]
+        facts["loadedPropertiesMatch"] = observation.properties.isSuperset(of: ["runatload", "keepalive"])
+        XCTAssertTrue(facts["loadedEndpointSettingsMatch"] == true)
+        XCTAssertTrue(facts["loadedPropertiesMatch"] == true)
         let conflict = try run(["bootstrap", domain, other.path])
         facts["sameLabelBootstrapRejected"] = conflict.exitCode != 0
         XCTAssertTrue(facts["sameLabelBootstrapRejected"] == true)
         let retained = try LaunchdJobObservation.decode(run(["print", target]).output, target: target)
         facts["conflictDidNotReplaceOwnedJob"] = retained.path == first.path && retained.program == observation.program && retained.arguments == observation.arguments
         XCTAssertTrue(facts["conflictDidNotReplaceOwnedJob"] == true)
-        try write(first, program: "/usr/bin/false", arguments: ["/usr/bin/false"])
+        try write(first, program: "/usr/bin/false", arguments: ["/usr/bin/false"], suffix: ".changed")
         let unchanged = try LaunchdJobObservation.decode(run(["print", target]).output, target: target)
         facts["loadedConfigurationIndependentOfDisk"] = unchanged.path == first.path && unchanged.program == observation.program && unchanged.arguments == observation.arguments
         XCTAssertTrue(facts["loadedConfigurationIndependentOfDisk"] == true)
+        facts["changedFileRetainsLoadedEndpointsAndProperties"] = unchanged.endpoints == observation.endpoints && unchanged.properties == observation.properties
+        XCTAssertTrue(facts["changedFileRetainsLoadedEndpointsAndProperties"] == true)
     }
 }

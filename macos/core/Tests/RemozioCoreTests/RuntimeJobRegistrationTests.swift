@@ -11,7 +11,9 @@ final class RuntimeJobRegistrationTests: XCTestCase {
     }
     private func output(_ job: InstalledAccountJobManifest) -> String {
         "system/\(job.declaration.label) = {\n\tpath = \(job.path)\n\ttype = LaunchDaemon\n\tstate = waiting\n\tprogram = \(job.executablePath)\n\targuments = {\n"
-            + job.arguments.map { "\t\t" + $0 + "\n" }.joined() + "\t}\n\tenvironment = {\n\t\tEXAMPLE => synthetic\n\t}\n}\n"
+            + job.arguments.map { "\t\t" + $0 + "\n" }.joined() + "\t}\n\tusername = \(job.userName)\n\tgroup = \(job.groupName)\n\tproperties = runatload | keepalive | inferred program\n\tendpoints = {\n"
+            + job.machServices.sorted().map { "\t\t\"" + $0 + "\" = {\n\t\t\tmanaged = 1\n\t\t\treset = 0\n\t\t\thide = 0\n\t\t}\n" }.joined()
+            + "\t}\n\tenvironment = {\n\t\tEXAMPLE => synthetic\n\t}\n}\n"
     }
     func testOperationalObservationMatchesOnlyTheExactLoadedProgramArgumentsAndSourcePath() throws {
         let job = try job(), original = output(job), target = "system/" + job.declaration.label
@@ -33,6 +35,37 @@ final class RuntimeJobRegistrationTests: XCTestCase {
         }
         XCTAssertThrowsError(try LaunchdJobObservation.decode(Data(repeating: 65, count: 65537), target: target))
         XCTAssertThrowsError(try LaunchdJobObservation.decode(Data([0xff]), target: target))
+    }
+    func testRetainedJobRejectsDifferentLoadedCredentialsEndpointsAndLaunchProperties() throws {
+        let job = try job(), original = output(job), target = "system/" + job.declaration.label
+        for changed in [original.replacingOccurrences(of: "username = root", with: "username = nobody"),
+                        original.replacingOccurrences(of: "group = wheel", with: "group = staff"),
+                        original.replacingOccurrences(of: "\t\t\"" + job.machServices.sorted()[0] + "\" = {", with: "\t\t\"dev.remozio.wrong\" = {"),
+                        original.replacingOccurrences(of: "runatload | keepalive", with: "runatload"),
+                        original.replacingOccurrences(of: "runatload | keepalive", with: "keepalive")] {
+            XCTAssertFalse(try LaunchdJobObservation.decode(Data(changed.utf8), target: target).matches(job))
+        }
+        for changed in [original.replacingOccurrences(of: "managed = 1", with: "managed = 0"),
+                        original.replacingOccurrences(of: "reset = 0", with: "reset = 1"),
+                        original.replacingOccurrences(of: "hide = 0", with: "hide = 1"),
+                        original.replacingOccurrences(of: "\tendpoints = {", with: "\tunknown-endpoints = {"),
+                        original.replacingOccurrences(of: "\tgroup = wheel", with: "\tusername = nobody")] {
+            XCTAssertThrowsError(try LaunchdJobObservation.decode(Data(changed.utf8), target: target))
+        }
+        let defaults = original.replacingOccurrences(of: "\tusername = root\n", with: "").replacingOccurrences(of: "\tgroup = wheel\n", with: "")
+        XCTAssertTrue(try LaunchdJobObservation.decode(Data(defaults.utf8), target: target).matches(job))
+    }
+    func testTransportRequiresItsExplicitLoadedUserAndGroup() throws {
+        let account = Data(repeating: 2, count: 16)
+        let job = try InstalledAccountJobManifest(accountID: account, role: .transport, executionUID: 450,
+            userName: ServiceAccountClaim.recordName(accountID: account, role: .transport), bundlePath: MachineBootstrap.bundlePath)
+        let original = output(job), target = "system/" + job.declaration.label
+        XCTAssertTrue(try LaunchdJobObservation.decode(Data(original.utf8), target: target).matches(job))
+        for changed in [original.replacingOccurrences(of: "\tusername = " + job.userName + "\n", with: ""),
+                        original.replacingOccurrences(of: "\tgroup = " + job.groupName + "\n", with: ""),
+                        original.replacingOccurrences(of: "username = " + job.userName, with: "username = root")] {
+            XCTAssertFalse(try LaunchdJobObservation.decode(Data(changed.utf8), target: target).matches(job))
+        }
     }
     func testMatchingRegistrationDoesNotBootstrapOrMutateTheExistingJob() throws {
         var checks = 0
