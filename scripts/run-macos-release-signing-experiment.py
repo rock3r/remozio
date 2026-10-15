@@ -103,8 +103,14 @@ def signing_options(identity, team):
     return identity.upper() if identity else None, team
 
 
-def measure(probe, *, identity=None, team=None):
+def measure(probe, *, identity=None, team=None, export_app=None):
     identity, team = signing_options(identity, team)
+    if export_app is not None:
+        if not identity:
+            raise ValueError('Export requires an explicit signing identity and trusted team')
+        export_app = Path(export_app).absolute()
+        if export_app.exists() or export_app.is_symlink():
+            raise ValueError('The export destination must not exist')
     original = ROOT / APP
     initial = fingerprint(original)
     public = run(['/usr/bin/codesign', '--display', '--verbose=4', original])
@@ -163,13 +169,18 @@ def measure(probe, *, identity=None, team=None):
                 shutil.copytree(app, wrong, symlinks=True)
                 sign_app(wrong, 'dev.remozio.other')
                 cases['foreignApplicationIdentifierEntitlement'] = inspect(probe, wrong, team, False)
+                if export_app is not None:
+                    shutil.copytree(app, export_app, symlinks=True)
+                    if fingerprint(export_app) != fingerprint(app):
+                        raise RuntimeError('The exported signed app does not match the verified copy')
+                    inspect(probe, export_app, team, True)
     finally:
         if fingerprint(original) != initial:
             raise RuntimeError('The original built app changed during this experiment')
     return {'experiment': 'complete-release-signature-inspection', 'schemaVersion': 1,
         'mode': 'developer-id' if identity else 'ad-hoc-rejection', 'cases': cases,
         'trustedTeamID': team, 'identityFingerprint': identity, 'originalBundleUnchanged': True,
-        'temporarySignedCopiesRemoved': True, 'signingTimestampUsed': False,
+        'temporarySignedCopiesRemoved': True, 'signedAppExported': export_app is not None, 'signingTimestampUsed': False,
         'notarizationTested': False, 'appLaunched': False, 'servicesInstalled': False,
         'limits': ['Candidate signature evidence only; no protected installation or activation',
                    'No password retrieval or authentication UI automation',
@@ -180,6 +191,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--signing-identity', help='Explicit certificate SHA-1 fingerprint; no automatic selection')
     parser.add_argument('--trusted-team', help='Expected Team ID from trusted policy, independent of the candidate')
+    parser.add_argument('--export-app', type=Path, help='Keep one verified signed copy at a new path for developer package preparation')
     arguments = parser.parse_args()
     try:
         identity, team = signing_options(arguments.signing_identity, arguments.trusted_team)
@@ -193,7 +205,7 @@ def main():
     run(build_arguments, timeout=300)
     binary_path = Path(run([*build_arguments, '--show-bin-path']).stdout.strip())
     probe = binary_path / 'ReleaseSigningProbe'
-    evidence = measure(probe, identity=identity, team=team)
+    evidence = measure(probe, identity=identity, team=team, export_app=arguments.export_app)
     evidence['recordedAtUTC'] = datetime.now(timezone.utc).isoformat()
     evidence['probeSHA256'] = hashlib.sha256(probe.read_bytes()).hexdigest()
     evidence['host'] = {'os': run(['sw_vers', '-productVersion']).stdout.strip(),
