@@ -62,7 +62,7 @@ final class MacSetupServiceControlsTests: XCTestCase {
         driver.registration = { driver.value = .requiresApproval; throw SetupRegistrationDriver.Failure.refused }
         await subject.enable()
         XCTAssertEqual(subject.state, .requiresApproval)
-        XCTAssertEqual(subject.notice, .registrationFailed)
+        XCTAssertNil(subject.notice)
         XCTAssertEqual(driver.registrations, 1)
         driver.value = .enabled; await subject.refresh()
         XCTAssertEqual(subject.state, .enabled)
@@ -140,6 +140,35 @@ final class MacSetupServiceControlsTests: XCTestCase {
         for code in [path + "/Contents/Library/LaunchServices/RemozioSetup", "/private/tmp/Remozio", path + "/Other"] {
             XCTAssertFalse(MacSetupServiceLocation.matches(bundlePath: path, codePath: code))
         }
+    }
+
+    @MainActor func testEnabledRegistrationReconcilesAnErrorWithoutFailureOrRetry() async {
+        let driver = SetupRegistrationDriver(), subject: MacSetupServiceControls
+        subject = MacSetupServiceControls(driver: driver)
+        driver.registration = { driver.value = .enabled; throw SetupRegistrationDriver.Failure.refused }
+        await subject.enable()
+        XCTAssertEqual(subject.state, .enabled)
+        XCTAssertNil(subject.notice)
+        XCTAssertEqual(driver.registrations, 1)
+        await subject.enable()
+        XCTAssertEqual(driver.registrations, 1)
+    }
+    @MainActor func testRegistrationErrorRemainsVisibleWhenRegistrationIsStillAbsent() async {
+        let driver = SetupRegistrationDriver(), subject: MacSetupServiceControls
+        subject = MacSetupServiceControls(driver: driver)
+        driver.registration = { throw SetupRegistrationDriver.Failure.refused }
+        await subject.enable()
+        XCTAssertEqual(subject.state, .notRegistered)
+        XCTAssertEqual(subject.notice, .registrationFailed)
+        await subject.refresh()
+        XCTAssertEqual(subject.state, .notRegistered)
+        XCTAssertEqual(subject.notice, .registrationFailed)
+        XCTAssertEqual(driver.registrations, 1)
+        driver.value = .requiresApproval
+        await subject.refresh()
+        XCTAssertEqual(subject.state, .requiresApproval)
+        XCTAssertNil(subject.notice)
+        XCTAssertEqual(driver.registrations, 1)
     }
 
 }

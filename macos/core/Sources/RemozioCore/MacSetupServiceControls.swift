@@ -119,7 +119,7 @@ public final class MacSetupServiceControls {
         defer { operation = nil }
         do {
             state = try await driver.inspect()
-            if state == .enabled || notice == .inspectionFailed { notice = nil }
+            if state == .enabled || state == .requiresApproval || notice == .inspectionFailed { notice = nil }
         } catch { state = .unavailable; notice = .inspectionFailed }
     }
     public func enable() async {
@@ -138,7 +138,7 @@ public final class MacSetupServiceControls {
         } catch {
             // A failed reply does not undo registration. Read current system state; never repeat the mutation.
             state = (try? await driver.inspect()) ?? .unavailable
-            notice = .registrationFailed
+            notice = state == .enabled || state == .requiresApproval ? nil : .registrationFailed
         }
     }
     public func openSettings() { SMAppService.openSystemSettingsLoginItems() }

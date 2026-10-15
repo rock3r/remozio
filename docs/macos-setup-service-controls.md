@@ -43,6 +43,8 @@ Opening the app only reads status.
 Registration and opening System Settings each require an explicit user action.
 An error after registration triggers a fresh status read, never another registration attempt.
 It does not unregister or undo an uncertain result.
+A fresh enabled or approval-required result is expected progress, even if registration threw.
+An absent or unavailable registration retains its failure notice.
 
 ## Visible states
 
@@ -61,8 +63,8 @@ The existing pairing and setup-file controls remain available.
 
 ## Evidence and remaining work
 
-Twenty-four focused tests cover these controls.
-Twelve cover the setup controller and code-location checks, including pending approval, failures, lost replies and overlapping actions.
+Twenty-six focused tests cover these controls.
+Fourteen cover the setup controller and code-location checks, including pending approval, failures, lost replies and overlapping actions.
 The native test process receives package guidance without registration.
 Two new placement tests inspect existing Root-owned metadata as an ordinary account and retain the Root-only write refusal.
 They create no system state.
