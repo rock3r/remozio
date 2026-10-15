@@ -118,6 +118,7 @@ The native driver submits disabled authentication, a false shell, an empty home 
 It checks exact names, numbers and UUIDs before reading the claimed record's authentication policy.
 It also checks primary groups, POSIX identity, and administrator and wheel membership.
 No account creation runs during ordinary tests.
+The [live XPC experiment](experiments/macos-xpc.md#service-account-setup-selectors) also checks the new selectors across separate ordinary-user processes.
 
 The tests use real SQLite transactions and a logical directory fixture.
 They cover cross-account reservations, lost commits, malformed records, every controller interruption and rejected administrator rights.
