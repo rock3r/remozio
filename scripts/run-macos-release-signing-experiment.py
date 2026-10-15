@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Inspect disposable release copies through the production signature reader."""
 import argparse
+import ctypes
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -103,6 +104,26 @@ def signing_options(identity, team):
     return identity.upper() if identity else None, team
 
 
+def exclusive_rename(source, destination):
+    """Darwin RENAME_EXCL publishes a verified directory without replacing an entry."""
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = library.renamex_np
+    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(os.fsencode(source), os.fsencode(destination), 0x00000004) != 0:
+        raise OSError(ctypes.get_errno(), 'Could not publish the verified app export')
+
+
+def export_verified_app(probe, app, team, destination):
+    with tempfile.TemporaryDirectory(prefix='.remozio-export-', dir=destination.parent) as temporary:
+        candidate = Path(temporary) / 'Remozio.app'
+        shutil.copytree(app, candidate, symlinks=True)
+        if fingerprint(candidate) != fingerprint(app):
+            raise RuntimeError('The exported signed app does not match the verified copy')
+        inspect(probe, candidate, team, True)
+        exclusive_rename(candidate, destination)
+
+
 def measure(probe, *, identity=None, team=None, export_app=None):
     identity, team = signing_options(identity, team)
     if export_app is not None:
@@ -170,10 +191,7 @@ def measure(probe, *, identity=None, team=None, export_app=None):
                 sign_app(wrong, 'dev.remozio.other')
                 cases['foreignApplicationIdentifierEntitlement'] = inspect(probe, wrong, team, False)
                 if export_app is not None:
-                    shutil.copytree(app, export_app, symlinks=True)
-                    if fingerprint(export_app) != fingerprint(app):
-                        raise RuntimeError('The exported signed app does not match the verified copy')
-                    inspect(probe, export_app, team, True)
+                    export_verified_app(probe, app, team, export_app)
     finally:
         if fingerprint(original) != initial:
             raise RuntimeError('The original built app changed during this experiment')

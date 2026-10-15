@@ -74,6 +74,9 @@ python3 scripts/build-macos-package.py \
 ```
 
 Both output paths must be new. The original build stays unchanged.
+App exports publish after verification through an exclusive native rename.
+Package files publish only after a complete staged copy.
+Failed copies leave no partial final artifact.
 The signing experiment uses no timestamp and performs no notarization.
 Its export is suitable for this local archive experiment, not a trusted public release.
 The builder also accepts an explicit `--installer-identity` instead of `--unsigned-developer`.
@@ -82,7 +85,7 @@ A package signature does not imply notarization or native install validation.
 The builder uses explicit nonrelocation settings for macOS 26 compatibility.
 It reads ownership from the compressed cpio payload, rather than extracted files.
 Every app entry must have Root ownership, group 0 and no group or other write access.
-It compares all archived app bytes and modes with the verified source copy.
+It compares all archived app bytes, file types and modes with the verified source copy.
 It also checks both archived setup helpers and their scripts.
 AppleDouble records can contain only empty Finder data and Apple's non-authoritative provenance attribute.
 Resource forks, custom attributes and other metadata formats are refused.

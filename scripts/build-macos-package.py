@@ -164,7 +164,7 @@ def archive_inventory(payload):
                 validate_metadata(bytes(metadata_bytes))
             elif stat.S_ISREG(mode) and links != 1:
                 raise RuntimeError('The package payload contains a hard link')
-            records[path.as_posix()] = {'mode': mode & 0o777, 'sha256': digest.hexdigest(), 'size': size, 'metadata': metadata}
+            records[path.as_posix()] = {'mode': mode & 0o777, 'sha256': digest.hexdigest(), 'size': size, 'metadata': metadata, 'type': stat.S_IFMT(mode)}
     return records
 
 
@@ -178,16 +178,26 @@ def verify_payload(payload, app):
             expected.add(relative)
             row = records.get(relative)
             metadata = file.lstat()
-            if row is None or row['mode'] != stat.S_IMODE(metadata.st_mode):
+            if row is None or row['mode'] != stat.S_IMODE(metadata.st_mode) or row['type'] != stat.S_IFMT(metadata.st_mode):
                 raise RuntimeError('The archived app does not match the verified source')
             if file.is_file() and (row['sha256'] != hashlib.sha256(file.read_bytes()).hexdigest() or row['size'] != metadata.st_size):
                 raise RuntimeError('The archived app bytes changed')
     for name, row in records.items():
         if row['metadata'] and str(Path(name).with_name(Path(name).name[2:])) not in expected:
             raise RuntimeError('Orphan package metadata')
-    if {name for name, row in records.items() if not row['metadata']} != expected or records['Remozio.app']['mode'] != stat.S_IMODE(app.lstat().st_mode):
+    if {name for name, row in records.items() if not row['metadata']} != expected or records['Remozio.app']['mode'] != stat.S_IMODE(app.lstat().st_mode) or any(records[name]['type'] != stat.S_IFDIR for name in ('.', 'Remozio.app')):
         raise RuntimeError('The package contains an unexpected payload')
     return len(records)
+
+
+def publish_package(candidate, output):
+    """Publish complete bytes exclusively. Failed copies leave no final artifact."""
+    with tempfile.NamedTemporaryFile(prefix='.remozio-package-', dir=output.parent) as temporary:
+        with candidate.open('rb') as source:
+            shutil.copyfileobj(source, temporary)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        os.link(temporary.name, output)
 
 
 def build(app, output, team, *, installer_identity=None, unsigned_developer=False):
@@ -255,9 +265,7 @@ def build(app, output, team, *, installer_identity=None, unsigned_developer=Fals
                 raise RuntimeError('The archived package helper changed')
         if reader.fingerprint(app) != original or reader.fingerprint(copy) != original:
             raise RuntimeError('The verified app changed during packaging')
-        # Exclusive publication cannot replace an existing artifact, even after an earlier existence check.
-        with candidate.open('rb') as source, output.open('xb') as destination:
-            shutil.copyfileobj(source, destination)
+        publish_package(candidate, output)
         return {'schemaVersion': 1, 'packageSHA256': hashlib.sha256(output.read_bytes()).hexdigest(),
             'appFingerprint': original, 'trustedTeamID': team, 'packageProfile': pins, 'payloadEntries': count,
             'packageSigned': bool(installer_identity), 'unsignedDeveloperPackage': unsigned_developer,

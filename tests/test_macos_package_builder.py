@@ -2,6 +2,7 @@ import gzip
 import importlib.util
 from pathlib import Path
 import stat
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -69,6 +70,22 @@ class MacPackageBuilderTests(unittest.TestCase):
                 write(data)
                 with self.assertRaises(RuntimeError): BUILDER.verify_payload(payload, app)
 
+    def test_payload_rejects_directory_and_file_type_substitutions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); app = root / 'Remozio.app'; app.mkdir(); app.chmod(0o755)
+            contents = app / 'Contents'; contents.mkdir(); contents.chmod(0o755)
+            helper = contents / 'helper'; helper.write_bytes(b'hello'); helper.chmod(0o755)
+            rows = [('.', stat.S_IFDIR | 0o755, b''), ('Remozio.app', stat.S_IFDIR | 0o755, b''),
+                    ('Remozio.app/Contents', stat.S_IFDIR | 0o755, b''),
+                    ('Remozio.app/Contents/helper', stat.S_IFREG | 0o755, b'hello')]
+            for index in range(len(rows)):
+                changed = list(rows); name, mode, data = changed[index]
+                changed[index] = (name, (stat.S_IFDIR if stat.S_ISREG(mode) else stat.S_IFREG) | 0o755, data)
+                payload = root / 'Payload'
+                payload.write_bytes(gzip.compress(b''.join(cpio(name, mode=mode, data=data) for name, mode, data in changed) + cpio('TRAILER!!!')))
+                with self.subTest(index=index), self.assertRaises(RuntimeError):
+                    BUILDER.verify_payload(payload, app)
+
     def test_scripts_refuse_missing_or_external_volume_before_invoking_any_helper(self):
         for role in BUILDER.IDENTIFIERS:
             with tempfile.TemporaryDirectory() as temporary:
@@ -105,6 +122,56 @@ class MacPackageBuilderTests(unittest.TestCase):
             with self.assertRaises(ValueError): BUILDER.build(Path('/unused'), output, 'ABCDEFGHIJ', unsigned_developer=True)
             self.assertEqual(output.read_bytes(), b'existing')
             run.assert_not_called()
+
+    def test_failed_package_copy_does_not_publish_partial_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); candidate = root / 'candidate'; candidate.write_bytes(b'verified package')
+            output = root / 'Remozio.pkg'
+            def failed_copy(source, destination):
+                destination.write(b'partial'); raise OSError('fixture copy failure')
+            with patch.object(BUILDER.shutil, 'copyfileobj', side_effect=failed_copy):
+                with self.assertRaises(OSError): BUILDER.publish_package(candidate, output)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.iterdir()), [candidate])
+            BUILDER.publish_package(candidate, output)
+            self.assertEqual(output.read_bytes(), candidate.read_bytes())
+            with self.assertRaises(FileExistsError): BUILDER.publish_package(candidate, output)
+            self.assertEqual(output.read_bytes(), b'verified package')
+            self.assertEqual(set(root.iterdir()), {candidate, output})
+
+    def test_failed_app_export_leaves_no_final_path_or_owned_temporary_copy(self):
+        reader = BUILDER.signing_reader()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); app = root / 'source.app'; app.mkdir(); (app / 'helper').write_bytes(b'signed fixture')
+            destination = root / 'export.app'
+            def failed_copy(source, candidate, **kwargs):
+                candidate.mkdir(); (candidate / 'partial').write_bytes(b'partial'); raise OSError('fixture copy failure')
+            cases = [patch.object(reader.shutil, 'copytree', side_effect=failed_copy),
+                     patch.object(reader, 'fingerprint', side_effect=['candidate', 'different source']),
+                     patch.object(reader, 'inspect', side_effect=RuntimeError('fixture rejection'))]
+            for failure in cases:
+                with failure, self.assertRaises((OSError, RuntimeError)):
+                    reader.export_verified_app('/unused', app, 'ABCDEFGHIJ', destination)
+                self.assertFalse(destination.exists())
+                self.assertEqual(list(root.iterdir()), [app])
+
+    @unittest.skipUnless(platform.system() == 'Darwin', 'Native exclusive directory publication')
+    def test_native_app_export_publishes_once_without_replacing_foreign_entries(self):
+        reader = BUILDER.signing_reader()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(reader, 'inspect', return_value={'result': 'accepted'}):
+            root = Path(temporary); app = root / 'source.app'; app.mkdir(); (app / 'helper').write_bytes(b'signed fixture')
+            destination = root / 'export.app'
+            reader.export_verified_app('/unused', app, 'ABCDEFGHIJ', destination)
+            self.assertEqual(reader.fingerprint(destination), reader.fingerprint(app))
+            for kind in ('directory', 'file', 'link'):
+                foreign = root / kind
+                if kind == 'directory': foreign.mkdir()
+                elif kind == 'file': foreign.write_bytes(b'user data')
+                else: foreign.symlink_to('/missing-fixture')
+                before = foreign.lstat()
+                with self.assertRaises(OSError): reader.export_verified_app('/unused', app, 'ABCDEFGHIJ', foreign)
+                self.assertEqual(foreign.lstat().st_ino, before.st_ino)
+            self.assertFalse(any(path.name.startswith('.remozio-export-') for path in root.iterdir()))
 
     def test_signing_export_requires_certificate_and_fresh_destination(self):
         reader = BUILDER.signing_reader()
