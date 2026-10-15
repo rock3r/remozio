@@ -54,6 +54,7 @@ public enum PackageBootstrap {
     /// This mode does not relax the installed service's protected-path startup checks.
     public static func preparePayload(_ profile: PackageBootstrapProfile) throws {
         try verifyCaller(profile)
+        try inspectEntry(parent: "/Applications", owner: 0)
         let shared = try ProtectedSetupDirectory.createOrOpen(path: sharedPath, visibility: .sharedMetadata)
         defer { shared.close() }
         try requireFreshState(shared)
@@ -83,6 +84,7 @@ public enum PackageBootstrap {
     }
     public static func inspectInstalled(_ profile: PackageBootstrapProfile) throws -> Plan {
         try verifyCaller(profile)
+        try inspectEntry(parent: "/Applications", owner: 0)
         return try withInstalled(profile) { shared, release in
             try inspectState(shared: shared, owner: 0, bundlePath: MachineBootstrap.bundlePath,
                 machinePath: MachineBootstrap.machineDirectory, release: release)
@@ -160,6 +162,12 @@ public enum PackageBootstrap {
     }
     // The UI entry is not an authority boundary. Its directory may allow administrator-group writes.
     static func publishEntry(parent: String, owner: uid_t) throws {
+        try applicationEntry(parent: parent, owner: owner, createIfMissing: true)
+    }
+    static func inspectEntry(parent: String, owner: uid_t) throws {
+        try applicationEntry(parent: parent, owner: owner, createIfMissing: false)
+    }
+    private static func applicationEntry(parent: String, owner: uid_t, createIfMissing: Bool) throws {
         guard getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
         let fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw JournalLeaseError.system(errno) }
@@ -173,7 +181,10 @@ public enum PackageBootstrap {
         }
         func matches() throws {
             var info = stat()
-            guard fstatat(fd, "Remozio.app", &info, AT_SYMLINK_NOFOLLOW) == 0 else { throw JournalLeaseError.system(errno) }
+            guard fstatat(fd, "Remozio.app", &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+                if !createIfMissing, errno == ENOENT { return }
+                throw JournalLeaseError.system(errno)
+            }
             guard info.st_mode & S_IFMT == S_IFLNK else { throw PackageBootstrapError.shortcutConflict }
             var bytes = [UInt8](repeating: 0, count: Int(PATH_MAX))
             let count = readlinkat(fd, "Remozio.app", &bytes, bytes.count)
@@ -181,11 +192,13 @@ public enum PackageBootstrap {
             guard Data(bytes.prefix(Int(count))) == Data(MachineBootstrap.bundlePath.utf8) else { throw PackageBootstrapError.shortcutConflict }
         }
         try validate()
-        if symlinkat(MachineBootstrap.bundlePath, fd, "Remozio.app") != 0 {
+        if createIfMissing, symlinkat(MachineBootstrap.bundlePath, fd, "Remozio.app") != 0 {
             guard errno == EEXIST else { throw JournalLeaseError.system(errno) }
         }
         try matches()
-        guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+        if createIfMissing {
+            guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+        }
         try validate(); try matches()
     }
 }

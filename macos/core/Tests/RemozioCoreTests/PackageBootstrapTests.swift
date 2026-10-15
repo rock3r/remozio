@@ -173,6 +173,33 @@ final class PackageBootstrapTests: XCTestCase {
             XCTAssertEqual(lstat(path.path, &after), 0); XCTAssertEqual(before.st_ino, after.st_ino)
         } }
     }
+    func testEntryPreflightAcceptsMissingOrMatchingLinkWithoutCreatingOrChangingIt() throws {
+        try fixture { f in
+            try PackageBootstrap.inspectEntry(parent: f.apps.path, owner: getuid())
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.apps.path), [])
+            try PackageBootstrap.publishEntry(parent: f.apps.path, owner: getuid())
+            let path = URL(fileURLWithPath: f.apps.path).appendingPathComponent("Remozio.app")
+            var before = stat(), after = stat(); XCTAssertEqual(lstat(path.path, &before), 0)
+            try PackageBootstrap.inspectEntry(parent: f.apps.path, owner: getuid())
+            XCTAssertEqual(lstat(path.path, &after), 0); XCTAssertEqual(before.st_ino, after.st_ino)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.shared.path), [])
+        }
+    }
+    func testEntryPreflightRejectsForeignDirectoryFileOrLinkWithoutWritingBootstrapState() throws {
+        for kind in 0...2 { try fixture { f in
+            let path = URL(fileURLWithPath: f.apps.path).appendingPathComponent("Remozio.app")
+            if kind == 0 { try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false) }
+            else if kind == 1 { try Data("user data".utf8).write(to: path) }
+            else { try FileManager.default.createSymbolicLink(atPath: path.path, withDestinationPath: "/another/application") }
+            var before = stat(), after = stat(); XCTAssertEqual(lstat(path.path, &before), 0)
+            XCTAssertThrowsError(try PackageBootstrap.inspectEntry(parent: f.apps.path, owner: getuid())) {
+                XCTAssertEqual($0 as? PackageBootstrapError, .shortcutConflict)
+            }
+            XCTAssertEqual(lstat(path.path, &after), 0); XCTAssertEqual(before.st_ino, after.st_ino)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.shared.path), [])
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.machine.path))
+        } }
+    }
     func testPublicPackageOperationsRejectOrdinaryUserBeforeProtectedPaths() throws {
         guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Ordinary-user refusal") }
         let value = try profile()

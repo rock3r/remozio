@@ -34,6 +34,9 @@ These package modes grant no account enrollment or command access.
 
 The payload guard refuses an existing app, including a file or symbolic link at that path.
 It also refuses retained machine files or bootstrap records before payload installation.
+It checks the Applications entry before creating protected parent directories.
+The installed-package check repeats that check before bootstrap can create machine state.
+Missing entries and matching shortcuts pass without writes. Foreign entries stop setup early.
 It creates only protected parent directories on a fresh installation.
 It does not replace an existing app or repair unsafe ownership.
 
