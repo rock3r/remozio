@@ -6,6 +6,8 @@ import java.security.KeyPairGenerator
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import javax.crypto.KeyGenerator
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -60,6 +62,102 @@ class StoredPairingHostTest {
         initSign(authority.private); update(t.signingInput(PairingProofPurpose.MAC_COMMIT)); sign()
     }))
     init { EncryptedEnrollmentStore.create(storage, cipher, 10).close() }
+
+    private class RecoveryWire(
+        private val read: suspend () -> ByteArray?,
+        private val joining: suspend () -> Unit = {},
+    ) : PairingReceiptWire {
+        var queries = 0
+        var joins = 0
+        override suspend fun recover(): ByteArray? { queries++; return read() }
+        override fun close() = Unit
+        override suspend fun closeAndJoin() { joins++; joining() }
+    }
+
+    @Test fun recoveryActivatesOnlyTheRetainedTranscriptAndPreservesKeys() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val wire = RecoveryWire({ receipt(t).copyBytes() })
+        val recovery = PairingReceiptRecovery(h, { _, row ->
+            assertEquals(e.recordID, row.enrollment.recordID)
+            assertContentEquals(t.encode(), checkNotNull(row.pairing).transcript.encode())
+            wire
+        }, Dispatchers.Unconfined)
+        assertTrue(recovery.recover(e.recordID))
+        assertEquals(1, wire.queries); assertEquals(1, wire.joins)
+        open().use {
+            val active = it.snapshot().entries.single()
+            assertEquals(EnrollmentPhase.ACTIVE, active.phase)
+            assertEquals(e.transportKey.alias, active.enrollment.transportKey.alias)
+            assertEquals(e.biometricKey.publicKey, active.enrollment.biometricKey.publicKey)
+        }
+    }
+
+    @Test fun unavailableReceiptKeepsThePreparationAndReleasesLeaseAfterIoJoins() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        val prepared = h.prepare(e, t, 0u, 1u).entries.single()
+        var retired = false
+        val wire = RecoveryWire({ null }, {
+            assertFails { h.abandonUnsubmitted(prepared) { retired = true } }
+            assertFalse(retired)
+        })
+        assertFalse(PairingReceiptRecovery(h, { _, _ -> wire }, Dispatchers.Unconfined).recover(e.recordID))
+        open().use { assertEquals(1uL, it.snapshot().revision); assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single().phase) }
+        assertEquals(1, wire.queries); assertEquals(1, wire.joins)
+        // This fixture's original setup never submitted a proof. The recovery borrow must now be gone.
+        h.abandonUnsubmitted(prepared) { retired = true }
+        assertTrue(retired)
+    }
+
+    @Test fun invalidRecoveryReceiptCannotActivateOrRemovePreparation() = runBlocking<Unit> {
+        failedRecoveryPreservesPreparation(networkFailure = false)
+    }
+
+    @Test fun recoveryNetworkFailureCannotActivateOrRemovePreparation() = runBlocking<Unit> {
+        failedRecoveryPreservesPreparation(networkFailure = true)
+    }
+
+    private suspend fun failedRecoveryPreservesPreparation(networkFailure: Boolean) {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val wire = RecoveryWire({ if (networkFailure) error("Synthetic network failure") else ByteArray(64) })
+        assertFails { PairingReceiptRecovery(h, { _, _ -> wire }, Dispatchers.Unconfined).recover(e.recordID) }
+        assertEquals(1, wire.joins)
+        open().use { assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single().phase) }
+        assertTrue(invalidated.isEmpty())
+    }
+
+    @Test fun recoveryCancellationJoinsIoAndKeepsAllPreparedKeys() = runBlocking<Unit> {
+        val h = host(); val e = record(1); h.prepare(e, transcript(e), 0u, 1u)
+        val started = CompletableDeferred<Unit>()
+        val wire = RecoveryWire({ started.complete(Unit); CompletableDeferred<ByteArray?>().await() })
+        val operation = async { PairingReceiptRecovery(h, { _, _ -> wire }, Dispatchers.Unconfined).recover(e.recordID) }
+        started.await(); operation.cancel(); operation.join()
+        assertEquals(1, wire.joins)
+        open().use { assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single().phase) }
+        assertTrue(invalidated.isEmpty())
+    }
+
+    @Test fun localRemovalDuringConnectionStopsRecoveryBeforeAnyQuery() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e); h.prepare(e, t, 0u, 1u)
+        val wire = RecoveryWire({ receipt(t).copyBytes() })
+        val recovery = PairingReceiptRecovery(h, { _, _ -> h.remove(e.recordID, 1u); wire }, Dispatchers.Unconfined)
+        assertFails { recovery.recover(e.recordID) }
+        assertEquals(0, wire.queries); assertEquals(1, wire.joins)
+        open().use { assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single().phase) }
+    }
+
+    @Test fun activationWriteFailureKeepsTheSamePreparationForReceiptRetry() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e); h.prepare(e, t, 0u, 1u)
+        val first = RecoveryWire({ storage.fail = true; receipt(t).copyBytes() })
+        assertFails { PairingReceiptRecovery(h, { _, _ -> first }, Dispatchers.Unconfined).recover(e.recordID) }
+        assertEquals(1, first.joins)
+        storage.fail = false
+        open().use { assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single().phase) }
+        val retry = RecoveryWire({ receipt(t).copyBytes() })
+        assertTrue(PairingReceiptRecovery(h, { _, _ -> retry }, Dispatchers.Unconfined).recover(e.recordID))
+        assertEquals(1, retry.joins)
+    }
 
     @Test fun activationReopensRetainedAttemptAndInvalidatesBeforeCommit() = runBlocking<Unit> {
         val e = record(1); val t = transcript(e)

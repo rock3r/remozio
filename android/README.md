@@ -140,7 +140,12 @@ Rotation retains the setup owner. Leaving setup closes its channel and joins cle
 The archive removal commits before native key retirement, under the enrollment lock. Active records, changed data, other key references and other prepared borrowers prevent cleanup.
 A missing or unreadable archive preserves the keys. A key-retirement failure retains the closed owner so Close can retry safely.
 Any proof submission attempt keeps the record and keys, including after a lost reply. A process restart also leaves uncertain setup intact.
-Lost receipt recovery and explicit re-enrollment remain integration work. The current UI preserves incomplete records and states that uncertainty.
+Incomplete records have an explicit **Check pairing** action. It uses the retained hardware transport identity and the separate enrolled receipt protocol.
+The existing direct-first connector can use a retained relay route after direct connection failure. Only a verified receipt activates the retained preparation.
+Recovery requests no new biometric proof. It keeps the existing record and keys after a missing receipt, connection error, cancellation or storage failure.
+Stopping the UI cancels recovery and joins I/O before releasing the prepared-record lease. Local network permission is requested only after the explicit action. Denial skips LAN discovery and still permits a retained relay route.
+A failed check states that setup remains incomplete; it never claims that the Mac did not commit. Explicit re-enrollment remains separate work.
+See the [receipt recovery contract](../protocol/pairing-receipt.md). Native Pixel permission, key custody and lifecycle behavior remain interactive checks.
 
 The debug-only PairingPreviewActivity renders synthetic layouts with inert callbacks. It never opens enrollment storage or creates a setup owner.
 Its expiry scene checks return from the biometric screen after the countdown ends. This is a Compose transition check, without biometric hardware.

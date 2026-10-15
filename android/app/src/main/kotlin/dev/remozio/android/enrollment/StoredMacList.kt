@@ -71,7 +71,8 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                         Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete else R.string.macs_not_connected),
                             style = MaterialTheme.typography.titleMedium)
                         Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete_description else R.string.macs_unknown_status))
-                        if (!mac.setupIncomplete) TextButton(onClick = { onOpen(mac) }) {
+                        if (mac.setupIncomplete) PairingReceiptControl(mac, onRecovered = { retry++ })
+                        else TextButton(onClick = { onOpen(mac) }) {
                             Text(stringResource(R.string.commands_open))
                         }
                     }
