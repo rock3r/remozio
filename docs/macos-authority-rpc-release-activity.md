@@ -59,6 +59,13 @@ Each callback keeps its own reference; closing one cannot unlock the other.
 
 Ordinary-account controls use real protected-file checks and independent flock descriptors.
 They cover every transport selector, all presence replies, idle admission, attachment after construction, exclusive refusal, handler failure, metadata changes, nested replies and concurrent disconnect.
+The anonymous native XPC fixture also attaches a real activity barrier.
+Its forwarding object checks independent exclusive refusal immediately before and after each successful native reply callback.
+It preserves the original invocation stack and pinned test binary checks.
+The [retained native result](experiments/evidence/2026-10-16-authority-rpc-activity-native-xpc.json) records 19 verified invocations and 32 callback checks on macOS 27.0.1.
+The same run checks idle acquisition, reconnect, an uncertain committed mode, crossed connection refusal and observer withdrawal.
+Three refused operations have no successful reply; they are excluded from the callback count.
+The record binds the exact fixture hash. It establishes no macOS 26 runtime result.
 Existing native XPC and policy controls remain part of the full repository gate.
 These results do not establish installed Root identity, administrator consent or the complete Mac–Pixel flow.
 

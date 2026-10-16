@@ -81,6 +81,27 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         func close() { connection.invalidate() }
         deinit { connection.invalidate() }
     }
+    /// Forwards native invocations synchronously, preserving the OS invocation guard's original stack.
+    private final class CheckedNativeReplies: NSObject, AuthorityPresenceXPCProtocol, @unchecked Sendable {
+        let endpoint: AuthorityPresenceXPCEndpoint
+        let check: @Sendable () -> Void
+        init(endpoint: AuthorityPresenceXPCEndpoint, check: @escaping @Sendable () -> Void) {
+            self.endpoint = endpoint; self.check = check
+        }
+        func hello(reply: @escaping @Sendable (UInt64) -> Void) {
+            endpoint.hello { [check] version in
+                if version == 1 { check() }; reply(version); if version == 1 { check() }
+            }
+        }
+        func current(reply: @escaping @Sendable (Data?) -> Void) { endpoint.current(reply: checked(reply)) }
+        func publish(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { endpoint.publish(payload, reply: checked(reply)) }
+        func setMode(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { endpoint.setMode(payload, reply: checked(reply)) }
+        private func checked(_ reply: @escaping @Sendable (Data?) -> Void) -> @Sendable (Data?) -> Void {
+            { [check] bytes in
+                if bytes != nil { check() }; reply(bytes); if bytes != nil { check() }
+            }
+        }
+    }
     /// Anonymous listener owned by this test. No Mach service is registered and no Root process runs.
     private final class NativeServer: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         private let lock = NSRecursiveLock()
@@ -91,12 +112,13 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         let account: Data
         let policy: XPCPeerPolicy
         private let requirement: String
+        private let activityCheck: (@Sendable () -> Void)?
         private var connections: [(NSXPCConnection, AuthorityPresenceXPCEndpoint)] = []
         private var closed = false
         let loseNextModeReply = Box(false)
-        init(fixture: Fixture, requirement: String) {
+        init(fixture: Fixture, requirement: String, activityCheck: (@Sendable () -> Void)? = nil) {
             access = fixture.access; environment = fixture.environment; mac = fixture.mac; account = fixture.account
-            policy = fixture.policy; self.requirement = requirement
+            policy = fixture.policy; self.requirement = requirement; self.activityCheck = activityCheck
             super.init()
             listener.setConnectionCodeSigningRequirement(requirement); listener.delegate = self; listener.activate()
         }
@@ -130,7 +152,9 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
                        })
                     connection.setCodeSigningRequirement(requirement)
                     connection.exportedInterface = NSXPCInterface(with: AuthorityPresenceXPCProtocol.self)
-                    connection.exportedObject = endpoint
+                    if let activityCheck {
+                        connection.exportedObject = CheckedNativeReplies(endpoint: endpoint, check: activityCheck)
+                    } else { connection.exportedObject = endpoint }
                     connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }
                     connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
                     connections.append((connection, endpoint)); connection.activate(); return true
@@ -229,11 +253,15 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
     }
 
 
-    private static func assertUpdateBusy(_ installer: ReleaseActivityBarrier, file: StaticString = #filePath, line: UInt = #line) {
+    @discardableResult
+    private static func assertUpdateBusy(_ installer: ReleaseActivityBarrier, file: StaticString = #filePath, line: UInt = #line) -> Bool {
         do {
             let unexpected = try installer.acquireExclusive(); unexpected.close()
-            XCTFail("Active RPC did not exclude update admission", file: file, line: line)
-        } catch { XCTAssertEqual(error as? ReleaseActivityError, .busy, file: file, line: line) }
+            XCTFail("Active RPC did not exclude update admission", file: file, line: line); return false
+        } catch {
+            XCTAssertEqual(error as? ReleaseActivityError, .busy, file: file, line: line)
+            return (error as? ReleaseActivityError) == .busy
+        }
     }
     func testPresenceReleaseActivityCoversHandshakeAndAllOperationRepliesButNotIdleConnection() throws {
         let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
@@ -424,13 +452,28 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
             throw XCTSkip("Requires a supported unprivileged Mac GUI session; installed account checks remain separate")
         }
         let f = try Fixture(ownerUID: getuid()), requirement = try runningTestRequirement(), environment = f.environment
-        let server = NativeServer(fixture: f, requirement: requirement)
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), activityChecks = Box(0), activityFailures = Box(0)
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let server = NativeServer(fixture: f, requirement: requirement, activityCheck: {
+            if !Self.assertUpdateBusy(installer) { activityFailures.value += 1 }; activityChecks.value += 1
+        })
+        func requireIdle() async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while true {
+                do { try installer.acquireExclusive().close(); return }
+                catch ReleaseActivityError.busy {
+                    guard ContinuousClock.now < deadline else { throw Failure.fixture }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            }
+        }
         defer { server.close() }
         func client() -> AuthorityPresenceChannel {
             AuthorityPresenceChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: server.policy, requirement: requirement),
                 macID: f.mac, accountID: f.account, timeoutMilliseconds: 3000, sample: { _ in environment.now() })
         }
         let first = client(), initial = try await first.start()
+        try await requireIdle()
         XCTAssertEqual(initial.state, .init(mode: .automatic, revision: 0))
         let present = try await first.setMode(.present, expectedRevision: 0)
         XCTAssertEqual(present.state, .init(mode: .present, revision: 1)); XCTAssertEqual(present.routing.destination, .localMac)
@@ -480,6 +523,21 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         await reader.close()
         XCTAssertEqual(try f.records().count, 3)
         XCTAssertGreaterThanOrEqual(environment.verified.value, 19)
+        try await requireIdle()
+        guard activityChecks.value >= 32, activityFailures.value == 0 else { throw Failure.fixture }
+        if let output = ProcessInfo.processInfo.environment["REMOZIO_RPC_ACTIVITY_XPC_EVIDENCE"] {
+            let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "authority-presence-native-xpc-release-activity",
+                "status": "passed", "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
+                "hostArchitecture": "arm64", "guiSessionAvailable": true, "sameProcessNativeConnection": true,
+                "kernelPeerCredentialsChecked": true, "invocationConnectionChecked": true, "testCodeHashRequirementApplied": true,
+                "verifiedInvocations": environment.verified.value, "activityChecksBeforeAndAfterNativeReply": activityChecks.value,
+                "independentExclusiveDescriptorRefusedInsideReplies": true, "idleConnectionAllowsExclusiveActivity": true,
+                "reconnectPreservesMode": true, "lostReplyReconciled": true, "modeChangesAudited": 3,
+                "installedRootAccountsTested": false, "developerIDPolicyTested": false, "physicalPresenceSignalsTested": false,
+                "serviceInstalled": false, "realApprovalIssued": false, "productionActivationTested": false]
+            try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
+                .write(to: URL(fileURLWithPath: output), options: .atomic)
+        }
         if let output = ProcessInfo.processInfo.environment["REMOZIO_PRESENCE_XPC_EVIDENCE"] {
             let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "account-presence-anonymous-native-xpc", "status": "passed",
                 "osVersion": ProcessInfo.processInfo.operatingSystemVersionString, "guiSessionAvailable": true,
