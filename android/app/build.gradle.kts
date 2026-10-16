@@ -51,6 +51,7 @@ dependencies {
     implementation("androidx.core:core:1.19.1")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.google.firebase:firebase-messaging:26.0.0")
+    implementation("com.google.android.gms:play-services-cloud-messaging:17.4.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.activity:activity-compose:1.13.0")

@@ -3,10 +3,15 @@ package dev.remozio.android.push
 import android.content.Context
 import android.content.Intent
 import androidx.work.*
+import com.google.android.gms.cloudmessaging.CloudMessage
+import com.google.android.gms.cloudmessaging.Rpc
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import dev.remozio.android.RemozioApplication
 import dev.remozio.protocol.PushData
+import dev.remozio.phone.push.WakeReceipt
+import dev.remozio.phone.push.WakeReception
+import dev.remozio.phone.push.WakeNotificationResult
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -16,14 +21,23 @@ internal fun acceptsFCMExtras(keys: Set<String>): Boolean = keys.none {
     it.startsWith("gcm.n.") || it.startsWith("gcm.notification.")
 }
 
+internal fun dispatchFCMIntent(
+    action: String?, enabled: Boolean, keys: Set<String>, acknowledgeRejected: () -> Unit, deliver: () -> Unit,
+) {
+    val delivery = action in setOf("com.google.android.c2dm.intent.RECEIVE", "com.google.firebase.messaging.RECEIVE_DIRECT_BOOT")
+    if (delivery && (!enabled || !acceptsFCMExtras(keys))) acknowledgeRejected() else deliver()
+}
+
 class RemozioMessagingService : FirebaseMessagingService() {
-    override fun handleIntent(intent: Intent) {
-        if (intent.action in setOf("com.google.android.c2dm.intent.RECEIVE", "com.google.firebase.messaging.RECEIVE_DIRECT_BOOT")) {
-            if ((application as RemozioApplication).pushClient.generation() == null ||
-                !acceptsFCMExtras(intent.extras?.keySet().orEmpty())) return
-        }
-        super.handleIntent(intent)
-    }
+    private val rejectedDeliveryRPC by lazy { Rpc(applicationContext) }
+    override fun handleIntent(intent: Intent) = dispatchFCMIntent(
+        intent.action, (application as RemozioApplication).pushClient.generation() != null,
+        intent.extras?.keySet().orEmpty(),
+        acknowledgeRejected = {
+            try { rejectedDeliveryRPC.messageHandled(CloudMessage(intent)) } catch (_: RuntimeException) { }
+        },
+        deliver = { super.handleIntent(intent) },
+    )
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onNewToken(token: String) { (application as RemozioApplication).pushClient.tokenChanged() }
     override fun onMessageReceived(message: RemoteMessage) {
@@ -64,16 +78,20 @@ class FCMWakeWorker(context: Context, parameters: WorkerParameters) : CoroutineW
         val enrollment = inputData.getString(ENROLLMENT) ?: return Result.failure()
         val app = applicationContext as RemozioApplication
         val receipt = app.wakeNotifications.receive(generation, mapOf("wake_v1" to identifier, "enrollment_v1" to enrollment))
-        val status = when (receipt?.notification) {
-            dev.remozio.phone.push.WakeNotificationResult.POSTED -> PushDeliveryStatus.ALERT_REQUESTED
-            dev.remozio.phone.push.WakeNotificationResult.PERMISSION_DENIED,
-            dev.remozio.phone.push.WakeNotificationResult.APP_DISABLED -> PushDeliveryStatus.PERMISSION_BLOCKED
-            dev.remozio.phone.push.WakeNotificationResult.CHANNEL_DISABLED -> PushDeliveryStatus.CHANNEL_BLOCKED
-            dev.remozio.phone.push.WakeNotificationResult.FAILED -> PushDeliveryStatus.UNAVAILABLE
-            null -> if (receipt == null) PushDeliveryStatus.UNAVAILABLE else null
-        }
-        if (status != null) report(app, generation, status)
+        report(app, generation, wakeDeliveryStatus(receipt))
         return Result.success()
+    }
+}
+
+internal fun wakeDeliveryStatus(receipt: WakeReceipt?): PushDeliveryStatus = when (receipt?.notification) {
+    WakeNotificationResult.POSTED -> PushDeliveryStatus.ALERT_REQUESTED
+    WakeNotificationResult.PERMISSION_DENIED, WakeNotificationResult.APP_DISABLED -> PushDeliveryStatus.PERMISSION_BLOCKED
+    WakeNotificationResult.CHANNEL_DISABLED -> PushDeliveryStatus.CHANNEL_BLOCKED
+    WakeNotificationResult.FAILED -> PushDeliveryStatus.UNAVAILABLE
+    null -> when (receipt?.reception) {
+        WakeReception.DUPLICATE, WakeReception.UNKNOWN_ENROLLMENT,
+        WakeReception.TOKEN_CHALLENGE, WakeReception.MALFORMED -> PushDeliveryStatus.IGNORED
+        else -> PushDeliveryStatus.UNAVAILABLE
     }
 }
 

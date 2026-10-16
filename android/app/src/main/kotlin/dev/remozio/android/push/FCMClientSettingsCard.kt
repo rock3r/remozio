@@ -126,4 +126,5 @@ private fun PushDeliveryStatus.label(): Int = when (this) {
     PushDeliveryStatus.CHANNEL_BLOCKED -> R.string.fcm_delivery_channel_blocked
     PushDeliveryStatus.UNAVAILABLE -> R.string.fcm_delivery_unavailable
     PushDeliveryStatus.CAPACITY_LIMIT -> R.string.fcm_delivery_capacity
+    PushDeliveryStatus.IGNORED -> R.string.fcm_delivery_ignored
 }

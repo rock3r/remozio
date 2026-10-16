@@ -5,7 +5,7 @@ import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-internal enum class PushDeliveryStatus { QUEUED, ALERT_REQUESTED, PERMISSION_BLOCKED, CHANNEL_BLOCKED, UNAVAILABLE, CAPACITY_LIMIT }
+internal enum class PushDeliveryStatus { QUEUED, ALERT_REQUESTED, PERMISSION_BLOCKED, CHANNEL_BLOCKED, UNAVAILABLE, CAPACITY_LIMIT, IGNORED }
 internal class PushDeliveryReport(val generation: UUID, val status: PushDeliveryStatus) {
     override fun toString() = "PushDeliveryReport(redacted)"
 }

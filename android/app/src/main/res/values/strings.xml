@@ -469,10 +469,11 @@
     <string name="fcm_clear_alerts">Clear push alerts</string>
     <string name="fcm_alerts_cleared">Existing push alerts cleared.</string>
     <string name="fcm_clear_failed">Could not clear existing alerts. Try again.</string>
-    <string name="fcm_delivery_queued">A wake hint is queued for a local check.</string>
+    <string name="fcm_delivery_queued">A wake hint was received for a local check.</string>
     <string name="fcm_delivery_alert_requested">A generic alert was requested. Android controls its visibility.</string>
     <string name="fcm_delivery_permission_blocked">Android notification access blocked the alert.</string>
     <string name="fcm_delivery_channel_blocked">The notification channel blocked the alert.</string>
     <string name="fcm_delivery_unavailable">The wake check could not finish. Open a Mac inbox to check pending requests.</string>
     <string name="fcm_delivery_capacity">The wake queue reached its limit. Open a Mac inbox to check pending requests.</string>
+    <string name="fcm_delivery_ignored">The last wake finished without a new alert.</string>
 </resources>

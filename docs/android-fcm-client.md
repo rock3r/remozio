@@ -41,7 +41,8 @@ Removing a pairing cancels its notification by stable local record ID, including
 Disabling or replacing the provider prevents an old worker from publishing a new notification.
 
 WorkManager admits expedited work with ordinary-work fallback when quota is unavailable. It coalesces unfinished work per Mac and provider generation.
-The ingress checks a limit of 256 unfinished jobs. Queue errors and capacity refusal produce coarse local diagnostics. These diagnostics contain no tokens or request identifiers.
+The ingress checks a limit of 256 unfinished jobs. Queue errors and capacity refusal produce coarse local diagnostics. Completed ignored wakes replace the queued state with an explicit no-new-alert result.
+These diagnostics describe recent ingress and worker results, not the current queue length. They contain no tokens or request identifiers.
 
 The router keeps duplicate and alert-throttle state in process memory. It does not provide durable duplicate suppression across process restarts.
 Notifications use a stable local record tag and expire after 60 seconds. Their expiry makes no claim about a request's actual state.
@@ -51,7 +52,9 @@ Android permission, channel settings, Do Not Disturb and scheduling still contro
 
 Firebase Messaging 26.0.0 uses the existing registration-token API for the Mac's HTTP v1 sender. The installation-ID delivery migration is separate work.
 The service overrides the pinned SDK's public `handleIntent` hook. It rejects both provider notification prefixes before SDK rendering.
-The manifest removes the fallback Firebase service. SDK upgrades must recheck the hook and the packaged manifest.
+Rejected deliveries still call the same Google Play services acknowledgement used by the SDK. They never enter SDK notification rendering.
+This adapter pins the SDK's Play services version. [Direct acknowledgement API use](https://developers.google.com/android/reference/com/google/android/gms/cloudmessaging/Rpc) has no supported compatibility contract.
+The manifest removes the fallback Firebase service. SDK upgrades must recheck the hook, acknowledgement and packaged manifest.
 
 References: [Firebase initialization options](https://firebase.google.com/support/guides/init-options),
 [Android message receipt](https://firebase.google.com/docs/cloud-messaging/android/receive),
@@ -60,7 +63,7 @@ and [WorkManager execution](https://developer.android.com/topic/libraries/archit
 
 ## Validation and remaining work
 
-Twenty JVM tests cover import boundaries, configuration recovery, callback fencing and saved-Mac notification routing.
+Twenty-four JVM tests cover import boundaries, configuration recovery, callback fencing and saved-Mac notification routing.
 The packaged debug manifest verifies the disabled initializers and the exclusive application messaging service.
 A disposable Android 17 emulator provides phone, tablet, dark-theme and large-text layout evidence. It uses no real provider credentials or enrolled Mac.
 
