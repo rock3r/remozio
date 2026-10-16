@@ -27,7 +27,7 @@ flowchart TD
 
 | Control | Required observation |
 | --- | --- |
-| Root account | Actual target reports the expected real/effective IDs and closed private descriptors |
+| Root account | Actual target reports the expected real/effective IDs and a complete descriptor-table check |
 | Ordinary account | Same checks, plus access to the extra-group fixture |
 | Wrong name | No preparation, release, target output or execution |
 | Missing group | Same refusal with a canonical changed group set |
@@ -50,10 +50,11 @@ python3 scripts/run-production-child-experiment.py
 The script compiles for Apple Silicon and macOS 26 with warnings treated as errors.
 It checks six frames through the actual decoder and account validator, including the full Root capture.
 All four binaries refuse missing arguments. The probe refuses privileged mode from an ordinary account.
-Twenty separate owner controls substitute monitor calls and clock readings at compile time.
+Twenty-four separate owner controls substitute monitor calls and clock readings at compile time.
 They check preparation failures, early input/output, release errors, missing execution/reaping, ownership loss and clock failure or rollback.
 Negative controls require the expected account or frame error. A timeout cannot count as an identity refusal.
-Those controls spawn no process and change no credentials. They establish test-owner behavior, not privileged product execution.
+Three actual descriptor controls also check a clean table, a leaked descriptor at 128 and the restored table.
+The owner controls spawn no process and change no credentials. They establish test-owner behavior, not privileged product execution.
 The normal repository gate runs these ordinary checks only.
 
 ## Prepare the interactive run
@@ -64,7 +65,9 @@ Use a new output directory whose parent exists:
 python3 scripts/run-production-child-experiment.py --prepare-new-directory .build/production-child-session
 ```
 
-The script records source hashes before and after compilation. Concurrent source changes prevent command publication.
+The script reads each source once and hashes those captured bytes. It compiles a private read-only copy of those exact bytes.
+Compiler inputs never refer to the live workspace. A changed workspace also prevents command publication.
+The compiler and SDK remain trusted build inputs.
 Read `manifest.json` and `administrator-command.txt` before the interactive run. Keep their hashes with the results.
 The command accepts only the frozen ordinary UID and the four fixed helper names.
 It creates a fresh Root-owned directory below `/private/var/tmp`, copies the helpers and verifies every protected copy before execution.
@@ -78,6 +81,7 @@ The preparation script provides no elevation switch. CI cannot start the privile
 
 The Root parent owns only its monitor. The monitor owns the target wait operation.
 The parent cancels through that monitor and continues polling for actual reaping. It never signals a borrowed target PID.
+Any monitor polling error or protocol fault fails the control, including after release. Cleanup polling still continues.
 Waits use a monotonic clock. Failed or reversed readings end the wait and preserve uncertainty.
 Monitor exit alone does not prove target cleanup. The parent also requires the monitor's actual target-reaping record.
 

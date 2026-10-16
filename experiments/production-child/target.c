@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <libproc.h>
 #include <mach-o/dyld.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -15,15 +16,31 @@ static bool identifier(const char *text, uint32_t *out) {
     if (errno || !*text || *end || value >= UINT32_MAX) return false;
     *out = (uint32_t)value; return true;
 }
+static bool private_descriptors_closed(void) {
+    struct proc_fdinfo descriptors[1024];
+    int bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
+    if (bytes <= 0 || bytes >= (int)sizeof(descriptors) || bytes % sizeof(*descriptors)) return false;
+    for (size_t i = 0; i < (size_t)bytes / sizeof(*descriptors); ++i)
+        if (descriptors[i].proc_fd >= 3) return false;
+    return true;
+}
+static int descriptor_controls(void) {
+    if (!private_descriptors_closed()) return 71;
+    int original = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (original < 0) return 71;
+    int high = fcntl(original, F_DUPFD_CLOEXEC, 128); close(original);
+    if (high < 0) return 71;
+    bool refused = !private_descriptors_closed(); close(high);
+    if (!refused || !private_descriptors_closed()) return 71;
+    puts("{\"schemaVersion\":1,\"descriptorControls\":3,\"privilegedControlsRun\":false}"); return 0;
+}
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--descriptor-controls")) return descriptor_controls();
     uint32_t uid, gid;
     if (argc != 3 || !identifier(argv[1], &uid) || !identifier(argv[2], &gid)) return 64;
     fixed_result_t result = { .magic = FIXED_RESULT_MAGIC,
         .identity = getuid() == uid && geteuid() == uid && getgid() == gid && getegid() == gid,
-        .private_fds_closed = 1, .extra_group_access = uid == 0 };
-    for (int fd = 3; fd <= 7; ++fd) {
-        errno = 0; if (fcntl(fd, F_GETFD) >= 0 || errno != EBADF) result.private_fds_closed = 0;
-    }
+        .private_fds_closed = private_descriptors_closed(), .extra_group_access = uid == 0 };
     unsigned char input[2] = {0};
     ssize_t count; do { count = read(0, input, sizeof(input)); } while (count < 0 && errno == EINTR);
     result.input = count == 1 && input[0] == 'Q';

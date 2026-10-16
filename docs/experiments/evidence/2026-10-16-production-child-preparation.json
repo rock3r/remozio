@@ -1,5 +1,10 @@
 {
-  "administratorCommandSHA256": "d8763e45a796e5fb4722aaef7d9d18376d8d526e3383543be5077ac25e3cc264",
+  "administratorCommandSHA256": "4c193e890eb332a10b24db90823a06b9748ccb3051003120158a543c968eb26d",
+  "descriptorControls": {
+    "descriptorControls": 3,
+    "privilegedControlsRun": false,
+    "schemaVersion": 1
+  },
   "executables": {
     "child": {
       "bytes": 36568,
@@ -11,11 +16,11 @@
     },
     "probe": {
       "bytes": 56760,
-      "sha256": "2e5adb6009b6eda542fb1382305ca15efed80c2e29a7505a86a5704baaf1deab"
+      "sha256": "72360a2bb2d8d679c40ab3f4b0421d33d7384c380731110064003b2a65a8a8d9"
     },
     "target": {
-      "bytes": 34312,
-      "sha256": "a8acc4e17e7f170ed08cd784b4052cc8f7ee3f42684625c0d267c8ece5e3dbec"
+      "bytes": 34632,
+      "sha256": "9b2c5a95516f3a070b11065fb7762efac55fdc0282adf8db1581b6ca46700a51"
     }
   },
   "hostArchitecture": "arm64",
@@ -29,7 +34,7 @@
   },
   "ordinaryPrivilegedModeRefused": true,
   "ownerControls": {
-    "ownerControls": 20,
+    "ownerControls": 24,
     "privilegedControlsRun": false,
     "realProcessesSpawned": 0,
     "schemaVersion": 1
@@ -38,10 +43,10 @@
   "productionExecutionTested": false,
   "schemaVersion": 1,
   "sourceHashes": {
-    "experiments/production-child/owner-controls.c": "12f5fe1c150834e3869d9c838b3a461ab43620fd9b5e22695437402d294953d2",
-    "experiments/production-child/probe.c": "02b1cb5188f0d247a9e9e3997ee823f16d0f611f481f58b929abdcc5034ec805",
+    "experiments/production-child/owner-controls.c": "77ae3c41b16bb870cbe0cd4efe2930ce072959e7b9f9780260a79a113c3aaa5d",
+    "experiments/production-child/probe.c": "de87c7ad3b830623660889df60d5db371f3d53b1b379ca96671b8f95ab0b873a",
     "experiments/production-child/result.h": "302c79a1b4fc3f72f85f3f8dd530960632e17605d8f8b11939d8ea6812e61a56",
-    "experiments/production-child/target.c": "e4aa6ffb7fe0f698ed1d801a548fdc0a46dd92f180bfe5aacd44c0a2dfa03aca",
+    "experiments/production-child/target.c": "dba41f3d71e2648399d3159ca021d95e5067ba49632c1e682b68eee6c3f60a80",
     "macos/app/CommandChild/ChildMain.c": "afb030191c3ea04a861de5457f8ab9303c31a88a19134831cf31e80130613225",
     "macos/app/CommandMonitor/MonitorMain.c": "fbcd405aaf2e974dbfafe93f160437ba591b6261d5c9f6a98f339aabc61dfc6f",
     "macos/core/Sources/RemozioMach/CommandAccountCredentials.c": "f05273ed25954b999e1bb9ded4d787f066992d80e070b104024fa973db389807",
@@ -62,6 +67,6 @@
     "macos/core/Sources/RemozioMach/include/RemozioFrontendRuntime.h": "3be30d389b8b7a64369532c64c69fe53177da643dbdc889ee98b5b8f656b2c9d",
     "macos/core/Sources/RemozioMach/include/RemozioFrontendTerminal.h": "4b7e2cc2681ff7ad29621ab27e50215104146d60fe7fa71df71fd176b2445902",
     "macos/core/Sources/RemozioMach/include/RemozioMach.h": "e7b31e1453ab034bfffc851ae5e5fe570f8de811a383841d1a59d843439d9dcf",
-    "scripts/run-production-child-experiment.py": "d66ee56862a80b0b789534a1c98384f73a7791d7c209cd52f3fa8541d4873753"
+    "scripts/run-production-child-experiment.py": "d69bdc73e0d400a57fa739fa596ae02aeed3cf11a2211c2716ac994f41a7c110"
   }
 }

@@ -121,10 +121,12 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
     uint64_t began = now();
     while (!state.prepared && !state.monitor_reaped && !state.monitor_ownership_lost && before(began, 15000)) {
         error = remozio_command_monitor_poll(owner, &state);
-        if (error || state.status.failed) break;
+        if (error) { failure = 13; goto cleanup; }
+        if (state.status.failed) break;
         usleep(1000);
     }
     bool should_prepare = kind == positive || kind == cancel_prepared;
+    if (state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
     int available = 0, produced = 0;
     if (state.prepared != should_prepare || state.target_exec_observed || state.release_attempted ||
         ioctl(input[0], FIONREAD, &available) || available != 1 ||
@@ -137,8 +139,11 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
     }
     began = now();
     while (!state.monitor_reaped && !state.monitor_ownership_lost && before(began, 15000)) {
-        (void)remozio_command_monitor_poll(owner, &state); usleep(1000);
+        error = remozio_command_monitor_poll(owner, &state);
+        if (error || state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
+        usleep(1000);
     }
+    if (state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
     if (!state.monitor_reaped || state.monitor_ownership_lost || !state.status.reaped) { failure = 8; goto cleanup; }
     unsigned char result_bytes[sizeof(fixed_result_t) + 1] = {0};
     ssize_t received = read(output[0], result_bytes, sizeof(result_bytes));

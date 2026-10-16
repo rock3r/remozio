@@ -47,7 +47,13 @@ static int fixture_poll(remozio_command_monitor_t *owner, remozio_command_monito
         owner->state.status.latest.tag = REMOZIO_MONITOR_TARGET_REAPED;
         if (fixture_output >= 0) { close(fixture_output); fixture_output = -1; }
     }
-    *state = owner->state; return scenario == 4 && !cancelled ? EIO : 0;
+    if (owner->state.release_attempted) {
+        if (scenario == 19) owner->state.fault = EIO;
+        if (scenario == 20) owner->state.protocol_failed = true;
+        if (scenario == 21) owner->state.status.failed = true;
+    }
+    *state = owner->state;
+    return ((scenario == 4 && !cancelled) || (scenario == 18 && owner->state.release_attempted)) ? EIO : 0;
 }
 static int fixture_release(remozio_command_monitor_t *owner) {
     releases++;
@@ -78,11 +84,12 @@ int main(void) {
     strcpy(directory, "/private/tmp"); strcpy(target_path, "/fixture/target");
     const struct { int scenario; enum case_kind kind; int error; bool retired; int disposed; } cases[] = {
         {0,positive,0,true,1}, {0,wrong_name,0,true,1}, {0,missing_group,0,true,1}, {0,legacy,0,true,1},
-        {0,cancel_prepared,0,true,1}, {3,positive,4,true,1}, {4,positive,5,true,1},
+        {0,cancel_prepared,0,true,1}, {3,positive,4,true,1}, {4,positive,13,true,1},
         {5,positive,5,true,1}, {6,positive,5,true,1}, {7,positive,6,true,1}, {8,positive,6,true,1},
         {9,positive,9,true,1}, {10,positive,9,true,1}, {11,positive,11,false,0},
         {12,positive,11,false,0}, {13,positive,11,false,1}, {14,positive,11,false,0}, {15,positive,11,false,0},
-        {16,wrong_name,5,true,1}, {17,missing_group,5,true,1}
+        {16,wrong_name,5,true,1}, {17,missing_group,5,true,1},
+        {18,positive,13,true,1}, {19,positive,13,true,1}, {20,positive,13,true,1}, {21,positive,13,true,1}
     };
     for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); ++i) {
         rejection_error = cases[i].kind == legacy ? EINVAL : ESTALE;
@@ -94,5 +101,5 @@ int main(void) {
             fprintf(stderr, "Owner control %u: result=%d cleanup=%d dispose=%d\n", i, result, retired, disposals); return 1;
         }
     }
-    puts("{\"schemaVersion\":1,\"ownerControls\":20,\"privilegedControlsRun\":false,\"realProcessesSpawned\":0}"); return 0;
+    puts("{\"schemaVersion\":1,\"ownerControls\":24,\"privilegedControlsRun\":false,\"realProcessesSpawned\":0}"); return 0;
 }
