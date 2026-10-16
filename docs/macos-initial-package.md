@@ -63,6 +63,9 @@ Native Finder, LaunchServices and menu bar behavior remain interactive test gate
 
 ## Prepare a local candidate
 
+For bundled setup-daemon testing, use the [notarized candidate workflow](macos-notarization.md).
+The procedure below remains the local archive experiment without notarization.
+
 First build the Release app with `python3 scripts/check-macos-app.py`.
 Use the release signing experiment to export one disposable signed copy:
 
