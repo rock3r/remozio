@@ -24,24 +24,23 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 
-private enum class ReceiptCheckState { IDLE, CHECKING, UNAVAILABLE }
+internal enum class ReceiptCheckState { IDLE, CHECKING, UNAVAILABLE }
 
 @Composable
-internal fun PairingReceiptControl(mac: StoredMac, onRecovered: () -> Unit) {
+internal fun PairingReceiptControl(mac: StoredMac, status: MutableState<ReceiptCheckState>, onChecked: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as RemozioApplication
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scope = rememberCoroutineScope()
-    var state by remember(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
+    var state by status
     var operation by remember(mac.recordID) { mutableStateOf<Job?>(null) }
     fun checkPairing() {
         if (operation?.isActive == true || !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
         state = ReceiptCheckState.CHECKING
         operation = scope.launch {
             try {
-                if (app.pairingReceipts.recover(mac.recordID)) {
+                if (app.pairingReceipts.checkAndReconcile(mac.recordID, onChecked)) {
                     state = ReceiptCheckState.IDLE
-                    onRecovered()
                 } else state = ReceiptCheckState.UNAVAILABLE
             } catch (cancelled: CancellationException) {
                 state = ReceiptCheckState.IDLE

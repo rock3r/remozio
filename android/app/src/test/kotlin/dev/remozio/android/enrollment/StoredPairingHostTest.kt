@@ -11,9 +11,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import org.junit.Test
 import kotlin.test.*
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class StoredPairingHostTest {
     private fun id(n: Int) = ByteArray(16) { n.toByte() }
     private fun key() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
@@ -45,8 +52,9 @@ class StoredPairingHostTest {
     private class Storage : EnrollmentStorage {
         var bytes: ByteArray? = null
         var fail = false
+        var beforeReplace: () -> Unit = {}
         override fun read(maximumBytes: Int) = bytes?.copyOf()
-        override fun replace(ciphertext: ByteArray) { check(!fail); bytes = ciphertext.copyOf() }
+        override fun replace(ciphertext: ByteArray) { check(!fail); beforeReplace(); bytes = ciphertext.copyOf() }
         override fun close() = Unit
     }
     private val storage = Storage()
@@ -54,10 +62,11 @@ class StoredPairingHostTest {
     private val mutex = Mutex()
     private var custodyAvailable = true
     private var custodyChecks = 0
+    private var afterCustodyCheck: () -> Unit = {}
     private val invalidated = mutableListOf<Set<CborValue.Bytes>>()
     private fun open() = EncryptedEnrollmentStore.open(storage, cipher, 10)
     private fun host(invalidate: (Set<CborValue.Bytes>) -> Unit = { invalidated.add(it) }) = StoredPairingHost(
-        ::open, ::open, mutex, { assertTrue(mutex.isLocked); invalidate(it) }, { custodyChecks++; check(custodyAvailable) }, Dispatchers.Unconfined)
+        ::open, ::open, mutex, { assertTrue(mutex.isLocked); invalidate(it) }, { custodyChecks++; check(custodyAvailable); afterCustodyCheck() }, Dispatchers.Unconfined)
     private fun receipt(t: PairingTranscript) = CborValue.Bytes(P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
         initSign(authority.private); update(t.signingInput(PairingProofPurpose.MAC_COMMIT)); sign()
     }))
@@ -157,6 +166,73 @@ class StoredPairingHostTest {
         val retry = RecoveryWire({ receipt(t).copyBytes() })
         assertTrue(PairingReceiptRecovery(h, { _, _ -> retry }, Dispatchers.Unconfined).recover(e.recordID))
         assertEquals(1, retry.joins)
+    }
+
+    @Test fun receiptNetworkDeadlineCannotCancelAStartedActivation() = runTest {
+        val h = host(); val e = record(1); val t = transcript(e); h.prepare(e, t, 0u, 1u)
+        val wire = RecoveryWire({ receipt(t).copyBytes() })
+        var observed: EnrollmentPhase? = null
+        storage.beforeReplace = {
+            testScheduler.advanceTimeBy(30_001)
+            testScheduler.runCurrent()
+        }
+        val recovery = PairingReceiptRecovery(h, { _, _ -> wire }, StandardTestDispatcher(testScheduler))
+        assertTrue(recovery.checkAndReconcile(e.recordID) {
+            open().use { observed = it.snapshot().entries.single().phase }
+        })
+        assertEquals(EnrollmentPhase.ACTIVE, observed)
+        assertEquals(1, wire.joins)
+    }
+
+    @Test fun callerCancellationDuringCommitStillRefreshesTheCommittedInventory() = runTest {
+        val h = host(); val e = record(1); val t = transcript(e); h.prepare(e, t, 0u, 1u)
+        val wire = RecoveryWire({ receipt(t).copyBytes() })
+        var observed: EnrollmentPhase? = null
+        val operation = async {
+            val caller = checkNotNull(currentCoroutineContext()[Job])
+            storage.beforeReplace = { caller.cancel() }
+            PairingReceiptRecovery(h, { _, _ -> wire }, StandardTestDispatcher(testScheduler))
+                .checkAndReconcile(e.recordID) { open().use { observed = it.snapshot().entries.single().phase } }
+        }
+        operation.join()
+        assertTrue(operation.isCancelled)
+        assertEquals(EnrollmentPhase.ACTIVE, observed)
+        assertEquals(1, wire.joins)
+    }
+
+    @Test fun cancellationBeforeActivationKeepsThePreparedInventory() = runTest {
+        val h = host(); val e = record(1); val t = transcript(e); h.prepare(e, t, 0u, 1u)
+        var observed: EnrollmentPhase? = null
+        val wire = RecoveryWire({ currentCoroutineContext().cancel(); receipt(t).copyBytes() })
+        val operation = async {
+            PairingReceiptRecovery(h, { _, _ -> wire }, StandardTestDispatcher(testScheduler))
+                .checkAndReconcile(e.recordID) { open().use { observed = it.snapshot().entries.single().phase } }
+        }
+        operation.join()
+        assertTrue(operation.isCancelled)
+        assertEquals(EnrollmentPhase.PREPARED, observed)
+        assertEquals(1, wire.joins)
+        assertTrue(invalidated.isEmpty())
+    }
+
+    @Test fun cancellationWhileAcquiringPreparationCannotLeakItsLease() = runTest {
+        val h = host(); val e = record(1); val t = transcript(e)
+        val prepared = h.prepare(e, t, 0u, 1u).entries.single()
+        var opened = false
+        val operation = async {
+            val caller = checkNotNull(currentCoroutineContext()[Job])
+            afterCustodyCheck = { caller.cancel() }
+            PairingReceiptRecovery(h, { _, _ ->
+                opened = true
+                RecoveryWire({ receipt(t).copyBytes() })
+            }, StandardTestDispatcher(testScheduler)).recover(e.recordID)
+        }
+        operation.join()
+        afterCustodyCheck = {}
+        assertTrue(operation.isCancelled); assertFalse(opened)
+        var retired = false
+        h.abandonUnsubmitted(prepared) { retired = true }
+        assertTrue(retired)
     }
 
     @Test fun activationReopensRetainedAttemptAndInvalidatesBeforeCommit() = runBlocking<Unit> {

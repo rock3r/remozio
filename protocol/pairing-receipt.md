@@ -27,7 +27,9 @@ The setup listener's unpaired admission is never used here.
 
 The existing channel negotiation and session envelope remain version 1. The phone offers no command or audit capabilities. Denied LAN permission does not block an existing relay route.
 The Mac dispatches the immutable TLS purpose before command discovery. A receipt connection accepts exactly one query and then closes.
-The exchange has a 30-second operation deadline. Closing or stopping the phone UI cancels and joins its owned I/O.
+The network exchange has a 30-second deadline. Closing or stopping the phone UI cancels and joins its owned I/O.
+Check cancellation before local activation. After that boundary, finish the verified receipt commit without network timeout or caller cancellation.
+The caller always refreshes saved inventory after cleanup, even if cancellation prevents delivery of the activation result.
 
 The transport-to-authority XPC extension negotiates `pairingReceiptVersion` after the harmless base hello and credential verification.
 Version 1 supports `pairingReceipt`; zero means unavailable. Other extension versions cannot receive a binding or setup ID.
@@ -56,11 +58,12 @@ Expired setup time does not undo an enrollment that already committed.
 ## Uncertain outcomes
 
 A null response means the receipt is unavailable. A TLS, network, policy, signature or storage failure has the same uncertainty boundary.
-None proves that the Mac never committed. Keep PREPARED storage and its keys after every failed or cancelled check.
+None proves that the Mac never committed. Keep the retained record and keys after every failure or cancellation. A cancellation after the activation boundary can leave a committed ACTIVE record.
 Never resubmit a biometric enrollment proof, recreate keys, reset pairing or infer an absent enrollment from a timeout.
 If the Mac never committed, enrolled TLS admission can reject the phone. Explicit re-enrollment remains a separate facility.
 
 On Android, activation verifies the receipt again under the enrollment lock and checks the retained record and lease.
+Transfer the prepared-record lease into its cleanup owner without a cancellable handoff. Check cancellation before opening network I/O.
 Join native I/O before releasing the lease. A storage failure keeps the preparation so an explicit later check can retry.
 The UI refreshes the Mac list after activation. An active saved record still makes no claim about current Mac connectivity or presence.
 

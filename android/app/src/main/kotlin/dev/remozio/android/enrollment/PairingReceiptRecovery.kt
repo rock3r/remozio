@@ -7,6 +7,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
@@ -23,19 +25,21 @@ internal class PairingReceiptRecovery(
 ) {
     suspend fun recover(recordID: CborValue.Bytes): Boolean = withContext(dispatcher) {
         coroutineScope {
-            val access = store.recoverable(recordID)
+            val access = withContext(NonCancellable) { store.recoverable(recordID) }
             var wire: PairingReceiptWire? = null
             try {
-                withTimeout(30_000) {
+                currentCoroutineContext().ensureActive()
+                val proof = withTimeout(30_000) {
                     check(access.lease.isCurrent())
                     wire = open(this@coroutineScope, access.record)
                     check(access.lease.isCurrent())
-                    val proof = checkNotNull(wire).recover()
-                    check(access.lease.isCurrent())
-                    if (proof == null) false else {
-                        store.activate(recordID, CborValue.Bytes(proof), expected = access)
-                        true
-                    }
+                    checkNotNull(wire).recover()
+                }
+                currentCoroutineContext().ensureActive()
+                check(access.lease.isCurrent())
+                if (proof == null) false else withContext(NonCancellable) {
+                    store.activate(recordID, CborValue.Bytes(proof), expected = access)
+                    true
                 }
             } finally {
                 withContext(NonCancellable) {
@@ -46,3 +50,7 @@ internal class PairingReceiptRecovery(
         }
     }
 }
+
+/** Re-read durable state even when cancellation or a failed result handoff hides a completed activation. */
+internal suspend fun PairingReceiptRecovery.checkAndReconcile(recordID: CborValue.Bytes, refresh: () -> Unit): Boolean =
+    try { recover(recordID) } finally { refresh() }
