@@ -102,6 +102,19 @@ class NotarizedCandidateTests(unittest.TestCase):
         self.assertNotIn('local-profile', (self.folder / 'journal.json').read_text())
         with self.assertRaises(ValueError): RUNNER.finish(self.folder)
 
+    def test_nowait_upload_receipt_preserves_id_without_inventing_a_processing_status(self):
+        receipt = subprocess.CompletedProcess([], 0, json.dumps({
+            'id': ID, 'message': 'Successfully uploaded file', 'path': '/private/candidate.zip'}), '')
+        with patch.object(RUNNER, 'native', return_value=receipt):
+            value = RUNNER.submit(self.folder, 'local-profile')
+        self.assertEqual(value['submissionID'], ID)
+        self.assertEqual(value['phase'], 'submitted')
+        self.assertEqual(value['lastStatus'], 'Unknown')
+        self.assertNotIn('/private/candidate.zip', (self.folder / 'journal.json').read_text())
+        with self.assertRaises(ValueError): RUNNER.finish(self.folder)
+        with patch.object(RUNNER, 'native', return_value=self.result()):
+            self.assertEqual(RUNNER.status(self.folder, 'local-profile')['phase'], 'accepted')
+
     def test_authenticated_reconciliation_can_recover_a_lost_submission_response(self):
         self.value['phase'] = 'submission-unknown'; self.write()
         with patch.object(RUNNER, 'native', return_value=self.result()):

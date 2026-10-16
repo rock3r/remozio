@@ -56,7 +56,8 @@ python3 scripts/prepare-macos-notarized-candidate.py status \
 
 Submission records uncertainty before it starts the upload. Each workspace permits one upload attempt.
 An upload timeout, crash or malformed reply leaves that attempt uncertain. Do not submit again or create a replacement workspace blindly.
-A pending result remains pending. Run `status` later to inspect the same submission.
+An upload receipt can contain an ID without a processing status. The journal retains that ID and records the status as Unknown.
+Run `status` to obtain the authenticated processing result. A pending result remains pending.
 
 If the upload reply lost its ID, inspect authenticated history:
 
@@ -80,6 +81,7 @@ python3 scripts/prepare-macos-notarized-candidate.py finish \
 The command preserves the submitted app and creates a separate stapled copy.
 Only the stapler child uses umask `022`, so its new ticket is readable. The journal stays private with mode `0600`.
 The command validates the ticket, every signature, the release pins and Gatekeeper assessment.
+The package producer sets its new payload parent to `0755`, independently of the private workspace umask.
 It then builds the unsigned local package and repeats ticket, signature and Gatekeeper checks after full package extraction.
 The final journal records the package hash and each proven boundary.
 
@@ -93,3 +95,6 @@ The tool never retrieves vault secrets, launches the app, changes protected inst
 A complete journal proves candidate preparation and archive composition. It does not prove native installation, service registration or an approval flow.
 The initial package still refuses a different installed release. Follow its verified transition procedure separately.
 Sparkle distribution and signed public packages remain later release work.
+
+The [16 October 2026 control](experiments/evidence/2026-10-16-notarized-candidate.json) records one accepted live submission and authenticated ID recovery.
+It also records the private-umask package fix and its actual archive checks. No app was installed or launched.

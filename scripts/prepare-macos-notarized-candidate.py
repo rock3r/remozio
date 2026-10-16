@@ -178,13 +178,14 @@ def read_journal(folder):
     return value
 
 
-def response(result):
+def response(result, *, require_status=True):
     try:
         value = json.loads(result.stdout)
         if not isinstance(value, dict): raise ValueError()
         value['id'] = str(uuid.UUID(value['id']))
         if value.get('status') not in ('In Progress', 'Accepted', 'Invalid', 'Rejected'):
-            raise ValueError()
+            if require_status: raise ValueError()
+            value['status'] = 'Unknown'
         return value
     except (ValueError, KeyError, TypeError, AttributeError):
         raise RuntimeError('The notary service returned an invalid response') from None
@@ -198,7 +199,7 @@ def submit(folder, profile):
         value['phase'] = 'submission-unknown'; save(folder, value)
         # Persist uncertainty before upload. A timeout or crash must never permit a second submission.
         result = response(native(['/usr/bin/xcrun', 'notarytool', 'submit', folder / value['archiveName'],
-            '--keychain-profile', profile, '--output-format', 'json', '--no-wait']))
+            '--keychain-profile', profile, '--output-format', 'json', '--no-wait']), require_status=False)
         value.update(phase='submitted', submissionID=result['id'], lastStatus=result['status'])
         save(folder, value)
     return value

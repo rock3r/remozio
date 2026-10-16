@@ -92,6 +92,7 @@ A package signature does not imply notarization or native install validation.
 
 The builder uses explicit nonrelocation settings for macOS 26 compatibility.
 It reads ownership from the compressed cpio payload, rather than extracted files.
+Its staged payload parent has mode `0755`, even under a private process umask. Archive validation requires that mode.
 Every app entry must have Root ownership, group 0 and no group or other write access.
 It compares all archived app bytes, file types and modes with the verified source copy.
 It also checks both archived setup helpers and their scripts.
