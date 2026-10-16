@@ -23,7 +23,7 @@ class ProductionChildPreparationTests(unittest.TestCase):
                     Path(command[command.index("-o") + 1]).write_bytes(b"fixture")
                     return subprocess.CompletedProcess(command, 0)
                 self.assertEqual(Path(command[0]).name, "owner-controls")
-                return subprocess.CompletedProcess(command, 0, json.dumps({"schemaVersion": 1, "ownerControls": 24,
+                return subprocess.CompletedProcess(command, 0, json.dumps({"schemaVersion": 1, "ownerControls": 28,
                     "privilegedControlsRun": False, "realProcessesSpawned": 0}), "")
 
             with patch.object(EXPERIMENT, "source_hashes", return_value={"input.c": "after"}), \
@@ -63,7 +63,7 @@ class ProductionChildPreparationTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0)
                 name = Path(command[0]).name
                 if name == "owner-controls":
-                    value = {"schemaVersion": 1, "ownerControls": 24, "privilegedControlsRun": False, "realProcessesSpawned": 0}
+                    value = {"schemaVersion": 1, "ownerControls": 28, "privilegedControlsRun": False, "realProcessesSpawned": 0}
                 elif "--descriptor-controls" in command:
                     value = {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False}
                 elif "--inspect" in command and command[-1] != str(2**32 - 1):
@@ -75,6 +75,7 @@ class ProductionChildPreparationTests(unittest.TestCase):
             with patch.object(EXPERIMENT, "ROOT", root), patch.object(EXPERIMENT, "EXPERIMENT", root), \
                  patch.object(EXPERIMENT, "NATIVE", root), patch.object(EXPERIMENT, "SOURCES", sources), \
                  patch.object(EXPERIMENT, "source_inputs", return_value=inputs), \
+                 patch.object(EXPERIMENT.os, "getuid", return_value=501), \
                  patch.object(EXPERIMENT.subprocess, "run", side_effect=run):
                 result = EXPERIMENT.prepare(output)
             self.assertEqual(result["sourceHashes"], EXPERIMENT.hashes(inputs))

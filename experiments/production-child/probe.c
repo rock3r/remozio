@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sysexits.h>
 #include <time.h>
 #include <unistd.h>
 #define CAPACITY 1024
@@ -145,6 +146,8 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
     }
     if (state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
     if (!state.monitor_reaped || state.monitor_ownership_lost || !state.status.reaped) { failure = 8; goto cleanup; }
+    if (!WIFEXITED(state.monitor_wait_status) ||
+        WEXITSTATUS(state.monitor_wait_status) != (should_prepare ? EX_OK : EX_SOFTWARE)) { failure = 14; goto cleanup; }
     unsigned char result_bytes[sizeof(fixed_result_t) + 1] = {0};
     ssize_t received = read(output[0], result_bytes, sizeof(result_bytes));
     if (kind == positive) {

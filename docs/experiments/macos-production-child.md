@@ -50,7 +50,7 @@ python3 scripts/run-production-child-experiment.py
 The script compiles for Apple Silicon and macOS 26 with warnings treated as errors.
 It checks six frames through the actual decoder and account validator, including the full Root capture.
 All four binaries refuse missing arguments. The probe refuses privileged mode from an ordinary account.
-Twenty-four separate owner controls substitute monitor calls and clock readings at compile time.
+Twenty-eight separate owner controls substitute monitor calls and clock readings at compile time.
 They check preparation failures, early input/output, release errors, missing execution/reaping, ownership loss and clock failure or rollback.
 Negative controls require the expected account or frame error. A timeout cannot count as an identity refusal.
 Three actual descriptor controls also check a clean table, a leaked descriptor at 128 and the restored table.
@@ -83,6 +83,7 @@ The Root parent owns only its monitor. The monitor owns the target wait operatio
 The parent cancels through that monitor and continues polling for actual reaping. It never signals a borrowed target PID.
 Any monitor polling error or protocol fault fails the control, including after release. Cleanup polling still continues.
 Waits use a monotonic clock. Failed or reversed readings end the wait and preserve uncertainty.
+A monitor must exit normally with the expected code. A signal or an unexpected exit code fails the control.
 Monitor exit alone does not prove target cleanup. The parent also requires the monitor's actual target-reaping record.
 
 Success requires unchanged parent IDs/groups, all six controls and confirmed cleanup.

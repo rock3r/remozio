@@ -1,5 +1,5 @@
 {
-  "administratorCommandSHA256": "4c193e890eb332a10b24db90823a06b9748ccb3051003120158a543c968eb26d",
+  "administratorCommandSHA256": "614e26ce72dfba532206cc2b92a3b975a1afa636cf0337eca6d73f06257ce691",
   "descriptorControls": {
     "descriptorControls": 3,
     "privilegedControlsRun": false,
@@ -16,7 +16,7 @@
     },
     "probe": {
       "bytes": 56760,
-      "sha256": "72360a2bb2d8d679c40ab3f4b0421d33d7384c380731110064003b2a65a8a8d9"
+      "sha256": "c452fab2106703200d83c60b55b6419bc0c03b3aa298d27ee5248913e4c8936d"
     },
     "target": {
       "bytes": 34632,
@@ -34,7 +34,7 @@
   },
   "ordinaryPrivilegedModeRefused": true,
   "ownerControls": {
-    "ownerControls": 24,
+    "ownerControls": 28,
     "privilegedControlsRun": false,
     "realProcessesSpawned": 0,
     "schemaVersion": 1
@@ -43,8 +43,8 @@
   "productionExecutionTested": false,
   "schemaVersion": 1,
   "sourceHashes": {
-    "experiments/production-child/owner-controls.c": "77ae3c41b16bb870cbe0cd4efe2930ce072959e7b9f9780260a79a113c3aaa5d",
-    "experiments/production-child/probe.c": "de87c7ad3b830623660889df60d5db371f3d53b1b379ca96671b8f95ab0b873a",
+    "experiments/production-child/owner-controls.c": "8ee8aa8c511918a9d1b3e1976d13d000e4e983da3620319273e7ea7b5af8b376",
+    "experiments/production-child/probe.c": "2623f9971115e65d6072457eb2c4ec1dcc06379fb44e7cae2754c694283eda5f",
     "experiments/production-child/result.h": "302c79a1b4fc3f72f85f3f8dd530960632e17605d8f8b11939d8ea6812e61a56",
     "experiments/production-child/target.c": "dba41f3d71e2648399d3159ca021d95e5067ba49632c1e682b68eee6c3f60a80",
     "macos/app/CommandChild/ChildMain.c": "afb030191c3ea04a861de5457f8ab9303c31a88a19134831cf31e80130613225",
@@ -67,6 +67,6 @@
     "macos/core/Sources/RemozioMach/include/RemozioFrontendRuntime.h": "3be30d389b8b7a64369532c64c69fe53177da643dbdc889ee98b5b8f656b2c9d",
     "macos/core/Sources/RemozioMach/include/RemozioFrontendTerminal.h": "4b7e2cc2681ff7ad29621ab27e50215104146d60fe7fa71df71fd176b2445902",
     "macos/core/Sources/RemozioMach/include/RemozioMach.h": "e7b31e1453ab034bfffc851ae5e5fe570f8de811a383841d1a59d843439d9dcf",
-    "scripts/run-production-child-experiment.py": "d69bdc73e0d400a57fa739fa596ae02aeed3cf11a2211c2716ac994f41a7c110"
+    "scripts/run-production-child-experiment.py": "b5bb37374d3c3b10e2489a5c440b69c7cba7af85e9dda975766c0883f042e02a"
   }
 }

@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
+#include <sysexits.h>
+#include <signal.h>
 #include <unistd.h>
 struct remozio_command_monitor { remozio_command_monitor_observation_t state; };
 static struct remozio_command_monitor fixture_owner;
@@ -41,6 +43,10 @@ static int fixture_poll(remozio_command_monitor_t *owner, remozio_command_monito
     }
     if ((cancelled || owner->state.release_attempted || (negative && polls > 1)) && scenario != 11 && scenario != 12) {
         owner->state.monitor_reaped = true;
+        owner->state.monitor_wait_status = negative ? EX_SOFTWARE << 8 : 0;
+        if (scenario == 22 || scenario == 24) owner->state.monitor_wait_status = EX_SOFTWARE << 8;
+        if (scenario == 23) owner->state.monitor_wait_status = SIGTERM;
+        if (scenario == 25) owner->state.monitor_wait_status = 0;
         owner->state.status.reaped = scenario != 13;
         owner->state.target_exit_observed = owner->state.release_attempted;
         owner->state.target_exec_observed = owner->state.release_attempted && scenario != 9;
@@ -89,7 +95,8 @@ int main(void) {
         {9,positive,9,true,1}, {10,positive,9,true,1}, {11,positive,11,false,0},
         {12,positive,11,false,0}, {13,positive,11,false,1}, {14,positive,11,false,0}, {15,positive,11,false,0},
         {16,wrong_name,5,true,1}, {17,missing_group,5,true,1},
-        {18,positive,13,true,1}, {19,positive,13,true,1}, {20,positive,13,true,1}, {21,positive,13,true,1}
+        {18,positive,13,true,1}, {19,positive,13,true,1}, {20,positive,13,true,1}, {21,positive,13,true,1},
+        {22,positive,14,true,1}, {23,positive,14,true,1}, {24,cancel_prepared,14,true,1}, {25,wrong_name,14,true,1}
     };
     for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); ++i) {
         rejection_error = cases[i].kind == legacy ? EINVAL : ESTALE;
@@ -101,5 +108,5 @@ int main(void) {
             fprintf(stderr, "Owner control %u: result=%d cleanup=%d dispose=%d\n", i, result, retired, disposals); return 1;
         }
     }
-    puts("{\"schemaVersion\":1,\"ownerControls\":24,\"privilegedControlsRun\":false,\"realProcessesSpawned\":0}"); return 0;
+    puts("{\"schemaVersion\":1,\"ownerControls\":28,\"privilegedControlsRun\":false,\"realProcessesSpawned\":0}"); return 0;
 }
