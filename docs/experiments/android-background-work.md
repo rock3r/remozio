@@ -64,7 +64,9 @@ A failed or uncertain journal owner closes. Reopening reads the durable file wit
 
 Startup installs periodic recovery before attempting immediate reconciliation.
 Recovery covers a journal commit followed by process exit or enqueue failure.
-Queued work for retired provider generations is cancelled before it can consume the new queue limit.
+Work with generation tags is cancelled when its provider generation retires.
+Retained v1 ingress jobs lack generation tags. They share the ingress limit with v2 jobs until completion or cancellation.
+Startup preserves their pending hints. Their worker checks the current provider before processing a hint.
 
 Ingress and fetch queues have separate admission owners. Each counts persisted work, unfinished enqueue futures and uncertain calls.
 A timed-out enqueue retains capacity until its future finishes. A synchronous uncertain call retains capacity until process restart.
@@ -78,8 +80,9 @@ These intervals do not change a request's expiry or make a retained request curr
 
 ## Verification
 
-Four controls passed against the actual AndroidWakeWork code in the WorkManager test runtime on an API 37 emulator.
-The worker bodies were gated test substitutes. The controls exercised independent ingress, revision guards, resizing and startup retirement.
+Five controls passed against the actual AndroidWakeWork code in the WorkManager test runtime on an API 37 emulator.
+The worker bodies were gated test substitutes. The controls exercised independent ingress, revision guards, resizing, startup retirement and retained v1 jobs during an upgrade.
+The upgrade control checks shared v1/v2 capacity, preservation across startup and capacity released after legacy cancellation.
 The [evidence](evidence/2026-10-17-android-background-work.json) records the tested source hashes and exact limits of this result.
 
 Host controls cover uncertain commits, generation fencing, trusted pruning, foreground ownership, concurrent wakes, incomplete snapshots and transport cleanup.

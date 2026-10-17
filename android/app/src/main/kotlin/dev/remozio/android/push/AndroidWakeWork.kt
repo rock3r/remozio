@@ -25,7 +25,7 @@ internal class AndroidWakeWork(
     private val app = context.applicationContext
     private val manager by lazy { WorkManager.getInstance(app) }
     private val ingress = BoundedWakeWorkAdmission<OneTimeWorkRequest>(256,
-        { count(INGRESS_TAG) }, { manager.enqueue(it).result })
+        { count(INGRESS_TAG, LEGACY_INGRESS_TAG) }, { manager.enqueue(it).result })
     private val guards = BoundedWakeWorkAdmission<Pair<String, OneTimeWorkRequest>>(256,
         { count(FETCH_TAG) }, { (name, request) -> manager.enqueueUniqueWork(name, ExistingWorkPolicy.KEEP, request).result })
 
@@ -106,7 +106,8 @@ internal class AndroidWakeWork(
             .filter { it.startsWith(GENERATION_PREFIX) && it != current }.toSet()
         for (tag in stale) manager.cancelAllWorkByTag(tag).result.get(1, TimeUnit.SECONDS)
     }
-    private fun count(tag: String) = manager.getWorkInfosByTag(tag).get(1, TimeUnit.SECONDS).count { !it.state.isFinished }
+    private fun count(vararg tags: String) = tags.flatMap { manager.getWorkInfosByTag(it).get(1, TimeUnit.SECONDS) }
+        .distinctBy { it.id }.count { !it.state.isFinished }
     private fun reportAdmission(generation: UUID, admission: WakeWorkAdmission) = report(generation, when (admission) {
         WakeWorkAdmission.QUEUED -> PushDeliveryStatus.QUEUED
         WakeWorkAdmission.CAPACITY_LIMIT -> PushDeliveryStatus.CAPACITY_LIMIT
@@ -117,6 +118,8 @@ internal class AndroidWakeWork(
     companion object {
         private const val GENERATION_PREFIX = "remozio.wake.generation."
         private const val INGRESS_TAG = "remozio.fcm.ingress.v2"
+        // Legacy jobs lack generation tags. Preserve their hints and count them until their worker retires them.
+        private const val LEGACY_INGRESS_TAG = "remozio.fcm.ingress.v1"
         private const val FETCH_TAG = "remozio.wake.snapshot.v1"
         private const val RECONCILE_NAME = "remozio.wake.reconcile.v1"
     }

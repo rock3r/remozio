@@ -98,6 +98,32 @@ class AndroidWakeWorkProbeTest {
         work.accept(generation, wake(2)); assertEquals(2, infos(ingressTag).size)
         assertEquals(PushDeliveryStatus.QUEUED, statuses.last())
     }
+    @Test fun retainedLegacyIngressSharesTheUpgradeCapacityAndSurvivesStartup() = runBlocking {
+        assertTrue(settings.save(WakeWorkPolicy(ingressLimit = 2)))
+        val fields = wake(1).encode()
+        val legacy = OneTimeWorkRequestBuilder<FCMWakeWorker>()
+            .setInputData(workDataOf(WAKE_GENERATION to generation.toString(),
+                WAKE_IDENTIFIER to fields["wake_v1"], WAKE_ENROLLMENT to fields["enrollment_v1"]))
+            .addTag("remozio.fcm.ingress.v1").setInitialDelay(1, TimeUnit.DAYS).build()
+        manager.enqueueUniqueWork("remozio.fcm.legacy.upgrade", ExistingWorkPolicy.KEEP, legacy)
+            .result.get(10, TimeUnit.SECONDS)
+        work.accept(generation, wake(2)); work.accept(generation, wake(3))
+        assertEquals(1, infos(ingressTag).size)
+        assertEquals(PushDeliveryStatus.CAPACITY_LIMIT, statuses.last())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val owner = work.start(scope)
+        try {
+            withTimeout(10_000) {
+                while (manager.getWorkInfosForUniqueWork("remozio.wake.reconcile.v1")
+                    .get(10, TimeUnit.SECONDS).none { !it.state.isFinished }) delay(10)
+            }
+            assertEquals(listOf(legacy.id), infos("remozio.fcm.ingress.v1").map { it.id })
+            manager.cancelWorkById(legacy.id).result.get(10, TimeUnit.SECONDS)
+            work.accept(generation, wake(3))
+            assertEquals(2, infos(ingressTag).size)
+            assertEquals(PushDeliveryStatus.QUEUED, statuses.last())
+        } finally { owner.cancelAndJoin(); scope.cancel() }
+    }
     @Test fun startupReconcilesSavedDemandAndRetiresOldGenerationJobs() = runBlocking {
         mark(); work.accept(generation, wake(1)); val old = infos(ingressTag).single().id
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
