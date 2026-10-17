@@ -1,9 +1,9 @@
 {
   "experiment": "phone-push-publication-components",
   "evidenceFormat": 1,
-  "recordedAtUTC": "2026-10-17T17:58:11.316724+00:00",
-  "sourceCommit": "c14190ecb09a47d7eb3c9b3933dc93af69ee55f7",
-  "sourceBase": "c850b67b24fafe1fc154ed7a903131110aed8543",
+  "recordedAtUTC": "2026-10-17T18:32:43.341048+00:00",
+  "sourceCommit": "24752ed62a683f031aff7148acad4ab55a70ac01",
+  "sourceBase": "fd3cacc4a6d7ab0e620eef910bf74c6e69ddf342",
   "sourceBasis": "The named source commit contains the executable implementation and tests. Later evidence and prose changes do not alter those inputs.",
   "hostMacOS": "27.0.1",
   "deploymentTarget": "26.0",
@@ -11,12 +11,12 @@
     "nativePythonGate": "./scripts/check.sh",
     "nativePythonExitCode": 0,
     "nativeCoreTests": {
-      "tests": 2480,
+      "tests": 2485,
       "skipped": 1,
       "failures": 0,
       "skipReason": "LiveOwnedJobInspectionTests.testOwnedGUIJobReconciliation is an explicit ordinary GUI-session experiment."
     },
-    "nativeLogSHA256": "f12a664a2715b1e64622c8e827e83fcdee2c5ac1eefd323e028b7463022fcd45",
+    "nativeLogSHA256": "3ac6e84f81e2bda90a7eb876d9e57be8a9b349884bda416478c96b58673102d1",
     "ATCTasks": [
       ":protocol-kotlin:test",
       ":phone-core:test",
@@ -53,7 +53,8 @@
       }
     },
     "assemblyAndLintPassed": true,
-    "unchangedGradleOutputsMayBeReused": true
+    "unchangedGradleOutputsMayBeReused": true,
+    "localGateComposition": "Mac check-local.sh equivalent: check.sh then the six required Gradle tasks through ATC."
   },
   "relevantPassedMethods": {
     "AuthorityPhonePushRegistrationTests": [
@@ -82,13 +83,18 @@
       "testCandidateProbeProofAndActivationUseTheSingleRootChannel",
       "testExpiredLeaseAfterCandidateReplyStopsPublicationAndClosesTheChannel",
       "testExpiredProbeWaitsForThePhoneWithoutFillingRetainedHistory",
+      "testExpiredUnappliedActivationRequiresFreshAbsenceBeforeRenewal",
       "testInvalidGatewayHeadCannotPublishAndDoesNotRetireHealthyRoot",
       "testLegacyMappingQueryRejectionKeepsTheControlConnection",
+      "testLostActivationReplyDoesNotReplaceAnAlreadyMappedActivation",
       "testProviderInvalidationRepairsWithFreshProofAndRetainsPairing",
       "testRejectedPhoneDoesNotStarveOtherPhones",
       "testRetiredOwnerAfterCandidateReplyCannotStartAProbe",
+      "testReversePhoneProofOrderPublishesBothActivationsWithinEitherBudget",
       "testSupersededCandidateCannotStartAProbeAfterTheReply",
-      "testThreePhonesProgressAcrossBoundedTurnsWithoutRepeatedProbes"
+      "testTemporaryMappingQueryRejectionRecoversOnTheSameConnection",
+      "testThreePhonesProgressAcrossBoundedTurnsWithoutRepeatedProbes",
+      "testTransientControlRejectionsRetainTheCommittedActivation"
     ],
     "AuthorityWakePublisherTests": [
       "testAccountPresenceModeChangesReachPublisherAndLiveHintFeed",
@@ -125,16 +131,16 @@
     ]
   },
   "sourceSHA256": {
-    "macos/core/Sources/RemozioCore/AuthorityPhonePushPublication.swift": "fc35d700f491a67ff98ded11bdf03451bf9c9c50e1bc47edd8939a9920e145ce",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushPublication.swift": "4a690077dcff877eb8cd0ef7d870280387a871ffab9d0e7822be1b4fc01b47e9",
     "macos/core/Sources/RemozioCore/AuthorityPhonePushRegistration.swift": "70847224ada8cc8ab20822b3f36a95df6b54d49ee9640d465de0944de15cc739",
     "macos/core/Sources/RemozioCore/ApprovalRequestCoordinator.swift": "686b6dff3bb9c1265985a89c5fb5603bf20509fba5fdf995e35f015b77fcfb44",
     "macos/core/Sources/RemozioCore/GatewayAuthorityJournal.swift": "1189f4697aa822a16f6be2947d37b9757a0ef47b99e678379b16227478b8e85a",
     "macos/core/Sources/RemozioCore/JournalDatabase.swift": "26d4e291210a10406fb8209c663ed91fe397445cef4c9fc6582fca7ebde3ae16",
-    "macos/core/Sources/RemozioCore/AuthorityWakePublisher.swift": "53dfe2ba5ae9fb52d6dbd431337247eafaba821dd94aa27bd710b8724ed8ce54",
+    "macos/core/Sources/RemozioCore/AuthorityWakePublisher.swift": "db673b6baa64b76621401bc836c973c3bf7302913b1408d740c9d70caf029410",
     "macos/core/Sources/RemozioCore/AuthorityWakeService.swift": "5bb794aa0bf37de93654c808847450f38867367a959256f6d0a75bd3828f4cac",
     "macos/core/Sources/RemozioCore/GatewayRootChannel.swift": "23c24f2dda29255261138eda24c24332926178b0987421a51a2c312a67406bb7",
     "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushRegistrationTests.swift": "ed4d172c7ee07b7794976cb66ca5d5f9c83a68406d4042d2a97b135bf55a1b27",
-    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushPublisherTests.swift": "e96b7432a687f3e7ef6ffa0ad6ace9e4237688d68783684f3f1b9c5f4813453c"
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushPublisherTests.swift": "117987e723479c03836f7ce40600fc53252364482e54a54563eaea1e71b915aa"
   },
   "usesSoftwareFixtureKeys": true,
   "realGatewayJournalAndCoordinator": true,

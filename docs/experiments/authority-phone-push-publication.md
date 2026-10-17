@@ -48,7 +48,8 @@ The existing internal renewal operation remains available for that integration.
 
 ## Bounds and diagnostics
 
-A turn processes at most the configured number of phones, from 1 through 64.
+A turn publishes for at most the configured number of phones, from 1 through 64.
+The owner first snapshots the bounded enrollment set.
 The default is 16.
 A rotating cursor gives the other phones a later turn.
 Unpublished committed activations take precedence in gateway revision order.
@@ -71,7 +72,7 @@ An older gateway can reject optional mapping queries while keeping ordinary wake
 
 The [recorded component evidence](evidence/2026-10-17-phone-push-publication-components.json) binds the results to the source.
 The complete native/Python gate and six required ATC tasks passed.
-The native core suite ran 2,480 tests with zero failures and one explicit GUI experiment skipped.
+The native core suite ran 2,485 tests with zero failures and one explicit GUI experiment skipped.
 The component controls use software fixture keys, real SQLite journals and the continuity store.
 The gateway coordinator is real; the provider and Root channel driver are synthetic.
 Controls cover publication, proof commit, activation, provider invalidation and fresh-proof repair.
