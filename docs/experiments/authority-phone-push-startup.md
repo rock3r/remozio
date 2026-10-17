@@ -56,6 +56,8 @@ The query does not contact FCM or establish successful phone delivery.
 
 ## Evidence and limits
 
+The [recorded component evidence](evidence/2026-10-17-phone-push-startup-components.json) binds the results to the source.
+The complete native/Python gate and six required ATC tasks passed.
 Component controls use software fixture keys, SQLite and the continuity store.
 They cover startup encoding, checkpoint failure, restart retention and candidate renewal.
 Mapping controls cover stale replies, scope mutations, provider invalidation and database reopen.
