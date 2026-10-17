@@ -21,7 +21,7 @@ final class AuthorityPhonePushRecoveryTests: XCTestCase {
         let candidate = try h.candidate(metadata)
         _ = try h.exchange(.proof(correlationID: Data(repeating: 81, count: 16), proof: GatewayTokenProof(binding: candidate.binding)))
     }
-    private func observation(_ h: Harness, time: UInt64 = 120, present: Bool = true) throws -> VerifiedGatewayMappingState {
+    private func observation(_ h: Harness, time: UInt64 = 120, present: Bool = true, receivedAt: UInt64? = nil) throws -> VerifiedGatewayMappingState {
         let now = AuthorityMoment(epoch: h.clock, milliseconds: time)
         let state = try XCTUnwrap(h.owner.currentPhonePushRegistration(h.provider, phoneID: h.binding.scope.phoneID,
             enrollmentEpoch: h.binding.scope.enrollmentEpoch, now: now, wall: 900 + time))
@@ -36,7 +36,8 @@ final class AuthorityPhonePushRecoveryTests: XCTestCase {
         fields[10] = .bytes(present ? try XCTUnwrap(state.activation).signature : Data())
         let payload = try DeterministicCBOR.encode(.map(fields), limits: GatewayMappingStateWire.replyLimits)
         return try owner.accept(GatewayMappingStateReply(canonicalPayload: payload,
-            signature: key.signature(for: GatewayMappingStateWire.signingInput(payload)).rawRepresentation), now: now)
+            signature: key.signature(for: GatewayMappingStateWire.signingInput(payload)).rawRepresentation),
+            now: .init(epoch: h.clock, milliseconds: receivedAt ?? time))
     }
     private func record(_ h: Harness, _ observation: VerifiedGatewayMappingState, session: UUID, time: UInt64 = 121,
                         validUntil: UInt64 = 10000, revision: UUID? = nil) throws {
@@ -54,6 +55,22 @@ final class AuthorityPhonePushRecoveryTests: XCTestCase {
         XCTAssertEqual(current.phase, .mappingObserved); XCTAssertEqual(current.observationAgeMilliseconds, 2)
         XCTAssertEqual(try state(resume(h, time: 5120)).phase, .proofCommitted)
         XCTAssertEqual(try h.store.read(), checkpoint); XCTAssertEqual(h.signs.value, signs)
+    }
+    func testDelayedGatewayReplyCannotRestartTheObservationWindow() throws {
+        let h = try Harness(), metadata = try state(resume(h)).metadata
+        try commitProof(h, metadata: metadata)
+        let session = UUID(); try h.owner.beginWakePublicationSession(session)
+        let delayed = try observation(h, time: 120, receivedAt: 5119), checkpoint = try h.store.read()
+        XCTAssertEqual(delayed.queriedAt.milliseconds, 120)
+        XCTAssertEqual(delayed.receivedAt.milliseconds, 5119)
+        XCTAssertEqual(delayed.validUntilMilliseconds, 5120)
+        try record(h, delayed, session: session, time: 5119)
+        let current = try state(resume(h, time: 5119))
+        XCTAssertEqual(current.phase, .mappingObserved); XCTAssertEqual(current.observationAgeMilliseconds, 4999)
+        XCTAssertEqual(try state(resume(h, time: 5120)).phase, .proofCommitted)
+        XCTAssertThrowsError(try record(h, delayed, session: session, time: 5120))
+        XCTAssertEqual(try state(resume(h, time: 5121)).phase, .proofCommitted)
+        XCTAssertEqual(try h.store.read(), checkpoint)
     }
     func testPublisherLeaseExpiryRemovesObservedMappingStatus() throws {
         let h = try Harness(), metadata = try state(resume(h)).metadata

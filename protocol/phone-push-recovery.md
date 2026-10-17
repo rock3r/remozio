@@ -93,6 +93,8 @@ No response exposes a provider challenge.
 The Root publisher records fresh separately pinned gateway evidence for Mapping observed.
 Cached observations bind the Root publication session, trust revision and exact candidate and activation operations.
 The Root rejects observations after publisher lease expiry, retirement or changed desired state.
+Observation age starts when Root sends the gateway query.
+The query deadline also bounds the cache; reply receipt cannot restart that window.
 A missing or stale observation returns Proof committed.
 The phone must include exchange elapsed time when interpreting the age.
 Anchor the validity bound to the local request start; do not restart it when the response arrives.

@@ -98,7 +98,7 @@ public final class ApprovalRequestCoordinator {
         let trustRevision: UUID
         let candidateOperation: Data
         let activationOperation: Data
-        let receivedAt: AuthorityMoment
+        let queriedAt: AuthorityMoment
         let validUntilMilliseconds: UInt64
     }
     private var phonePushMappingObservations: [Data: PhonePushMappingObservation] = [:]
@@ -1017,8 +1017,10 @@ public final class ApprovalRequestCoordinator {
                                 session: UUID, expectedTrustRevision: UUID, validUntilMilliseconds: UInt64,
                                 now: AuthorityMoment, wall: UInt64) throws {
         try requireWakePublicationSession(session); try checkClock(now)
-        guard observation.receivedAt.epoch == now.epoch, observation.receivedAt.milliseconds <= now.milliseconds,
-              now.milliseconds - observation.receivedAt.milliseconds < 5000, now.milliseconds < validUntilMilliseconds,
+        guard observation.queriedAt.epoch == now.epoch, observation.receivedAt.epoch == now.epoch,
+              observation.queriedAt.milliseconds <= observation.receivedAt.milliseconds, observation.receivedAt.milliseconds <= now.milliseconds,
+              now.milliseconds - observation.queriedAt.milliseconds < 5000, now.milliseconds < observation.validUntilMilliseconds,
+              now.milliseconds < validUntilMilliseconds,
               observation.scope.registration == provider.policy.registration else { throw GatewayMappingStateError.expired }
         let retained = try read { tx in
             guard try tx.approvalTrustSnapshot().revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
@@ -1038,7 +1040,7 @@ public final class ApprovalRequestCoordinator {
         }
         phonePushMappingObservations[observation.scope.phoneID] = .init(session: session, trustRevision: expectedTrustRevision,
             candidateOperation: retained.candidate.operationID, activationOperation: activation.operationID,
-            receivedAt: observation.receivedAt, validUntilMilliseconds: validUntilMilliseconds)
+            queriedAt: observation.queriedAt, validUntilMilliseconds: min(validUntilMilliseconds, observation.validUntilMilliseconds))
     }
 
     private func observedPhonePushRecovery(_ response: PhonePushRecoveryFrame, binding: AuthorityPeerBinding,
@@ -1051,14 +1053,14 @@ public final class ApprovalRequestCoordinator {
         do { try wakePublication.requireSession(observed.session) }
         catch { phonePushMappingObservations.removeValue(forKey: phone); return response }
         guard observed.trustRevision == binding.revision, observed.candidateOperation == state.metadata.operationID,
-              observed.receivedAt.epoch == now.epoch, observed.receivedAt.milliseconds <= now.milliseconds,
-              now.milliseconds - observed.receivedAt.milliseconds < 5000, now.milliseconds < observed.validUntilMilliseconds,
+              observed.queriedAt.epoch == now.epoch, observed.queriedAt.milliseconds <= now.milliseconds,
+              now.milliseconds - observed.queriedAt.milliseconds < 5000, now.milliseconds < observed.validUntilMilliseconds,
               let retained = try currentPhonePushRegistration(provider, phoneID: phone, enrollmentEpoch: binding.scope.enrollmentEpoch, now: now, wall: wall),
               retained.candidate.operationID == observed.candidateOperation, retained.activation?.operationID == observed.activationOperation else {
             phonePushMappingObservations.removeValue(forKey: phone); return response
         }
         return .state(correlationID: correlation, state: try .init(metadata: state.metadata, phase: .mappingObserved,
-            observationAgeMilliseconds: now.milliseconds - observed.receivedAt.milliseconds))
+            observationAgeMilliseconds: now.milliseconds - observed.queriedAt.milliseconds))
     }
 
     /// Read current retained registration before deciding whether a checkpointed mutation is required.
