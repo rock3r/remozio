@@ -121,7 +121,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
         sec_protocol_options_set_peer_authentication_required(options, true)
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
-        for purpose: EnrolledChannelPurpose in [.approvals, .pairingReceipt] {
+        for purpose: EnrolledChannelPurpose in [.approvals, .pairingReceipt, .pendingSnapshot] {
             sec_protocol_options_add_tls_application_protocol(options, purpose.applicationProtocol)
         }
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
