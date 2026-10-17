@@ -209,12 +209,15 @@ No registration state establishes current Mac presence or actual notification de
 
 ## Android validation boundary
 
-[The Android component record](../docs/experiments/evidence/2026-10-18-android-push-registration-components.json) binds the implementation and tests to source commit `ba9c0b0`.
+[The Android component record](../docs/experiments/evidence/2026-10-18-android-push-registration-components.json) binds the implementation and tests to source commit `ac83cf0`.
 The complete native/Python gate passed 2525 core tests, with one explicit GUI experiment skipped.
-The six required ATC tasks passed 795 reports, APK assembly and lint, with no new lint issues.
-The Android suite includes 315 tests for the provider, storage, orchestration and pairing callbacks.
+The six required ATC tasks passed 800 reports, APK assembly and lint, with no new lint issues.
+The Android suite includes 320 tests for the provider, storage, orchestration and pairing callbacks.
 
 Five actual API37 scheduling controls passed with real WorkManager queues, synthetic provider state and blocked network bodies.
+A later isolated APK repeats those controls and adds a full-ingress retry control for the reviewed scheduler.
+It creates no additional ingress entry. Its probe patch and source hashes are recorded separately.
+Five coroutine tests cover signal retention, coalescing, exceptions, cancellation and ten-second retry timing.
 A separate API37 control passed real boot-counter and elapsed-clock reads. It does not exercise reboot behavior.
 Five earlier Android proof-file controls still match the named ledger, file adapter and probe source.
 The record identifies their original APK and the current debug manifest additions.
