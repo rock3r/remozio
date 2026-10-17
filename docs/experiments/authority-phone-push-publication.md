@@ -52,9 +52,11 @@ A turn publishes for at most the configured number of phones, from 1 through 64.
 The owner first snapshots the bounded enrollment set.
 The default is 16.
 A rotating cursor gives the other phones a later turn.
-Unpublished committed activations take precedence in gateway revision order.
+New retained candidates and activations publish in gateway revision order.
+Remaining turn slots poll existing mappings in cursor order.
 A rejected activation prevents later controls from advancing past it.
-A rejected candidate does not prevent the next phone from progressing.
+Transient registration rejections retry before later controls advance the shared head.
+Ordinary approvals and wake publication continue during these registration retries.
 The loop starts each current probe operation once per connection.
 The gateway retains its independent provider retry and resource limits.
 

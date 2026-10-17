@@ -271,18 +271,19 @@ public actor AuthorityWakePublisher {
             }
         }
         let work = Dictionary(uniqueKeysWithValues: retained.map { ($0.enrollment.approval.phoneID, $0) })
-        let pendingActivations = retained.filter { ($0.state.activation?.revision ?? 0) > head.evidence.revision }.sorted { $0.revision < $1.revision }
-        var selected = (0..<count).map { enrollments[(start + $0) % enrollments.count] }
-        // A later control must not advance the global gateway head past an unpublished committed activation.
-        if let first = pendingActivations.first, !selected.contains(where: { $0.approval.phoneID == first.enrollment.approval.phoneID }) {
-            selected[selected.count - 1] = first.enrollment
+        let pendingControls = retained.filter { !$0.state.needsRenewal && $0.revision > head.evidence.revision }.sorted { $0.revision < $1.revision }
+        var selected = pendingControls.prefix(count).map(\.enrollment)
+        // New controls follow the shared revision order. Remaining slots poll existing mappings in cursor order.
+        for index in 0..<count where selected.count < count {
+            let enrollment = enrollments[(start + index) % enrollments.count]
+            if !selected.contains(where: { $0.approval.phoneID == enrollment.approval.phoneID }) { selected.append(enrollment) }
         }
         selected.sort { (work[$0.approval.phoneID]?.revision ?? UInt64.max) < (work[$1.approval.phoneID]?.revision ?? UInt64.max) }
         var confirmedHead = head.evidence.revision, completed = true
         for enrollment in selected {
             // Expired probes wait for a fresh authenticated phone exchange. A timer must not fill retained history with renewals.
             guard let item = work[enrollment.approval.phoneID], !item.state.needsRenewal else { continue }
-            if let barrier = pendingActivations.first(where: { $0.revision > confirmedHead }), item.revision > barrier.revision {
+            if let barrier = pendingControls.first(where: { $0.revision > confirmedHead }), item.revision > barrier.revision {
                 completed = false; continue
             }
             do {

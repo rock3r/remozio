@@ -273,15 +273,17 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         XCTAssertFalse(f.root.owner.retired)
         await f.close()
     }
-    func testRejectedPhoneDoesNotStarveOtherPhones() async throws {
+    func testTransientCandidateRejectionPreservesAllPhonesAndOriginalOffers() async throws {
         let f = try Fixture(enrollmentCount: 3, maximumPhonesPerTurn: 1)
         let metadata = try (0..<3).map { try f.offer(phoneIndex: $0) }
-        _ = f.driver.state.withLock { $0.rejectedPhones.insert(f.root.bindings[0].scope.phoneID) }
+        let head = try f.root.head
+        f.driver.state.withLock { $0.rejectedCandidateCalls = 1 }
         try await f.publisher.start()
-        for _ in 0..<6 { try await f.publisher.reconcile() }
-        try await waitFor { await f.provider.challenges.count == 2 }
+        for _ in 0..<8 { try await f.publisher.reconcile() }
+        try await waitFor { await f.provider.challenges.count == 3 }
         let challenges = await f.provider.challenges
-        XCTAssertEqual(Set(challenges.map(\.candidateID)), Set(metadata.dropFirst().map(\.candidateID)))
+        XCTAssertEqual(Set(challenges.map(\.candidateID)), Set(metadata.map(\.candidateID)))
+        XCTAssertEqual(try f.root.head, head)
         XCTAssertFalse(f.driver.state.withLock { $0.closed })
         XCTAssertFalse(f.root.owner.retired)
         await f.close()
@@ -324,6 +326,43 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         try await waitFor { await f.provider.challenges.count == 1 }
         XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
         await f.close()
+    }
+    func testCandidateOfferOrderDoesNotDependOnEnrollmentCursorOrder() async throws {
+        for (count, budget) in [(2, 1), (3, 2)] {
+            let f = try Fixture(enrollmentCount: count, maximumPhonesPerTurn: budget)
+            let phones = try f.journal.withRequests { try $0.wakeDeliveryTrust().enrollments.map { $0.approval.phoneID } }
+            let order = try phones.map { phone in try XCTUnwrap(f.root.bindings.firstIndex { $0.scope.phoneID == phone }) }
+            let metadata = try order.reversed().map { try f.offer(phoneIndex: $0) }
+            let head = try f.root.head
+            try await f.publisher.start()
+            for _ in 0..<(count + 3) { try await f.publisher.reconcile() }
+            try await waitFor { await f.provider.challenges.count == count }
+            let challenges = await f.provider.challenges
+            XCTAssertEqual(Set(challenges.map(\.candidateID)), Set(metadata.map(\.candidateID)))
+            XCTAssertEqual(try f.root.head, head)
+            XCTAssertEqual(f.driver.state.withLock { $0.probes }, count)
+            await f.close()
+        }
+    }
+    func testEarlierCandidatesPublishBeforeActivationAtTheOnePhoneBudget() async throws {
+        for count in [2, 3] {
+            let f = try Fixture(enrollmentCount: count, maximumPhonesPerTurn: 1)
+            let first = try f.offer()
+            try await f.publisher.start()
+            for _ in 0..<count { try await f.publisher.reconcile() }
+            try await waitFor { await f.provider.challenges.count == 1 }
+            let others = try (1..<count).map { try f.offer(phoneIndex: $0) }
+            try f.prove(first, challenge: await f.provider.challenges[0])
+            let head = try f.root.head
+            for _ in 0..<8 { try await f.publisher.reconcile() }
+            let challenges = await f.provider.challenges
+            XCTAssertEqual(Set(challenges.map(\.candidateID)), Set(([first] + others).map(\.candidateID)))
+            XCTAssertTrue(f.driver.state.withLock { $0.mappedCandidates.contains(first.candidateID) })
+            XCTAssertEqual(try f.root.head, head)
+            XCTAssertEqual(f.driver.state.withLock { $0.probes }, count)
+            XCTAssertFalse(f.root.owner.retired)
+            await f.close()
+        }
     }
     func testReversePhoneProofOrderPublishesBothActivationsWithinEitherBudget() async throws {
         for budget in [1, 16] {
