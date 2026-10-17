@@ -433,7 +433,7 @@ final class GatewayAuthorityJournal {
     }
 
     /// Record only controls already present in protected local history. Never fill a history gap from this reply.
-    func acknowledge(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
+    func acknowledge(_ verified: VerifiedGatewayHead, record: Bool = true) throws -> GatewayAcknowledgmentResult {
         let evidence = verified.evidence, identity = evidence.registration
         let local = try head(identity), previous = try acknowledgment(identity)
         func result(_ disposition: GatewayAcknowledgmentDisposition, _ value: GatewayAcknowledgment?) -> GatewayAcknowledgmentResult {
@@ -457,6 +457,7 @@ final class GatewayAuthorityJournal {
         }
         guard evidence.revision <= local else { return result(.missingLocalHistory, previous) }
         let value = GatewayAcknowledgment(revision: evidence.revision, operationID: evidence.receipt?.operationID)
+        if !record { return result(.recorded, value) }
         try statement("""
             INSERT INTO main.gateway_acknowledgment_v1 VALUES(1,?,?)
             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,operation=excluded.operation
