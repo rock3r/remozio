@@ -474,6 +474,21 @@ class CommandRequestReceiverTest {
             queue.close()
         }
     }
+    @Test fun snapshotConnectorBudgetReservesBothFrameLayers() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        val foregroundBudget = maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES
+        val snapshotBudget = CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)
+        assertEquals(foregroundBudget + 128, snapshotBudget)
+        val tooSmall = Wire(scope(), maximumPayloadBytes = foregroundBudget)
+        assertFails { snapshot(enrollment, tooSmall) }
+        assertTrue(tooSmall.closed); assertTrue(tooSmall.sent.tryReceive().isFailure)
+        val reserved = Wire(scope(), maximumPayloadBytes = snapshotBudget)
+        reserved.snapshotReply(listOf(mac.issued(), mac.status()))
+        snapshot(enrollment, reserved).run()
+        assertTrue(reserved.closed); assertEquals(1, enrollment.sessions().size)
+        enrollment.close()
+    }
+
     @Test fun snapshotVerifiesEachFrameAndRequiresExactCompletion() = runBlocking<Unit> {
         val mac = Mac(); val enrollment = mac.enroll(); val wire = Wire(scope())
         wire.snapshotReply(listOf(mac.issued(), mac.status()))

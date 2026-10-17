@@ -25,6 +25,14 @@ class CommandSnapshotReceiver private constructor(
     override fun toString() = "CommandSnapshotReceiver(redacted)"
 
     companion object {
+        /** Reserve the outer snapshot frame as well as the ordinary signed approval frame when creating the connector. */
+        fun requiredChannelPayloadBytes(limits: RequestLimits): Int {
+            val body = maxOf(limits.body.maxBytes, limits.status.maxBytes)
+            require(body in 1..(PendingRequestSnapshotFrame.MAXIMUM_FRAME_BYTES - ApprovalMessage.OVERHEAD_BYTES))
+            return body + ApprovalMessage.OVERHEAD_BYTES +
+                (PendingRequestSnapshotFrame.MAXIMUM_BYTES - PendingRequestSnapshotFrame.MAXIMUM_FRAME_BYTES)
+        }
+
         /** Takes channel ownership. Background binding refuses an active receiver without closing that receiver. */
         fun bind(enrollment: CommandRequestEnrollment, channel: NegotiatedTLSChannel, phoneID: ByteArray,
                  enrollmentEpoch: ByteArray, maximumFrames: ULong, maximumBytes: ULong,

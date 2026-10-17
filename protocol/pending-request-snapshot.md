@@ -85,6 +85,9 @@ Their synthetic echo does not establish a Root snapshot or an installed Mac–Pi
 
 `CommandSnapshotReceiver` requires this TLS purpose and the existing enrolled scope and request contracts.
 It makes one query with a fresh nonce and the retained request IDs.
+Callers create the connector with `CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)`.
+That budget includes both the signed approval frame and its outer snapshot frame.
+Using the ordinary foreground budget cannot hold the configured maximum body and fails binding before sending a query.
 The ordinary receiver verifies every returned request and status with the retained Root key.
 The channel cannot send a decision. A complete set does not grant action authority.
 
