@@ -193,6 +193,11 @@ A boot or provider change can clear challenge buffers without clearing proof his
 
 The queues have bounded admission and independent names for each Mac and provider revision.
 A retained cursor prevents a small queue from starving later Macs.
+The application collector remembers confirmed admissions during one finite sweep.
+A capacity retry selects only the remaining Macs; it does not restart that sweep.
+After the sweep finishes, the collector waits for another trigger.
+A challenge received during a partial sweep retains a trigger for the next sweep.
+Provider changes and process restart start a fresh sweep from retained enrollment and cursor state.
 If ingress admission fails, one coalesced process signal wakes the scheduler.
 It retries a full or unavailable queue every ten seconds without adding queue entries.
 Restart reconciles the encrypted journal even if the process signal was lost.
