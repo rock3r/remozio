@@ -962,6 +962,26 @@ public final class ApprovalRequestCoordinator {
         return try write { try provider.renewExpired(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: $0, now: now, wall: wall) }
     }
 
+    /// A repeated fresh observation validates history without generating another continuity write.
+    func acknowledgePhonePushHead(_ provider: AuthorityPhonePushRegistration, head: VerifiedGatewayHead,
+                                  expectedTrustRevision: UUID, now: AuthorityMoment) throws -> GatewayAcknowledgmentResult {
+        try running(); try checkClock(now)
+        guard head.receivedAt.epoch == now.epoch, head.receivedAt.milliseconds <= now.milliseconds,
+              now.milliseconds - head.receivedAt.milliseconds < 5000 else { throw GatewayHeadReplyError.expired }
+        let proposed = try read { try provider.acknowledge(head, expectedTrustRevision: expectedTrustRevision, transaction: $0, commit: false) }
+        guard proposed.disposition == .recorded else { return proposed }
+        return try write { try provider.acknowledge(head, expectedTrustRevision: expectedTrustRevision, transaction: $0, commit: true) }
+    }
+
+    func renewMissingPhonePushRegistration(_ provider: AuthorityPhonePushRegistration, observation: VerifiedGatewayMappingState,
+                                          expectedTrustRevision: UUID, now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
+        try running(); try checkClock(now)
+        guard observation.receivedAt.epoch == now.epoch, observation.receivedAt.milliseconds <= now.milliseconds,
+              now.milliseconds - observation.receivedAt.milliseconds < 5000 else { throw GatewayMappingStateError.expired }
+        return try write { try provider.renewMissing(observation, expectedTrustRevision: expectedTrustRevision,
+            transaction: $0, now: now, wall: wall) }
+    }
+
     /// Protected startup only. The hardware-bound provider validates Root before initializing its fixed identity.
     func preparePhonePushRegistration(_ provider: AuthorityPhonePushRegistration, now: AuthorityMoment) throws {
         try running()

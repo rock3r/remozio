@@ -977,6 +977,11 @@ public final class JournalTransaction {
         try withGateway(write: true) { try $0.acknowledge(verified) }
     }
 
+    /// Inspect the proposed acknowledgment without writing. A recorded disposition still requires the owner to commit it.
+    func inspectGatewayHead(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
+        try withGateway(write: false) { try $0.acknowledge(verified, record: false) }
+    }
+
     /// Protected root recovery after independent continuity checks. Serialize with trust and registration changes.
     /// Apply recovered revocations before reconciliation. Unknown trust history still requires host recovery.
     /// Collection includes the shared boundary receipt when expectedLocalRevision is nonzero.
