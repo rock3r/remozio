@@ -113,8 +113,8 @@ Root controls cover idempotent resume, checkpoint failure, lease/session retirem
 The gateway publication fixture uses a real coordinator and journals with software keys and a synthetic provider.
 These components do not expose a new network purpose or Root IPC selector.
 Authenticated transport recovery, Android ingress and scheduling remain integration work.
-[Recorded component results](../docs/experiments/evidence/2026-10-17-phone-push-recovery-components.json) bind the implementation and tests to source commit `29cee2d`.
-The local gate passed 2505 native core tests, with one explicit GUI experiment skipped.
+[Recorded component results](../docs/experiments/evidence/2026-10-17-phone-push-recovery-components.json) bind the implementation and tests to source commit `cfdaae3`.
+The local gate passed 2506 native core tests, with one explicit GUI experiment skipped.
 The six required ATC tasks passed 723 test reports, assembly and lint.
 The shared recovery fixtures contain eleven valid and thirty-four invalid frames.
 Version 1 source and fixtures remain byte-identical to the base.
