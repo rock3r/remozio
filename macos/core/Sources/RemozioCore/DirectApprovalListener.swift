@@ -28,6 +28,15 @@ public struct DirectApprovalPeer: Sendable {
         self.auditVersions = auditVersions; self.minimumEnvelopeVersion = minimumEnvelopeVersion
         self.maximumPayloadBytes = maximumPayloadBytes
     }
+
+    /// The authority limit still bounds signed frames. Only the snapshot channel reserves outer framing and query space.
+    func channelMaximumPayloadBytes(for purpose: EnrolledChannelPurpose) -> Int {
+        guard case .pendingSnapshot = purpose else { return maximumPayloadBytes }
+        let signedFrames = min(maximumPayloadBytes, PendingRequestSnapshotFrame.maximumFrameBytes) +
+            (PendingRequestSnapshotFrame.maximumBytes - PendingRequestSnapshotFrame.maximumFrameBytes)
+        let retainedQuery = PendingRequestSnapshotFrame.maximumRetainedRequests * 17 + 256
+        return max(signedFrames, retainedQuery)
+    }
 }
 
 struct DirectPeerSnapshot: Sendable {
@@ -190,7 +199,8 @@ public final class DirectApprovalListener: @unchecked Sendable {
                     throw DirectListenerError.invalidIdentity
                 }
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
-                    requests: peer.requests, auditVersions: peer.auditVersions, maximumPayloadBytes: peer.maximumPayloadBytes,
+                    requests: peer.requests, auditVersions: peer.auditVersions,
+                    maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose),
                     trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout, purpose: purpose)
                 do { try Task.checkCancellation(); try await handler(peer, framed) }
                 catch { await framed.closeAndWait(); throw error }

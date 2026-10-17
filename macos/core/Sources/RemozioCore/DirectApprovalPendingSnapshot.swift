@@ -17,11 +17,11 @@ extension DirectApprovalTransportService {
                       session.peer.requests.contains(where: { local in metadata.peer.requests.contains {
                           $0.kind == local.kind && $0.wireVersion == local.wireVersion && $0.schemaVersion == local.schemaVersion
                       } }) else { throw ApprovalChannelError.invalidInput }
+                let channelMaximum = session.peer.channelMaximumPayloadBytes(for: .pendingSnapshot)
                 let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(timeoutMilliseconds)))
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     group.addTask {
-                        guard let encoded = try await channel.receive(maximumBytes: min(session.peer.maximumPayloadBytes,
-                            PendingRequestSnapshotFrame.maximumBytes)),
+                        guard let encoded = try await channel.receive(maximumBytes: min(channelMaximum, PendingRequestSnapshotFrame.maximumBytes)),
                               case .query(let nonce, let maximumFrames, let maximumBytes, let retained) = try PendingRequestSnapshotFrame.decode(encoded) else {
                             throw ApprovalChannelError.invalidInput
                         }
@@ -45,15 +45,16 @@ extension DirectApprovalTransportService {
     private func sendPendingSnapshot(for session: DirectApprovalSession, over channel: NegotiatedNetworkChannel,
                                      nonce: Data, maximumFrames: UInt64, maximumBytes: UInt64, retained: [Data],
                                      remoteRequests: [ChannelRequestCapability], deadline: ContinuousClock.Instant) async throws {
+        let channelMaximum = session.peer.channelMaximumPayloadBytes(for: .pendingSnapshot)
         var budget = PendingSnapshotWriteBudget(nonce: nonce, maximumFrames: maximumFrames, maximumBytes: maximumBytes)
         let pending = try await pendingRequestIDs(for: session)
         var statuses = Set(retained)
         for id in pending {
             try await validate(session)
-            guard let frame = try await requestFrame(for: session, requestID: id) else { continue }
+            guard let frame = try await requestFrame(for: session, requestID: id) else { throw ApprovalChannelError.invalidInput }
             guard try Self.supports(frame, maximumBytes: session.peer.maximumPayloadBytes,
                 local: session.peer.requests, remote: remoteRequests) else { throw ApprovalChannelError.invalidInput }
-            let item = try budget.item(frame, maximumPayloadBytes: session.peer.maximumPayloadBytes)
+            let item = try budget.item(frame, maximumPayloadBytes: channelMaximum)
             try await validate(session)
             try await Self.send(item, over: channel, deadline: deadline)
             try await validate(session)
@@ -62,15 +63,16 @@ extension DirectApprovalTransportService {
         for id in statuses.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
             try await validate(session)
             guard let frame = try await exchangeRequest(for: session, requestID: id) else { continue }
-            let message = try ApprovalMessage.decode(frame, maximumBodyBytes: AuthorityRequestExchange.maximumFrameBytes - ApprovalMessage.overheadBytes)
+            let maximumBodyBytes = min(session.peer.maximumPayloadBytes, AuthorityRequestExchange.maximumFrameBytes) - ApprovalMessage.overheadBytes
+            let message = try ApprovalMessage.decode(frame, maximumBodyBytes: maximumBodyBytes)
             guard message.type == .status, message.purpose == .status else { throw ApprovalChannelError.invalidInput }
-            let item = try budget.item(frame, maximumPayloadBytes: session.peer.maximumPayloadBytes)
+            let item = try budget.item(frame, maximumPayloadBytes: channelMaximum)
             try await validate(session)
             try await Self.send(item, over: channel, deadline: deadline)
             try await validate(session)
         }
         let complete = try budget.complete()
-        guard complete.count <= session.peer.maximumPayloadBytes else { throw ApprovalChannelError.invalidInput }
+        guard complete.count <= channelMaximum else { throw ApprovalChannelError.invalidInput }
         try await validate(session)
         try await Self.send(complete, over: channel, deadline: deadline)
         try await validate(session)

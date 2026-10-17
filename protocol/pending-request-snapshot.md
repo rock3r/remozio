@@ -72,7 +72,9 @@ It keeps individually verified request and status updates. An incomplete set doe
 The handler requires the snapshot TLS purpose, matching enrolled scope and a common request contract.
 It validates the current authority session before discovery and around every network write.
 One authority index defines the pass. New requests need another query with a fresh nonce.
-The handler sends available compatible captures, then signed statuses for delivered and retained request IDs.
+The handler sends every indexed compatible capture, then signed statuses for delivered and retained request IDs.
+A missing indexed capture closes the channel without a completion marker.
+The listener reserves outer framing and retained-query space separately from the unchanged signed-frame limit.
 A missing status grants no terminal outcome. Unknown status remains unknown.
 Unsupported captures, exceeded limits or a failed write close the channel without a completion marker.
 The local delivery timeout bounds the entire exchange. Snapshot input cannot submit a decision.
@@ -87,6 +89,7 @@ Their synthetic echo does not establish a Root snapshot or an installed Mac–Pi
 It makes one query with a fresh nonce and the retained request IDs.
 Callers create the connector with `CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)`.
 That budget includes both the signed approval frame and its outer snapshot frame.
+It also holds the largest retained-ID query, even when the configured body limit is smaller.
 Using the ordinary foreground budget cannot hold the configured maximum body and fails binding before sending a query.
 The ordinary receiver verifies every returned request and status with the retained Root key.
 The channel cannot send a decision. A complete set does not grant action authority.

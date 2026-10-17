@@ -474,11 +474,26 @@ class CommandRequestReceiverTest {
             queue.close()
         }
     }
+    @Test fun snapshotConnectorBudgetAlsoHoldsTheLargestRetainedQuery() = runBlocking<Unit> {
+        val retained = List(PendingRequestSnapshotFrame.MAXIMUM_RETAINED_REQUESTS) { index ->
+            ByteArray(16).apply { this[14] = (index ushr 8).toByte(); this[15] = index.toByte() }
+        }
+        val query = PendingRequestSnapshotFrame.Query(id(9, 32), PendingRequestSnapshotFrame.MAXIMUM_FRAMES,
+            PendingRequestSnapshotFrame.MAXIMUM_SNAPSHOT_BYTES, retained)
+        val wire = Wire(scope(), maximumPayloadBytes = CommandSnapshotReceiver.requiredChannelPayloadBytes(limits))
+        wire.snapshotReply(emptyList())
+        val channel = PendingSnapshotMessageChannel(wire, query)
+        try {
+            assertNull(channel.receive()); channel.requireComplete()
+            assertEquals(retained.size, (PendingRequestSnapshotFrame.decode(wire.sent.receive()) as PendingRequestSnapshotFrame.Query).retainedRequestIDs.size)
+        } finally { channel.close() }
+    }
+
     @Test fun snapshotConnectorBudgetReservesBothFrameLayers() = runBlocking<Unit> {
         val mac = Mac(); val enrollment = mac.enroll()
         val foregroundBudget = maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES
         val snapshotBudget = CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)
-        assertEquals(foregroundBudget + 128, snapshotBudget)
+        assertTrue(snapshotBudget >= foregroundBudget + 128)
         val tooSmall = Wire(scope(), maximumPayloadBytes = foregroundBudget)
         assertFails { snapshot(enrollment, tooSmall) }
         assertTrue(tooSmall.closed); assertTrue(tooSmall.sent.tryReceive().isFailure)
