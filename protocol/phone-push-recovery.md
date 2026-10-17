@@ -205,10 +205,17 @@ No registration state establishes current Mac presence or actual notification de
 
 ## Android validation boundary
 
-The prepared component passed 315 Android unit tests and five actual API37 scheduling controls.
-Those controls use real WorkManager queues, synthetic provider state and blocked network bodies.
+[The Android component record](../docs/experiments/evidence/2026-10-18-android-push-registration-components.json) binds the implementation and tests to source commit `ba9c0b0`.
+The complete native/Python gate passed 2525 core tests, with one explicit GUI experiment skipped.
+The six required ATC tasks passed 795 reports, APK assembly and lint, with no new lint issues.
+The Android suite includes 315 tests for the provider, storage, orchestration and pairing callbacks.
+
+Five actual API37 scheduling controls passed with real WorkManager queues, synthetic provider state and blocked network bodies.
 A separate API37 control passed real boot-counter and elapsed-clock reads. It does not exercise reboot behavior.
+Five earlier Android proof-file controls still match the named ledger, file adapter and probe source.
+The record identifies their original APK and the current debug manifest additions.
+
 The actual status and limit cards were inspected in portrait with default text size.
-The isolated package was removed and its device lease was released.
-Source-bound evidence and the full local gate must be published after promotion onto the merged transport branch.
-Actual FCM delivery, hardware challenge keys, paired-Mac presentation and installed Mac-Pixel operation remain separate gates.
+Those captures use an empty Mac inventory and default settings. They do not establish data-entry or paired-Mac behavior.
+The isolated packages were removed and their device leases were released.
+Actual FCM delivery, hardware challenge keys and installed Mac-Pixel operation remain separate gates.
