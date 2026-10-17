@@ -3,7 +3,7 @@
 This contract adds an optional recovery exchange to [version 1 registration](phone-push-registration.md).
 It connects the shared codecs and Root recovery to optional IPC and enrolled native/phone transport handlers.
 The transport performs harmless preflight before accepting a provider token.
-Android provider lifecycle, work scheduling and settings integration remain pending.
+The Android app connects private provider ingress, per-Mac registration work and setup status.
 Installed services and provider delivery require separate validation.
 
 ## Negotiation and compatibility
@@ -122,7 +122,7 @@ The source now exposes a separate optional Root IPC capability and purpose-bound
 Shared controls cover unsupported capability preflight, delayed replies, retirement and unchanged ordinary approval access.
 A synthetic native TLS peer exercises Probe/Ready/Resume directly and through the opaque relay.
 It supplies fixed state without a configured Root or provider.
-Android provider ingress, orchestration and scheduling remain separate integration work.
+The Android lifecycle below connects provider ingress, orchestration and scheduling in source.
 [Recorded component results](../docs/experiments/evidence/2026-10-17-phone-push-recovery-components.json) bind the implementation and tests to source commit `cfdaae3`.
 The local gate passed 2506 native core tests, with one explicit GUI experiment skipped.
 The six required ATC tasks passed 723 test reports, assembly and lint.
@@ -144,3 +144,71 @@ The live unprivileged XPC experiment passed all 53 controls and confirmed tempor
 Those controls include matching peers, hostile peer requirements, and nil and empty recovery replies.
 Its ad-hoc identifiers do not establish Developer ID, Team ID or installed Root behavior.
 No physical phone, production provider token or actual FCM delivery was used by these controls.
+
+
+## Android registration lifecycle
+
+One app serves independently enrolled Macs with one provider client.
+Each Mac has its own attempt and retained proof history.
+The app fences every result with the current enrollment, provider generation and token revision.
+Network operations hold no enrollment, provider or storage lock.
+
+```mermaid
+sequenceDiagram
+    participant S as Provider SDK
+    participant A as Android app
+    participant W as Worker for one Mac
+    participant R as Mac Root
+    participant G as Gateway
+    S-->>A: Current provider token
+    A->>W: Enqueue opaque identifiers
+    W->>R: Harmless preflight, then Resume
+    R-->>W: Retained registration state
+    alt Awaiting provider proof
+        R->>G: Publish pending candidate and probe
+        G-->>S: Provider challenge
+        S->>A: Sender-checked callback
+        A->>A: Encrypt and commit the challenge
+        A->>W: Enqueue an opaque ticket
+        W->>R: Resume the current candidate
+        R-->>W: Metadata for that candidate
+        W->>W: Commit the proof claim
+        W->>R: Submit the proof once
+        R-->>W: Retained proof commitment
+    else Proof already committed
+        W->>W: Present retained state
+    end
+```
+
+This trace shows the challenge arriving after the first Resume.
+A challenge can arrive earlier. The same metadata join and proof claim apply.
+A lost proof reply triggers recovery. It cannot trigger another proof for that candidate.
+Provider retries, token rotation and process restart preserve proof claims.
+
+The SDK callback admits challenges only after the configured sender check.
+It encrypts them in private storage before work admission.
+WorkManager receives opaque identifiers, not provider tokens or challenge bytes.
+An expired, mismatched or missing challenge cannot start a proof exchange.
+A boot or provider change can clear challenge buffers without clearing proof history or pairing.
+
+The queues have bounded admission and independent names for each Mac and provider revision.
+A retained cursor prevents a small queue from starving later Macs.
+A stale collector cannot replace or cancel newer token work.
+Pairing changes request work after the archive commit and outside its lock.
+A failed work callback cannot undo that commit. Periodic recovery reads the retained archive.
+
+Settings expose the queue limit, parallel attempts, attempt budget, retry delay, operation timeout and recovery interval.
+A lower parallel limit affects new attempts. Existing owners finish cleanup.
+Each Mac shows its own registration result.
+The UI reads observation freshness again while presenting it.
+No registration state establishes current Mac presence or actual notification delivery.
+
+## Android validation boundary
+
+The prepared component passed 315 Android unit tests and five actual API37 scheduling controls.
+Those controls use real WorkManager queues, synthetic provider state and blocked network bodies.
+A separate API37 control passed real boot-counter and elapsed-clock reads. It does not exercise reboot behavior.
+The actual status and limit cards were inspected in portrait with default text size.
+The isolated package was removed and its device lease was released.
+Source-bound evidence and the full local gate must be published after promotion onto the merged transport branch.
+Actual FCM delivery, hardware challenge keys, paired-Mac presentation and installed Mac-Pixel operation remain separate gates.
