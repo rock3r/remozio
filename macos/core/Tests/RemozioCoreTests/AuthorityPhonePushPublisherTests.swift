@@ -26,8 +26,13 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
             var activations = 0
             var mappedReplies = 0
             var lastMappedCandidate: Data?
+            var mappedCandidates: Set<Data> = []
             var closed = false
             var rejectMappingQuery = false
+            var mappingQueries = 0
+            var rejectedCandidateCalls = 0
+            var rejectedActivationCalls = 0
+            var dropActivationReply = false
             var tamperHeadSignature = false
             var rejectedPhones: Set<Data> = []
             var onCandidate: (@Sendable () throws -> Void)?
@@ -52,11 +57,12 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                         switch try GatewayRootCommand.decode(bytes) {
                         case .head(let query):
                             if GatewayMappingStateWire.isQuery(query) {
+                                state.withLock { $0.mappingQueries += 1 }
                                 if state.withLock({ $0.rejectMappingQuery }) { return reply(.command(nil)) }
                                 let value = try await coordinator.mappingStateReply(canonicalQuery: query) { try self.receiptKey.signature(for: $0).rawRepresentation }
                                 let fields = try GatewayMappingStateWire.fields(value.canonicalPayload, kind: 5, last: 10, limits: GatewayMappingStateWire.replyLimits)
                                 if fields[8] == .unsigned(1), case .bytes(let candidate) = fields[6] {
-                                    state.withLock { $0.mappedReplies += 1; $0.lastMappedCandidate = candidate }
+                                    state.withLock { $0.mappedReplies += 1; $0.lastMappedCandidate = candidate; _ = $0.mappedCandidates.insert(candidate) }
                                 }
                                 reply(.command(try GatewayRootCommand.reply([.bytes(value.canonicalPayload), .bytes(value.signature)])))
                             } else {
@@ -66,13 +72,27 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                             }
                         case .candidate(let payload, let signature, let version, let phone, let token):
                             if state.withLock({ $0.rejectedPhones.contains(phone) }) { return reply(.command(nil)) }
+                            let rejected = state.withLock { state in
+                                guard state.rejectedCandidateCalls > 0 else { return false }
+                                state.rejectedCandidateCalls -= 1; return true
+                            }
+                            if rejected { return reply(.command(nil)) }
                             let value = try await coordinator.admitCandidate(canonicalPayload: payload, signature: signature, wireVersion: version, registrationToken: token, phoneID: phone)
                             let hook = state.withLock { state in state.candidates += 1; let hook = state.onCandidate; state.onCandidate = nil; return hook }
                             try hook?()
                             reply(.command(try GatewayRootCommand.reply([.bytes(value.receipt.canonicalPayload), .bytes(value.receipt.signature), .boolean(value.inserted)])))
                         case .recipient(let payload, let signature, let version, let phone, let kind):
+                            let rejected = state.withLock { state in
+                                guard state.rejectedActivationCalls > 0 else { return false }
+                                state.rejectedActivationCalls -= 1; return true
+                            }
+                            if rejected { return reply(.command(nil)) }
                             let value = try await coordinator.applyRecipient(canonicalPayload: payload, signature: signature, wireVersion: version, kind: kind, phoneID: phone)
-                            state.withLock { $0.activations += 1 }
+                            let drop = state.withLock { state in
+                                state.activations += 1
+                                let drop = state.dropActivationReply; state.dropActivationReply = false; return drop
+                            }
+                            if drop { return reply(.command(nil)) }
                             reply(.command(try GatewayRootCommand.reply([.bytes(value.receipt.canonicalPayload), .bytes(value.receipt.signature), .boolean(value.inserted)])))
                         case .probe(let operation, let phone):
                             state.withLock { $0.probes += 1 }
@@ -133,10 +153,10 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                 return metadata
             }
         }
-        func prove(_ metadata: PhonePushRegistrationMetadata, challenge: PushTokenChallenge) throws {
+        func prove(_ metadata: PhonePushRegistrationMetadata, challenge: PushTokenChallenge, phoneIndex: Int = 0) throws {
             try journal.withRequests { _ in
                 let frame = PhonePushRegistrationFrame.proof(correlationID: Data(repeating: 99, count: 16), proof: try metadata.proof(challenge))
-                guard case .outcome(_, .proofCommitted) = try root.exchange(frame, time: clock.now().milliseconds) else { throw CocoaError(.fileReadUnknown) }
+                guard case .outcome(_, .proofCommitted) = try root.exchange(frame, time: clock.now().milliseconds, binding: root.bindings[phoneIndex]) else { throw CocoaError(.fileReadUnknown) }
             }
         }
         func state() throws -> GatewayCurrentTokenState? {
@@ -305,6 +325,95 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
         await f.close()
     }
+    func testReversePhoneProofOrderPublishesBothActivationsWithinEitherBudget() async throws {
+        for budget in [1, 16] {
+            for rejectFirst in [false, true] {
+                let f = try Fixture(enrollmentCount: 2, maximumPhonesPerTurn: budget)
+                let metadata = try (0..<2).map { try f.offer(phoneIndex: $0) }
+                try await f.publisher.start()
+                try await f.publisher.reconcile(); try await f.publisher.reconcile()
+                try await waitFor { await f.provider.challenges.count == 2 }
+                let challenges = await f.provider.challenges
+                for index in [1, 0] {
+                    let challenge = try XCTUnwrap(challenges.first { $0.candidateID == metadata[index].candidateID })
+                    try f.prove(metadata[index], challenge: challenge, phoneIndex: index)
+                }
+                let head = try f.root.head
+                if rejectFirst { f.driver.state.withLock { $0.rejectedActivationCalls = 1 } }
+                for _ in 0..<6 { try await f.publisher.reconcile() }
+                XCTAssertEqual(f.driver.state.withLock { $0.mappedCandidates }, Set(metadata.map(\.candidateID)))
+                XCTAssertEqual(f.driver.state.withLock { $0.probes }, 2)
+                XCTAssertEqual(try f.root.head, head)
+                XCTAssertFalse(f.root.owner.retired)
+                await f.close()
+            }
+        }
+    }
+    func testTemporaryMappingQueryRejectionRecoversOnTheSameConnection() async throws {
+        let f = try Fixture(), metadata = try f.offer()
+        try await f.publisher.start(); try await f.publisher.reconcile()
+        try await waitFor { await f.provider.challenges.count == 1 }
+        try f.prove(metadata, challenge: await f.provider.challenges[0])
+        let activation = try XCTUnwrap(f.state()?.activation)
+        f.driver.state.withLock { $0.rejectMappingQuery = true }
+        try await f.publisher.reconcile()
+        f.driver.state.withLock { $0.rejectMappingQuery = false }
+        try await f.publisher.reconcile()
+        XCTAssertEqual(f.driver.state.withLock { $0.lastMappedCandidate }, metadata.candidateID)
+        XCTAssertEqual(try f.state()?.activation?.operationID, activation.operationID)
+        XCTAssertFalse(f.driver.state.withLock { $0.closed })
+        XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
+        await f.close()
+    }
+    func testTransientControlRejectionsRetainTheCommittedActivation() async throws {
+        for candidateCall in [true, false] {
+            let f = try Fixture(), metadata = try f.offer()
+            try await f.publisher.start(); try await f.publisher.reconcile()
+            try await waitFor { await f.provider.challenges.count == 1 }
+            try f.prove(metadata, challenge: await f.provider.challenges[0])
+            let original = try XCTUnwrap(f.state()), head = try f.root.head
+            f.driver.state.withLock { state in
+                if candidateCall { state.rejectedCandidateCalls = 1 }
+                else { state.rejectedActivationCalls = 1 }
+            }
+            try await f.publisher.reconcile()
+            XCTAssertEqual(try f.state()?.activation?.operationID, original.activation?.operationID)
+            XCTAssertEqual(try f.state()?.candidate.operationID, original.candidate.operationID)
+            XCTAssertEqual(try f.root.head, head)
+            try await f.publisher.reconcile()
+            XCTAssertEqual(f.driver.state.withLock { $0.lastMappedCandidate }, metadata.candidateID)
+            XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
+            await f.close()
+        }
+    }
+    func testLostActivationReplyDoesNotReplaceAnAlreadyMappedActivation() async throws {
+        let f = try Fixture(), metadata = try f.offer()
+        try await f.publisher.start(); try await f.publisher.reconcile()
+        try await waitFor { await f.provider.challenges.count == 1 }
+        try f.prove(metadata, challenge: await f.provider.challenges[0])
+        let original = try XCTUnwrap(f.state()), head = try f.root.head
+        f.driver.state.withLock { $0.dropActivationReply = true }
+        try await f.publisher.reconcile()
+        XCTAssertEqual(try f.state()?.activation?.operationID, original.activation?.operationID)
+        XCTAssertEqual(try f.root.head, head)
+        try await f.publisher.reconcile()
+        XCTAssertEqual(f.driver.state.withLock { $0.lastMappedCandidate }, metadata.candidateID)
+        XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
+        await f.close()
+    }
+    func testExpiredUnappliedActivationRequiresFreshAbsenceBeforeRenewal() async throws {
+        let f = try Fixture(), metadata = try f.offer()
+        try await f.publisher.start(); try await f.publisher.reconcile()
+        try await waitFor { await f.provider.challenges.count == 1 }
+        try f.prove(metadata, challenge: await f.provider.challenges[0])
+        f.clock.advance(1100)
+        try await f.publisher.reconcile()
+        let replacement = try XCTUnwrap(f.state())
+        XCTAssertNil(replacement.activation)
+        XCTAssertNotEqual(replacement.candidate.operationID, metadata.operationID)
+        XCTAssertEqual(f.driver.state.withLock { $0.mappingQueries }, 2)
+        await f.close()
+    }
     func testLegacyMappingQueryRejectionKeepsTheControlConnection() async throws {
         let f = try Fixture(), metadata = try f.offer()
         try await f.publisher.start(); try await f.publisher.reconcile()
@@ -313,7 +422,8 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         f.driver.state.withLock { $0.rejectMappingQuery = true }
         try await f.publisher.reconcile(); try await f.publisher.reconcile()
         let diagnostic = await f.publisher.phonePushDiagnostic
-        XCTAssertEqual(diagnostic, .unsupportedGateway)
+        XCTAssertEqual(diagnostic, .retryPending)
+        XCTAssertEqual(f.driver.state.withLock { $0.mappingQueries }, 2)
         XCTAssertFalse(f.driver.state.withLock { $0.closed })
         XCTAssertFalse(f.root.owner.retired)
         await f.close()

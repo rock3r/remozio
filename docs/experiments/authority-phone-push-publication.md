@@ -51,6 +51,8 @@ The existing internal renewal operation remains available for that integration.
 A turn processes at most the configured number of phones, from 1 through 64.
 The default is 16.
 A rotating cursor gives the other phones a later turn.
+Unpublished committed activations take precedence in gateway revision order.
+A rejected activation prevents later controls from advancing past it.
 A rejected candidate does not prevent the next phone from progressing.
 The loop starts each current probe operation once per connection.
 The gateway retains its independent provider retry and resource limits.
@@ -59,6 +61,10 @@ Optional registration failure does not retire a healthy request owner.
 Clock, lease or owner failure still closes publication.
 Local diagnostics contain only fixed enum values.
 A completed turn does not claim a current mapping or successful phone delivery.
+A rejected query remains ambiguous and is retried on the same connection.
+It does not prove that the gateway lacks support.
+Transient apply failures retain the committed activation.
+Replacement after a rejection requires local signed expiry and another fresh absent observation.
 An older gateway can reject optional mapping queries while keeping ordinary wake control usable.
 
 ## Evidence and remaining integration

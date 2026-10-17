@@ -3,7 +3,7 @@ import Foundation
 
 /// A local diagnostic for the last publication turn. It does not confirm a mapping or phone delivery.
 public enum AuthorityPhonePushPublicationDiagnostic: Sendable, Equatable {
-    case disabled, notStarted, turnCompleted, retryPending, unsupportedGateway, closed
+    case disabled, notStarted, turnCompleted, retryPending, closed
 }
 
 /// Protected runtime inputs. Callbacks are synchronous and must not reenter the journal or publisher.
