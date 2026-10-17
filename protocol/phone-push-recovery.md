@@ -128,13 +128,19 @@ The local gate passed 2506 native core tests, with one explicit GUI experiment s
 The six required ATC tasks passed 723 test reports, assembly and lint.
 The shared recovery fixtures contain eleven valid and thirty-four invalid frames.
 Version 1 source and fixtures remain byte-identical to the base.
-These results do not exercise an advertised recovery purpose or optional Root IPC.
+That earlier record does not exercise the recovery purpose or optional Root IPC.
 Codec acceptance cannot authenticate a message or establish actual gateway mapping state.
 Installed services, hardware keys, actual FCM delivery and physical Android behavior require separate evidence.
 
 ## Transport validation
 
-The transport validation record will bind the combined source and results before publication.
-The unprivileged XPC experiment must verify matching peers, hostile peer requirements, nil and empty replies, and temporary service removal.
+[The transport record](../docs/experiments/evidence/2026-10-17-phone-push-recovery-transport-components.json) binds the combined implementation and tests to source commit `ad9adfe`.
+The full native/Python gate passed 2525 core tests, with one explicit GUI experiment skipped.
+The six required ATC tasks passed 738 test reports, APK assembly and lint.
+The native TLS peer passed 71 interoperability tests, including recovery directly and through the opaque relay.
+It supplied fixed recovery state without a configured Root or provider.
+
+The live unprivileged XPC experiment passed all 53 controls and confirmed temporary service removal.
+Those controls include matching peers, hostile peer requirements, and nil and empty recovery replies.
 Its ad-hoc identifiers do not establish Developer ID, Team ID or installed Root behavior.
-No physical phone, production provider token or actual FCM delivery is used by these controls.
+No physical phone, production provider token or actual FCM delivery was used by these controls.
