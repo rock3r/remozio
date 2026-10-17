@@ -270,6 +270,9 @@ public actor AuthorityWakePublisher {
                 return PhonePushPublicationWork(enrollment: enrollment, state: state)
             }
         }
+        let otherControl = try withPhoneOwner(revision) { owner, now in
+            try owner.phonePushPublicationBarrier(push.provider, after: head.evidence.revision, now: now)
+        }
         let work = Dictionary(uniqueKeysWithValues: retained.map { ($0.enrollment.approval.phoneID, $0) })
         let pendingControls = retained.filter { !$0.state.needsRenewal && $0.revision > head.evidence.revision }.sorted { $0.revision < $1.revision }
         var selected = pendingControls.prefix(count).map(\.enrollment)
@@ -283,6 +286,9 @@ public actor AuthorityWakePublisher {
         for enrollment in selected {
             // Expired probes wait for a fresh authenticated phone exchange. A timer must not fill retained history with renewals.
             guard let item = work[enrollment.approval.phoneID], !item.state.needsRenewal else { continue }
+            if let otherControl, item.revision > otherControl {
+                completed = false; continue
+            }
             if let barrier = pendingControls.first(where: { $0.revision > confirmedHead }), item.revision > barrier.revision {
                 completed = false; continue
             }

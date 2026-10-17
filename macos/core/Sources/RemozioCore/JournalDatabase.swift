@@ -966,6 +966,10 @@ public final class JournalTransaction {
         try withGateway(write: false) { try $0.head(identity) }
     }
 
+    func firstGatewayNonRegistrationControl(after revision: UInt64, registration: GatewayRegistrationIdentity) throws -> UInt64? {
+        try withGateway(write: false) { try $0.firstNonRegistrationControl(after: revision, identity: registration) }
+    }
+
     /// Historical metadata only. It cannot establish current gateway availability or restore authority.
     public func gatewayAcknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
         try withGateway(write: false) { try $0.acknowledgment(identity) }

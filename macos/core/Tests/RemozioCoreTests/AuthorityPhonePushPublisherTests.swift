@@ -106,16 +106,57 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         }
         func close() { state.withLock { $0.closed = true }; lease.retire() }
     }
+    private enum EarlierControl: CaseIterable { case phoneRevocation, submissionRotation, submissionRevocation }
     private final class Fixture: @unchecked Sendable {
         let root: AuthorityPhonePushRegistrationTests.Harness
         let clock: Clock
         let journal: AuthorityJournal
         let provider = Provider()
         let coordinator: GatewayDeliveryCoordinator
+        let earlierControl: GatewayAuthorityEnvelope?
         let driver: Driver
         let publisher: AuthorityWakePublisher
-        init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16) throws {
-            let root = try AuthorityPhonePushRegistrationTests.Harness(enrollmentCount: enrollmentCount); self.root = root
+        init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16, earlier: EarlierControl? = nil, candidateBeforeEarlier: Bool = false) throws {
+            var retained: GatewayAuthorityEnvelope?
+            let root = try AuthorityPhonePushRegistrationTests.Harness(enrollmentCount: enrollmentCount, gatewaySetup: { tx, r, key, limits, epoch, writer in
+                guard let earlier else { return }
+                let now = AuthorityMoment(epoch: epoch, milliseconds: 100)
+                if candidateBeforeEarlier {
+                    _ = try tx.prepareGatewayCandidate(registrationToken: "synthetic-token", authenticatedPhoneID: Data(repeating: 5, count: 16),
+                        authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16), registration: r, registrationActive: true,
+                        expectedTrustRevision: tx.approvalTrustSnapshot().revision, expectedHead: 0, nowUnixMillis: 1000, now: now,
+                        sign: { try key.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+                            canonicalPayload: $0.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation })
+                }
+                let head = try tx.gatewayAuthorityHead(r)
+                switch earlier {
+                case .phoneRevocation:
+                    let gateway = EnrollmentGatewayRemoval(registration: r, expectedHead: head, nowUnixMillis: 1000, now: now,
+                        sign: { try key.signature(for: GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
+                            canonicalPayload: $0.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation })
+                    retained = try tx.revokeApprovalEnrollment(phoneID: Data(repeating: 15, count: 16), epoch: Data(repeating: 19, count: 16),
+                        expectedTrustRevision: tx.approvalTrustSnapshot().revision, eventID: Data(repeating: 90, count: 16), receiptTimeMs: 1000,
+                        writer: writer, expectedAuditHead: UInt64(enrollmentCount), gateway: gateway).gatewayControl
+                case .submissionRotation, .submissionRevocation:
+                    _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
+                        AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
+                    ]), expectedRevision: nil)
+                    try tx.installCommandSubmissionReplay()
+                    try tx.installGatewaySubmissionHistory(r)
+                    let sign: (GatewaySubmissionControl) throws -> Data = {
+                        try key.signature(for: GatewaySubmissionSigningInput.make(wireVersion: 1, kind: $0.kind,
+                            canonicalPayload: $0.encode(limits: limits), payloadLimits: limits, inputLimits: limits)).rawRepresentation
+                    }
+                    if earlier == .submissionRotation {
+                        retained = try tx.rotateGatewaySubmission(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                            registration: r, registrationActive: true, expectedHead: head, nowUnixMillis: 1000, now: now, sign: sign)
+                    } else {
+                        retained = try tx.revokeGatewaySubmission(credentialID: Data(repeating: 80, count: 16),
+                            registration: r, registrationActive: true, expectedHead: head, nowUnixMillis: 1000, now: now, sign: sign)
+                    }
+                }
+            }); self.root = root; earlierControl = retained
             let clock = Clock(root.clock); self.clock = clock
             let journal = AuthorityJournal(requests: root.owner); self.journal = journal
             let directory = root.root.appendingPathComponent("gateway")
@@ -164,11 +205,93 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                 try owner.currentPhonePushRegistration(root.provider, phoneID: Data(repeating: 5, count: 16), enrollmentEpoch: Data(repeating: 9, count: 16), now: clock.now(), wall: clock.wall())
             }
         }
+        func assertGatewayHead(_ expected: UInt64, file: StaticString = #filePath, line: UInt = #line) async throws {
+            let key = driver.receiptKey
+            let owner = try GatewayHeadQueryOwner(registration: root.registration, gatewayPublicKey: key.publicKey.x963Representation,
+                clockEpoch: clock.epoch, lifetimeMillis: 500)
+            let reply = try await coordinator.recoveryHeadReply(canonicalQuery: owner.makeQuery(now: clock.now()),
+                sign: { try key.signature(for: $0).rawRepresentation })
+            XCTAssertEqual(try owner.accept(reply, now: clock.now()).evidence.revision, expected, file: file, line: line)
+        }
+        func publishEarlierControl() async throws {
+            let control = try XCTUnwrap(earlierControl)
+            if control.kind == 3 {
+                let applied = try await coordinator.applyRecipient(canonicalPayload: control.canonicalPayload, signature: control.signature,
+                    wireVersion: 1, kind: .phoneRevocation, phoneID: Data(repeating: 15, count: 16))
+                XCTAssertTrue(applied.inserted)
+                XCTAssertEqual(applied.receipt.canonicalPayload, control.canonicalPayload)
+            } else {
+                _ = try await coordinator.applySubmission(canonicalPayload: control.canonicalPayload, signature: control.signature, wireVersion: 1)
+            }
+        }
         func close() async { await publisher.close(); try? await coordinator.shutdown(); try? journal.close() }
     }
     private func waitFor(_ condition: () async -> Bool) async throws {
         for _ in 0..<1000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(1)) }
         XCTFail("Fixture did not settle"); throw CocoaError(.featureUnsupported)
+    }
+    func testRegistrationWaitsForEveryEarlierNonRegistrationControl() async throws {
+        for kind in EarlierControl.allCases {
+            let f = try Fixture(enrollmentCount: 2, maximumPhonesPerTurn: 1, earlier: kind)
+            let metadata = try f.offer(), control = try XCTUnwrap(f.earlierControl)
+            try await f.publisher.start()
+            try await f.publisher.reconcile(); try await f.publisher.reconcile()
+            XCTAssertEqual(f.driver.state.withLock { $0.candidates }, 0, "Registration skipped \(kind)")
+            XCTAssertEqual(f.driver.state.withLock { $0.probes }, 0)
+            try await f.assertGatewayHead(0)
+            let diagnostic = await f.publisher.phonePushDiagnostic
+            XCTAssertEqual(diagnostic, .retryPending)
+            try await f.publishEarlierControl()
+            try await f.assertGatewayHead(control.revision)
+            try await f.publisher.reconcile(); try await f.publisher.reconcile()
+            try await waitFor { await f.provider.challenges.count == 1 }
+            let challenge = await f.provider.challenges[0]
+            XCTAssertEqual(challenge.candidateID, metadata.candidateID)
+            try await f.assertGatewayHead(control.revision + 1)
+            try f.prove(metadata, challenge: await f.provider.challenges[0])
+            try await f.publisher.reconcile()
+            XCTAssertGreaterThan(f.driver.state.withLock { $0.mappedReplies }, 0)
+            await f.close()
+        }
+    }
+    func testControlBetweenCandidateAndProofBlocksOnlyTheLaterActivation() async throws {
+        for kind in EarlierControl.allCases {
+            let f = try Fixture(enrollmentCount: 2, earlier: kind, candidateBeforeEarlier: true)
+            let retained = try XCTUnwrap(f.state()), control = try XCTUnwrap(f.earlierControl)
+            let candidate = try GatewayTokenCandidate.decode(retained.candidate.canonicalPayload, limits: f.root.limits)
+            let metadata = try PhonePushRegistrationMetadata(candidate)
+            try await f.publisher.start(); try await f.publisher.reconcile()
+            try await waitFor { await f.provider.challenges.count == 1 }
+            try await f.assertGatewayHead(candidate.revision)
+            try f.prove(metadata, challenge: await f.provider.challenges[0])
+            try await f.publisher.reconcile(); try await f.publisher.reconcile()
+            XCTAssertEqual(f.driver.state.withLock { $0.activations }, 0)
+            try await f.assertGatewayHead(candidate.revision)
+            let diagnostic = await f.publisher.phonePushDiagnostic
+            XCTAssertEqual(diagnostic, .retryPending)
+            try await f.publishEarlierControl()
+            try await f.assertGatewayHead(control.revision)
+            try await f.publisher.reconcile()
+            XCTAssertEqual(f.driver.state.withLock { $0.activations }, 1)
+            XCTAssertGreaterThan(f.driver.state.withLock { $0.mappedReplies }, 0)
+            await f.close()
+        }
+    }
+    func testExpiredNonRegistrationControlsStillBlockLaterRegistration() async throws {
+        for kind in EarlierControl.allCases {
+            let f = try Fixture(enrollmentCount: 2, earlier: kind)
+            f.clock.advance(1001)
+            let metadata = try f.offer()
+            try await f.publisher.start()
+            try await f.publisher.reconcile(); try await f.publisher.reconcile()
+            try await f.assertGatewayHead(0)
+            XCTAssertEqual(f.driver.state.withLock { $0.candidates }, 0)
+            XCTAssertEqual(f.driver.state.withLock { $0.probes }, 0)
+            XCTAssertEqual(try f.state()?.candidate.operationID, metadata.operationID)
+            let diagnostic = await f.publisher.phonePushDiagnostic
+            XCTAssertEqual(diagnostic, .retryPending)
+            await f.close()
+        }
     }
     func testCandidateProbeProofAndActivationUseTheSingleRootChannel() async throws {
         let f = try Fixture(), metadata = try f.offer()

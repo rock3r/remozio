@@ -53,6 +53,10 @@ The owner first snapshots the bounded enrollment set.
 The default is 16.
 A rotating cursor gives the other phones a later turn.
 New retained candidates and activations publish in gateway revision order.
+Earlier phone revocations and submission credential controls form an additional barrier.
+Registration cannot advance past them, including after their delivery envelopes expire.
+Their existing publication or recovery path must first advance the verified gateway head.
+This registration loop does not publish or renew those controls itself.
 Remaining turn slots poll existing mappings in cursor order.
 A rejected activation prevents later controls from advancing past it.
 Transient registration rejections retry before later controls advance the shared head.
@@ -74,7 +78,7 @@ An older gateway can reject optional mapping queries while keeping ordinary wake
 
 The [recorded component evidence](evidence/2026-10-17-phone-push-publication-components.json) binds the results to the source.
 The complete native/Python gate and six required ATC tasks passed.
-The native core suite ran 2,487 tests with zero failures and one explicit GUI experiment skipped.
+The evidence records the complete native suite and its explicit GUI experiment skip.
 The component controls use software fixture keys, real SQLite journals and the continuity store.
 The gateway coordinator is real; the provider and Root channel driver are synthetic.
 Controls cover publication, proof commit, activation, provider invalidation and fresh-proof repair.

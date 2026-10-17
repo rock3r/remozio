@@ -35,6 +35,10 @@ public struct AuthorityPhonePushRegistration: Sendable {
         try verifySelf(transaction)
         try transaction.configureGatewayAuthority(policy.registration)
     }
+    func publicationBarrier(after revision: UInt64, transaction tx: JournalTransaction) throws -> UInt64? {
+        try verifySelf(tx)
+        return try tx.firstGatewayNonRegistrationControl(after: revision, registration: policy.registration)
+    }
     func current(phoneID: Data, enrollmentEpoch: Data, transaction tx: JournalTransaction,
                  now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
         try verifySelf(tx)

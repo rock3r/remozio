@@ -30,7 +30,8 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let provider: AuthorityPhonePushRegistration
         let signs = PushSignCount()
         let limits: CBORLimits
-        init(configureGateway: Bool = true, enrollmentCount: Int = 1) throws {
+        init(configureGateway: Bool = true, enrollmentCount: Int = 1,
+             gatewaySetup: (JournalTransaction, GatewayRegistrationIdentity, P256.Signing.PrivateKey, CBORLimits, UUID, AuditEpochWriter) throws -> Void = { _, _, _, _, _, _ in }) throws {
             precondition((1...8).contains(enrollmentCount))
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.injected }
             defer { free(canonical) }
@@ -79,15 +80,22 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
                     eventID: pushID(30 + offset), receiptTimeMs: 900, writer: writer, expectedAuditHead: UInt64(index)) }
                 enrolledValues.append(next)
             }
-            bindings = try enrolledValues.map { enrollment in
-                try AuthorityPeerBinding(scope: ChannelScope(macID: pushID(1), accountID: pushID(2), phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),
-                    transportPublicKey: P256.Signing.PublicKey(x963Representation: enrollment.identityPublicKey).derRepresentation, revision: enrolled)
-            }
-            binding = bindings[0]
             let registration = try GatewayRegistrationIdentity(ownerID: pushID(40), macID: pushID(1), accountID: pushID(2),
                 gatewayID: pushID(41), lifecycleEpoch: pushID(42), rootPublicKey: key.publicKey.x963Representation)
             self.registration = registration
-            if configureGateway { try db.write { try $0.configureGatewayAuthority(registration) } }
+            if configureGateway {
+                let setupKey = key, setupLimits = limits, setupClock = clock
+                try db.write {
+                    try $0.configureGatewayAuthority(registration)
+                    try gatewaySetup($0, registration, setupKey, setupLimits, setupClock, writer)
+                }
+            }
+            let bindingRevision = try db.read { try $0.approvalTrustSnapshot().revision }
+            bindings = try enrolledValues.map { enrollment in
+                try AuthorityPeerBinding(scope: ChannelScope(macID: pushID(1), accountID: pushID(2), phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),
+                    transportPublicKey: P256.Signing.PublicKey(x963Representation: enrollment.identityPublicKey).derRepresentation, revision: bindingRevision)
+            }
+            binding = bindings[0]
             let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch, generation: 1, authorityGeneration: 3) }
             let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
                 macID: pushID(1), accountID: pushID(2), initialize: initial)

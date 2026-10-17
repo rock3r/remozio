@@ -954,6 +954,14 @@ public final class ApprovalRequestCoordinator {
         try checkClock(now)
         return try read { try provider.current(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: $0, now: now, wall: wall) }
     }
+    func phonePushPublicationBarrier(_ provider: AuthorityPhonePushRegistration, after revision: UInt64,
+                                     now: AuthorityMoment) throws -> UInt64? {
+        try running(); try checkClock(now)
+        guard provider.policy.registration.macID == mac, provider.policy.registration.accountID == account else {
+            throw GatewayAuthorityError.wrongScope
+        }
+        return try read { try provider.publicationBarrier(after: revision, transaction: $0) }
+    }
     /// Automatic expiry/restart recovery retains pairing. A new candidate still requires provider possession proof.
     func renewExpiredPhonePushRegistration(_ provider: AuthorityPhonePushRegistration, phoneID: Data, enrollmentEpoch: Data,
                                           now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {

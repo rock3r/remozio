@@ -507,6 +507,25 @@ final class GatewayAuthorityJournal {
         }
     }
 
+    /// A registration publisher cannot skip another retained control, even after that control expires.
+    /// Only a fresh verified gateway head can establish that this ordering barrier has passed.
+    func firstNonRegistrationControl(after revision: UInt64, identity: GatewayRegistrationIdentity) throws -> UInt64? {
+        guard revision <= (try head(identity)) else { throw GatewayAuthorityError.headMismatch }
+        let submission = try submissionSchemaVersion() >= 16
+            ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1 WHERE revision>?" : ""
+        var arguments = [uint(revision)]
+        if !submission.isEmpty { arguments.append(uint(revision)) }
+        return try statement("SELECT operation,revision FROM main.gateway_revocations_v1 WHERE revision>?" + submission + " ORDER BY revision LIMIT 1", arguments) { row in
+            let result = sqlite3_step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            let next = try unsigned(blob(row, 1, maximum: 8))
+            guard let retained = try envelope(blob(row, 0, maximum: 16), identity: identity), retained.revision == next,
+                  retained.kind == 3 || GatewaySubmissionKind(rawValue: retained.kind) != nil else { throw GatewayAuthorityError.corruptData }
+            return next
+        }
+    }
+
     func prepare(token: String, authenticatedPhoneID: Data, authenticatedEnrollmentEpoch: Data, trust: GatewayAuthorityTrust,
                  expectedHead: UInt64, wall: UInt64, now: AuthorityMoment,
                  sign: (GatewayTokenCandidate) throws -> Data) throws -> GatewayAuthorityEnvelope {
