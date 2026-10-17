@@ -33,6 +33,7 @@ internal class AndroidPushRegistrationWork(
     private val selectionPrefix = "$namespace.selection."
     private val reconcileName = "$namespace.reconcile.v1"
     private val manager by lazy { WorkManager.getInstance(app) }
+    private val retry = PushRegistrationReconcileRetry()
     private val cursor = app.getSharedPreferences("$namespace.cursor.v1", Context.MODE_PRIVATE)
     private val attempts = BoundedWakeWorkAdmission<Pair<String, OneTimeWorkRequest>>(256,
         { count(attemptTag) }, { (name, work) -> manager.enqueueUniqueWork(name, ExistingWorkPolicy.KEEP, work).result })
@@ -50,7 +51,7 @@ internal class AndroidPushRegistrationWork(
         val selected = provider.tokenCandidate() ?: return true
         return enqueueReconcile(selected.generation, selected.revision, null, "changed")
     }
-    private fun enqueueReconcile(generation: UUID, revision: UUID, tag: CborValue.Bytes?, trigger: String): Boolean =
+    private fun enqueueReconcile(generation: UUID, revision: UUID, tag: CborValue.Bytes?, trigger: String): Boolean = retry.enqueue {
         provider.withCurrentToken(generation, revision) {
             val policy = settings.read(); ingress.setMaximumQueued(policy.queueLimit)
             val fields = mutableMapOf<String, Any>(REGISTRATION_GENERATION to generation.toString(),
@@ -62,6 +63,7 @@ internal class AndroidPushRegistrationWork(
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST).build()
             ingress.admit("$namespace.ingress.$generation.$revision.$trigger" to request) == WakeWorkAdmission.QUEUED
         } ?: true
+    }
 
     /** A retained cursor keeps a small queue fair across more independently enrolled Macs. */
     @SuppressLint("UseKtx")
@@ -97,23 +99,19 @@ internal class AndroidPushRegistrationWork(
         combine(provider.generationState, provider.tokenRevisionState, settings.state) { generation, revision, policy ->
             Triple(generation, revision, policy)
         }.collectLatest { (generation, revision, policy) ->
-            while (isActive) {
-                try {
-                    provider.withCurrentTokenOrDisabled(generation, revision) {
-                        retireOldWork(generation, revision)
-                        if (generation == null || revision == null) manager.cancelUniqueWork(reconcileName).result.get(1, TimeUnit.SECONDS)
-                        else {
-                            val request = PeriodicWorkRequestBuilder<PushRegistrationReconcileWorker>(policy.reconcileMinutes.toLong(), TimeUnit.MINUTES)
-                                .setInputData(workDataOf(REGISTRATION_GENERATION to generation.toString(), REGISTRATION_REVISION to revision.toString()))
-                                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, policy.backoffSeconds.toLong(), TimeUnit.SECONDS)
-                                .addTag(selectionTag(generation, revision)).build()
-                            manager.enqueueUniquePeriodicWork(reconcileName, ExistingPeriodicWorkPolicy.UPDATE, request).result.get(1, TimeUnit.SECONDS)
-                        }
+            retry.run {
+                provider.withCurrentTokenOrDisabled(generation, revision) {
+                    retireOldWork(generation, revision)
+                    if (generation == null || revision == null) manager.cancelUniqueWork(reconcileName).result.get(1, TimeUnit.SECONDS)
+                    else {
+                        val request = PeriodicWorkRequestBuilder<PushRegistrationReconcileWorker>(policy.reconcileMinutes.toLong(), TimeUnit.MINUTES)
+                            .setInputData(workDataOf(REGISTRATION_GENERATION to generation.toString(), REGISTRATION_REVISION to revision.toString()))
+                            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, policy.backoffSeconds.toLong(), TimeUnit.SECONDS)
+                            .addTag(selectionTag(generation, revision)).build()
+                        manager.enqueueUniquePeriodicWork(reconcileName, ExistingPeriodicWorkPolicy.UPDATE, request).result.get(1, TimeUnit.SECONDS)
                     }
-                    if (generation != null && revision != null && !reconcile(generation, revision)) { delay(10_000); continue }
-                    break
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { delay(10_000) }
+                }
+                generation == null || revision == null || reconcile(generation, revision)
             }
         }
     }

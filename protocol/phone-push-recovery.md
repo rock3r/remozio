@@ -193,6 +193,10 @@ A boot or provider change can clear challenge buffers without clearing proof his
 
 The queues have bounded admission and independent names for each Mac and provider revision.
 A retained cursor prevents a small queue from starving later Macs.
+If ingress admission fails, one coalesced process signal wakes the scheduler.
+It retries a full or unavailable queue every ten seconds without adding queue entries.
+Restart reconciles the encrypted journal even if the process signal was lost.
+These retries cannot guarantee execution before expiry when Android suspends or stops the process.
 A stale collector cannot replace or cancel newer token work.
 Pairing changes request work after the archive commit and outside its lock.
 A failed work callback cannot undo that commit. Periodic recovery reads the retained archive.
