@@ -16,3 +16,5 @@ The artifact check compares both roles with the compiled store constant.
 The manifest declares codec support. It does not authorize migration or activation.
 Existing migration declarations remain unchanged.
 No installed app or service changes in this experiment.
+
+[The frozen gate evidence](evidence/2026-10-18-macos-release-preparation-declarations.json) records 2622 passing core tests, 804 Kotlin/Android reports, assembly and lint.
