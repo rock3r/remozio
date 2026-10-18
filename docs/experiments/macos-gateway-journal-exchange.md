@@ -76,3 +76,6 @@ The unprivileged XPC probe exports the actual setup protocol. It checks hello an
 The probe uses disposable ad-hoc identifiers and synthetic bytes. It calls the real credential and invocation guards on native connections. Its identifier requirement is separate from its synthetic policy used for UID checks. This does not validate Developer ID chains, Root UID admission or dedicated service accounts.
 
 The runner registers one temporary service in the current GUI domain. It removes that service and confirms its absence before success.
+
+[The live native XPC evidence](evidence/2026-10-18-macos-gateway-setup-live-xpc.json) records all 62 passing controls and temporary-service cleanup.
+The same frozen source passes the full local gate: 2618 core tests and 804 Kotlin/Android reports, plus assembly and lint.
