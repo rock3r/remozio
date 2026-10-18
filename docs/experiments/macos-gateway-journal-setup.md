@@ -1,103 +1,68 @@
-# Mac gateway journal setup exchange
+# Mac gateway journal initializer
 
-Journal setup uses a separate local protocol between the Root setup helper and the gateway account.
-It does not widen the normal gateway control endpoint or grant command authority.
+The bundled gateway can host a temporary journal setup endpoint. Its configuration, job identity and cleanup belong to one retained setup intent. The Root operation and app action follow separately.
+
+```mermaid
+flowchart TD
+    Intent["Retained setup intent"] --> Metadata["Publish exact configuration and temporary job"]
+    Metadata --> Launch["Registration adapter checks the exact job"]
+    Launch --> Listener["Gateway starts the setup listener"]
+    Listener --> Authenticate["Authenticate the Root setup helper and request"]
+    Authenticate --> Journal["Create an empty journal or restore the same journal"]
+    Journal --> Report["Return the intent and challenge bound report"]
+    Report --> Stop["Wait for stopped work and an absent job"]
+    Stop --> Cleanup["Remove only the matching job plist"]
+```
+
+This flow describes the adapters and their intended composition. The Root setup owner does not orchestrate it yet. Owned fixtures do not establish system launchd admission.
+
+## A separate endpoint
+
+The temporary mode uses `--journal-setup`. Ordinary gateway startup does not initialize SQLite. The retired direct initialization CLI remains unavailable.
+
+The job fixes the bundled executable, configuration path, dedicated user and group, and scoped Mach service. Its label includes the account and intent scope. `RunAtLoad` and `KeepAlive` are false.
+
+The setup endpoint pins the active Root setup helper. The client pins the active gateway component and its dedicated account. Version 1 requires a handshake before initialization. Each connection admits one operation.
+
+Reports bind the retained intent, scope digest and fresh client challenge. Unknown versions, wrong bindings and oversized or malformed replies fail. Public setup metadata contains no provider credential or private signing key.
+
+## Work must settle before cleanup
 
 ```mermaid
 sequenceDiagram
-    participant R as Root setup owner
     participant C as Setup client
-    participant G as Setup endpoint
-    participant D as Gateway journal
-    R->>R: Verify the retained pending intent
-    R->>C: Prepare the scoped exchange
-    C->>G: Authenticate version handshake
-    G-->>C: Setup protocol version 1
-    C->>G: Send intent digest and fresh challenge
-    G->>D: Initialize empty files or restore the same journal
-    D-->>G: Empty scoped head
-    G-->>C: Return report bound to intent and challenge
-    C->>R: Recheck pending state and return report
-    R->>R: Retain historical completion
+    participant E as Setup endpoint
+    participant W as Journal work
+    participant R as Registration adapter
+    C->>E: Authenticate and submit the retained intent
+    E->>W: Admit one operation and retain its work budget
+    C--xE: Disconnect
+    E->>W: Request cancellation
+    Note over E,W: Keep ownership until work settles
+    W-->>E: Work has stopped
+    R->>R: Observe the exact job as stopped and absent
+    R->>R: Remove only its matching plist
 ```
 
-## Current boundary
+A connection closing does not prove that SQLite work has stopped. The service retains admitted work until settlement. Cleanup refuses a running or uncertain job.
 
-| Part | Current evidence |
+| Observation | Required behavior |
 | --- | --- |
-| Setup endpoint and Root client | Compiled; owned invocation and driver fixtures |
-| Journal operation | Actual owned SQLite creation and restoration |
-| Combined exchange | In-process protocol with real owned SQLite and protected setup state |
-| Native setup configuration and job | Compiled metadata models and exact manifest fixtures |
-| Native listener and gateway entry mode | Compiled; six startup refusal controls |
-| Root temporary job registration and cleanup | Pending integration |
-| Dedicated UID, signed XPC peers and installed coexistence | Pending native runtime verification |
+| Initialization succeeds | Return an exact scoped report; completion still needs the Root owner. |
+| The reply is lost | Leave setup pending; restore the same compatible journal on a matching retry. |
+| The retained journal is replaced | Refuse initialization or completion. |
+| The job is running or unknown | Preserve its files and refuse cleanup. |
+| The exact job is absent | Remove only its matching plist; preserve journal files and credentials. |
+| Signed or protected scope changes | Refuse the operation. |
 
-The software exchange covers successful setup, a lost reply and a replaced retained database.
-A lost reply leaves Root setup pending. Its retry restores the same compatible journal.
-Completed setup refuses another initialization request.
-These fixtures do not establish native XPC routing or service account isolation.
+The native host must verify compatible components before selecting the explicit schema 9 transition. Older binaries do not gain schema 9 support through parsing metadata.
 
-## Separate identities
+## Evidence boundary
 
-The setup endpoint pins the active `setupController` code under Root.
-The client pins the active gateway code and dedicated gateway account.
-The existing authority policy is not reused for setup.
-Native configuration must come from protected release metadata and match the retained foreground scope.
-The Root host must hold the release scope and validate its pending checkpoint before committing completion.
+The frozen gate below records this combined source revision. It covers the configuration and job models, work ownership, protected publication, registration adapters and cleanup fixtures.
 
-Protocol version 1 requires a harmless handshake before initialization.
-Each endpoint admits one operation. Reports bind the intent identifier, scope digest and fresh client challenge.
-Unknown versions, wrong bindings and malformed or oversized replies fail.
-Timeout, cancellation and connection loss retire the exchange.
-An active initializer retains its work budget until it finishes; disconnect does not imply that SQLite work has stopped.
+The fixtures use owned files and injected lifecycle observations. They do not prove Root admission, dedicated UID isolation, Developer ID peer authentication or the system launchd job format.
 
-## Native job contract
+The remaining integration connects the Root setup owner and app API. The supervised installation session must then check native service behavior and coexistence. No service is installed by these checks, and no physical phone is used.
 
-The temporary job uses the bundled gateway executable under its retained gateway user and group.
-Its metadata fixes the `--journal-setup` mode and protected configuration path.
-The draft connects this entry mode. Root setup does not launch it yet.
-The label and Mach service include the account and intent scope.
-`RunAtLoad` and `KeepAlive` are false. A demand start must expose only the authenticated setup listener.
-Starting the process must never initialize SQLite before an authenticated setup request.
-
-Public setup metadata contains code pins and retained scope, without provider credentials or private signing keys.
-The native launcher must verify the signed release and reconcile only its exact temporary job.
-It must observe stopped work before cleanup or a replacement launch.
-A loaded job observation alone does not prove immutable settings, code identity or current health.
-
-The native host must verify compatible components before the explicit schema 9 transition.
-Older binaries do not gain support for schema 9.
-The foreground runtime, pairings and frozen interactive package remain outside these draft changes.
-
-The direct `--prepare-journal` prototype is retired and remains sealed as historical experiment evidence.
-The current entry mode opens only the authenticated setup listener. Startup does not grant initialization permission.
-The focused suite passed 44 fixtures, including public metadata rejection and active-work drain checks.
-The compiled gateway passed six refusal controls with unchanged stdin, empty stdout and no created files.
-These results do not prove dedicated UID admission or signed peer authentication at runtime.
-
-
-## Temporary job ownership
-
-The same PR includes the temporary service, its protected artifacts and its launchd lifecycle. These parts form one initializer feature. The Root setup operation and app API follow separately.
-
-```mermaid
-flowchart LR
-  Pending[Retained pending intent] --> Files[Publish exact configuration and job]
-  Files --> Register[Root registers the temporary job]
-  Register --> Gateway[Gateway runs under its dedicated UID]
-  Gateway --> Exchange[Authenticate the setup exchange]
-  Exchange --> Stop[Wait for the exact job to stop]
-  Stop --> Absent[Confirm the job is absent]
-  Absent --> Remove[Remove only its matching job file]
-```
-
-The job uses `RunAtLoad=false` and `KeepAlive=false`. Ordinary gateway startup does not initialize a journal.
-
-Registration accepts only the exact expected path, arguments, UID and Mach service. Cleanup does not stop a running or unknown job. It removes the matching plist only after absence checks. Journal files and credentials remain intact.
-
-An unused prototype file case is removed. This PR does not add a standalone intent file or direct initialization CLI.
-
-## Remaining native checks
-
-Owned fixtures do not prove the system launchd format, Root admission, dedicated UID isolation or Developer ID peer validation. The supervised installation session must check these paths before runtime readiness is claimed.
+[The frozen gate evidence](evidence/2026-10-18-macos-gateway-native-initializer.json) records 2651 passing core tests, 804 Kotlin/Android reports, assembly and lint.
