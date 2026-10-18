@@ -192,8 +192,8 @@ public actor GatewayRootChannel {
                     await self?.expire(id)
                 }
                 guard lifetime.ifOpen({
-                    driver.invoke(call) { [weak self] result in
-                        if case .failed = result, lifetime.close() { driver.close() }
+                    driver.invoke(call) { [weak self, weak driver] result in
+                        if case .failed = result, lifetime.close() { driver?.close() }
                         Task { await self?.complete(id, result: result) }
                     }
                 }) else { close(); return }

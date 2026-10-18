@@ -56,6 +56,18 @@ final class GatewayRootChannelTests: XCTestCase, @unchecked Sendable {
             released = nil
         }
     }
+    func testRetainedReplyDoesNotKeepDriverAliveAfterTimeout() async throws {
+        var driver: Driver? = Driver()
+        driver?.value.withLock { $0.hold = true }
+        weak var released = driver
+        var channel: GatewayRootChannel? = GatewayRootChannel(driver: try XCTUnwrap(driver), timeoutMilliseconds: 20)
+        do { try await channel?.start(); XCTFail() } catch {
+            XCTAssertEqual(error as? GatewayRootChannelError, .timedOut)
+        }
+        channel = nil; driver = nil
+        XCTAssertNil(released, "The stored reply callback must not retain its own driver")
+        released = nil
+    }
     func testConnectionLossDuringStartCannotSendHello() async throws {
         let driver = Driver(); driver.value.withLock { $0.closeDuringStart = true }
         let channel = GatewayRootChannel(driver: driver)
