@@ -55,3 +55,7 @@ They test sequencing, framing, cancellation and storage recovery.
 They do not prove installed Root admission, dedicated UID isolation or native XPC peer admission.
 The host runs macOS 27. The macOS 26 deployment target is not macOS 26 runtime evidence.
 The frozen interactive package and recovery handoff remain unchanged.
+
+[The component record](evidence/2026-10-18-macos-gateway-journal-exchange.json) covers source commit `e420430`.
+The full local gate passed 2615 core tests and 804 Kotlin/Android reports.
+Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
