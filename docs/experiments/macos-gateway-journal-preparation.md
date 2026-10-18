@@ -63,3 +63,7 @@ Owned fixtures exercise actual file publication, writer locks and SQLite initial
 They cover interrupted publication, missing or replaced files, unsafe metadata, incompatible stores and retained history.
 The fixtures use one ordinary owner. They do not prove Root ownership transfer or isolation between service accounts.
 Native launch, report authentication, installed coexistence and device delivery remain integration gates.
+
+[The component record](evidence/2026-10-18-macos-gateway-journal-preparation.json) covers source commit `13b909d`.
+The full local gate passed 2582 core tests and 804 Kotlin/Android reports.
+Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
