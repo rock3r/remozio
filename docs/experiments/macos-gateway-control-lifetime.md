@@ -23,3 +23,5 @@ Two deterministic regressions reproduce hello or control dispatch after connecti
 These are injected-driver and owned journal checks. They do not prove native Root admission, dedicated service UID isolation or installed gateway recovery. The frozen interactive package is unchanged.
 
 [The frozen gate evidence](evidence/2026-10-18-macos-gateway-control-lifetime.json) records 2620 passing core tests, 804 Kotlin/Android reports, assembly and lint.
+
+[The frozen gate evidence](evidence/2026-10-18-macos-gateway-control-ownership.json) records 2621 passing core tests, 804 Kotlin/Android reports, assembly and lint.
