@@ -30,7 +30,7 @@ enum GatewayJournalSetupPreparation {
     // Owned fixtures exercise ordering and protected state. They do not prove Root authorization or native service isolation.
     static func prepare(machine: PreparationIntentStore, account: AccountPreparationIntent, material: GatewayMaterialReference,
                         configuration: GatewayServiceConfiguration, expected: GatewayJournalPreparationState,
-                        verifyCurrent: @escaping () throws -> Void, verifyServices: () throws -> Void,
+                        verifyCurrent: @escaping () throws -> Void, verifyServices: @escaping () throws -> Void,
                         publishPrivate: (Bool, () throws -> Void) throws -> Void,
                         provisionFiles: (GatewayJournalFileIdentity?, () throws -> Void) throws -> GatewayJournalFileIdentity,
                         didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayJournalPreparationState {
@@ -47,7 +47,7 @@ enum GatewayJournalSetupPreparation {
         guard proposal.gateway.canonicalBytes == configuration.canonicalBytes else { throw GatewayPreparationError.changedScope }
         var retained = expected
         func verify() throws {
-            try verifyCurrent(); try machine.validateAccountPreparation(account)
+            try verifyServices(); try verifyCurrent(); try machine.validateAccountPreparation(account)
             let current = try machine.runtimeActivation(accountID: account.accountID)
             guard try machine.inventory() == inventory, current.jobsRegistered,
                   try current.plan?.encoded == foreground.encoded,
@@ -67,7 +67,7 @@ enum GatewayJournalSetupPreparation {
                 $0.accountID == account.accountID && $0.role == .notificationGateway
             }) else { throw GatewayPreparationError.changedScope }
         }
-        try verifyServices(); try verify()
+        try verify()
         try publishPrivate(retained.intent != nil, verify); try didStage(.privateFilesPublished); try verify()
         let files = try provisionFiles(retained.intent?.files, verify)
         if let pinned = retained.intent?.files { guard files == pinned else { throw JournalLeaseError.identityChanged } }

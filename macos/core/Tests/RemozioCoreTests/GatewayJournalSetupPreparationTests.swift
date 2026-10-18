@@ -10,6 +10,7 @@ final class GatewayJournalSetupPreparationTests: XCTestCase {
         var privateModes: [Bool] = []
         var filePins: [GatewayJournalFileIdentity?] = []
         var invalidHost = false
+        var invalidServices = false
         init(fresh: Bool = false) throws {
             fixture = try .init()
             if fresh { _ = try fixture.runtime.f.sql("DELETE FROM gateway_journal_preparation_v1") }
@@ -18,7 +19,7 @@ final class GatewayJournalSetupPreparationTests: XCTestCase {
                  stage: (GatewayJournalSetupPreparation.Stage) throws -> Void = { _ in }) throws -> GatewayJournalPreparationState {
             try GatewayJournalSetupPreparation.prepare(machine: fixture.runtime.machine, account: fixture.runtime.account,
                 material: fixture.intent.material, configuration: fixture.intent.configuration, expected: expected ?? fixture.state(),
-                verifyCurrent: { if self.invalidHost { throw Interrupted() } }, verifyServices: {},
+                verifyCurrent: { if self.invalidHost { throw Interrupted() } }, verifyServices: { if self.invalidServices { throw Interrupted() } },
                 publishPrivate: { retained, verify in self.privateModes.append(retained); try verify() },
                 provisionFiles: { retained, verify in
                     self.filePins.append(retained)
@@ -81,6 +82,25 @@ final class GatewayJournalSetupPreparationTests: XCTestCase {
         XCTAssertNil(try h.fixture.state().intent)
         h.invalidHost = false
         XCTAssertEqual(try h.run().intent?.files, h.fixture.intent.files)
+    }
+    func testChangedServicesAfterPublicationOrProvisioningCannotRetainAnIntent() throws {
+        for stop in [GatewayJournalSetupPreparation.Stage.privateFilesPublished, .journalFilesPrepared] {
+            let h = try Harness(fresh: true)
+            XCTAssertThrowsError(try h.run(stage: { if $0 == stop { h.invalidServices = true } })) {
+                XCTAssertTrue($0 is Interrupted)
+            }
+            XCTAssertNil(try h.fixture.state().intent)
+            h.invalidServices = false
+            XCTAssertEqual(try h.run().intent?.files, h.fixture.intent.files)
+        }
+    }
+    func testCompletedRetryStillValidatesServiceIdentitiesWithoutOpeningTheJournal() throws {
+        let h = try Harness()
+        try h.fixture.retainCompletion(.decode(h.fixture.initialize()))
+        h.invalidServices = true
+        XCTAssertThrowsError(try h.run()) { XCTAssertTrue($0 is Interrupted) }
+        XCTAssertTrue(h.privateModes.isEmpty); XCTAssertTrue(h.filePins.isEmpty)
+        XCTAssertTrue(try h.fixture.state().initialized)
     }
     func testNativeEntryRejectsAnOrdinaryCallerBeforeFilesystemAccess() throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner native entry refusal") }

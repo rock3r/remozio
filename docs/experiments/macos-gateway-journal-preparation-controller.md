@@ -10,8 +10,8 @@ flowchart TD
     Retain --> Async["Separate asynchronous Root operation follows"]
 ```
 
-A pending retry requires the retained file identities. It cannot recreate missing storage. Completed preparation returns historical progress without touching private files or acquiring the active journal writer.
+A pending retry requires the retained file identities. It cannot recreate missing storage. Completed preparation validates the current service identities, then returns historical progress without touching private files or acquiring the active journal writer.
 
-Twenty-seven focused tests pass, including seven new controls. Owned fixtures cover interrupted stages, changed host scope, stale expected state, pending-file loss and completed retries. The ordinary native caller is refused before filesystem access.
+Thirty-four affected preparation tests pass, including nine controller controls. Owned fixtures cover interrupted stages, changed host or service scope, stale expected state, pending-file loss and completed retries. Two new regressions produce five failures before the service validation fix. The ordinary native caller is refused before filesystem access.
 
 Root ownership transfer, dedicated UID isolation and installed signing remain required supervised checks in issue286. The owner deferred administrator and physical-device tests. No service is installed. The frozen first-flow package is unchanged.
