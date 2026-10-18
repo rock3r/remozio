@@ -5,7 +5,7 @@ import RemozioProtocol
 public enum GatewayRootChannelError: Error, Equatable { case invalidConfiguration, closed, busy, timedOut, rejected, invalidMessage, unsupportedVersion }
 enum GatewayRootCall: Sendable { case hello, synchronize(Data), command(Data) }
 enum GatewayRootResponse: Sendable { case version(UInt64), synchronized(Bool), command(Data?), failed }
-protocol GatewayRootDriver: Sendable {
+protocol GatewayRootDriver: AnyObject, Sendable {
     func start(closed: @escaping @Sendable () -> Void)
     func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void)
     func close()
@@ -81,8 +81,8 @@ public actor GatewayRootChannel {
         guard state == .new else { throw GatewayRootChannelError.closed }
         state = .opening
         let lifetime = lifetime, driver = driver
-        driver.start { [weak self] in
-            if lifetime.close() { driver.close() }
+        driver.start { [weak self, weak driver] in
+            if lifetime.close() { driver?.close() }
             Task { await self?.close() }
         }
         do {

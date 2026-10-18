@@ -44,6 +44,18 @@ final class GatewayRootChannelTests: XCTestCase, @unchecked Sendable {
         return try GatewayHostSnapshot(registration: identity, rootEpoch: UUID(), sequence: 1, observedAtMilliseconds: 100,
             leaseDeadlineMilliseconds: 200, enrollments: [], active: false, phoneRouting: false)
     }
+    func testStartedDriverIsReleasedAfterExplicitCloseOrOwnerDeinitialization() async throws {
+        for explicitClose in [false, true] {
+            var driver: Driver? = Driver()
+            weak var released = driver
+            var channel: GatewayRootChannel? = GatewayRootChannel(driver: try XCTUnwrap(driver))
+            try await channel?.start()
+            if explicitClose { await channel?.close() }
+            channel = nil; driver = nil
+            XCTAssertNil(released, "The stored close callback must not retain its own driver")
+            released = nil
+        }
+    }
     func testConnectionLossDuringStartCannotSendHello() async throws {
         let driver = Driver(); driver.value.withLock { $0.closeDuringStart = true }
         let channel = GatewayRootChannel(driver: driver)
