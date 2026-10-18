@@ -66,3 +66,7 @@ These tests do not prove installed updates, rollback compatibility or settings m
 The host runs macOS 27. Targeting macOS 26 does not prove runtime behavior on macOS 26.
 No installed service, physical device or live provider is used.
 The frozen interactive package and recovery handoff remain unchanged.
+
+[The component record](evidence/2026-10-18-macos-gateway-journal-state.json) covers source commit `f8d4ada`.
+The full local gate passed 2593 core tests and 804 Kotlin/Android reports.
+Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
