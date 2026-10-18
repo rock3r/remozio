@@ -48,6 +48,7 @@ The activation path must verify compatible signed components before use.
 Shared setup version 1 keeps its existing encoding.
 The optional gateway material does not alter those exported bytes.
 The startup proposal preserves the foreground command limits, presence policy, pairing configuration, TLS identity and relay port.
+The gateway storage capacity must cover the authority control budget.
 
 ## Validation boundary
 
@@ -69,4 +70,8 @@ The foreground Mac–Pixel approval handoff remains separate from background pus
 
 [The component record](evidence/2026-10-18-macos-gateway-material.json) covers source commit `a5681de`.
 The full local gate passed 2556 core tests and 804 Kotlin/Android reports.
+Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
+
+[The component record](evidence/2026-10-18-macos-gateway-material-capacity-9ff9483.json) covers source commit `9ff9483`.
+The full local gate passed 2557 core tests and 804 Kotlin/Android reports.
 Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
