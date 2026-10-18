@@ -6,6 +6,7 @@ import XCTest
 
 final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
     private struct Interrupted: Error {}
+    private final class Counter: Sendable { let value = Mutex(0) }
     private actor Gate {
         private var continuation: CheckedContinuation<Void, Never>?
         func wait(_ started: XCTestExpectation) async {
@@ -16,6 +17,8 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
     private final class Backend: @unchecked Sendable {
         struct State {
             var entered = 0
+            var beforeOpenGate: Gate?
+            var beforeOpenStarted: XCTestExpectation?
             var gate: Gate?
             var started: XCTestExpectation?
             var checkCancellation = false
@@ -28,6 +31,8 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
         init(_ fixture: GatewayJournalSetupExchangeTests.Fixture) { self.fixture = fixture }
         var operation: GatewaySetupJournalOperations {
             .init(resume: { [self] uid, digest, verify in
+                let opening = state.withLock { $0 }
+                if let gate = opening.beforeOpenGate, let started = opening.beforeOpenStarted { await gate.wait(started) }
                 let machine = try fixture.runtime.f.open()
                 defer { try? machine.close() }
                 let current = try machine.gatewayJournalPreparation(accountID: fixture.intent.accountID)
@@ -54,15 +59,18 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
         let activity: ReleaseActivityFixture
         let backend: Backend
         let owner: SetupAccountOwner
+        let machineOpens: Counter
         init() throws {
             let f = try GatewayJournalSetupExchangeTests.Fixture(); fixture = f
             _ = try f.initialize(); try f.runtime.machine.close()
             let a = try ReleaseActivityFixture(); activity = a
             let backend = Backend(f); self.backend = backend
-            let identity = f.runtime.f.identity
-            owner = try .init(openMachine: { try f.runtime.f.open() }, expectedReleaseDigest: f.runtime.f.release,
+            let identity = f.runtime.f.identity, opens = Counter(); machineOpens = opens
+            owner = try .init(openMachine: { opens.value.withLock { $0 += 1 }; return try f.runtime.f.open() }, expectedReleaseDigest: f.runtime.f.release,
                 resume: { _, _ in throw Interrupted() }, accountCodePolicy: f.runtime.f.policy,
                 lookupAccount: { uid in guard uid == identity.uid else { throw AdministrativeSetupError.wrongAccount }; return identity },
+                activationOperations: .init(prepare: { _, _, _, _, _ in throw Interrupted() },
+                    validate: { _, _, _, _, _ in throw Interrupted() }, register: { _, _ in throw Interrupted() }, didStage: { _ in }),
                 releaseActivity: a.open(), gatewayJournalOperation: backend.operation)
         }
         deinit { try? owner.close() }
@@ -116,6 +124,48 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
         catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
         XCTAssertEqual(h.backend.state.withLock { $0.entered }, 1)
         await gate.release(); _ = try await task.value
+    }
+    func testOnlyTheLiveReservationFromThisOwnerCanEnterItsMachinePhases() throws {
+        let owner = SetupOwnerAsyncWork(), other = SetupOwnerAsyncWork()
+        XCTAssertTrue(owner.permits(nil))
+        let token = try owner.admit(), foreign = try other.admit()
+        XCTAssertFalse(owner.permits(nil)); XCTAssertTrue(owner.permits(token)); XCTAssertFalse(owner.permits(foreign))
+        owner.closeAdmission()
+        XCTAssertTrue(owner.permits(token)); XCTAssertThrowsError(try owner.admit())
+        token.close(); XCTAssertFalse(owner.permits(token)); XCTAssertTrue(owner.permits(nil))
+        foreign.close()
+    }
+    func testEveryCompetingMachineOperationIsExcludedAcrossTheAsyncWriterHandoff() async throws {
+        let h = try Harness(), expected = try h.read(), activation = try XCTUnwrap(h.owner.activationProgress(callerUID: getuid()))
+        let beforeOpen = Gate(), beforeStarted = expectation(description: "before backend opens writer")
+        let active = Gate(), activeStarted = expectation(description: "backend owns writer")
+        h.backend.state.withLock { $0.beforeOpenGate = beforeOpen; $0.beforeOpenStarted = beforeStarted }
+        h.hold(active, activeStarted)
+        let uid = getuid()
+        let operation = Task { try await h.owner.resumeGatewayJournal(callerUID: uid, expected: expected) }
+        defer { Task { await beforeOpen.release(); await active.release() } }
+        let competitors: [() throws -> Void] = [
+            { try h.owner.verifyCurrent() },
+            { _ = try h.owner.gatewayProgress(callerUID: uid) },
+            { _ = try h.owner.activationProgress(callerUID: uid) },
+            { _ = try h.owner.enrollment(callerUID: uid) },
+            { _ = try h.owner.resumeActivation(callerUID: uid, expected: activation) },
+            { _ = try h.owner.prepareGateway(callerUID: uid, expected: expected, prepare: { _, _, _ in
+                XCTFail("Competing mutation entered the writer"); throw Interrupted()
+            }) }
+        ]
+        for entered in [beforeStarted, activeStarted] {
+            await fulfillment(of: [entered], timeout: 5)
+            let count = h.machineOpens.value.withLock { $0 }
+            for competitor in competitors {
+                XCTAssertThrowsError(try competitor()) { XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable) }
+            }
+            XCTAssertEqual(h.machineOpens.value.withLock { $0 }, count)
+            if entered === beforeStarted { await beforeOpen.release() }
+        }
+        await active.release(); let completed = try await operation.value
+        XCTAssertTrue(completed.progress.journalInitialized)
+        XCTAssertEqual(try h.read(), completed.progress)
     }
     func testShutdownRetainsPlacementAndActivityUntilTheOperationSettlesEvenWhenCancelled() async throws {
         let h = try Harness(), expected = try h.read(), gate = Gate(), started = expectation(description: "backend entered")

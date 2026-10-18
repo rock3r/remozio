@@ -19,11 +19,11 @@ sequenceDiagram
     O-->>E: Return completion and cleanup status
 ```
 
-Shutdown rejects new operations, then waits for actual backend settlement. Cancellation does not release the activity early. A second initializer cannot enter while the first owns the operation. Wrong callers, stale progress and misbound backend reports cannot return success.
+Shutdown rejects new operations, then waits for actual backend settlement. Cancellation does not release the activity early. An owner-bound reservation excludes every competing machine read or mutation across the asynchronous handoff. Only that operation can use its validation writers. Wrong callers, stale progress and misbound backend reports cannot return success.
 
 Completed retries read retained completion without reopening the active journal writer. Cleanup can remain pending. That state does not prove that a temporary job stopped or that a release update is safe.
 
-Forty-two related controls passed in the isolated draft, including eight new asynchronous owner controls. They use real machine leases and release locks with injected initialization and report admission. Seven ordinary-user entrypoint controls refused privileged paths. The setup executable compiled through ATC without installation or launch.
+The initial isolated draft passed forty-two related controls, including eight new asynchronous owner controls. The reservation fix passes 28 related controls, including two new controls. Its held-handoff regression failed before the fix. They use real machine leases and release locks with injected initialization and report admission. Seven ordinary-user entrypoint controls refused privileged paths. The setup executable compiled through ATC without installation or launch.
 
 The full local gate must pass on this promoted source before publication. The app-facing protocol and UI follow separately. No new exported selector is enabled here.
 

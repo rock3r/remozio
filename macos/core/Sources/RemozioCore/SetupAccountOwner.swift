@@ -149,9 +149,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
-    private func withMachine<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
+    private func withMachine<Value>(admission: SetupOwnerAsyncWork.Token? = nil,
+                                    _ body: (PreparationIntentStore) throws -> Value) throws -> Value {
         try lock.withLock {
-            guard !closed, !closing else { throw AdministrativeSetupError.unavailable }
+            guard !closed, !closing, asynchronousWork.permits(admission) else { throw AdministrativeSetupError.unavailable }
             guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
             let activity = try releaseActivity?.acquireShared()
             defer { activity?.close() }
@@ -322,7 +323,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             catch { admission.close(); throw error }
         }
         defer { context.1?.close(); context.0.close() }
-        let digest = try withMachine { machine -> Data in
+        let digest = try withMachine(admission: context.0) { machine -> Data in
             guard expected.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
                 throw AdministrativeSetupError.wrongAccount
             }
@@ -345,7 +346,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         })
         try Task.checkCancellation(); try context.1?.validate()
         guard report.intentDigest == digest else { throw AdministrativeSetupError.staleProgress }
-        let progress = try withMachine { machine in
+        let progress = try withMachine(admission: context.0) { machine in
             guard let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
             try verifyEnrollment(account, callerUID: callerUID, machine: machine)
             let value = try gatewayProgress(machine: machine, account: account)
@@ -374,7 +375,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     func resumeActivation(callerUID: uid_t, expected: SetupActivationProgress) throws -> SetupActivationProgress {
         try lock.withLock {
-            guard !closed, !closing else { throw AdministrativeSetupError.unavailable }
+            guard !closed, !closing, asynchronousWork.permits(nil) else { throw AdministrativeSetupError.unavailable }
             guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
             let activity = try releaseActivity?.acquireShared()
             defer { activity?.close() }
