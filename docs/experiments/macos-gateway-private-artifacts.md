@@ -57,3 +57,7 @@ The full local gate and exact-head CI review remain required after promotion.
 
 The next steps prepare the service journal, retain setup progress, and connect native activation and app settings.
 Normal gateway startup must continue to require an existing journal.
+
+[The component record](evidence/2026-10-18-macos-gateway-private-artifacts.json) covers source commit `3fb459e`.
+The full local gate passed 2565 core tests and 804 Kotlin/Android reports.
+Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
