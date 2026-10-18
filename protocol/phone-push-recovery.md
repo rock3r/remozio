@@ -231,3 +231,8 @@ The actual status and limit cards were inspected in portrait with default text s
 Those captures use an empty Mac inventory and default settings. They do not establish data-entry or paired-Mac behavior.
 The isolated packages were removed and their device leases were released.
 Actual FCM delivery, hardware challenge keys and installed Mac-Pixel operation remain separate gates.
+
+[The finite-sweep record](../docs/experiments/evidence/2026-10-18-android-registration-finite-sweep.json) covers source commit `2bf91c3`.
+Its four new regression tests and eight actual API37 controls passed.
+The full local gate passed 804 Kotlin/Android reports, native checks, assembly and lint.
+The record retains the first fixture failure, its correction and the successful disposable APK hash.
