@@ -66,3 +66,7 @@ The remaining integration has distinct steps:
 5. Verify installed services and Mac–Pixel delivery during the interactive session.
 
 The foreground Mac–Pixel approval handoff remains separate from background push activation.
+
+[The component record](evidence/2026-10-18-macos-gateway-material.json) covers source commit `a5681de`.
+The full local gate passed 2556 core tests and 804 Kotlin/Android reports.
+Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
