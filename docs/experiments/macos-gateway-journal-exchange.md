@@ -68,3 +68,11 @@ Three deterministic regressions first reproduced requests after loss or report a
 
 [The connection lifetime evidence](evidence/2026-10-18-macos-gateway-setup-lifetime.json) records the reviewed fix.
 The revised full gate passed 2618 core tests and 804 Kotlin/Android reports, plus assembly and lint.
+
+## Live native selector checks
+
+The unprivileged XPC probe exports the actual setup protocol. It checks hello and both Data arguments, including empty and nil replies. Negative controls reject wrong client or server identifiers, wrong effective UIDs and a guard bound to another connection.
+
+The probe uses disposable ad-hoc identifiers and synthetic bytes. It calls the real credential and invocation guards on native connections. Its identifier requirement is separate from its synthetic policy used for UID checks. This does not validate Developer ID chains, Root UID admission or dedicated service accounts.
+
+The runner registers one temporary service in the current GUI domain. It removes that service and confirms its absence before success.
