@@ -48,6 +48,16 @@ private final class NativeGatewayJournalSetupDriver: GatewayJournalSetupDriver, 
     deinit { connection.invalidate() }
 }
 
+private final class GatewaySetupClientLifetime: @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private var closed = false
+    @discardableResult
+    func close() -> Bool { lock.withLock { guard !closed else { return false }; closed = true; return true } }
+    func ifOpen(_ body: () -> Void) -> Bool {
+        lock.withLock { guard !closed else { return false }; body(); return !closed }
+    }
+}
+
 /// A single pending setup exchange. The Root owner must retain its release scope and recheck pending state before committing completion.
 /// A valid report establishes neither normal gateway health nor push activation.
 actor GatewayJournalSetupChannel {
@@ -59,6 +69,7 @@ actor GatewayJournalSetupChannel {
     private let verifyAccount: @Sendable () throws -> Void
     private let verifyPending: @Sendable () throws -> Void
     private let challenge: @Sendable () throws -> Data
+    private let lifetime = GatewaySetupClientLifetime()
     private var state = State.new
     private var pending: (id: UUID, continuation: CheckedContinuation<GatewayJournalSetupReply, any Error>)?
     private var timer: Task<Void, Never>?
@@ -90,14 +101,18 @@ actor GatewayJournalSetupChannel {
         self.driver = driver; self.intentID = intentID; self.scopeDigest = scopeDigest; timeout = timeoutMilliseconds
         self.verifyAccount = verifyAccount; self.verifyPending = verifyPending; self.challenge = challenge
     }
-    deinit { timer?.cancel(); driver.close() }
+    deinit { lifetime.close(); timer?.cancel(); driver.close() }
 
     func prepare() async throws -> GatewayJournalSetupReport {
         guard state == .new else { throw state == .closed ? GatewayJournalSetupChannelError.closed : .busy }
         do {
             try verifyAccount(); try verifyPending(); try Task.checkCancellation()
             state = .opening
-            driver.start { [weak self] in Task { await self?.close() } }
+            let lifetime = lifetime, driver = driver
+            driver.start { [weak self] in
+                if lifetime.close() { driver.close() }
+                Task { await self?.close() }
+            }
             guard case .version(let version) = try await perform(.hello), state == .opening else { throw GatewayJournalSetupChannelError.closed }
             guard GatewayJournalSetupInterface.supportedVersions.contains(version) else { throw GatewayJournalSetupChannelError.unsupportedVersion }
             state = .open
@@ -106,13 +121,13 @@ actor GatewayJournalSetupChannel {
             guard case .report(let bytes) = try await perform(.prepare(scopeDigest, nonce)), let bytes else { throw GatewayJournalSetupChannelError.invalidReply }
             let report = try GatewayJournalSetupResponse.decode(bytes, challenge: nonce, intentID: intentID, scopeDigest: scopeDigest)
             try verifyAccount(); try verifyPending(); try Task.checkCancellation()
-            guard state == .open else { throw GatewayJournalSetupChannelError.closed }
+            guard state == .open, lifetime.ifOpen({}) else { throw GatewayJournalSetupChannelError.closed }
             close(); return report
         } catch { close(); throw error }
     }
     func close() {
         guard state != .closed else { return }
-        state = .closed; timer?.cancel(); timer = nil; driver.close()
+        state = .closed; lifetime.close(); timer?.cancel(); timer = nil; driver.close()
         let previous = pending; pending = nil; previous?.continuation.resume(throwing: GatewayJournalSetupChannelError.closed)
     }
     private func perform(_ call: GatewayJournalSetupCall) async throws -> GatewayJournalSetupReply {
@@ -121,21 +136,31 @@ actor GatewayJournalSetupChannel {
         case .hello: guard state == .opening else { throw GatewayJournalSetupChannelError.closed }
         case .prepare: guard state == .open else { throw GatewayJournalSetupChannelError.closed }
         }
+        guard lifetime.ifOpen({}) else { close(); throw GatewayJournalSetupChannelError.closed }
         guard pending == nil else { throw GatewayJournalSetupChannelError.busy }
-        let id = UUID()
-        return try await withTaskCancellationHandler {
+        let id = UUID(), lifetime = lifetime, driver = driver
+        let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending = (id, continuation)
                 timer = Task { [weak self, timeout] in
                     do { try await Task.sleep(for: .milliseconds(timeout)) } catch { return }
                     await self?.expire(id)
                 }
-                driver.invoke(call) { [weak self] result in Task { await self?.complete(id, result: result) } }
+                guard lifetime.ifOpen({
+                    driver.invoke(call) { [weak self] result in
+                        if case .failed = result, lifetime.close() { driver.close() }
+                        Task { await self?.complete(id, result: result) }
+                    }
+                }) else { close(); return }
             }
-        } onCancel: { [weak self] in Task { await self?.close() } }
+        } onCancel: { [weak self] in lifetime.close(); driver.close(); Task { await self?.close() } }
+        try Task.checkCancellation()
+        guard state != .closed, lifetime.ifOpen({}) else { close(); throw GatewayJournalSetupChannelError.closed }
+        return result
     }
     private func complete(_ id: UUID, result: GatewayJournalSetupReply) {
         guard let pending, pending.id == id, state != .closed else { return }
+        guard lifetime.ifOpen({}) else { close(); return }
         self.pending = nil; timer?.cancel(); timer = nil
         if case .failed = result { pending.continuation.resume(throwing: GatewayJournalSetupChannelError.closed); close() }
         else { pending.continuation.resume(returning: result) }

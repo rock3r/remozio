@@ -12,6 +12,9 @@ final class GatewayJournalSetupChannelTests: XCTestCase, @unchecked Sendable {
             var calls: [GatewayJournalSetupCall] = []
             var version: UInt64 = 1
             var started = 0
+            var closeDuringStart = false
+            var reportIssued = false
+            var lost: (@Sendable () -> Void)?
             var closed = 0
             var holdHello = false
             var holdPrepare = false
@@ -22,7 +25,11 @@ final class GatewayJournalSetupChannelTests: XCTestCase, @unchecked Sendable {
             var reply: (@Sendable (GatewayJournalSetupReply) -> Void)?
         }
         let value = Mutex(Value())
-        func start(closed: @escaping @Sendable () -> Void) { value.withLock { $0.started += 1 } }
+        func start(closed: @escaping @Sendable () -> Void) {
+            let lose = value.withLock { $0.started += 1; $0.lost = closed; return $0.closeDuringStart }
+            if lose { closed() }
+        }
+        func disconnect() { value.withLock { $0.lost }?() }
         func invoke(_ call: GatewayJournalSetupCall, reply: @escaping @Sendable (GatewayJournalSetupReply) -> Void) {
             let result: GatewayJournalSetupReply? = value.withLock { state in
                 state.calls.append(call)
@@ -35,6 +42,7 @@ final class GatewayJournalSetupChannelTests: XCTestCase, @unchecked Sendable {
                 case .prepare(_, let challenge):
                     state.onPrepare?()
                     if state.holdPrepare { state.reply = reply; return nil }
+                    state.reportIssued = true
                     if let response = state.response { return .report(response) }
                     let report = try! GatewayJournalSetupReport(intentID: GatewayJournalSetupChannelTests.id, scopeDigest: GatewayJournalSetupChannelTests.digest, created: true)
                     return .report(try! GatewayJournalSetupResponse.encode(report: report, challenge: challenge))
@@ -121,6 +129,30 @@ final class GatewayJournalSetupChannelTests: XCTestCase, @unchecked Sendable {
         do { _ = try await task.value; XCTFail() } catch {}
         driver.value.withLock { $0.reply }?(.report(Data()))
         do { _ = try await channel.prepare(); XCTFail() } catch {}
+        XCTAssertEqual(driver.value.withLock { $0.calls.count }, 2)
+    }
+    func testConnectionLossDuringStartDoesNotSendEvenTheHello() async throws {
+        let driver = Driver(); driver.value.withLock { $0.closeDuringStart = true }
+        let channel = try channel(driver)
+        do { _ = try await channel.prepare(); XCTFail() } catch { XCTAssertEqual(error as? GatewayJournalSetupChannelError, .closed) }
+        XCTAssertEqual(driver.value.withLock { $0.calls.count }, 0)
+        XCTAssertGreaterThan(driver.value.withLock { $0.closed }, 0)
+    }
+    func testConnectionLossAfterHelloCannotSendPreparationBeforeTheActorReceivesClose() async throws {
+        let driver = Driver()
+        let channel = try channel(driver, challenge: { driver.disconnect(); return Self.nonce })
+        do { _ = try await channel.prepare(); XCTFail() } catch { XCTAssertEqual(error as? GatewayJournalSetupChannelError, .closed) }
+        let calls = driver.value.withLock { $0.calls }
+        XCTAssertEqual(calls.count, 1)
+        guard case .hello = try XCTUnwrap(calls.first) else { return XCTFail() }
+    }
+    func testConnectionLossDuringFinalScopeCheckCannotAcceptTheReport() async throws {
+        let driver = Driver()
+        let channel = try channel(driver, verifyPending: {
+            if driver.value.withLock({ $0.reportIssued }) { driver.disconnect() }
+        })
+        do { _ = try await channel.prepare(); XCTFail("A lost connection must not establish completion") }
+        catch { XCTAssertEqual(error as? GatewayJournalSetupChannelError, .closed) }
         XCTAssertEqual(driver.value.withLock { $0.calls.count }, 2)
     }
     func testSetupAddressesSeparateAccountsAndIntentsFromPermanentGatewayServices() throws {

@@ -59,3 +59,9 @@ The frozen interactive package and recovery handoff remain unchanged.
 [The component record](evidence/2026-10-18-macos-gateway-journal-exchange.json) covers source commit `e420430`.
 The full local gate passed 2615 core tests and 804 Kotlin/Android reports.
 Assembly and lint passed with no new lint issues. The record identifies the explicit native skip and the validation limits.
+
+## Connection loss
+
+The connection callback closes a shared lifetime and invalidates the driver before it schedules actor cleanup. Dispatch, reply handling and final acceptance check that lifetime. Cancellation also closes it before actor cleanup.
+
+Three deterministic regressions first reproduced requests after loss or report acceptance after loss. They now pass with the complete 25-test exchange suite. They use injected drivers and do not prove native Root admission.
