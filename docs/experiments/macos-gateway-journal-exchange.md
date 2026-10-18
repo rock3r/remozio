@@ -65,3 +65,6 @@ Assembly and lint passed with no new lint issues. The record identifies the expl
 The connection callback closes a shared lifetime and invalidates the driver before it schedules actor cleanup. Dispatch, reply handling and final acceptance check that lifetime. Cancellation also closes it before actor cleanup.
 
 Three deterministic regressions first reproduced requests after loss or report acceptance after loss. They now pass with the complete 25-test exchange suite. They use injected drivers and do not prove native Root admission.
+
+[The connection lifetime evidence](evidence/2026-10-18-macos-gateway-setup-lifetime.json) records the reviewed fix.
+The revised full gate passed 2618 core tests and 804 Kotlin/Android reports, plus assembly and lint.
