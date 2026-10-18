@@ -19,12 +19,12 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         try .init(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
             privateKeyID: "fixture-key", privateKeyPEM: Self.pem.get())
     }
-    private func settings(candidateLifetime: UInt64 = 300000, lease: UInt64 = 15000) throws -> GatewayServiceSettings {
+    private func settings(candidateLifetime: UInt64 = 300000, lease: UInt64 = 15000, storedControls: Int = 4096) throws -> GatewayServiceSettings {
         try .init(delivery: .init(maximumFlights: 4, minimumSendIntervalMillis: 1000),
             probe: .init(maximumAttempts: 3, minimumRetryDelayMillis: 1000, maximumTTLSeconds: 300),
             wake: .init(maximumEntries: 32, maximumAttempts: 3, minimumEnrollmentIntervalMillis: 1000,
                 maximumLifetimeMillis: 300000, maximumTTLSeconds: 300), authorityLeaseMillis: lease,
-            maximumCandidateLifetimeMillis: candidateLifetime)
+            maximumStoredControls: storedControls, maximumCandidateLifetimeMillis: candidateLifetime)
     }
     private func map(_ bytes: Data) throws -> [UInt64: CBORValue] {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits) else { throw GatewayPreparationError.invalidRecord }
@@ -36,7 +36,7 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         var fields = try map(original.encoded); fields[3] = .bytes(host.canonicalBytes); fields[4] = .bytes(transport.canonicalBytes)
         return try RuntimeActivationPlan.decode(encode(fields))
     }
-    private func fixture(customized: Bool = false,
+    private func fixture(customized: Bool = false, maximumControls: Int = 4096,
                          _ body: (RuntimeActivationPlan, GatewayPreparationMaterial, InstallationInventory) throws -> Void) throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner configuration fixture") }
         let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild]
@@ -70,7 +70,7 @@ final class GatewayConfigurationBundleTests: XCTestCase {
             foreground = try plan(foreground, host: customHost, transport: customTransport)
         }
         let material = try GatewayPreparationMaterial.create(runtime: runtime.reference, provider: provider(), senderID: "123",
-            packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+            packageName: "dev.remozio.android", fileWakeCustodyAccepted: true, maximumControls: maximumControls)
         try body(foreground, material, foreground.enrolledInventory(inventory))
     }
     private func bundle(_ foreground: RuntimeActivationPlan, _ material: GatewayPreparationMaterial,
@@ -161,6 +161,22 @@ final class GatewayConfigurationBundleTests: XCTestCase {
                     formatVersion: inventory.formatVersion)
                 return try bundle(foreground, material, missing)
             }())
+        }
+    }
+    func testGatewayStorageMustCoverTheAuthorityControlBudget() throws {
+        for authorityCapacity in [10, 4096] {
+            try fixture(maximumControls: authorityCapacity) { foreground, material, inventory in
+                XCTAssertThrowsError(try GatewayConfigurationBundle(foreground: foreground, material: material.reference,
+                    inventory: inventory, settings: settings(storedControls: authorityCapacity - 1))) {
+                    XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+                }
+                for gatewayCapacity in [authorityCapacity, authorityCapacity + 1] {
+                    let value = try GatewayConfigurationBundle(foreground: foreground, material: material.reference,
+                        inventory: inventory, settings: settings(storedControls: gatewayCapacity))
+                    XCTAssertEqual(value.gateway.settings.maximumStoredControls, gatewayCapacity)
+                    XCTAssertEqual(value.commandHost.command.presence.wake.phonePush?.maximumControls, authorityCapacity)
+                }
+            }
         }
     }
     func testImpossibleLifetimeLeaseAndWakeSettingsCannotProduceAProposal() throws {

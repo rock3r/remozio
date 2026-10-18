@@ -25,6 +25,7 @@ struct GatewayConfigurationBundle: CustomStringConvertible, CustomDebugStringCon
               inventory.services.contains(foreground.authorityJob.declaration), inventory.services.contains(foreground.transportJob.declaration),
               let transportClaim = services.claims.first(where: { $0.role == .transport }),
               let gatewayClaim = services.claims.first(where: { $0.role == .gateway }),
+              material.phonePush.maximumControls <= settings.maximumStoredControls,
               material.phonePush.candidateLifetimeMilliseconds <= settings.maximumCandidateLifetimeMillis else {
             throw GatewayPreparationError.changedScope
         }
