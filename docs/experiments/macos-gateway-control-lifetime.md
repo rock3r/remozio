@@ -25,3 +25,5 @@ These are injected-driver and owned journal checks. They do not prove native Roo
 [The frozen gate evidence](evidence/2026-10-18-macos-gateway-control-lifetime.json) records 2620 passing core tests, 804 Kotlin/Android reports, assembly and lint.
 
 [The frozen gate evidence](evidence/2026-10-18-macos-gateway-control-ownership.json) records 2621 passing core tests, 804 Kotlin/Android reports, assembly and lint.
+
+[The frozen gate evidence](evidence/2026-10-18-macos-gateway-control-reply-ownership.json) records 2622 passing core tests, 804 Kotlin/Android reports, assembly and lint.
