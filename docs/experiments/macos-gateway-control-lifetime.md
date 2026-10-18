@@ -21,3 +21,5 @@ The existing publisher recovery path handles the terminal result. Code and UID p
 Two deterministic regressions reproduce hello or control dispatch after connection loss. They fail before the fix. The corrected component run passes 105 related tests. An existing shutdown check also verifies one driver cleanup.
 
 These are injected-driver and owned journal checks. They do not prove native Root admission, dedicated service UID isolation or installed gateway recovery. The frozen interactive package is unchanged.
+
+[The frozen gate evidence](evidence/2026-10-18-macos-gateway-control-lifetime.json) records 2620 passing core tests, 804 Kotlin/Android reports, assembly and lint.
