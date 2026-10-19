@@ -266,5 +266,83 @@
     },
     "installedResourcesChanged": false,
     "physicalTestsPerformed": false
+  },
+  "combinedFenceAndSendableValidation": {
+    "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+    "findingURL": "https://github.com/rock3r/remozio/pull/458#discussion_r4313328906",
+    "scope": "Bind the previous Gateway digest to its exact settings commit for successor fences.",
+    "redControl": "A same-scope valid alternate Gateway configuration passed fence decoding after substituting only field 9.",
+    "affectedFenceTests": 8,
+    "CICompilerDiagnosis": {
+      "failedRun": 39245295134,
+      "head": "ccb57dcc7e076bc4e8ffb3fabd6f85f23b1bed9a",
+      "diagnosis": "Swift 6.2 rejects inferred sending closures that share already-Sendable test captures. Explicit @Sendable task closures preserve the concurrency controls.",
+      "uniqueCompilerErrors": [
+        "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift:102:21: error: sending value of non-Sendable type '() async throws -> GatewaySettingsConsumerObservation' risks causing data races [#SendingRisksDataRace]",
+        "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift:222:40: error: sending value of non-Sendable type '() async throws -> ()' risks causing data races [#SendingRisksDataRace]"
+      ],
+      "path": "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift",
+      "oldSHA256": "1de3a5a7b049c46e761aab43062020d6650e34a3801a8e8e1278dcf2990e2769",
+      "newSHA256": "a7e89a34d1b3e4d3d598dc307a23a8ad41d4398a4dbaa1b07a4f356851c58d6b",
+      "taskClosures": 7,
+      "localToolchain": "Swift 6.4",
+      "CIReproductionPending": true,
+      "fixPreparedNotApplied": false,
+      "existingFullGateMustFinishBeforeSourceMutation": true,
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539"
+    },
+    "CICompilerProofPending": true,
+    "redProof": {
+      "sourceCommit": "ccb57dcc7e076bc4e8ffb3fabd6f85f23b1bed9a",
+      "expectedFailure": "XCTAssertThrowsError failed: did not throw an error",
+      "tests": 1,
+      "failures": 1,
+      "unexpected": 0,
+      "test": "valid same-scope alternate Gateway bytes admitted by a substituted predecessor digest",
+      "logSHA256": "4dbc5c4e6df04efd07c14a7b155a57cdb9b60cafa164f0db2aece233dcb460d8",
+      "proofParserCorrection": "Matched the actual XCTest wording; no test rerun."
+    },
+    "nativeCoreTests": 2948,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+      "recordedAtUTC": "2026-10-19T12:34:40.202776+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1227.98,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "9a37521f9ce0c412082121a8065cee530709854fac003a88bbe46e43530b5373"
+    },
+    "portableGate": {
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.46,
+      "resultSHA256": "962baf270314307a7b3628d7278117887074c9977abf0795fa3e669190df2e40"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "9a37521f9ce0c412082121a8065cee530709854fac003a88bbe46e43530b5373",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewayRuntimeSettingsFenceTests": {
+          "tests": 8,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerOwnerTests": {
+          "tests": 15,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
   }
 }
