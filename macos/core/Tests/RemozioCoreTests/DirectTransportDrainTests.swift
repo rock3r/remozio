@@ -69,7 +69,7 @@ final class DirectTransportDrainTests: XCTestCase, @unchecked Sendable {
     func testRegistryJoinsReservedWorkAndConcurrentCancelledClosers() async throws {
         let registry = OwnedTaskHandoffRegistry(), work = registry.reserve(), done = Mutex(0)
         let gate = Mutex<CheckedContinuation<Void, Never>?>(nil)
-        let first = Task { await registry.waitAll(); done.withLock { $0 += 1 } }, second = Task { await registry.waitAll(); done.withLock { $0 += 1 } }
+        let first = Task { @Sendable in await registry.waitAll(); done.withLock { $0 += 1 } }, second = Task { @Sendable in await registry.waitAll(); done.withLock { $0 += 1 } }
         first.cancel(); registry.cancelAll()
         try await Task.sleep(for: .milliseconds(10)); XCTAssertEqual(done.withLock { $0 }, 0)
         work.install(Task { await withCheckedContinuation { c in gate.withLock { $0 = c } } })
