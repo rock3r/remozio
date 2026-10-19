@@ -40,6 +40,24 @@ final class GatewayRuntimeSettingsFenceTests: XCTestCase {
         let competing = try GatewayRuntimeSettingsFence(publication(r, revision: r.revision(3, previous: first), previous: first))
         XCTAssertThrowsError(try fence.validate(commit: competing.selected))
     }
+    func testSuccessorRejectsASubstitutedDigestForValidGatewayBytesInTheSameScope() throws {
+        let r = try Ready(), first = try r.revision(), second = try r.revision(2, previous: first)
+        let plan = try publication(r, revision: second, previous: first), fence = try GatewayRuntimeSettingsFence(plan)
+        let gateway = try GatewayServiceConfiguration.decode(XCTUnwrap(plan.artifacts.first?.previous))
+        let limits = try CBORLimits(maxBytes: 65536, maxDepth: 4, maxItems: 128)
+        guard case .map(var fields) = try DeterministicCBOR.decode(gateway.canonicalBytes, limits: limits) else {
+            throw GatewayPreparationError.invalidRecord
+        }
+        fields[11] = .text("alternate-project")
+        let substituted = try GatewayServiceConfiguration.decode(DeterministicCBOR.encode(.map(fields), limits: limits))
+        XCTAssertEqual(substituted.registration.macID, gateway.registration.macID)
+        XCTAssertEqual(substituted.registration.accountID, gateway.registration.accountID)
+        let digest = Data(SHA256.hash(data: substituted.canonicalBytes))
+        XCTAssertNotEqual(digest, fence.previous.gatewayConfigurationDigest)
+        let crossed = try changed(fence.encoded) { $0[9] = .bytes(digest) }
+        XCTAssertThrowsError(try GatewayRuntimeSettingsFence.decode(crossed))
+        try fence.validate(gateway: gateway, commit: fence.previous)
+    }
     func testForeignScopeAndSubstitutedGatewayBytesCannotMatchARecognizedCommit() throws {
         let r = try Ready(), other = try Ready(), plan = try publication(r), fence = try GatewayRuntimeSettingsFence(plan)
         XCTAssertThrowsError(try fence.validate(services: other.activation.extensions.authority.material.runtime.services))

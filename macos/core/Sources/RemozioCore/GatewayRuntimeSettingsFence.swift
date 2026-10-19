@@ -43,6 +43,7 @@ struct GatewayRuntimeSettingsFence: Sendable, CustomStringConvertible, CustomDeb
         if let sequence = previous.settingsSequence {
             guard sequence < UInt64.max, revision.sequence == sequence + 1,
                   previous.settingsRevisionDigest == revision.previousDigest,
+                  previous.gatewayConfigurationDigest == previousGatewayDigest,
                   previous.activationDigest == revision.activationDigest else { throw GatewayPreparationError.changedScope }
         } else {
             guard revision.sequence == 1, revision.previousDigest == revision.activationDigest else { throw GatewayPreparationError.changedScope }
