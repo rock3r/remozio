@@ -137,16 +137,21 @@ final class GatewaySettingsInitialRuntimeTests: XCTestCase, @unchecked Sendable 
         XCTAssertTrue(backend.state.withLock { $0.retired }); XCTAssertEqual(backend.state.withLock { $0.closes }, 1)
         try await owner.close()
     }
-    func testFailedCleanupRetainsInitialBackendAndBlocksFactoryUntilExplicitDrain() async throws {
-        let f = try GatewaySettingsConsumerControlFixture(), backend = Backend(), calls = Mutex(0)
+    func testInitialCleanupRetriesBeforeAnyFreshFactoryAndQuiescencePreventsFallback() async throws {
+        let f = try GatewaySettingsConsumerControlFixture(), backend = Backend(), replacement = Backend(), calls = Mutex(0)
         backend.state.withLock { $0.failStart = true; $0.failClose = true }
-        let owner = try owner(f, initial: { _ in calls.withLock { $0 += 1 }; return .init(runtime: backend, verifyCurrent: {}) })
+        let owner = try owner(f, initial: { _ in
+            let n = calls.withLock { $0 += 1; return $0 }
+            return .init(runtime: n == 1 ? backend : replacement, verifyCurrent: {})
+        })
         do { _ = try await owner.startConfiguredRuntimeIfNeeded(); XCTFail() } catch {}
-        let retry = try await owner.startConfiguredRuntimeIfNeeded(); XCTAssertFalse(retry); XCTAssertEqual(calls.withLock { $0 }, 1)
-        do { _ = try await act(owner, f, .quiesce); XCTFail() } catch {}
+        do { _ = try await owner.startConfiguredRuntimeIfNeeded(); XCTFail() } catch { XCTAssertTrue(error is Failed) }
+        XCTAssertEqual(calls.withLock { $0 }, 1); XCTAssertEqual(backend.state.withLock { $0.closes }, 2)
         backend.state.withLock { $0.failClose = false }
-        _ = try await act(owner, f, .quiesce)
-        let after = try await owner.startConfiguredRuntimeIfNeeded(); XCTAssertFalse(after); XCTAssertEqual(calls.withLock { $0 }, 1)
+        let retry = try await owner.startConfiguredRuntimeIfNeeded(); XCTAssertTrue(retry)
+        XCTAssertEqual(backend.state.withLock { $0.closes }, 3); XCTAssertEqual(replacement.state.withLock { $0.starts }, 1)
+        let paused = try await act(owner, f, .quiesce); XCTAssertEqual(paused, .paused)
+        let after = try await owner.startConfiguredRuntimeIfNeeded(); XCTAssertFalse(after); XCTAssertEqual(calls.withLock { $0 }, 2)
         try await owner.close()
     }
     func testInvalidCallerCannotDisableInitialStartupAndScopeFailurePrecedesFactory() async throws {

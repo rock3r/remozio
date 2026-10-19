@@ -210,6 +210,8 @@ actor GatewaySettingsConsumerOwner {
     /// Initial startup is separate from settings acceptance and cannot return after authenticated quiescence.
     func startConfiguredRuntimeIfNeeded() async throws -> Bool {
         guard !closed else { throw GatewayPreparationError.changedScope }
+        if cleanupRequired { try await settle() }
+        guard !closed else { throw GatewayPreparationError.changedScope }
         if accepted != nil { return try await startAcceptedRuntimeIfNeeded() }
         guard initialAllowed, !cleanupRequired, drain == nil, starting == nil, runtime == nil,
               let makeInitialRuntime = operations.makeInitialRuntime else { return false }
@@ -234,6 +236,9 @@ actor GatewaySettingsConsumerOwner {
     }
     /// The minimal native host can poll without rebuilding or replacing an active backend.
     func startAcceptedRuntimeIfNeeded() async throws -> Bool {
+        guard !closed else { throw GatewayPreparationError.changedScope }
+        guard accepted != nil else { return false }
+        if cleanupRequired { try await settle() }
         guard !closed else { throw GatewayPreparationError.changedScope }
         guard accepted != nil, !cleanupRequired, drain == nil, starting == nil, runtime == nil else { return false }
         try await startAcceptedRuntime(); return true

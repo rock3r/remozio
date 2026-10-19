@@ -95,6 +95,21 @@ final class GatewaySettingsConsumerHostTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(backend.state.withLock { $0.starts }, 2)
         try await host.close()
     }
+    func testProviderStartAndCleanupFailuresRecoverThroughHostPolling() async throws {
+        let f = try GatewaySettingsConsumerControlFixture(), backend = Backend(startFailures: 1, closeFailures: 1)
+        let owner = try owner(f, backend: backend)
+        let files = try ServiceReleaseActivityFixture(), service = try files.open(), listener = Listener()
+        let host = try GatewaySettingsConsumerHost(owner: owner, listener: listener, activity: service.acquireShared(), retryMilliseconds: 100)
+        try await host.start(); try await accept(owner, f); try await host.poll()
+        let failed = try await act(owner, f, .observe); XCTAssertEqual(failed, .quiescing)
+        XCTAssertFalse(listener.state.withLock { $0.retired })
+        try await host.poll()
+        XCTAssertEqual(backend.state.withLock { $0.starts }, 1); XCTAssertEqual(backend.state.withLock { $0.closes }, 1)
+        try await Task.sleep(for: .milliseconds(120)); try await host.poll()
+        let recovered = try await act(owner, f, .observe); XCTAssertEqual(recovered, .runtimeStarted)
+        XCTAssertEqual(backend.state.withLock { $0.closes }, 2); XCTAssertEqual(backend.state.withLock { $0.starts }, 2)
+        try await host.close()
+    }
     func testCloseRetainsActivityThroughListenerAndBackendDrainDespiteCancelledWaiter() async throws {
         let f = try GatewaySettingsConsumerControlFixture(), backend = Backend(holdClose: true), owner = try owner(f, backend: backend, initial: true)
         let files = try ServiceReleaseActivityFixture(), service = try files.open(), updater = try files.open(update: true)
