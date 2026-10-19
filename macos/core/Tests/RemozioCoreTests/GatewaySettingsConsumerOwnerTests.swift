@@ -99,10 +99,10 @@ final class GatewaySettingsConsumerOwnerTests: XCTestCase, @unchecked Sendable {
     func testConcurrentCancelledQuiescersJoinActualCleanupBeforeAnyPausedReceipt() async throws {
         let backend = Runtime(holdClose: true), f = try Fixture(backend: backend), owner = try f.owner(initial: backend)
         let completed = Mutex(0)
-        let first = Task { let result = try await f.act(owner, .quiesce); completed.withLock { $0 += 1 }; return result }
+        let first = Task { @Sendable in let result = try await f.act(owner, .quiesce); completed.withLock { $0 += 1 }; return result }
         defer { backend.releaseClose() }
         try await waitUntil { backend.state.withLock { $0.closeGate != nil } }
-        let second = Task { let result = try await f.act(owner, .quiesce); completed.withLock { $0 += 1 }; return result }
+        let second = Task { @Sendable in let result = try await f.act(owner, .quiesce); completed.withLock { $0 += 1 }; return result }
         first.cancel()
         let observing = try await f.act(owner, .observe); XCTAssertEqual(observing, .quiescing)
         do { _ = try await f.act(owner, .accept); XCTFail() } catch {}
@@ -175,11 +175,11 @@ final class GatewaySettingsConsumerOwnerTests: XCTestCase, @unchecked Sendable {
     func testQuiescenceRevokesThePermitBeforeAnOutstandingStartCanFinish() async throws {
         let backend = Runtime(holdStart: true, holdClose: true), f = try Fixture(backend: backend), owner = try f.owner()
         try await f.accept(owner)
-        let start = Task { try await owner.startAcceptedRuntime() }
+        let start = Task { @Sendable in try await owner.startAcceptedRuntime() }
         defer { backend.releaseStart(); backend.releaseClose() }
         try await waitUntil { backend.state.withLock { $0.startGate != nil } }
         let permit = try f.permit(); try f.validate(permit, owner)
-        let pause = Task { try await f.act(owner, .quiesce) }
+        let pause = Task { @Sendable in try await f.act(owner, .quiesce) }
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertThrowsError(try f.validate(permit, owner)); XCTAssertEqual(backend.state.withLock { $0.closes }, 0)
         XCTAssertTrue(backend.state.withLock { $0.retired })
@@ -216,11 +216,11 @@ final class GatewaySettingsConsumerOwnerTests: XCTestCase, @unchecked Sendable {
     func testCloseDuringStartPreventsLatePublicationAndJoinsTheBackend() async throws {
         let backend = Runtime(holdStart: true, holdClose: true), f = try Fixture(backend: backend), owner = try f.owner()
         try await f.accept(owner)
-        let start = Task { try await owner.startAcceptedRuntime() }
+        let start = Task { @Sendable in try await owner.startAcceptedRuntime() }
         defer { backend.releaseStart(); backend.releaseClose() }
         try await waitUntil { backend.state.withLock { $0.startGate != nil } }
-        let closed = Mutex(0), first = Task { try await owner.close(); closed.withLock { $0 += 1 } }
-        let second = Task { try await owner.close(); closed.withLock { $0 += 1 } }; first.cancel()
+        let closed = Mutex(0), first = Task { @Sendable in try await owner.close(); closed.withLock { $0 += 1 } }
+        let second = Task { @Sendable in try await owner.close(); closed.withLock { $0 += 1 } }; first.cancel()
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertThrowsError(try f.validate(f.permit(), owner)); XCTAssertEqual(closed.withLock { $0 }, 0)
         backend.releaseStart(); try await waitUntil { backend.state.withLock { $0.closeGate != nil } }
