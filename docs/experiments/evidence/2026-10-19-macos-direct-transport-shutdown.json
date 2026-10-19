@@ -90,5 +90,74 @@
     "Owned runtime and native loopback checks do not establish installed dedicated UID or physical phone behavior.",
     "Native settings host integration follows separately.",
     "No installed services, secrets, physical devices or frozen recovery artifacts were used."
-  ]
+  ],
+  "CICompilerCompatibilityValidation": {
+    "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+    "diagnosis": {
+      "run": 39265381333,
+      "job": 118103479017,
+      "previousHead": "15402d10aad4caabd6619af554e80a7568b0b3be",
+      "path": "macos/core/Tests/RemozioCoreTests/DirectTransportDrainTests.swift",
+      "line": 72,
+      "error": "sending value of non-Sendable type () async -> () risks causing data races",
+      "change": "Add explicit @Sendable to both concurrent registry wait tasks. Preserve every assertion and execution path.",
+      "beforeSHA256": "4ac6f99f91987b92836f4cb045c6490e98153bd557bfe7b74951a20b5670df8e",
+      "afterSHA256": "790bbea601bafaabd53ebea8b5f30a5f7443c972e373c68c58543505f0a96ffa",
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "recordedAtUTC": "2026-10-19T14:43:01.597726+00:00",
+      "CICompilerProofPending": true
+    },
+    "nativeCoreTests": 2954,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "recordedAtUTC": "2026-10-19T15:04:49.859753+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1202.77,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1666,
+      "logSHA256": "547ce11664027ea2ee976ec8c410e7f919ef0381c3c14653ad29687440ff794f"
+    },
+    "portableGate": {
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.86,
+      "resultSHA256": "088b7baa775acb5f60bfdb3f4cd64611946955d51f7ce5667595e99d2c4ab179"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "547ce11664027ea2ee976ec8c410e7f919ef0381c3c14653ad29687440ff794f",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "AuthorityTrustFeedTests": {
+          "tests": 33,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalRequestDeliveryTests": {
+          "tests": 43,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalTransportHostTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectTransportDrainTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "scope": "Two concurrent registry wait closures declare @Sendable. No assertion or task body changed.",
+    "CICompilerProofPending": true
+  }
 }
