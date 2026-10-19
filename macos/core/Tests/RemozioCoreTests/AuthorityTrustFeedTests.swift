@@ -154,6 +154,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         var isClosed: Bool { lock.withLock { closed } }
         func start() throws { }
         func close() { lock.withLock { closed = true } }
+        func closeAndWait() async { close() }
     }
     private final class Listeners: @unchecked Sendable {
         private let lock = NSLock()

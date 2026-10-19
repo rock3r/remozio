@@ -24,6 +24,8 @@ public actor AuthorityTrustFeed {
     private var recoveryLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var registrationLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var timer: Task<Void, Never>?
+    private var retiredTimer: Task<Void, Never>?
+    private let refreshWork = OwnedTaskHandoffRegistry()
     private var lastSnapshot: Data?
     private var started = false
     private var ready = false
@@ -269,7 +271,8 @@ public actor AuthorityTrustFeed {
 
     public func close() async {
         if !closed {
-            closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil
+            closed = true; ready = false; refreshDue = false; lease.invalidate()
+            retiredTimer = timer; timer?.cancel(); timer = nil; refreshWork.cancelAll()
             channel?.abort(); channel = nil; lastSnapshot = nil
             if let id = registrationLink?.id { retireRegistrationLink(id) }
             if let id = recoveryLink?.id { retireRecoveryLink(id) }
@@ -277,6 +280,10 @@ public actor AuthorityTrustFeed {
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }
         await host?.authorityDisconnected(lease)
+    }
+    /// External owners join refresh work after invalidating the channels. Internal refresh failure uses close alone.
+    public func closeAndWait() async {
+        await close(); await retiredTimer?.value; await refreshWork.waitAll(); retiredTimer = nil
     }
     private func update(_ channel: AuthorityXPCChannel) async throws {
         let trust = try await channel.fetchTrust(expectedMacID: macID, expectedAccountID: accountID)
@@ -313,7 +320,8 @@ public actor AuthorityTrustFeed {
     private func release() {
         if refreshDue, !closed {
             refreshDue = false; scheduledRefresh = true
-            Task { await self.runScheduledRefresh() }
+            let work = refreshWork.reserve()
+            work.install(Task { await self.runScheduledRefresh() })
         } else if waiters.isEmpty { busy = false }
         else { waiters.removeFirst().1.resume() }
     }
