@@ -11,11 +11,23 @@ final class GatewaySettingsConsumerPreflightTests: XCTestCase, @unchecked Sendab
     }
     private func release(role: GatewaySettingsConsumerRole, omit: AuthorityCodeRole? = nil, version: UInt64 = 1,
                          edit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws -> SignedReleaseEvidence {
-        let components = try [AuthorityCodeRole.app, role.codeRole, .setupController].map { code in
-            try edit(.init(role: code, identifier: "dev.remozio.role-\(code.rawValue)", generation: 4,
-                relativePath: "Contents/Helpers/role-\(code.rawValue)", codeDirectoryHash: code == .app ? nil : Data(repeating: 1, count: 20),
-                build: "4", teamID: team, formats: code == omit ? [] : [try .init(name: role.formatName, readers: [version], writers: [version])] +
-                    (code == .app ? [] : [try .init(name: GatewayRuntimeSettingsFence.formatName, readers: [1], writers: code == .setupController ? [1] : [])])))
+        let codes: [AuthorityCodeRole] = [.app, role.codeRole, .setupController]
+        let components: [ReleaseComponent] = try codes.map { code in
+            var formats: [ReleaseFormat] = []
+            if code != omit {
+                let control = try ReleaseFormat(name: role.formatName, readers: [version], writers: [version])
+                formats.append(control)
+                if code != .app {
+                    let writers: Set<UInt64> = code == .setupController ? [1] : []
+                    let fence = try ReleaseFormat(name: GatewayRuntimeSettingsFence.formatName, readers: [1], writers: writers)
+                    formats.append(fence)
+                }
+            }
+            let codeHash: Data? = code == .app ? nil : Data(repeating: 1, count: 20)
+            let component = try ReleaseComponent(role: code, identifier: "dev.remozio.role-\(code.rawValue)", generation: 4,
+                relativePath: "Contents/Helpers/role-\(code.rawValue)", codeDirectoryHash: codeHash,
+                build: "4", teamID: team, formats: formats)
+            return try edit(component)
         }
         return .init(manifest: try .init(release: "0.1.0", build: "4", components: components),
             codeDirectoryHashes: Dictionary(uniqueKeysWithValues: components.map { ($0.role, $0.codeDirectoryHash ?? Data(repeating: 1, count: 20)) }))
