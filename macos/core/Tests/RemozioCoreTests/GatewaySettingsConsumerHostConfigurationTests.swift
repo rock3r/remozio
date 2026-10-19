@@ -27,6 +27,9 @@ struct ConsumerHostMetadataFixture {
                 formats.append(try .init(name: role.formatName, readers: [1], writers: [1]))
             }
             if [.transport, .notificationGateway, .setupController].contains(entry.role) {
+                let fenceWriters: Set<UInt64> = entry.role == .setupController ? GatewayRuntimeSettingsFence.supportedVersions : []
+                formats.append(try .init(name: GatewayRuntimeSettingsFence.formatName,
+                    readers: GatewayRuntimeSettingsFence.supportedVersions, writers: fenceWriters))
                 formats.append(try .init(name: GatewaySettingsConsumerHostConfiguration.formatName,
                     readers: [1], writers: entry.role == .setupController ? [1] : []))
             }
