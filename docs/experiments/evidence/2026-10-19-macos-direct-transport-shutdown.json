@@ -1,0 +1,94 @@
+{
+  "experiment": "macos-direct-transport-shutdown",
+  "evidenceFormat": 1,
+  "sourceCommit": "324569d1a56f0c3fd1a9a0009ea4428054d8a84a",
+  "recordedAtUTC": "2026-10-19T14:02:16.574188+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/OwnedTaskHandoff.swift": "e391fc94123f68dce134f0ad2386a851ce07ae32db3a0b2d8b3cf1ed428a29ec",
+    "macos/core/Sources/RemozioCore/DirectApprovalListener.swift": "a40d842e9ae5c04fe7a271ac59ae79bcc30103bad9864b106a8a561589b823e6",
+    "macos/core/Sources/RemozioCore/DirectApprovalTransportHost.swift": "6839eda6d2a9fe3efdb4932b7e49660bde2c0f84e2f9a88e895e32994ffbdb32",
+    "macos/core/Sources/RemozioCore/DirectApprovalTransportService.swift": "dd5e9cf8e9d77b639ef6b55bd7485269f5bfaeed544e5ff41ba3002ff5320b93",
+    "macos/core/Sources/RemozioCore/AuthorityTrustFeed.swift": "8278b8baa4621827c7ed151f3ba129f36b78b9160c5ff05d74090e3b7e56ed95",
+    "macos/core/Tests/RemozioCoreTests/AuthorityTrustFeedTests.swift": "6c303adb0077cc6f3574562ffda022c919b60e78d930acb36cbb1ca2ddc6ec4b",
+    "macos/core/Tests/RemozioCoreTests/DirectApprovalRequestDeliveryTests.swift": "7d01c99d756a79ec470923ab721a4f0e68fc59a05d637ddb4b57487c76b47eef",
+    "macos/core/Tests/RemozioCoreTests/DirectApprovalTransportHostTests.swift": "2ac4d6ddc4f6f60e0b6df9a5e2bb73e4a8328d9bcd7aff76db5c7e0b2cc4ffe9",
+    "macos/core/Tests/RemozioCoreTests/DirectTransportDrainTests.swift": "4ac6f99f91987b92836f4cb045c6490e98153bd557bfe7b74951a20b5670df8e",
+    "macos/app/Transport/TransportMain.swift": "d1107cf4590ea0e70522e798ca4ce8c59d0f4453f2ea01a4d6482994ee90815b",
+    "docs/experiments/macos-direct-transport-shutdown.md": "dfc75bca6addedd043affaae93bd3de92365abe31d424d404cd935fcd4b4331c"
+  },
+  "validation": {
+    "nativeCoreTests": 2954,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "affectedSuitesCoveredByFullNativeRun": {
+      "sourceCommit": "324569d1a56f0c3fd1a9a0009ea4428054d8a84a",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "c47806fe98afbce82d2d3e4d14f87c23468e932f4a3b3414b6c5daf05f704b59",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "AuthorityTrustFeedTests": {
+          "tests": 33,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalRequestDeliveryTests": {
+          "tests": 43,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalTransportHostTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectTransportDrainTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "affectedSuiteCoverageSHA256": "d466c2cf52be1f414c8b92cb7db4c5ec6653d0008a8e0e6494bc7b02249ba16f",
+    "nativeLogSHA256": "c47806fe98afbce82d2d3e4d14f87c23468e932f4a3b3414b6c5daf05f704b59",
+    "ATCResultSHA256": "3bb533bb5bb32d5b16fbafbaeb4d6007364e37502491261bf42817f75ea1ca52",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Join current and retired direct handlers, trust refresh work and timers before the outer service lifetime ends.",
+    "Retain task reservations before installation and release each shared connection budget exactly once.",
+    "Use joined direct shutdown in the existing external Transport entry."
+  ],
+  "limits": [
+    "Owned runtime and native loopback checks do not establish installed dedicated UID or physical phone behavior.",
+    "Native settings host integration follows separately.",
+    "No installed services, secrets, physical devices or frozen recovery artifacts were used."
+  ]
+}
