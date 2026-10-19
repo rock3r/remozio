@@ -4,6 +4,7 @@ import XCTest
 @testable import RemozioCore
 
 final class GatewaySettingsConsumerHostTests: XCTestCase, @unchecked Sendable {
+    private final class Counter: Sendable { let value = Mutex(0) }
     private struct Failed: Error {}
     private final class WeakHost {
         weak var value: GatewaySettingsConsumerHost?
@@ -99,16 +100,16 @@ final class GatewaySettingsConsumerHostTests: XCTestCase, @unchecked Sendable {
         let files = try ServiceReleaseActivityFixture(), service = try files.open(), updater = try files.open(update: true)
         let listener = Listener(hold: true), host = try GatewaySettingsConsumerHost(owner: owner, listener: listener, activity: service.acquireShared())
         try await host.start()
-        let finished = Mutex(0), first = Task { try await host.close(); finished.withLock { $0 += 1 } }
-        let second = Task { try await host.close(); finished.withLock { $0 += 1 } }; first.cancel()
+        let finished = Counter(), first = Task { try await host.close(); finished.value.withLock { $0 += 1 } }
+        let second = Task { try await host.close(); finished.value.withLock { $0 += 1 } }; first.cancel()
         defer { listener.finish(); backend.finishClose() }
         try await until { listener.state.withLock { $0.gate != nil } }
         XCTAssertEqual(backend.state.withLock { $0.closes }, 0)
         XCTAssertTrue(backend.state.withLock { $0.retired }); XCTAssertThrowsError(try updater.acquireExclusive())
         listener.finish(); try await until { backend.state.withLock { $0.closeGate != nil } }
-        XCTAssertEqual(finished.withLock { $0 }, 0); XCTAssertThrowsError(try updater.acquireExclusive())
+        XCTAssertEqual(finished.value.withLock { $0 }, 0); XCTAssertThrowsError(try updater.acquireExclusive())
         backend.finishClose(); try await first.value; try await second.value
-        XCTAssertEqual(finished.withLock { $0 }, 2); XCTAssertEqual(backend.state.withLock { $0.closes }, 1)
+        XCTAssertEqual(finished.value.withLock { $0 }, 2); XCTAssertEqual(backend.state.withLock { $0.closes }, 1)
         let exclusive = try updater.acquireExclusive(); exclusive.close()
     }
     func testFailedDrainKeepsActivityAndAllowsCleanupRetryWithoutReopeningControl() async throws {

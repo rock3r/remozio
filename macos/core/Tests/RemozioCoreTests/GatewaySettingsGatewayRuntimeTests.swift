@@ -4,6 +4,7 @@ import XCTest
 @testable import RemozioCore
 
 final class GatewaySettingsGatewayRuntimeTests: XCTestCase, @unchecked Sendable {
+    private final class Counter: Sendable { let value = Mutex(0) }
     private struct Failed: Error {}
     private final class WeakPermit { weak var value: GatewaySettingsConsumerPermit? }
     private final class WeakRuntime {
@@ -140,19 +141,19 @@ final class GatewaySettingsGatewayRuntimeTests: XCTestCase, @unchecked Sendable 
         let starting = Task { try await runtime.start() }
         defer { Task { await gate.finish(); backend.finish(); try? await runtime.closeAndWait() } }
         try await until { await gate.waiting }
-        let completed = Mutex(0)
-        let first = Task { try await runtime.closeAndWait(); completed.withLock { $0 += 1 } }
-        let second = Task { try await runtime.closeAndWait(); completed.withLock { $0 += 1 } }
+        let completed = Counter()
+        let first = Task { try await runtime.closeAndWait(); completed.value.withLock { $0 += 1 } }
+        let second = Task { try await runtime.closeAndWait(); completed.value.withLock { $0 += 1 } }
         first.cancel()
-        try await Task.sleep(for: .milliseconds(20)); XCTAssertEqual(completed.withLock { $0 }, 0)
+        try await Task.sleep(for: .milliseconds(20)); XCTAssertEqual(completed.value.withLock { $0 }, 0)
         await gate.finish()
         try await until { backend.state.withLock { $0.closeGate != nil } }
         XCTAssertEqual(backend.state.withLock { $0.starts }, 0)
         XCTAssertGreaterThan(backend.state.withLock { $0.retires }, 0)
-        XCTAssertEqual(completed.withLock { $0 }, 0)
+        XCTAssertEqual(completed.value.withLock { $0 }, 0)
         backend.finish(); try await first.value; try await second.value
         do { try await starting.value; XCTFail() } catch {}
-        XCTAssertEqual(completed.withLock { $0 }, 2); XCTAssertEqual(backend.state.withLock { $0.closes }, 1)
+        XCTAssertEqual(completed.value.withLock { $0 }, 2); XCTAssertEqual(backend.state.withLock { $0.closes }, 1)
     }
     func testQuiescenceDuringProviderDrainRevokesPermitBeforePausedReceipt() async throws {
         let f = try Fixture(), backend = Backend(holdClose: true), owner = try f.owner(backend)

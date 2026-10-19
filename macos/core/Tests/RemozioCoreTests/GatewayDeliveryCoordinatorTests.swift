@@ -497,17 +497,17 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         let delivery = Task { try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)) }
         defer { delivery.cancel() }
         try await until { await gate.started }
-        let finished = Mutex(0)
-        let first = Task { try await coordinator.shutdown(); finished.withLock { $0 += 1 } }
-        let second = Task { try await coordinator.shutdown(); finished.withLock { $0 += 1 } }
+        let finished = Counter()
+        let first = Task { try await coordinator.shutdown(); finished.value.withLock { $0 += 1 } }
+        let second = Task { try await coordinator.shutdown(); finished.value.withLock { $0 += 1 } }
         first.cancel()
         try await until { await gate.cancelled }
         do { _ = try await delivery.value; XCTFail("Stopped delivery succeeded") } catch {}
         try await Task.sleep(for: .milliseconds(30))
-        XCTAssertEqual(finished.withLock { $0 }, 0)
+        XCTAssertEqual(finished.value.withLock { $0 }, 0)
         try await gate.release()
         try await first.value; try await second.value
-        XCTAssertEqual(finished.withLock { $0 }, 2)
+        XCTAssertEqual(finished.value.withLock { $0 }, 2)
         let attempts = await source.finishedAttemptCount, sends = await provider.times
         XCTAssertEqual(attempts, 1); XCTAssertTrue(sends.isEmpty)
         do { _ = try await source.token(); XCTFail("Stopped token source remained usable") }

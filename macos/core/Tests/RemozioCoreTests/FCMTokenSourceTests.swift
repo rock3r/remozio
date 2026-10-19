@@ -4,6 +4,7 @@ import Synchronization
 import XCTest
 
 final class FCMTokenSourceTests: XCTestCase, @unchecked Sendable {
+    private final class Counter: Sendable { let value = Mutex(0) }
     private enum FixtureError: Error { case timeout, missingAttempt }
     private final class Clock: Sendable {
         let value = Mutex(ContinuousClock.now)
@@ -69,21 +70,21 @@ final class FCMTokenSourceTests: XCTestCase, @unchecked Sendable {
         _ = await second.result
         let third = Task { try await source.token() }
         try await until { await new.calls == 1 }
-        let completed = Mutex(0)
-        let closing = Task { await source.shutdownAndWait(); completed.withLock { $0 += 1 } }
-        let otherClose = Task { await source.shutdownAndWait(); completed.withLock { $0 += 1 } }
+        let completed = Counter()
+        let closing = Task { await source.shutdownAndWait(); completed.value.withLock { $0 += 1 } }
+        let otherClose = Task { await source.shutdownAndWait(); completed.value.withLock { $0 += 1 } }
         closing.cancel()
         await expect(.stopped) { _ = try await third.value }
         try await until { await new.cancellations.contains(1) }
         try await Task.sleep(for: .milliseconds(30))
-        XCTAssertEqual(completed.withLock { $0 }, 0)
+        XCTAssertEqual(completed.value.withLock { $0 }, 0)
         try await new.complete(1, .success(lease(clock)))
         try await old.complete(2, .success(lease(clock)))
         try await Task.sleep(for: .milliseconds(30))
-        XCTAssertEqual(completed.withLock { $0 }, 0)
+        XCTAssertEqual(completed.value.withLock { $0 }, 0)
         try await old.complete(1, .success(lease(clock)))
         await closing.value; await otherClose.value
-        XCTAssertEqual(completed.withLock { $0 }, 2)
+        XCTAssertEqual(completed.value.withLock { $0 }, 2)
         await expect(.stopped) { _ = try await source.token() }
     }
 
