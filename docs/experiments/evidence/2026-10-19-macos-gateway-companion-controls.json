@@ -212,5 +212,59 @@
     },
     "installedResourcesChanged": false,
     "physicalTestsPerformed": false
+  },
+  "predecessorDigestFixValidation": {
+    "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+    "findingURL": "https://github.com/rock3r/remozio/pull/458#discussion_r4313328906",
+    "scope": "Bind the previous Gateway digest to its exact settings commit for successor fences.",
+    "redControl": "A same-scope valid alternate Gateway configuration passed fence decoding after substituting only field 9.",
+    "affectedFenceTests": 8,
+    "redProof": {
+      "sourceCommit": "ccb57dcc7e076bc4e8ffb3fabd6f85f23b1bed9a",
+      "expectedFailure": "XCTAssertThrowsError failed: did not throw an error",
+      "tests": 1,
+      "failures": 1,
+      "unexpected": 0,
+      "test": "valid same-scope alternate Gateway bytes admitted by a substituted predecessor digest",
+      "logSHA256": "4dbc5c4e6df04efd07c14a7b155a57cdb9b60cafa164f0db2aece233dcb460d8",
+      "proofParserCorrection": "Matched the actual XCTest wording; no test rerun."
+    },
+    "nativeCoreTests": 2948,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+      "recordedAtUTC": "2026-10-19T12:12:43.575192+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1275.52,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "43a3f7f967223c517ed30b9ee0ebc74d04231ae92cab138648de143381efcdda"
+    },
+    "portableGate": {
+      "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 29.81,
+      "resultSHA256": "83b91064a8d75169c8c1137989cb77de8b5f02dd3dd24cfce790435d9e096fd3"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "43a3f7f967223c517ed30b9ee0ebc74d04231ae92cab138648de143381efcdda",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewayRuntimeSettingsFenceTests": {
+          "tests": 8,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
   }
 }
