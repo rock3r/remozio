@@ -168,5 +168,49 @@
     },
     "installedResourcesChanged": false,
     "physicalTestsPerformed": false
+  },
+  "compilerFixtureFixValidation": {
+    "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+    "scope": "Split the test fixture expression into explicitly typed role, format and component steps without changing declarations or assertions.",
+    "ciFailureLogSHA256": "b4b944d7a4161a36028f29d14886afa333a083c0a9ff5bac4bb5cfe912a8e514",
+    "fixtureSourceSHA256": "1ffaf90c8addad0dfff1e9675f3397d17c75e2e5197fa3e6dfa06ca9c754c270",
+    "affectedPreflightTests": 6,
+    "nativeCoreTests": 2947,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+      "recordedAtUTC": "2026-10-19T11:31:26.377043+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1185.32,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "b7ee3e55f15186edeb6e5a0a7b03acc2d4eab177ce3c987406efdec53b1273a8"
+    },
+    "portableGate": {
+      "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.98,
+      "resultSHA256": "3fab7144e83494c6b288b7df17d76d4c1f812b1266466203cc6b4b1b1c871024"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "b7ee3e55f15186edeb6e5a0a7b03acc2d4eab177ce3c987406efdec53b1273a8",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewaySettingsConsumerPreflightTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
   }
 }
