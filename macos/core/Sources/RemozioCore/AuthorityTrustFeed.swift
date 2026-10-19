@@ -26,6 +26,8 @@ public actor AuthorityTrustFeed {
     private var timer: Task<Void, Never>?
     private var retiredTimer: Task<Void, Never>?
     private let refreshWork = OwnedTaskHandoffRegistry()
+    private var inFlightOperations = 0
+    private var operationDrainers: [CheckedContinuation<Void, Never>] = []
     private var lastSnapshot: Data?
     private var started = false
     private var ready = false
@@ -59,6 +61,7 @@ public actor AuthorityTrustFeed {
 
     public func start(host: DirectApprovalTransportHost) async throws {
         guard !started, !closed else { throw AuthorityXPCError.invalidState }
+        inFlightOperations += 1; defer { finishOperation() }
         started = true; busy = true; self.host = host
         defer { release() }
         do {
@@ -92,6 +95,7 @@ public actor AuthorityTrustFeed {
         catch { await close() }
     }
     public func refresh() async throws {
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do { try await update(try activeChannel()) }
@@ -99,6 +103,7 @@ public actor AuthorityTrustFeed {
     }
     /// Every call reaches the authority. A previous allow result is never cached.
     public func validatePeer(_ peer: DirectApprovalPeer, revision: UUID) async throws {
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         let allowed: Bool
@@ -114,6 +119,7 @@ public actor AuthorityTrustFeed {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID, requestID.count == 16 else {
             throw AuthorityXPCError.invalidMessage
         }
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do {
@@ -129,6 +135,7 @@ public actor AuthorityTrustFeed {
     /// Discover through the ordered authority connection. IDs are hints, never terminal request statuses.
     public func pendingRequestIDs(_ peer: DirectApprovalPeer, revision: UUID) async throws -> [Data] {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do {
@@ -141,6 +148,7 @@ public actor AuthorityTrustFeed {
         } catch { await close(); throw error }
     }
     func supportsRequestExchange() async throws -> Bool {
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do {
@@ -153,6 +161,7 @@ public actor AuthorityTrustFeed {
     public func exchangeRequest(_ peer: DirectApprovalPeer, revision: UUID, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
         _ = try AuthorityRequestExchange.encode(requestID: requestID, decisionFrame: decisionFrame)
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do {
@@ -170,6 +179,7 @@ public actor AuthorityTrustFeed {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID, setupID.count == 16 else {
             throw AuthorityXPCError.invalidMessage
         }
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do {
@@ -183,6 +193,7 @@ public actor AuthorityTrustFeed {
     }
     /// The transport performs this harmless preflight before accepting private recovery fields.
     public func requirePhonePushRecoverySupport() async throws {
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire(); defer { release() }
         let link = try await openRecoveryLink()
         do {
@@ -198,6 +209,7 @@ public actor AuthorityTrustFeed {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
         let binding = AuthorityPeerBinding(peer: peer, revision: revision)
         try AuthorityPhonePushRecoveryExchange.request(frame, binding: binding)
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire(); defer { release() }
         let link = try await openRecoveryLink()
         do {
@@ -233,6 +245,7 @@ public actor AuthorityTrustFeed {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
         let binding = AuthorityPeerBinding(peer: peer, revision: revision)
         try AuthorityPhonePushExchange.request(frame, binding: binding)
+        inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         let link = try await openRegistrationLink()
@@ -281,9 +294,22 @@ public actor AuthorityTrustFeed {
         }
         await host?.authorityDisconnected(lease)
     }
-    /// External owners join refresh work after invalidating the channels. Internal refresh failure uses close alone.
+    /// External owners join admitted operations and refresh tasks after closing admission. Internal failures use close alone.
     public func closeAndWait() async {
-        await close(); await retiredTimer?.value; await refreshWork.waitAll(); retiredTimer = nil
+        await close(); await retiredTimer?.value; await refreshWork.waitAll()
+        await withCheckedContinuation { continuation in
+            if inFlightOperations == 0 { continuation.resume() }
+            else { operationDrainers.append(continuation) }
+        }
+        retiredTimer = nil
+    }
+    private func finishOperation() {
+        precondition(inFlightOperations > 0)
+        inFlightOperations -= 1
+        if inFlightOperations == 0 {
+            let pending = operationDrainers; operationDrainers.removeAll()
+            for continuation in pending { continuation.resume() }
+        }
     }
     private func update(_ channel: AuthorityXPCChannel) async throws {
         let trust = try await channel.fetchTrust(expectedMacID: macID, expectedAccountID: accountID)
