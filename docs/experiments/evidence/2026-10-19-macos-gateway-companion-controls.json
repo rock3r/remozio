@@ -124,5 +124,49 @@
     "Native runtime adapters, host metadata, fixed registration, restart recovery and the visible app action follow separately.",
     "Owned runtime and anonymous XPC controls do not establish installed dedicated UID or Developer ID admission.",
     "No installed services, secrets, physical devices or frozen recovery artifacts were used."
-  ]
+  ],
+  "reviewFixValidation": {
+    "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+    "findingURL": "https://github.com/rock3r/remozio/pull/458#discussion_r4312481845",
+    "scope": "Require both signed fence readers and the Setup fence writer before companion native control.",
+    "redControl": "The previous preflight accepted ten incompatible declarations.",
+    "affectedPreflightTests": 6,
+    "nativeCoreTests": 2947,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+      "recordedAtUTC": "2026-10-19T10:25:51.016760+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1256.68,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "dac6bde7e10074696a8b093e6e1a1378a92301c19a13d4a60acf5b79f532d99f"
+    },
+    "portableGate": {
+      "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 27.1,
+      "resultSHA256": "312ee506af70d4e0f12d2ac6f41f03e192059b18ac3ece53e4017e8a4156692e"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "dac6bde7e10074696a8b093e6e1a1378a92301c19a13d4a60acf5b79f532d99f",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewaySettingsConsumerPreflightTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
+  }
 }
