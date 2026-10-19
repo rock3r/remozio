@@ -162,9 +162,9 @@ final class AuthorityWakeSettingsTests: XCTestCase, @unchecked Sendable {
         let service = try f.service([first], creationGate: gate), change = try f.change(), checks = Mutex(0), completed = Mutex(0)
         defer { gate.signal() }
         try await service.start(); try await waitUntil { f.attempts.withLock { $0 == 1 } }
-        let firstPause = Task { try await service.quiescePhonePushSettings(change, verifyCurrent: {}); completed.withLock { $0 += 1 } }
+        let firstPause = Task { @Sendable in try await service.quiescePhonePushSettings(change, verifyCurrent: {}); completed.withLock { $0 += 1 } }
         try await waitUntil { await service.wakeStatus == .quiescingForSettings }
-        let retry = Task { try await service.quiescePhonePushSettings(change, verifyCurrent: { checks.withLock { $0 += 1 } }); completed.withLock { $0 += 1 } }
+        let retry = Task { @Sendable in try await service.quiescePhonePushSettings(change, verifyCurrent: { checks.withLock { $0 += 1 } }); completed.withLock { $0 += 1 } }
         try await waitUntil { checks.withLock { $0 } >= 2 }
         XCTAssertEqual(completed.withLock { $0 }, 0)
         do { try await service.quiescePhonePushSettings(f.change(2), verifyCurrent: { XCTFail() }); XCTFail() } catch {}
