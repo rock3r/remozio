@@ -51,10 +51,10 @@ final class AuthorityGatewaySettingsRuntimeTests: XCTestCase, @unchecked Sendabl
     func testConcurrentAndCancelledClosesJoinTheSameWorkBeforeReturning() async throws {
         let listener = Listener(blockClose: true), completed = Mutex(0)
         let owner = AuthorityGatewaySettingsRuntime { listener }; try await owner.start()
-        let first = Task { await owner.close(); completed.withLock { $0 += 1 } }
+        let first = Task { @Sendable in await owner.close(); completed.withLock { $0 += 1 } }
         defer { listener.release() }
         try await waitUntil { listener.gates.withLock { !$0.isEmpty } }
-        let second = Task { await owner.close(); completed.withLock { $0 += 1 } }
+        let second = Task { @Sendable in await owner.close(); completed.withLock { $0 += 1 } }
         first.cancel(); try await Task.sleep(for: .milliseconds(25))
         XCTAssertEqual(completed.withLock { $0 }, 0); XCTAssertEqual(listener.closes.withLock { $0 }, 1)
         listener.release(); await first.value; await second.value
