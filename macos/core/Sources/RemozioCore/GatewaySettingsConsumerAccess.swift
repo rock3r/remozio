@@ -42,7 +42,12 @@ enum GatewaySettingsConsumerReleaseValidation {
                   release.codeDirectoryHashes[entry.role] == entry.codeDirectoryHash,
                   let format = component.formats.first(where: { $0.name == role.formatName }),
                   format.readers.contains(GatewaySettingsConsumerInterface.version),
-                  format.writers.contains(GatewaySettingsConsumerInterface.version) else { throw GatewayPreparationError.changedScope }
+                  format.writers.contains(GatewaySettingsConsumerInterface.version),
+                  let fence = component.formats.first(where: { $0.name == GatewayRuntimeSettingsFence.formatName }),
+                  GatewayRuntimeSettingsFence.supportedVersions.isSubset(of: fence.readers),
+                  entry.role != .setupController || GatewayRuntimeSettingsFence.supportedVersions.isSubset(of: fence.writers) else {
+                throw GatewayPreparationError.changedScope
+            }
         }
     }
 }

@@ -14,7 +14,8 @@ final class GatewaySettingsConsumerPreflightTests: XCTestCase, @unchecked Sendab
         let components = try [AuthorityCodeRole.app, role.codeRole, .setupController].map { code in
             try edit(.init(role: code, identifier: "dev.remozio.role-\(code.rawValue)", generation: 4,
                 relativePath: "Contents/Helpers/role-\(code.rawValue)", codeDirectoryHash: code == .app ? nil : Data(repeating: 1, count: 20),
-                build: "4", teamID: team, formats: code == omit ? [] : [try .init(name: role.formatName, readers: [version], writers: [version])]))
+                build: "4", teamID: team, formats: code == omit ? [] : [try .init(name: role.formatName, readers: [version], writers: [version])] +
+                    (code == .app ? [] : [try .init(name: GatewayRuntimeSettingsFence.formatName, readers: [1], writers: code == .setupController ? [1] : [])])))
         }
         return .init(manifest: try .init(release: "0.1.0", build: "4", components: components),
             codeDirectoryHashes: Dictionary(uniqueKeysWithValues: components.map { ($0.role, $0.codeDirectoryHash ?? Data(repeating: 1, count: 20)) }))
@@ -31,6 +32,39 @@ final class GatewaySettingsConsumerPreflightTests: XCTestCase, @unchecked Sendab
             XCTAssertThrowsError(try GatewaySettingsConsumerReleaseValidation.validate(release(role: other), role: role, consumer: consumer, setup: setup))
             XCTAssertThrowsError(try GatewaySettingsConsumerReleaseValidation.validate(release(role: role), role: role, consumer: entry(role.codeRole, active: false), setup: setup))
             XCTAssertThrowsError(try GatewaySettingsConsumerReleaseValidation.validate(release(role: role), role: role, consumer: consumer, setup: entry(.setupController, active: false)))
+        }
+    }
+    func testFenceReadersAndSetupWriterAreRequiredBeforeEitherNativeSideCanStart() throws {
+        for role in GatewaySettingsConsumerRole.allCases {
+            let consumer = try entry(role.codeRole), setup = try entry(.setupController)
+            for code in [role.codeRole, .setupController] {
+                for mode in 0..<3 {
+                    let value = try release(role: role, edit: { component in
+                        guard component.role == code else { return component }
+                        let other = component.formats.filter { $0.name != GatewayRuntimeSettingsFence.formatName }
+                        let replacement: [ReleaseFormat]
+                        if mode == 0 { replacement = [] }
+                        else if mode == 1 {
+                            replacement = [try .init(name: GatewayRuntimeSettingsFence.formatName, readers: [2],
+                                writers: code == .setupController ? [2] : [])]
+                        } else {
+                            // Consumers need no writer. Only Setup publishes retained fences.
+                            guard code == .setupController else { return component }
+                            replacement = [try .init(name: GatewayRuntimeSettingsFence.formatName, readers: [1, 2], writers: [2])]
+                        }
+                        return try .init(role: component.role, identifier: component.identifier, generation: component.generation,
+                            relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
+                            build: component.build, teamID: component.teamID, formats: other + replacement)
+                    })
+                    if mode == 2 && code != .setupController {
+                        XCTAssertNoThrow(try GatewaySettingsConsumerReleaseValidation.validate(value, role: role, consumer: consumer, setup: setup))
+                    } else {
+                        XCTAssertThrowsError(try GatewaySettingsConsumerReleaseValidation.validate(value, role: role, consumer: consumer, setup: setup))
+                    }
+                }
+            }
+            XCTAssertNoThrow(try GatewaySettingsConsumerReleaseValidation.validate(release(role: role), role: role,
+                consumer: consumer, setup: setup))
         }
     }
     func testRetainedIdentityAndActuallyInspectedCodeHashesCannotBeSubstituted() throws {
