@@ -9,6 +9,7 @@ import XCTest
 final class RoutingJournalTests: XCTestCase {
     private enum Failure: Error { case injected }
     private let key = P256.Signing.PrivateKey()
+    private let rootKey = P256.Signing.PrivateKey()
     private let clock = UUID()
     private func id(_ n: UInt8) -> Data { Data(repeating: n, count: 16) }
     private var limits: CBORLimits { get throws { try .init(maxBytes: 16384, maxDepth: 12, maxItems: 1024) } }
@@ -361,5 +362,236 @@ final class RoutingJournalTests: XCTestCase {
             defer { sqlite3_close(db) }
             guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw Failure.injected }
         }
+    }
+}
+
+
+extension RoutingJournalTests {
+    private func binding(_ db: JournalDatabase) throws -> AuthorityPeerBinding {
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 16384) }
+        return AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision)
+    }
+    private func route(_ owner: ApprovalRequestCoordinator, _ runtime: AuthorityPresenceRuntime, _ binding: AuthorityPeerBinding,
+                       _ frame: PhoneRoutingFrame, at: UInt64 = 100, wall: UInt64? = 1000,
+                       sign: ((Data) throws -> Data)? = nil) throws -> RoutingStatusResponse {
+        let reply = try owner.phoneRouting(frame, binding: binding, authorityPublicKey: rootKey.publicKey.x963Representation,
+            now: { self.now(at) }, wallTime: { wall }, routing: { try runtime.routing(owner: $0, now: $1) },
+            signer: sign ?? { try self.rootKey.signature(for: $0).rawRepresentation })
+        return try verified(reply, expectedNonce: frame.queryNonce)
+    }
+    private func verified(_ frame: PhoneRoutingFrame, expectedNonce: Data) throws -> RoutingStatusResponse {
+        guard case .response(let nonce, let body, let signature) = frame else { throw Failure.injected }
+        XCTAssertEqual(nonce, expectedNonce)
+        XCTAssertTrue(try RoutingStatusSignature.verify(signature: signature, publicKey: rootKey.publicKey.x963Representation,
+            wireVersion: 1, canonicalPayload: body, inputLimits: .init(maxBytes: 3200, maxDepth: 2, maxItems: 16)))
+        let status = try RoutingStatusResponse.decode(body); XCTAssertEqual(status.queryNonce, expectedNonce); return status
+    }
+    private func signedControl(_ status: RoutingStatusResponse) throws -> (Data, Data) {
+        let body = try XCTUnwrap(status.canonicalChallenge)
+        return (body, try key.signature(for: RoutingAwaySigningInput.make(wireVersion: 1, canonicalPayload: body,
+            payloadLimits: limits, inputLimits: limits)).rawRepresentation)
+    }
+    private func nonce(_ n: UInt8) -> Data { Data(repeating: n, count: 32) }
+
+    func testPhoneRoutingStatusAndChallengeRemainAvailableWhilePresentSuppressesApprovalDelivery() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        _ = try runtime.publish(usableSnapshot(), observer: UUID(), sampledAt: now(), now: now())
+        let peer = try binding(db)
+        let first = try route(owner, runtime, peer, .status(queryNonce: nonce(1)), wall: nil)
+        XCTAssertEqual(first.state.mode, .automatic); XCTAssertEqual(first.state.reason, .remoteDesktop)
+        _ = try owner.setLocalRoutingMode(.present, expectedRevision: 0, now: now(101), receiptTimeMs: 1001)
+        let status = try route(owner, runtime, peer, .status(queryNonce: nonce(2)), at: 102, wall: nil)
+        XCTAssertEqual(status.state.mode, .present); XCTAssertEqual(status.state.revision, 1)
+        let challenge = try route(owner, runtime, peer, .challenge(queryNonce: nonce(3), expectedRevision: 1), at: 103)
+        XCTAssertEqual(challenge.outcome, .challenge)
+        let control = try RoutingAwayControl.decode(XCTUnwrap(challenge.canonicalChallenge), limits: limits)
+        XCTAssertEqual(control.macID, id(1)); XCTAssertEqual(control.accountID, id(2)); XCTAssertEqual(control.phoneID, id(5))
+        XCTAssertEqual(control.enrollmentEpoch, id(4)); XCTAssertEqual(control.keyID, id(6)); XCTAssertEqual(control.expectedRevision, 1)
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .present, revision: 1))
+        XCTAssertEqual(try db.read { try $0.page(epoch: id(3), after: 0, maximumRecords: 10, maximumBytes: 16384).canonicalRecords.count }, 2)
+    }
+    func testPhoneRoutingAppliedReceiptNeverClaimsAHistoricalAwayModeIsCurrent() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db)
+        let issued = try route(owner, runtime, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0))
+        let (body, signature) = try signedControl(issued)
+        let applied = try route(owner, runtime, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: signature), at: 110, wall: 1100)
+        XCTAssertEqual(applied.outcome, .applied); XCTAssertEqual(applied.appliedRevision, 1)
+        XCTAssertEqual(applied.state.mode, .away); XCTAssertEqual(applied.state.revision, 1)
+        XCTAssertEqual(applied.controlDigest, Data(SHA256.hash(data: body)))
+        _ = try owner.setLocalRoutingMode(.present, expectedRevision: 1, now: now(120), receiptTimeMs: 1200)
+        let historical = try route(owner, runtime, peer, .apply(queryNonce: nonce(3), canonicalControl: body, signature: signature), at: 2000, wall: 9999)
+        XCTAssertEqual(historical.outcome, .applied); XCTAssertEqual(historical.appliedRevision, 1)
+        XCTAssertEqual(historical.state.mode, .present); XCTAssertEqual(historical.state.revision, 2)
+        let records = try db.read { try $0.page(epoch: id(3), after: 1, maximumRecords: 10, maximumBytes: 16384).canonicalRecords }
+        let events = try records.map { try AuditEventMetadata.decode($0, limits: limits) }
+        XCTAssertEqual(events.map { $0.authentication }, [.decisionKey, .localUser])
+        XCTAssertTrue(events.allSatisfy { $0.requestID == nil && $0.action == nil })
+    }
+    func testPhoneRoutingConflictsReturnCurrentStateWithoutAnotherModeChange() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db), issued = try route(owner, runtime, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0))
+        let (body, signature) = try signedControl(issued)
+        _ = try owner.setLocalRoutingMode(.present, expectedRevision: 0, now: now(110), receiptTimeMs: 1100)
+        let conflict = try route(owner, runtime, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: signature), at: 120)
+        XCTAssertEqual(conflict.outcome, .conflict); XCTAssertEqual(conflict.state.mode, .present); XCTAssertEqual(conflict.state.revision, 1)
+        XCTAssertEqual(conflict.controlDigest, Data(SHA256.hash(data: body))); XCTAssertNil(conflict.appliedRevision)
+        let staleQuery = try route(owner, runtime, peer, .challenge(queryNonce: nonce(3), expectedRevision: 0), at: 130)
+        XCTAssertEqual(staleQuery.outcome, .conflict); XCTAssertEqual(staleQuery.state.revision, 1)
+        XCTAssertNil(staleQuery.canonicalChallenge); XCTAssertNil(staleQuery.controlDigest)
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .present, revision: 1))
+    }
+    func testPhoneRoutingWrongDecisionSignatureAndBiometricKeyCannotConsumeTheChallenge() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db), issued = try route(owner, runtime, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0))
+        let (body, signature) = try signedControl(issued)
+        fails(.invalidSignature) { try route(owner, runtime, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: Data(repeating: 0, count: 64)), at: 110) }
+        guard case .map(var fields) = try DeterministicCBOR.decode(body, limits: limits) else { return XCTFail() }
+        fields[7] = .bytes(id(7)); let altered = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        fails(.wrongKey) { try route(owner, runtime, peer, .apply(queryNonce: nonce(3), canonicalControl: altered, signature: signature), at: 120) }
+        XCTAssertEqual(try owner.localRoutingState().revision, 0)
+        XCTAssertEqual(try route(owner, runtime, peer, .apply(queryNonce: nonce(4), canonicalControl: body, signature: signature), at: 130).state.mode, .away)
+    }
+    func testPhoneRoutingExpiredChallengeLeavesModeAndAuditUnchanged() throws {
+        for wallExpired in [false, true] {
+            let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+            defer { runtime.close(); owner.close(); try? db.close() }
+            let peer = try binding(db), issued = try route(owner, runtime, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0))
+            let (body, signature) = try signedControl(issued)
+            fails(.expired) { try route(owner, runtime, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: signature),
+                at: wallExpired ? 110 : 1100, wall: wallExpired ? 2000 : 1100) }
+            XCTAssertEqual(try owner.localRoutingState(), .init(mode: .automatic, revision: 0))
+            XCTAssertEqual(try db.read { try $0.page(epoch: id(3), after: 0, maximumRecords: 10, maximumBytes: 16384).canonicalRecords.count }, 1)
+        }
+    }
+    func testPhoneRoutingRevokedOrWrongScopePeerCannotReadOrChangeTheAccount() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db)
+        let otherScope = try ChannelScope(macID: id(9), accountID: id(2), phoneID: id(5), enrollmentEpoch: id(4))
+        let wrong = try AuthorityPeerBinding(scope: otherScope, transportPublicKey: peer.transportPublicKey, revision: peer.revision)
+        XCTAssertThrowsError(try route(owner, runtime, wrong, .status(queryNonce: nonce(1))))
+        let revision = try db.write { try $0.revokeApprovalEnrollment(phoneID: id(5), epoch: id(4), expectedTrustRevision: trust,
+            eventID: id(11), receiptTimeMs: 1100, writer: writer, expectedAuditHead: 1).revision }
+        XCTAssertThrowsError(try route(owner, runtime, peer, .status(queryNonce: nonce(2)), at: 110))
+        let removed = try AuthorityPeerBinding(scope: peer.scope, transportPublicKey: peer.transportPublicKey, revision: revision)
+        XCTAssertThrowsError(try route(owner, runtime, removed, .challenge(queryNonce: nonce(3), expectedRevision: 0), at: 120))
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .automatic, revision: 0))
+    }
+    func testPhoneRoutingSignerFailureAfterCommitRequiresReconciliationInsteadOfRollback() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db), issued = try route(owner, runtime, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0))
+        let (body, signature) = try signedControl(issued)
+        XCTAssertThrowsError(try route(owner, runtime, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: signature), at: 110, sign: { _ in throw Failure.injected }))
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .away, revision: 1))
+        let status = try route(owner, runtime, peer, .status(queryNonce: nonce(3)), at: 120)
+        XCTAssertEqual(status.state.mode, .away); XCTAssertEqual(status.state.revision, 1)
+        XCTAssertEqual(try db.read { try $0.page(epoch: id(3), after: 0, maximumRecords: 10, maximumBytes: 16384).canonicalRecords.count }, 2)
+    }
+    func testPhoneRoutingRejectsWrongSignerAndMissingMutationClockWithoutPublishingOrChangingMode() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db), wrong = P256.Signing.PrivateKey()
+        XCTAssertThrowsError(try route(owner, runtime, peer, .status(queryNonce: nonce(1)), sign: { try wrong.signature(for: $0).rawRepresentation }))
+        fails(.invalidClock) { try route(owner, runtime, peer, .challenge(queryNonce: nonce(2), expectedRevision: 0), at: 110, wall: nil) }
+        XCTAssertThrowsError(try route(owner, runtime, peer, .status(queryNonce: Data()), at: 120))
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .automatic, revision: 0))
+    }
+    func testPhoneRoutingResignsAfterPresenceChangesDuringSigningWithoutRepeatingAMutation() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        _ = try runtime.publish(usableSnapshot(), observer: UUID(), sampledAt: now(), now: now())
+        let peer = try binding(db); var time: UInt64 = 100; var signatures = 0
+        let reply = try owner.phoneRouting(.status(queryNonce: nonce(1)), binding: peer, authorityPublicKey: rootKey.publicKey.x963Representation,
+            now: { self.now(time) }, wallTime: { nil }, routing: { try runtime.routing(owner: $0, now: $1) }, signer: {
+                signatures += 1; time = 1300; return try self.rootKey.signature(for: $0).rawRepresentation
+            })
+        let result = try verified(reply, expectedNonce: nonce(1)); XCTAssertEqual(signatures, 2)
+        XCTAssertEqual(result.state.reason, .detectorUnavailable); XCTAssertEqual(result.state.destination, .phones)
+        XCTAssertEqual(result.sampledAtMilliseconds, 1300)
+    }
+    func testPhoneRoutingDoesNotPublishAChallengeWhoseOriginalDeadlinePassedDuringSigning() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db); var time: UInt64 = 100
+        fails(.expired) { try owner.phoneRouting(.challenge(queryNonce: nonce(1), expectedRevision: 0), binding: peer,
+            authorityPublicKey: rootKey.publicKey.x963Representation, now: { self.now(time) }, wallTime: { 1000 },
+            routing: { try runtime.routing(owner: $0, now: $1) }, signer: {
+                time = 1100; return try self.rootKey.signature(for: $0).rawRepresentation
+            }) }
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .automatic, revision: 0))
+    }
+    func testPhoneRoutingAuditFailureRollsBackTheModeAndLeavesTheOriginalChallengeUsable() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db), issued = try route(owner, runtime, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0))
+        let (body, signature) = try signedControl(issued)
+        try f.sql("CREATE TRIGGER reject_write BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try route(owner, runtime, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: signature), at: 110))
+        XCTAssertEqual(try owner.localRoutingState().revision, 0)
+        try f.sql("DROP TRIGGER reject_write")
+        XCTAssertEqual(try route(owner, runtime, peer, .apply(queryNonce: nonce(3), canonicalControl: body, signature: signature), at: 120).state.mode, .away)
+    }
+    func testPhoneRoutingWithholdsTheReplyWhenEnrollmentChangesDuringSigning() throws {
+        let f = try Fixture(), (db, writer, trust) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let peer = try binding(db)
+        XCTAssertThrowsError(try route(owner, runtime, peer, .status(queryNonce: nonce(1)), sign: { bytes in
+            _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: self.id(5), epoch: self.id(4), expectedTrustRevision: trust,
+                eventID: self.id(11), receiptTimeMs: 1100, writer: writer, expectedAuditHead: 1) }
+            return try self.rootKey.signature(for: bytes).rawRepresentation
+        }))
+        XCTAssertEqual(try owner.localRoutingState(), .init(mode: .automatic, revision: 0))
+    }
+}
+
+
+extension RoutingJournalTests {
+    private func providerConfiguration(_ f: Fixture, maximum: Int = 16384) throws -> AuthorityServiceConfiguration {
+        try .init(macID: id(1), accountID: id(2), journalDirectory: f.directory, serviceName: "dev.remozio.fixture.routing",
+            teamID: "SYNTHETIC1", transportIdentifier: "dev.remozio.fixture.transport",
+            transportHashes: [Data(repeating: 7, count: 20)], transportUID: 501, maximumPayloadBytes: maximum)
+    }
+    private func providers(_ f: Fixture, presence: AuthorityPresenceRuntime? = nil,
+                           wall: (@Sendable () -> UInt64?)? = nil, maximum: Int = 16384) throws -> AuthorityRequestProviders {
+        let bytes = rootKey.rawRepresentation
+        return try .init(configuration: providerConfiguration(f, maximum: maximum), publicKey: rootKey.publicKey.x963Representation,
+            signing: { try P256.Signing.PrivateKey(rawRepresentation: bytes).signature(for: $0).rawRepresentation },
+            routing: { throw AuthorityPresenceError.unavailable }, presence: presence, routingWallTime: wall)
+    }
+    func testPhoneRoutingProviderRequiresExplicitPresenceClockAndCompleteCarrierBudget() throws {
+        let f = try Fixture(), runtime = try presence(); defer { runtime.close() }
+        XCTAssertNil(try providers(f).phoneRouting)
+        XCTAssertNil(try providers(f, presence: runtime).phoneRouting)
+        XCTAssertThrowsError(try providers(f, wall: { 1000 }))
+        XCTAssertThrowsError(try providers(f, presence: runtime, wall: { 1000 }, maximum: 1024))
+        XCTAssertNotNil(try providers(f, presence: runtime, wall: { 1000 }).phoneRouting)
+    }
+    func testPhoneRoutingProviderUsesTheSameProtectedScopeSignerAndAuthorityClockForTheCompleteExchange() throws {
+        let f = try Fixture(), (db, writer, _) = try setup(f), owner = try requestOwner(db, writer: writer), runtime = try presence()
+        defer { runtime.close(); owner.close(); try? db.close() }
+        let provider = try XCTUnwrap(providers(f, presence: runtime, wall: { 1000 }).phoneRouting)
+        let peer = try binding(db), epoch = clock
+        let issued = try verified(provider(owner, peer, .challenge(queryNonce: nonce(1), expectedRevision: 0),
+            { .init(epoch: epoch, milliseconds: 100) }), expectedNonce: nonce(1))
+        let (body, signature) = try signedControl(issued)
+        let applied = try verified(provider(owner, peer, .apply(queryNonce: nonce(2), canonicalControl: body, signature: signature),
+            { .init(epoch: epoch, milliseconds: 110) }), expectedNonce: nonce(2))
+        XCTAssertEqual(applied.state.mode, .away); XCTAssertEqual(applied.appliedRevision, 1)
+        let status = try verified(provider(owner, peer, .status(queryNonce: nonce(3)),
+            { .init(epoch: epoch, milliseconds: 120) }), expectedNonce: nonce(3))
+        XCTAssertEqual(status.state.mode, .away); XCTAssertEqual(status.outcome, .status)
+        let wrong = try AuthorityPeerBinding(scope: .init(macID: id(9), accountID: id(2), phoneID: id(5), enrollmentEpoch: id(4)),
+            transportPublicKey: peer.transportPublicKey, revision: peer.revision)
+        XCTAssertThrowsError(try provider(owner, wrong, .status(queryNonce: nonce(4)), { .init(epoch: epoch, milliseconds: 130) }))
+    }
+    func testPhoneRoutingProviderRejectsAMismatchedPresenceRuntimeBeforeAnyOperation() throws {
+        let f = try Fixture(), wrong = try presence(mac: 9); defer { wrong.close() }
+        XCTAssertThrowsError(try providers(f, presence: wrong, wall: { 1000 }))
     }
 }
