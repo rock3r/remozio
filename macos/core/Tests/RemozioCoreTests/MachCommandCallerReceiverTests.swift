@@ -6271,7 +6271,8 @@ extension MachCommandCallerReceiverTests {
 
 extension MachCommandCallerReceiverTests {
     func testNativePTYControlsResizeAndSignalTheCurrentForegroundJob() throws {
-        for cancel in [false, true] {
+        for mode in ["interrupt", "interrupt-ready", "cancel"] {
+            let cancel = mode == "cancel"
             let fixture = try CommandRequestFixture(owned: true), authority = try XCTUnwrap(fixture.authority)
             let launcher = try dispatchLauncher(fixture), admissionPort = try Endpoint(), terminal = try Endpoint()
             let source = try XCTUnwrap(Bundle.module.url(forResource: "pty-controls", withExtension: "c", subdirectory: "Fixtures/command-process"))
@@ -6286,7 +6287,7 @@ extension MachCommandCallerReceiverTests {
             }
             let (_, command, submission, profile) = try input.withBorrowedSlave {
                 try ownerIOCommand(admission: admissionPort, terminal: terminal, inputDescriptor: $0,
-                    executablePath: program.path, arguments: [Data("program".utf8), Data((cancel ? "cancel" : "interrupt").utf8)],
+                    executablePath: program.path, arguments: [Data("program".utf8), Data(mode.utf8)],
                     wire: 4, ioMode: .pty)
             }
             let request = try admitOwnedCommand(command, fixture: fixture)
