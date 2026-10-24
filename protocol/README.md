@@ -104,3 +104,6 @@ The [restricted pairing exchange](pairing-setup.md) carries public phone claims,
 The [pairing receipt recovery exchange](pairing-receipt.md) retrieves an existing commit proof through a separate enrolled TLS purpose.
 
 The [bounded pending snapshot contract](pending-request-snapshot.md) defines transfer completion and retained status queries. Production adapters remain separate work.
+
+The [update scheduling control](update-scheduling.md) defines a separate signed claim for one verified release.
+It does not enable an updater or grant target-action authority.

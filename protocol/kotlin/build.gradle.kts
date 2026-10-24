@@ -52,6 +52,9 @@ tasks.matching { it.name.startsWith("compileTestKotlin") || it.name == "compileT
 // The JVM tests keep their file-based vector wiring.
 tasks.named<Test>("jvmTest") {
     useJUnit()
+    val updateSchedulingVectors = rootProject.layout.projectDirectory.file("protocol/vectors/update-scheduling-v1.json")
+    inputs.file(updateSchedulingVectors)
+    systemProperty("remozio.updateSchedulingVectors", updateSchedulingVectors.asFile.absolutePath)
     val pushRecoveryVectors = rootProject.layout.projectDirectory.file("protocol/vectors/phone-push-recovery-v2.json")
     inputs.file(pushRecoveryVectors)
     systemProperty("remozio.pushRecoveryVectors", pushRecoveryVectors.asFile.absolutePath)
