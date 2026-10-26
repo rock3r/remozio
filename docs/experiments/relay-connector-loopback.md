@@ -36,4 +36,4 @@ The combined experiment and affected regression suites passed on macOS 27.0.1 wi
 This does not qualify the macOS 26 runtime.
 The installed native factory still requires its dedicated transport identity, protected paths and Developer ID policy.
 Those checks were preserved. They require the supervised installation session and remain unproven here.
-No complete local gate or push covers this private experiment yet.
+This focused experiment does not replace the complete source-bound local gate required before publication.

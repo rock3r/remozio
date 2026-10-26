@@ -39,5 +39,7 @@ See [the notification experiment](experiments/android-request-notifications.md) 
 Next validate the current private source through the full repository gate, then continue the approved product frontier.
 No new confirmation, biometric prompt, forced re-enrollment or hidden connection limit is authorized by this integration.
 
-The current private tree still needs its full local gate. PR #493 awaits its current-head review before the next own PR can publish.
+Each focused slice needs its complete local gate before publication.
+Merge each published slice only after the watcher reports readiness for its current head.
+Merge that slice before opening the next own PR.
 Contributor #489 is merged with attribution and its branch preserved. Its main-branch changes require a fresh material-base comparison before using older gate evidence.

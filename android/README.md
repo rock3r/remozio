@@ -332,5 +332,6 @@ The returned metadata uses stable record, Mac and account identities; duplicate 
 
 Fourteen registry tests cover both individual and combined acquisition. The affected Android unit suite passed 336 cases through ATC.
 These tests use synthetic archives and software keys. They contact no device or peer.
-The application foreground coordinator, default combined inbox, filters and exact notification navigation remain the next integration slice.
-The existing screen still displays one selected Mac; acquiring owners alone does not connect them or grant an approval.
+The application foreground coordinator now runs all active owners.
+The default Requests inbox, filters and authenticated notification navigation share those owners.
+The Macs destination retains per-Mac inspection. Acquiring an owner alone grants no approval.
