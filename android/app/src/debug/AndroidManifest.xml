@@ -16,5 +16,21 @@
         <activity android:name=".requests.InboxEmptyPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".requests.InboxUnavailablePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".requests.NotificationNavigationProbeActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingExpandedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingOfflinePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingIncompatiblePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingConflictPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingUncertainPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingBusyPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingSettingsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingSettingsDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingSettingsLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingSettingsLargeFontEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingExpandedActionsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".routing.RoutingExpandedDarkActionsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
     </application>
 </manifest>

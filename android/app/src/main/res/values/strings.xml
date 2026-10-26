@@ -7,8 +7,6 @@
     <string name="macs_unavailable">Saved Macs unavailable</string>
     <string name="macs_unavailable_description">Remozio could not read its saved setup. Nothing has been reset.</string>
     <string name="macs_retry">Try again</string>
-    <string name="macs_not_connected">Not connected</string>
-    <string name="macs_unknown_status">The current Mac status is unknown.</string>
     <string name="macs_setup_incomplete">Setup incomplete</string>
     <string name="macs_setup_incomplete_description">This saved setup has not been activated.</string>
     <string name="command_details">Command details</string>

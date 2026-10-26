@@ -122,6 +122,7 @@ internal fun NotificationSettingsScreen() {
         PushRegistrationStatusCard()
         PushRegistrationWorkSettingsCard()
         WakeWorkSettingsCard()
+        dev.remozio.android.routing.RoutingWorkSettingsCard()
         LocalNetworkSettingsCard()
     }
 }

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="routing_checking">Checking Mac status…</string>
+    <string name="routing_unavailable">Status unavailable</string>
+    <string name="routing_recently_reachable">Recently reachable</string>
+    <string name="routing_offline">Offline</string>
+    <string name="routing_incompatible">Routing update required</string>
+    <string name="routing_no_current_state">Current Mac state is unknown.</string>
+    <string name="routing_current_mode">Mode: %1$s</string>
+    <string name="routing_last_known_mode">Last known mode: %1$s</string>
+    <string name="routing_mode_automatic">Automatic</string>
+    <string name="routing_mode_present">Present</string>
+    <string name="routing_mode_away">Away</string>
+    <string name="routing_to_phones">Requests route to paired phones.</string>
+    <string name="routing_to_mac">Requests stay on the Mac.</string>
+    <string name="routing_detection_limited">Presence detection is limited.</string>
+    <string name="routing_just_checked">Status just checked</string>
+    <plurals name="routing_verified_age">
+        <item quantity="one">Status checked within the last %1$d second</item>
+        <item quantity="other">Status checked within the last %1$d seconds</item>
+    </plurals>
+    <string name="routing_reason_present">Present was selected on the Mac.</string>
+    <string name="routing_reason_away">Away was selected.</string>
+    <string name="routing_reason_remote">A remote desktop session is active.</string>
+    <string name="routing_reason_locked">The Mac is locked.</string>
+    <string name="routing_reason_displays_off">The Mac displays are off.</string>
+    <string name="routing_reason_displays_dark">The Mac displays are dark.</string>
+    <string name="routing_reason_idle">The Mac is idle.</string>
+    <string name="routing_reason_active">The Mac is in use.</string>
+    <string name="routing_reason_unavailable">The presence detector is unavailable.</string>
+    <string name="routing_set_away">Set Away</string>
+    <string name="routing_refresh">Refresh status</string>
+    <string name="routing_setting_away">Setting Away…</string>
+    <string name="routing_away_unknown">The change outcome is unknown. It will not be retried automatically.</string>
+    <string name="routing_away_conflict">The Mac state changed before this choice was applied. Check its latest status.</string>
+    <string name="routing_away_failed">The change did not complete. Check the Mac status before another choice.</string>
+    <string name="routing_away_incomplete">The change did not complete. Refresh the status before another choice.</string>
+    <string name="routing_away_acknowledged">The Mac acknowledged the change. Its current mode is shown separately.</string>
+    <string name="routing_settings_title">Mac status timing</string>
+    <string name="routing_settings_reason">These values apply to all paired Macs. Changes apply to later checks and operations.</string>
+    <string name="routing_refresh_seconds">Status refresh (seconds)</string>
+    <string name="routing_freshness_seconds">Status freshness (seconds)</string>
+    <string name="routing_operation_seconds">Operation timeout (seconds)</string>
+    <string name="routing_settings_show">Show timing settings</string>
+    <string name="routing_settings_hide">Hide timing settings</string>
+    <string name="routing_settings_save">Save timing settings</string>
+    <string name="routing_settings_reading">Reading settings…</string>
+    <string name="routing_settings_saved">Settings saved.</string>
+    <string name="routing_settings_failed">The settings could not be saved.</string>
+</resources>

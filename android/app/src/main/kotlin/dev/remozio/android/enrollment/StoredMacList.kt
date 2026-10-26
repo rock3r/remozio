@@ -74,9 +74,10 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                     InventoryCard {
                         Text(mac.label, style = MaterialTheme.typography.titleLarge,
                             modifier = Modifier.semantics { heading() })
-                        Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete else R.string.macs_not_connected),
-                            style = MaterialTheme.typography.titleMedium)
-                        Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete_description else R.string.macs_unknown_status))
+                        if (mac.setupIncomplete) {
+                            Text(stringResource(R.string.macs_setup_incomplete), style = MaterialTheme.typography.titleMedium)
+                            Text(stringResource(R.string.macs_setup_incomplete_description))
+                        } else dev.remozio.android.routing.MacRoutingStatusContent(mac.recordID)
                         if (mac.setupIncomplete) PairingReceiptControl(mac,
                             status = remember(receiptStates, mac.recordID) {
                                 receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
