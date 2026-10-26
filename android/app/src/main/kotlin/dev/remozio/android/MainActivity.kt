@@ -100,6 +100,10 @@ internal fun RemozioTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @
 private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity, navigation: CommandInboxNavigation) {
     val commands = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val routing = (LocalContext.current.applicationContext as RemozioApplication).foregroundRouting
+    LaunchedEffect(routing, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { routing.runForeground() }
+    }
     LaunchedEffect(commands, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { commands.runForeground() }
     }
