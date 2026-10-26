@@ -19,34 +19,24 @@ import dev.remozio.android.RemozioApplication
 import dev.remozio.android.enrollment.StoredMac
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.CommandRequestSnapshot
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-/** Foreground connection host. The application registry retains requests between visits and reconnects. */
+/** Screens observe application-owned connections without opening or stopping their transports. */
 @Composable
-internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
-    val registry = (LocalContext.current.applicationContext as RemozioApplication).commands
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var owner by remember(mac.recordID) { mutableStateOf<CommandConnection?>(null) }
-    var failure by remember(mac.recordID) { mutableStateOf<Int?>(null) }
-    var attempt by remember(mac.recordID) { mutableIntStateOf(0) }
-    var selected by remember(mac.recordID) { mutableStateOf<CommandRequestSession?>(null) }
-    LaunchedEffect(registry, lifecycle, mac.recordID, attempt) {
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            failure = null
-            try {
-                val connection = registry.acquire(mac.recordID)
-                if (owner !== connection) selected = null
-                owner = connection
-                connection.run()
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: CommandEnrollmentUnavailable) { owner = null; selected = null; failure = R.string.commands_enrollment_unavailable }
-            catch (_: CommandRegistryUnavailable) { owner = null; selected = null; failure = R.string.commands_storage_unavailable }
-            catch (_: Exception) { failure = R.string.commands_connection_failed }
-            awaitCancellation()
+internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit, navigation: CommandInboxNavigation) {
+    val runtime = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
+    val runtimeState by runtime.state.collectAsState()
+    val selectedOwner = (runtimeState as? ForegroundCommandState.Ready)?.owners?.singleOrNull { it.recordID == mac.recordID }
+    val owner = selectedOwner?.connection
+    val failure = when (runtimeState) {
+        ForegroundCommandState.Unavailable -> R.string.commands_storage_unavailable
+        is ForegroundCommandState.Ready -> when {
+            selectedOwner == null -> R.string.commands_enrollment_unavailable
+            owner == null -> R.string.commands_storage_unavailable
+            else -> null
         }
+        else -> null
     }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(onClick = onBack) { Text(stringResource(R.string.commands_back)) }
@@ -63,32 +53,28 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
                 CommandConnectionState.CLOSED -> R.string.commands_enrollment_unavailable
             }))
             if (limited || state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED) {
-                TextButton(onClick = { attempt++ }) { Text(stringResource(R.string.commands_reconnect)) }
+                TextButton(onClick = runtime::refresh) { Text(stringResource(R.string.commands_reconnect)) }
             }
         } ?: run { if (failure == null) CircularProgressIndicator() }
         failure?.let {
             Text(stringResource(it))
-            if (owner == null) TextButton(onClick = { attempt++ }) { Text(stringResource(R.string.macs_retry)) }
+            if (owner == null) TextButton(onClick = runtime::refresh) { Text(stringResource(R.string.macs_retry)) }
         }
         owner?.let { connection ->
             val requests by connection.requests.collectAsState()
             if (requests.isEmpty()) Text(stringResource(R.string.commands_empty))
             LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 itemsIndexed(requests, key = { _, session -> session.identity.requestID.copyBytes().joinToString("") { "%02x".format(it) } }) { index, session ->
-                    CommandRequestRow(session, index + 1, onOpen = { selected = session })
+                    CommandRequestRow(session, index + 1, onOpen = { navigation.show(ScopedCommandRequest(checkNotNull(selectedOwner), session)) })
                 }
             }
-            selected?.let { session ->
-                val approval = remember(connection, session) { connection.approval(session) }
-                CommandRequestInspection(session, mac.label, stringResource(R.string.commands_paired_account),
-                    onDismiss = { selected = null }, approval = approval)
-            }
+
         }
     }
 }
 
 @Composable
-private fun CommandRequestRow(session: CommandRequestSession, number: Int, onOpen: () -> Unit) {
+internal fun CommandRequestRow(session: CommandRequestSession, number: Int, onOpen: () -> Unit, macName: String? = null, accountName: String? = null) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var snapshot by remember(session) { mutableStateOf<CommandRequestSnapshot?>(null) }
     LaunchedEffect(session, lifecycle) {
@@ -101,9 +87,14 @@ private fun CommandRequestRow(session: CommandRequestSession, number: Int, onOpe
     snapshot?.takeUnless { it.closed }?.let { current ->
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(stringResource(R.string.commands_request_number, number), style = MaterialTheme.typography.titleMedium)
-                current.status?.let { RequestStatusCard(it) } ?: Text(stringResource(R.string.commands_waiting_status))
-                TextButton(onClick = onOpen) { Text(stringResource(R.string.commands_review)) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(macName ?: stringResource(R.string.commands_request_number, number), style = MaterialTheme.typography.titleMedium)
+                        accountName?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    }
+                    TextButton(onClick = onOpen) { Text(stringResource(R.string.commands_review)) }
+                }
+                current.status?.let { RequestStatusSummary(it) } ?: Text(stringResource(R.string.commands_waiting_status))
             }
         }
     }
