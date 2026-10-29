@@ -179,7 +179,7 @@ on the target machine:
 | `ProtectHome=yes` | yes | yes | no; commands run in the user's directories |
 | `RestrictAddressFamilies=` | `AF_UNIX` | `AF_UNIX AF_INET AF_INET6` | `AF_UNIX` |
 | `IPAddressDeny=any` | yes | no | yes |
-| `PrivateDevices=yes` with `DeviceAllow=/dev/tpmrm0 rw` | yes | yes | `PrivateDevices=yes`, no TPM |
+| Device namespace and TPM exposure | unresolved, open decision 4 | unresolved, open decision 4 | `PrivateDevices=yes`, no TPM |
 | `CapabilityBoundingSet=` | empty | empty | open decision 2 |
 | `SystemCallFilter=@system-service` | yes | yes | open decision 3 |
 
@@ -194,11 +194,15 @@ These are listed so review can choose them; this proposal chooses none.
    candidate readings (A: detect and record, as in the fixture; B: a single owner
    holds the stop and spawns; C: pause until a production design exists) remain
    open, and nothing here selects one.
-2. **Monitor and execution privilege.** Ubuntu's default Yama mode allows ptrace of
-   descendants only, and tracing a process of another UID needs `CAP_SYS_PTRACE`.
-   A system-service monitor tracing a user's frontend therefore needs that
-   capability or must itself launch the frontend; a monitor running as the user is
-   not protected from that user. Starting a command as the target user needs
+2. **Monitor and execution privilege.** Ptrace access is checked in layers. Ubuntu's
+   default Yama mode adds an ancestry rule: without `CAP_SYS_PTRACE`, a tracer may
+   attach only to its descendants. Being the frontend's parent satisfies only that
+   rule. The ordinary ptrace access checks still apply: matching credentials or
+   `CAP_SYS_PTRACE`, the target's dumpability, and any other active LSM policy.
+   A monitor under a separate service UID therefore needs `CAP_SYS_PTRACE` or
+   another reviewed mechanism whether or not it launched the frontend, and a monitor
+   running as the user is not protected from that user. The protected launcher
+   design stays open. Starting a command as the target user needs
    `CAP_SETUID` and `CAP_SETGID`, or Root. The contract already flags that a
    narrowly privileged monitor needs its own review (lines 110–114).
 3. **Execution sandbox inheritance.** A command started directly by
@@ -211,8 +215,12 @@ These are listed so review can choose them; this proposal chooses none.
 4. **TPM role isolation.** On Ubuntu `/dev/tpmrm0` is shared by group. Any account
    allowed to open it can use any object whose authorization it holds, so role
    separation would rest on per-role key authorization stored in each role's 0600
-   state. Protected service access to the TPM is unmeasured
-   ([validation guide](linux-validation.md#human-testing-boundary)).
+   state, a proposed requirement whose hardware verification is pending. Protected
+   service access to the TPM is unmeasured
+   ([validation guide](linux-validation.md#human-testing-boundary)). Device exposure
+   is unresolved too: `PrivateDevices=yes` gives a unit a private `/dev` without
+   physical device nodes, and `DeviceAllow=` grants access without adding the node,
+   so a TPM-using role needs an explicitly reviewed exposure and device policy.
 5. **Protected frontend launch and code policy.** The contract's largest open gate
    (lines 95–108). The frontend path above is placement only.
 6. **Package and update trust.** Release manifests, version floors and update
