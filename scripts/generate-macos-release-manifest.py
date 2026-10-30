@@ -204,7 +204,27 @@ def generate(environment):
     if len(teams) != 1:
         raise ValueError('helper Team IDs differ')
     components[0][6] = teams.pop()
-    manifest = encode({0: 2, 1: release, 2: build, 3: 'arm64', 4: '26.0', 5: components, 6: dependencies})
+    maximum_formats = max(len(component[7]) for component in components)
+    if maximum_formats > 128:
+        raise ValueError('too many component formats')
+    schema = 5 if maximum_formats > 64 else 4 if maximum_formats > 32 else 2
+    if schema >= 3:
+        for component in components:
+            for request in component[8]:
+                request[5] = []
+    value = {0: schema, 1: release, 2: build, 3: 'arm64', 4: '26.0', 5: components, 6: dependencies}
+    pending = [(value, 0)]
+    items = 0
+    while pending:
+        item, depth = pending.pop()
+        items += 1
+        if items > 8192 or depth > 8:
+            raise ValueError('manifest exceeds item or depth limit')
+        if isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+        elif isinstance(item, dict):
+            pending.extend((child, depth + 1) for pair in item.items() for child in pair)
+    manifest = encode(value)
     if len(manifest) > 65536:
         raise ValueError('manifest exceeds size limit')
     return {'CFBundleIdentifier': identifier, 'CFBundleName': 'Remozio', 'CFBundleExecutable': 'Remozio',

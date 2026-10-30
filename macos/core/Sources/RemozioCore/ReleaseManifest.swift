@@ -77,7 +77,7 @@ public struct ReleaseComponent: Equatable, Sendable {
               role == .app ? codeDirectoryHash == nil : codeDirectoryHash?.count == 20,
               ReleaseManifest.validToken(build),
               teamID == nil || (teamID!.utf8.count == 10 && teamID!.utf8.allSatisfy({ (65...90).contains($0) || (48...57).contains($0) })),
-              formats.count <= 32, Set(formats.map(\.name)).count == formats.count,
+              formats.count <= ReleaseManifest.maximumFormatsPerComponent, Set(formats.map(\.name)).count == formats.count,
               requests.count <= 32, Set(requests.map(\.key)).count == requests.count else {
             throw ReleaseManifestError.invalidDeclaration
         }
@@ -98,6 +98,9 @@ public struct ReleaseComponent: Equatable, Sendable {
 public struct ReleaseManifest: Equatable, Sendable {
     public static let infoKey = "RemozioReleaseManifest"
     public static let maximumBytes = 65_536
+    public static let maximumFormatsPerComponent = 128
+    private static let schemaFourMaximumFormatsPerComponent = 64
+    private static let legacyMaximumFormatsPerComponent = 32
     public let release: String
     public let build: String
     public let components: [ReleaseComponent]
@@ -107,7 +110,10 @@ public struct ReleaseManifest: Equatable, Sendable {
 
     public init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency] = []) throws {
         try self.init(release: release, build: build, components: components, dependencies: dependencies,
-                      schemaVersion: components.contains(where: { $0.requests.contains(where: { !$0.features.isEmpty }) }) ? 3 : dependencies.isEmpty ? 1 : 2)
+                      schemaVersion: components.contains(where: { $0.formats.count > Self.schemaFourMaximumFormatsPerComponent }) ? 5
+                        : components.contains(where: { $0.formats.count > Self.legacyMaximumFormatsPerComponent }) ? 4
+                        : components.contains(where: { $0.requests.contains(where: { !$0.features.isEmpty }) }) ? 3
+                        : dependencies.isEmpty ? 1 : 2)
     }
 
     private init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency],
@@ -118,7 +124,10 @@ public struct ReleaseManifest: Equatable, Sendable {
               Set(components.map(\.identifier)).count == components.count,
               Set(components.map(\.relativePath)).count == components.count,
               components.filter({ $0.role == .app }).count == 1 else { throw ReleaseManifestError.invalidDeclaration }
-        guard (1...3).contains(schemaVersion), schemaVersion >= 2 || dependencies.isEmpty,
+        guard (1...5).contains(schemaVersion),
+              components.allSatisfy({ $0.formats.count <= (schemaVersion >= 5 ? Self.maximumFormatsPerComponent
+                : schemaVersion == 4 ? Self.schemaFourMaximumFormatsPerComponent : Self.legacyMaximumFormatsPerComponent) }),
+              schemaVersion >= 2 || dependencies.isEmpty,
               schemaVersion >= 3 || components.allSatisfy({ $0.requests.allSatisfy({ $0.features.isEmpty }) }),
               dependencies.count <= 32, Set(dependencies.map(\.executablePath)).count == dependencies.count,
               dependencies.allSatisfy({ dependency in components.contains(where: { $0.role == dependency.owner }) }) else {
@@ -157,7 +166,7 @@ public struct ReleaseManifest: Equatable, Sendable {
             guard case .map(let header) = raw, case .unsigned(let version) = header[0] else {
                 throw ReleaseManifestError.corruptData
             }
-            guard (1...3).contains(version) else { throw ReleaseManifestError.unsupportedSchema }
+            guard (1...5).contains(version) else { throw ReleaseManifestError.unsupportedSchema }
             let fields = try dictionary(raw, keys: version == 1 ? 0...5 : 0...6)
             guard fields[3] == .text("arm64"), fields[4] == .text("26.0") else { throw ReleaseManifestError.corruptData }
             let components = try array(fields[5]).map { item -> ReleaseComponent in
