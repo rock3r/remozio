@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 from pathlib import Path
 import plistlib
@@ -19,6 +20,57 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         return {'SRCROOT': str(ROOT / 'macos/app'), 'BUILT_PRODUCTS_DIR': '/unused-test-products',
                 'CONFIGURATION': configuration, 'PRODUCT_BUNDLE_IDENTIFIER': 'dev.remozio.mac' + ('.debug' if configuration == 'Debug' else ''),
                 'MACOSX_DEPLOYMENT_TARGET': '26.0', 'CURRENT_PROJECT_VERSION': '1', 'MARKETING_VERSION': '0.1.0'}
+
+    def test_capacity_keeps_current_debug_and_release_manifest_bytes(self):
+        expected = {'Debug': '5e1ec5a9ded1775ca8018459ce2240c7709b91b59b096112c17e1962920f73d3', 'Release': 'aa9f23c718c38330bb0a076b188a32a4cbce37974b926bce030c3f74b454f7ea'}
+        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
+            for configuration, digest in expected.items():
+                info = MANIFEST.generate(self.environment(configuration))
+                self.assertEqual(hashlib.sha256(info['RemozioReleaseManifest']).hexdigest(), digest)
+
+    def test_extended_capacity_selects_schema_and_keeps_explicit_request_features(self):
+        original = MANIFEST.declarations
+        for count, version in [(32, 2), (33, 4), (64, 4), (65, 5), (128, 5)]:
+            def declarations(role):
+                values = original(role)
+                if role == 2:
+                    values += [MANIFEST.format_declaration(f'capacity.{index}', [1])
+                               for index in range(count - len(values))]
+                return sorted(values, key=lambda value: value[0])
+            with patch.object(MANIFEST, 'declarations', side_effect=declarations), \
+                    patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
+                    patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:
+                MANIFEST.generate(self.environment())
+            root = encode.call_args_list[0].args[0]
+            self.assertEqual(root[0], version)
+            self.assertEqual(len(next(component for component in root[5] if component[0] == 2)[7]), count)
+            for component in root[5]:
+                for request in component[8]:
+                    if version >= 3:
+                        self.assertEqual(request[5], [])
+                    else:
+                        self.assertNotIn(5, request)
+
+    def test_capacity_refuses_oversized_components_and_global_item_budget(self):
+        original = MANIFEST.declarations
+        for count, error in [(129, 'too many component formats'), (128, 'item or depth limit')]:
+            with patch.object(MANIFEST, 'declarations', side_effect=lambda role: [
+                    MANIFEST.format_declaration(f'capacity.{index}', [1]) for index in range(count)]), \
+                    patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
+                with self.assertRaisesRegex(ValueError, error):
+                    MANIFEST.generate(self.environment())
+        self.assertLessEqual(max(len(original(role)) for role, *_ in MANIFEST.COMPONENTS), 32)
+
+    def test_capacity_keeps_the_global_byte_budget(self):
+        original = MANIFEST.declarations
+        def declarations(role):
+            if role not in (2, 4, 8):
+                return original(role)
+            return [MANIFEST.format_declaration(f'capacity.{index}.' + 'x' * 230, [1]) for index in range(128)]
+        with patch.object(MANIFEST, 'declarations', side_effect=declarations), \
+                patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
+            with self.assertRaisesRegex(ValueError, 'manifest exceeds size limit'):
+                MANIFEST.generate(self.environment())
 
     def test_connector_is_verified_and_declared_as_a_transport_tool(self):
         with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:

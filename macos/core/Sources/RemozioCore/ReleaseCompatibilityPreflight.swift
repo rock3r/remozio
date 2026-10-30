@@ -41,11 +41,12 @@ public struct RetainedReleaseRequirements: Sendable {
     public let requests: [RetainedReleaseRequest]
 
     public init(formats: [RetainedReleaseFormat], requests: [RetainedReleaseRequest]) throws {
-        guard formats.count <= 384, requests.count <= 384 else { throw ReleaseCompatibilityError.invalidRequirements }
+        guard formats.count <= AuthorityCodeRole.allCases.count * ReleaseManifest.maximumFormatsPerComponent,
+              requests.count <= 384 else { throw ReleaseCompatibilityError.invalidRequirements }
         for role in AuthorityCodeRole.allCases {
             let roleFormats = formats.filter { $0.role == role }
             let roleRequests = requests.filter { $0.role == role }
-            guard roleFormats.count <= 32, roleRequests.count <= 32,
+            guard roleFormats.count <= ReleaseManifest.maximumFormatsPerComponent, roleRequests.count <= 32,
                   Set(roleFormats.map(\.name)).count == roleFormats.count,
                   Set(roleRequests.map { [$0.contract.kind, $0.contract.wireVersion, $0.contract.schemaVersion] }).count == roleRequests.count else {
                 throw ReleaseCompatibilityError.invalidRequirements

@@ -2,8 +2,8 @@
 
 The app contains a canonical CBOR declaration in its signed `Info.plist`.
 The key is `RemozioReleaseManifest`.
-The current build emits schema 1. The reader supports schemas 1, 2 and 3.
-The build generates the plist input after signing the six helpers, before signing the app.
+The current build emits schema 2. The reader supports schemas 1 through 5.
+The build generates the plist input after it signs the seven helpers. It then signs the app.
 It does not modify a processed plist or an existing signature.
 
 ```mermaid
@@ -22,13 +22,13 @@ The root map has these exact keys. Unknown or missing keys fail closed.
 
 | Key | Value |
 | --- | --- |
-| 0 | Schema 1, 2 or 3 |
+| 0 | Schema 1 through 5 |
 | 1 | Marketing release |
 | 2 | App build |
 | 3 | `arm64` |
 | 4 | Minimum macOS `26.0` |
 | 5 | Components sorted by stable `AuthorityCodeRole` |
-| 6 | Schemas 2 and 3: dependencies sorted by canonical executable path |
+| 6 | Schemas 2 through 5: dependencies sorted by canonical executable path |
 
 Each component has a role, identifier, generation, relative executable path, build, Team ID, formats, and understood request contracts.
 The helper CDHash is 20 bytes. The app has no embedded self hash; inspection derives it from the validated signature.
@@ -55,8 +55,14 @@ Request contracts declare the kind, wire version, capture schema, action tags, a
 The current command contracts use wire 1 and capture schemas 1, 2, and 3.
 They understand decline and execute. Execute still requires biometric authorization against the retained request.
 These declarations do not enable command mode or invent active 1Password or Little Snitch adapters.
-Schema 3 adds an exact security-feature set to each request contract. Schemas 1 and 2 imply no declared features.
+Schemas 3 through 5 include an exact security-feature set in each request contract. Schemas 1 and 2 imply no declared features.
 The [compatibility preflight](macos-release-compatibility-preflight.md) checks retained format and request requirements, including required features.
+
+Schemas 1 through 3 permit at most 32 formats per component.
+Schema 4 permits 64 formats per component. Schema 5 permits 128.
+The encoder selects schema 4 above 32 formats and schema 5 above 64.
+Schemas 4 and 5 retain the schema 3 field layout, including explicit empty feature sets.
+A larger component limit does not increase the global byte, depth, or item budget.
 
 Arrays are sorted and unique. Identifiers, roles, paths, contracts, and format names cannot repeat.
 The decoder has a 64 KiB ceiling, depth 8, and 8,192-item ceiling.
@@ -81,7 +87,7 @@ A bounded filesystem inventory must match the declared executable paths exactly.
 It detects Mach-O files anywhere in the bundle, including files without an executable mode bit, and executable scripts.
 Unlisted code cannot silently appear as an absent role. Schema 1 requires every code file to have a declared native role.
 [Schema 2](macos-release-dependencies.md) declares dependency code and aliases without granting authority roles.
-Product packaging still uses schema 1; updater and bridge activation remain separate.
+Product packaging uses schema 2. Updater and bridge activation remain separate.
 The inventory permits aliases to plain internal resources. Aliases exposing code count as executable locations too.
 Schema 1 requires declared code paths without symlinks. Schema 2 binds each declared executable alias to its exact canonical dependency executable.
 The inventory rejects external links and special files, and limits traversal to 8,192 entries and depth 16.

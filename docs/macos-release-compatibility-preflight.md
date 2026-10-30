@@ -31,10 +31,11 @@ A migration edge does not count as reader support or authorize a migration.
 The installation owner must implement and authorize any migration separately.
 It must verify the resulting storage and retain a safe recovery path.
 
-Each role permits at most 32 format requirements and 32 request requirements.
+Each role permits at most 128 format requirements and 32 request requirements.
 Format reader and writer sets each permit at most 32 positive versions.
-Duplicate requirements fail construction. The total ceiling is 384 requirements in each category.
-These bounds match the existing twelve-role catalog and declaration limits.
+Duplicate requirements fail construction.
+The twelve-role catalog permits at most 1536 format requirements and 384 request requirements.
+The candidate manifest must also fit its schema limit and the global encoding budgets.
 
 The owner must derive complete requirements from protected stores, validated configuration and current live state.
 The candidate cannot choose these inputs.
@@ -45,13 +46,13 @@ Live-request snapshot composition and the activation transaction remain integrat
 ## Versioned feature declarations
 
 Schema 3 adds request-contract key 5: a sorted, unique feature set with at most 32 entries.
-Every schema 3 request contract includes this key, including an explicit empty set.
+Every request contract in schemas 3 through 5 includes this key, including an explicit empty set.
 Schema 3 retains the schema 2 dependency layout and existing signature and inventory checks.
 Schemas 1 and 2 keep their original bytes and imply no declared feature support.
 They cannot satisfy a nonempty required-feature set.
-A manifest with feature declarations uses schema 3. Decoding preserves the observed schema.
-Old readers reject schema 3 instead of ignoring its new field.
-The current product still emits schema 1 because its implemented contracts require no extra features.
+A manifest with features uses schema 3 unless its format count requires schema 4 or 5. Decoding preserves the observed schema.
+A reader rejects an unsupported schema instead of ignoring its new fields.
+The current product emits schema 2. Its dependency declarations require that schema, and its contracts declare no extra features.
 
 Features belong to each exact request contract. Matching wire and schema versions alone cannot substitute for feature support.
 The native inspector obtains the declaration from secured signing information.

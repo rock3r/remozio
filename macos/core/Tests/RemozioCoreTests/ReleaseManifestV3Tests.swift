@@ -63,7 +63,7 @@ final class ReleaseManifestV3Tests: XCTestCase {
             try reject(fields)
         }
         var downgrade = root; downgrade[0] = .unsigned(2); try reject(downgrade)
-        var future = root; future[0] = .unsigned(4); try reject(future)
+        var future = root; future[0] = .unsigned(6); try reject(future)
         var emptyRequest = request; emptyRequest[5] = .array([])
         var emptyComponent = component; emptyComponent[8] = .array([.map(emptyRequest)])
         var empty = root; empty[5] = .array([.map(emptyComponent)])
