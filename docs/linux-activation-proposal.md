@@ -55,7 +55,8 @@ system UIDs are required because state ownership is checked against them, so
 | `/usr/libexec/remozio/` | `root:root` | 0755 | Service and helper binaries |
 | `/usr/libexec/remozio/*` | `root:root` | 0755 | Regular files, one link, no set-ID bits, no `security.capability` |
 | `/usr/lib/systemd/system/remozio-*.{service,socket}` | `root:root` | 0644 | Units |
-| `/usr/lib/sysusers.d/remozio.conf`, `/usr/lib/tmpfiles.d/remozio.conf` | `root:root` | 0644 | Account and directory declarations, applied only by the attended installer |
+| `/usr/share/remozio/install/{sysusers.conf,state-tmpfiles.conf}` | `root:root` | 0644 | Installer-only account and persistent-state declarations, outside the `sysusers.d` and `tmpfiles.d` discovery directories |
+| `/usr/lib/tmpfiles.d/remozio-runtime.conf` | `root:root` | 0644 | Boot declaration for `/run/remozio` and its socket parents only, with no persistent path |
 | `/etc/remozio/` | `root:root` | 0755 | Administrator policy |
 | `/etc/remozio/grants.cbor` | `root:root` | 0644 | Explicit caller-to-target grants in the shared grant format |
 | `/var/lib/remozio/` | `root:root` | 0755 | State parent |
@@ -83,10 +84,23 @@ Services never create, migrate, `chmod`, `chown` or replace state at startup, as
 on the Mac (`macos/app/README.md`, `docs/macos-protected-setup-directories.md`).
 For that reason the units do not use `StateDirectory=` or `RuntimeDirectory=`,
 which create missing directories and adjust their ownership whenever the service
-starts. Note that `systemd-tmpfiles`
-`d` lines also adjust the mode and ownership of an existing directory, so the
-installer must refuse a pre-existing path with unexpected ownership before
-applying them, rather than silently correcting it.
+starts.
+
+`systemd-tmpfiles` `d` lines also adjust the mode and ownership of an existing
+directory, and `systemd-tmpfiles-setup.service` applies every discovered declaration
+at boot. A persistent-state declaration in a discovery directory could therefore
+repair a path before the startup refusals inspect it. The account and
+persistent-state declarations stay outside discovery for that reason. The attended
+installer validates every existing path first, refuses unexpected ownership or modes
+rather than correcting them, and only then applies each declaration once by explicit
+path (`systemd-sysusers` and `systemd-tmpfiles --create` with the absolute file name).
+
+Only `/run/remozio` and its socket parents use an automatically discovered
+declaration. `/run` is empty at boot, so that declaration creates them rather than
+repairing persistent state. Service starts and restarts validate those paths and
+refuse a mismatch; they do not repair them. Nothing in the package may run
+`systemd-tmpfiles --create` on this declaration during an update, because that would
+repair a live path. Whether updates can guarantee this belongs to open decision 6.
 
 ## IPC endpoints and peers
 
@@ -224,7 +238,8 @@ These are listed so review can choose them; this proposal chooses none.
 5. **Protected frontend launch and code policy.** The contract's largest open gate
    (lines 95–108). The frontend path above is placement only.
 6. **Package and update trust.** Release manifests, version floors and update
-   serialization have no Linux design yet.
+   serialization have no Linux design yet. Updates must also avoid a
+   `systemd-tmpfiles --create` run that would repair live `/run/remozio` paths.
 7. **Instances.** Machine-wide services first, or per-account templates from the start.
 8. **Names.** Account, unit and path names.
 
@@ -247,7 +262,8 @@ namei -l /usr/libexec/remozio /var/lib/remozio /run/remozio /etc/remozio
 Any existing `remozio-*` account or path blocks installation until explained.
 
 **Installation (attended, changes the system):** apply the package's
-`sysusers.d` and `tmpfiles.d` declarations, install the units, and do not enable them.
+installer-only declarations by explicit path after validating every existing path,
+install the units and the runtime declaration, and do not enable the units.
 TPM key creation for the authority and transport roles follows the existing
 [hardware gate rules](linux-validation.md#human-testing-boundary): known-empty owner
 authorization only, disposable objects first, no TPM clear, ownership reset or
