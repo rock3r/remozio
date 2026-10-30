@@ -53,7 +53,7 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit, navigation: 
                 CommandConnectionState.CLOSED -> R.string.commands_enrollment_unavailable
             }))
             if (limited || state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED) {
-                TextButton(onClick = runtime::refresh) { Text(stringResource(R.string.commands_reconnect)) }
+                TextButton(onClick = { runtime.reconnect(connection) }) { Text(stringResource(R.string.commands_reconnect)) }
             }
         } ?: run { if (failure == null) CircularProgressIndicator() }
         failure?.let {

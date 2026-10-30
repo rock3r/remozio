@@ -23,13 +23,14 @@ import dev.remozio.android.RemozioApplication
 internal fun CombinedCommandInboxScreen(onPair: () -> Unit, navigation: CommandInboxNavigation) {
     val runtime = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val state by runtime.state.collectAsStateWithLifecycle()
-    CombinedCommandInboxSurface(state, onPair, runtime::refresh, navigation, renderInspection = false)
+    CombinedCommandInboxSurface(state, onPair, runtime::refresh, navigation, renderInspection = false, onReconnect = runtime::reconnect)
 }
 
 /** Filters and selection belong to the display. All foreground connection jobs remain app-owned. */
 @Composable
 internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: () -> Unit, onRetry: () -> Unit,
-    navigation: CommandInboxNavigation = remember { CommandInboxNavigation() }, renderInspection: Boolean = true) {
+    navigation: CommandInboxNavigation = remember { CommandInboxNavigation() }, renderInspection: Boolean = true,
+    onReconnect: (CommandConnection) -> Unit = { onRetry() }) {
     val owners = (state as? ForegroundCommandState.Ready)?.owners.orEmpty()
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
     val route by navigation.state.collectAsStateWithLifecycle()
@@ -93,7 +94,7 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
                         item { Text(stringResource(R.string.commands_connections), style = MaterialTheme.typography.titleLarge,
                             modifier = Modifier.padding(top = 12.dp).semantics { heading() }) }
                         items(visibleOwners, key = { "connection:${commandIdentityText(it.recordID)}" }) { owner ->
-                            CommandPeerStatus(owner, owners, onRetry)
+                            CommandPeerStatus(owner, owners, onRetry, onReconnect)
                         }
                     }
                 }
@@ -104,7 +105,8 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
 }
 
 @Composable
-private fun CommandPeerStatus(owner: StoredCommandOwner, owners: List<StoredCommandOwner>, onRetry: () -> Unit) {
+private fun CommandPeerStatus(owner: StoredCommandOwner, owners: List<StoredCommandOwner>, onRetry: () -> Unit,
+    onReconnect: (CommandConnection) -> Unit) {
     val connection = owner.connection
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(commandMacLabel(owner, owners), style = MaterialTheme.typography.titleMedium)
@@ -123,7 +125,7 @@ private fun CommandPeerStatus(owner: StoredCommandOwner, owners: List<StoredComm
             }))
             if (limited) Text(stringResource(R.string.commands_capacity))
             if (state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED || limited) {
-                TextButton(onClick = onRetry) { Text(stringResource(R.string.commands_reconnect)) }
+                TextButton(onClick = { onReconnect(connection) }) { Text(stringResource(R.string.commands_reconnect)) }
             }
         }
         Text(stringResource(R.string.commands_presence_unknown), style = MaterialTheme.typography.bodySmall)

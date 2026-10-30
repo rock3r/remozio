@@ -28,11 +28,19 @@ internal class ForegroundCommandConnections(private val acquireActive: suspend (
     private class Running(val connection: CommandConnection, val job: Job)
     private val running = Mutex()
     private val changes = Channel<Unit>(Channel.CONFLATED)
+    private val reconnects = mutableSetOf<CommandConnection>()
     private val mutableState = MutableStateFlow<ForegroundCommandState>(ForegroundCommandState.Stopped)
     val state = mutableState.asStateFlow()
 
     /** Also retries completed connections. Healthy peers keep their current transport and requests. */
     fun refresh() { changes.trySend(Unit) }
+
+    /** Reconnects this exact incarnation after its old transport closes. Other peers keep their jobs. */
+    fun reconnect(connection: CommandConnection) {
+        synchronized(reconnects) { reconnects += connection }
+        refresh()
+    }
+
 
     /** The root activity owns this call for its STARTED lifetime; individual screens must not run connections. */
     suspend fun runForeground() = running.withLock {
@@ -46,6 +54,7 @@ internal class ForegroundCommandConnections(private val acquireActive: suspend (
             changes.trySend(Unit)
             try {
                 for (signal in changes) {
+                    val requested = synchronized(reconnects) { reconnects.toSet().also { reconnects.clear() } }
                     val owners = try { acquireActive() }
                     catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) {
@@ -56,7 +65,9 @@ internal class ForegroundCommandConnections(private val acquireActive: suspend (
                     }
                     currentCoroutineContext().ensureActive()
                     val active = owners.associateBy { it.recordID }
-                    val stale = peers.filter { (id, peer) -> active[id]?.connection !== peer.connection }
+                    val stale = peers.filter { (id, peer) ->
+                        active[id]?.connection !== peer.connection || peer.connection in requested
+                    }
                     // Join old incarnations before any replacement can open a transport.
                     retire(stale.values)
                     stale.keys.forEach(peers::remove)

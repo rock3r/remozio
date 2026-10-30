@@ -183,4 +183,60 @@ class ForegroundCommandConnectionsTest {
         } finally { active.cancelAndJoin(); owner.connection!!.close() }
     }
 
+    @Test fun reconnectJoinsTheSelectedLivePeerAndKeepsOtherTransports() = runBlocking<Unit> {
+        val firstWires = mutableListOf<Wire>()
+        val first = owner(1) {
+            if (firstWires.isNotEmpty()) assertTrue(firstWires.last().closed)
+            Wire().also { firstWires += it }
+        }
+        var otherOpens = 0; val otherWire = Wire()
+        val other = owner(2) { otherOpens++; otherWire }
+        val runtime = ForegroundCommandConnections { listOf(first, other) }
+        val running = launch { runtime.runForeground() }
+        try {
+            runtime.ready(); waitUntil { firstWires.size == 1 && otherOpens == 1 }
+            assertEquals(CommandConnectionState.CONNECTED, first.connection!!.connectionState.value)
+            runtime.reconnect(first.connection)
+            waitUntil { firstWires.size == 2 }
+            assertTrue(firstWires.first().closed); assertFalse(firstWires.last().closed)
+            assertEquals(1, otherOpens); assertFalse(otherWire.closed)
+        } finally { running.cancelAndJoin(); first.connection!!.close(); other.connection!!.close() }
+    }
+
+    @Test fun reconnectRequestsSurviveConflatedRefreshAndStayScoped() = runBlocking<Unit> {
+        val opens = IntArray(3); val wires = Array(3) { mutableListOf<Wire>() }
+        val owners = List(3) { n -> owner(n + 1) {
+            if (wires[n].isNotEmpty()) assertTrue(wires[n].last().closed)
+            opens[n]++; Wire().also { wires[n] += it }
+        } }
+        val runtime = ForegroundCommandConnections { owners }
+        val running = launch { runtime.runForeground() }
+        try {
+            runtime.ready(); waitUntil { opens.all { it == 1 } }
+            runtime.reconnect(owners[0].connection!!)
+            runtime.reconnect(owners[1].connection!!)
+            runtime.refresh()
+            waitUntil { opens[0] == 2 && opens[1] == 2 }
+            assertEquals(1, opens[2]); assertFalse(wires[2].single().closed)
+        } finally { running.cancelAndJoin(); owners.forEach { it.connection!!.close() } }
+    }
+
+    @Test fun reconnectForAnOldIncarnationCannotRestartItsReplacement() = runBlocking<Unit> {
+        val oldWire = Wire(); val old = owner(1) { oldWire }
+        val replacementWire = Wire(); var replacementOpens = 0
+        val replacement = owner(1) { replacementOpens++; replacementWire }
+        var rows = listOf(old); var loads = 0
+        val runtime = ForegroundCommandConnections { loads++; rows }
+        val running = launch { runtime.runForeground() }
+        try {
+            runtime.ready(); waitUntil { old.connection!!.connectionState.value == CommandConnectionState.CONNECTED }
+            rows = listOf(replacement); runtime.refresh()
+            waitUntil { replacementOpens == 1 }; assertTrue(oldWire.closed)
+            val previousLoads = loads
+            runtime.reconnect(old.connection!!)
+            waitUntil { loads > previousLoads }; yield()
+            assertEquals(1, replacementOpens); assertFalse(replacementWire.closed)
+        } finally { running.cancelAndJoin(); old.connection!!.close(); replacement.connection!!.close() }
+    }
+
 }
