@@ -1,5 +1,6 @@
 package dev.remozio.phone.transport
 
+import dev.remozio.phone.enrollment.PhoneEnrollment
 import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
 import dev.remozio.protocol.*
@@ -64,6 +65,15 @@ class PhoneRoutingChallenge internal constructor(
     fun signingInput(): ByteArray {
         requireUsable(record)
         return RoutingAwaySigningInput.make(1u, canonical.copyBytes(), CONTROL_LIMITS, SIGNING_LIMITS)
+    }
+    /** Custody code signs only a verified challenge for its exact enrolled identity. */
+    fun sign(enrollment: PhoneEnrollment, signer: (ByteArray) -> ByteArray): ByteArray {
+        require(record.sameConnectionAs(StoredPhoneEnrollment(enrollment, record.phase, record.pairing)))
+        val signature = signer(signingInput()).copyOf()
+        requireUsable(record)
+        require(RoutingAwaySignature.verify(signature, enrollment.decisionKey.publicKey.copyBytes(), 1u,
+            canonical.copyBytes(), CONTROL_LIMITS, SIGNING_LIMITS))
+        return signature
     }
     internal fun bytes(current: StoredPhoneEnrollment): ByteArray {
         requireUsable(current); return canonical.copyBytes()

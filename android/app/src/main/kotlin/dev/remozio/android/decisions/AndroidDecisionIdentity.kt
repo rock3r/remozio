@@ -4,6 +4,7 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import androidx.annotation.WorkerThread
 import dev.remozio.phone.enrollment.*
+import dev.remozio.phone.transport.PhoneRoutingChallenge
 import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.RequestLimits
@@ -104,6 +105,20 @@ class AndroidDecisionIdentity internal constructor(
                 check(ApprovalSignature.verify(signature, enrollment.decisionKey.publicKey.copyBytes(), 1u,
                     ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body, limits.body, limits.signing))
                 ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body, signature)
+            }
+        } catch (_: Exception) { throw DecisionIdentityUnavailable() }
+    }
+
+    /** Signs an explicit Away choice with the existing decision key. No biometric operation is used. */
+    @WorkerThread
+    @Synchronized
+    fun signRoutingAway(challenge: PhoneRoutingChallenge): ByteArray {
+        try {
+            val signingKey = key ?: throw DecisionIdentityUnavailable()
+            return challenge.sign(enrollment) { input ->
+                P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                    initSign(signingKey); update(input); sign()
+                })
             }
         } catch (_: Exception) { throw DecisionIdentityUnavailable() }
     }

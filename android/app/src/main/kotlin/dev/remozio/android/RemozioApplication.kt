@@ -2,6 +2,9 @@ package dev.remozio.android
 
 import android.app.Application
 import android.os.SystemClock
+import dev.remozio.android.routing.*
+import dev.remozio.android.decisions.AndroidDecisionIdentities
+import dev.remozio.phone.transport.PhoneRoutingChallenge
 import dev.remozio.android.push.*
 import dev.remozio.android.push.androidPushClient
 import dev.remozio.android.push.AndroidWakeNotifications
@@ -101,21 +104,43 @@ class RemozioApplication : Application() {
         )
     }
     internal val foregroundCommands by lazy { ForegroundCommandConnections(commands::acquireActive) }
+    internal val routingWorkSettings by lazy { RoutingWorkSettings(this) }
+    internal val routing by lazy {
+        StoredRoutingConnections(
+            { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            { record, current -> MacRoutingConnection(record,
+                open = { parent, active -> androidRoutingWire(this, parent, active, routingWorkSettings.read().operationSeconds * 1000L) },
+                loadSigner = { active ->
+                    val identity = AndroidDecisionIdentities.load(active)
+                    object : RoutingDecisionSigner {
+                        override fun sign(challenge: PhoneRoutingChallenge) = identity.signRoutingAway(challenge)
+                        override fun close() = identity.close()
+                    }
+                }, current = current, freshnessMillis = { routingWorkSettings.read().freshnessSeconds * 1000L },
+                timeoutMillis = { routingWorkSettings.read().operationSeconds * 1000L }) }, enrollmentAccess,
+        )
+    }
+    internal val foregroundRouting by lazy { ForegroundRoutingConnections(routing::acquireActive) { routingWorkSettings.read().refreshSeconds * 1000L } }
+
     internal val pairing by lazy {
         StoredPairingHost(
             { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, { ids ->
-                try { commands.invalidateRecordsLocked(ids) }
+                try { routing.invalidateRecordsLocked(ids) }
                 finally {
-                    try { wakeFetches.invalidateRecordsLocked(ids) }
+                    try { commands.invalidateRecordsLocked(ids) }
                     finally {
-                        try { wakeNotifications.invalidateRecordsLocked(ids) }
-                        finally { pushRegistrations.invalidateRecordsLocked(ids) }
+                        try { wakeFetches.invalidateRecordsLocked(ids) }
+                        finally {
+                            try { wakeNotifications.invalidateRecordsLocked(ids) }
+                            finally { pushRegistrations.invalidateRecordsLocked(ids) }
+                        }
                     }
                 }
             }, ::validatePairingKeys, onChanged = {
                 foregroundCommands.refresh()
+                foregroundRouting.refresh()
                 scope.launch(Dispatchers.IO) { pushRegistrationWork.changed() }
             },
         )
