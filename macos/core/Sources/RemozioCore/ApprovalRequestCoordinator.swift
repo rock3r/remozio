@@ -536,6 +536,94 @@ public final class ApprovalRequestCoordinator {
         }
     }
 
+    /// Serve one enrolled phone under the authority serialization boundary. Callbacks must not reenter.
+    /// A consumed Away operation can outlive its reply. Reconciliation signs current state without repeating the mutation.
+    public func phoneRouting(_ frame: PhoneRoutingFrame, binding: AuthorityPeerBinding, authorityPublicKey: Data,
+                             now: () throws -> AuthorityMoment, wallTime: () -> UInt64?,
+                             routing: (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting,
+                             signer: (Data) throws -> Data) throws -> PhoneRoutingFrame {
+        _ = try frame.encode()
+        guard binding.scope.macID == mac, binding.scope.accountID == account,
+              authorityPublicKey.count == 65, authorityPublicKey.first == 4,
+              (try? P256.Signing.PublicKey(x963Representation: authorityPublicKey)) != nil else {
+            throw DecisionVerificationError.invalidTrustedState
+        }
+        switch frame { case .status, .challenge, .apply: break; default: throw AuthorityXPCError.invalidMessage }
+        let initial = try now(); try checkClock(initial)
+        let original = try routingState(binding: binding)
+        _ = try RoutingWireProjection.make(original, routing: routing(self, initial))
+        var outcome = RoutingStatusOutcome.status
+        var challenge: Data?, digest: Data?, appliedRevision: UInt64?
+        var issuedChallenge: RoutingAwayControl?, challengeIssuedAt: AuthorityMoment?
+        switch frame {
+        case .status: break
+        case .challenge(_, let expected):
+            guard let wall = wallTime() else { throw RoutingJournalError.invalidClock }
+            let moment = try now(); try checkClock(moment)
+            do {
+                let control = try write { tx in
+                    try tx.requireDirectApprovalBinding(binding)
+                    return try tx.issueRoutingChallenge(authenticatedPhoneID: binding.scope.phoneID,
+                        authenticatedEnrollmentEpoch: binding.scope.enrollmentEpoch, expectedTrustRevision: binding.revision,
+                        expectedRoutingRevision: expected, nowUnixMillis: wall, now: moment)
+                }
+                challenge = try control.encode(limits: .init(maxBytes: 1024, maxDepth: 2, maxItems: 32)); outcome = .challenge
+                issuedChallenge = control; challengeIssuedAt = moment
+            } catch RoutingJournalError.conflict { outcome = .conflict }
+        case .apply(_, let control, let signature):
+            guard let wall = wallTime() else { throw RoutingJournalError.invalidClock }
+            let moment = try now(); try checkClock(moment)
+            digest = Data(SHA256.hash(data: control))
+            let event = try random(16)
+            do {
+                let receipt = try write { tx in
+                    try tx.requireDirectApprovalBinding(binding)
+                    return try tx.applyRoutingAway(canonicalPayload: control, signature: signature,
+                        authenticatedPhoneID: binding.scope.phoneID, authenticatedEnrollmentEpoch: binding.scope.enrollmentEpoch,
+                        expectedTrustRevision: binding.revision, nowUnixMillis: wall, now: moment,
+                        eventID: event, writer: writer, expectedAuditHead: head(tx))
+                }
+                appliedRevision = receipt.state.revision; outcome = .applied
+            } catch RoutingJournalError.conflict { outcome = .conflict }
+        default: throw AuthorityXPCError.invalidMessage
+        }
+        let inputLimits = try CBORLimits(maxBytes: 3200, maxDepth: 2, maxItems: 16)
+        for _ in 0..<2 {
+            let sampled = try now(); try checkClock(sampled)
+            let state = try routingState(binding: binding)
+            let observed = try routing(self, sampled)
+            if let bytes = challenge {
+                let control = try RoutingAwayControl.decode(bytes, limits: .init(maxBytes: 1024, maxDepth: 2, maxItems: 32))
+                if control.expectedRevision != state.revision { challenge = nil; issuedChallenge = nil; challengeIssuedAt = nil; outcome = .conflict }
+            }
+            let response = try RoutingStatusResponse(scope: binding.scope, queryNonce: frame.queryNonce, outcome: outcome,
+                clockEpoch: withUnsafeBytes(of: sampled.epoch.uuid) { Data($0) }, sampledAtMilliseconds: sampled.milliseconds,
+                state: RoutingWireProjection.make(state, routing: observed), canonicalChallenge: challenge,
+                controlDigest: digest, appliedRevision: appliedRevision)
+            let body = try response.encode()
+            let input = try RoutingStatusSigningInput.make(wireVersion: 1, canonicalPayload: body, inputLimits: inputLimits)
+            let signature = try signer(input)
+            guard try RoutingStatusSignature.verify(signature: signature, publicKey: authorityPublicKey,
+                wireVersion: 1, canonicalPayload: body, inputLimits: inputLimits) else { throw DecisionVerificationError.invalidSignature }
+            let final = try now(); try checkClock(final)
+            if let control = issuedChallenge, let issuedAt = challengeIssuedAt {
+                let deadline = issuedAt.milliseconds.addingReportingOverflow(control.expiresAtUnixMillis - control.issuedAtUnixMillis)
+                guard !deadline.overflow, final.milliseconds < deadline.partialValue, let wall = wallTime(),
+                      wall >= control.issuedAtUnixMillis, wall < control.expiresAtUnixMillis else { throw RoutingJournalError.expired }
+            }
+            let current = try routingState(binding: binding)
+            guard current == state, try routing(self, final) == observed else { continue }
+            return .response(queryNonce: frame.queryNonce, canonicalPayload: body, signature: signature)
+        }
+        throw ApprovalCoordinatorError.unavailable
+    }
+    private func routingState(binding: AuthorityPeerBinding) throws -> RoutingState {
+        try read { tx in
+            _ = try head(tx); try tx.requireDirectApprovalBinding(binding)
+            return try tx.routingState()
+        }
+    }
+
     /// Prepare bounded wake registrations and withdrawals from current retained requests and journal trust.
     /// The host serializes this operation with authority changes. No asynchronous work or gateway call belongs in this method.
     public func reconcileWakePublications(routing: PresenceRouting, now: AuthorityMoment,

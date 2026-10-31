@@ -7,6 +7,11 @@ public typealias AuthorityPairingReceiptProvider = @Sendable (
     ApprovalRequestCoordinator, AuthorityPeerBinding, Data, @Sendable (JournalTransaction) throws -> Void
 ) throws -> Data?
 
+/// Trusted routing provider. Invocation policy and current enrollment must be checked by the journal owner.
+public typealias AuthorityPhoneRoutingProvider = @Sendable (
+    ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneRoutingFrame, @Sendable () throws -> AuthorityMoment
+) throws -> PhoneRoutingFrame
+
 /// A single configured signer, clock contract, and payload budget for all root request operations.
 public struct AuthorityRequestProviders: Sendable {
     let configurationBytes: Data
@@ -14,6 +19,7 @@ public struct AuthorityRequestProviders: Sendable {
     let pendingRequestIDs: AuthorityPendingRequestsProvider
     let exchangeRequest: AuthorityRequestExchangeProvider
     let pairingReceipt: AuthorityPairingReceiptProvider
+    let phoneRouting: AuthorityPhoneRoutingProvider?
     let receiptTime: @Sendable () -> UInt64?
 
     /// Production requires a restored device-bound key. Callbacks must not reenter the service, journal, or request owner.
@@ -30,14 +36,15 @@ public struct AuthorityRequestProviders: Sendable {
 
     /// The presence runtime reads the durable mode through each serialized request operation.
     public init(configuration: AuthorityServiceConfiguration, signer: EnclaveAuthorityRequestSigner,
-                presence: AuthorityPresenceRuntime, receiptTime: @escaping @Sendable () -> UInt64? = { nil }) throws {
+                presence: AuthorityPresenceRuntime, routingWallTime: (@Sendable () -> UInt64?)? = nil,
+                receiptTime: @escaping @Sendable () -> UInt64? = { nil }) throws {
         guard signer.macID == configuration.macID, signer.accountID == configuration.accountID,
               presence.configuration.macID == configuration.macID, presence.configuration.accountID == configuration.accountID else {
             throw AuthorityRequestSignerError.wrongIdentity
         }
         try self.init(configuration: configuration, publicKey: signer.publicKey, signing: { try signer.sign($0) },
             routing: { throw AuthorityPresenceError.unavailable }, receiptTime: receiptTime,
-            presence: presence, receiptValidation: AuthoritySelfValidation.validate)
+            presence: presence, routingWallTime: routingWallTime, receiptValidation: AuthoritySelfValidation.validate)
     }
 
     /// Software signing exists only in internal component fixtures, never as a public custody fallback.
@@ -46,6 +53,7 @@ public struct AuthorityRequestProviders: Sendable {
          routing: @escaping @Sendable () throws -> PresenceRouting,
          receiptTime: @escaping @Sendable () -> UInt64? = { nil },
          presence: AuthorityPresenceRuntime? = nil,
+         routingWallTime: (@Sendable () -> UInt64?)? = nil,
          receiptValidation: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in }) throws {
         guard publicKey.count == 65, publicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: publicKey)) != nil,
@@ -56,6 +64,9 @@ public struct AuthorityRequestProviders: Sendable {
             guard presence.configuration.macID == configuration.macID, presence.configuration.accountID == configuration.accountID else {
                 throw AuthorityPresenceError.wrongScope
             }
+        }
+        guard routingWallTime == nil || (presence != nil && configuration.maximumPayloadBytes >= PhoneRoutingFrame.maximumBytes) else {
+            throw AuthorityServiceConfigurationError.invalidConfiguration
         }
         configurationBytes = configuration.canonicalBytes
         self.receiptTime = receiptTime
@@ -77,6 +88,13 @@ public struct AuthorityRequestProviders: Sendable {
             return try owner.exchangeRequest(binding: binding, requestID: id, decisionFrame: decision, authorityPublicKey: publicKey,
                 maximumBodyBytes: statusBudget, now: clock, receiptTimeMs: receiptTime(), signer: signing)
         }
+        if let presence, let routingWallTime {
+            phoneRouting = { owner, binding, frame, clock in
+                try Self.requireScope(binding, configuration: configuration)
+                return try owner.phoneRouting(frame, binding: binding, authorityPublicKey: publicKey, now: clock,
+                    wallTime: routingWallTime, routing: { try presence.routing(owner: $0, now: $1) }, signer: signing)
+            }
+        } else { phoneRouting = nil }
         pairingReceipt = { owner, binding, setupID, validateTransport in
             try Self.requireScope(binding, configuration: configuration)
             guard setupID.count == 16 else { throw AuthorityXPCError.invalidMessage }
