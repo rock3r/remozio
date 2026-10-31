@@ -5,6 +5,7 @@ import dev.remozio.protocol.ChannelScope
 import dev.remozio.protocol.PairingReceiptFrame
 import dev.remozio.protocol.PendingRequestSnapshotFrame
 import dev.remozio.protocol.PhonePushRegistrationFrame
+import dev.remozio.protocol.PhoneRoutingFrame
 import dev.remozio.protocol.PhonePushRecoveryFrame
 import java.io.IOException
 import javax.net.ssl.KeyManager
@@ -16,6 +17,7 @@ enum class EnrolledChannelPurpose(val applicationProtocol: String) {
     PENDING_SNAPSHOT(PendingRequestSnapshotFrame.APPLICATION_PROTOCOL),
     PUSH_REGISTRATION(PhonePushRegistrationFrame.APPLICATION_PROTOCOL),
     PUSH_RECOVERY(PhonePushRecoveryFrame.APPLICATION_PROTOCOL),
+    ROUTING(PhoneRoutingFrame.APPLICATION_PROTOCOL),
 }
 
 /** Supplies ciphertext only. All routes use the same enrolled identity and peer pin. */
