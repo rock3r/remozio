@@ -190,4 +190,29 @@ class MacRoutingConnectionTest {
         assertTrue(owner.refresh()); assertEquals(MacRoutingAvailability.INCOMPATIBLE, owner.snapshot().availability)
         assertNull(owner.snapshot().observation); assertFalse(owner.canSetAway()); assertEquals(0, f.loads); owner.close()
     }
+    @Test fun cancellingTheScreenWaiterDoesNotCancelTheApplicationOwnedAwayOperation() = runTest {
+        val f = Fixture(); val initial = f.result(); val prepared = f.result(RoutingStatusOutcome.CHALLENGE)
+        val applied = f.result(RoutingStatusOutcome.APPLIED, RoutingStatusMode.AWAY, 1u)
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        f.wires.add(Wire(status = { initial }))
+        val owner = f.owner()
+        try {
+            assertTrue(owner.refresh())
+            val prepare = Wire(challenge = { prepared })
+            val apply = Wire(apply = { _, _ -> entered.complete(Unit); release.await(); applied })
+            f.wires.add(prepare); f.wires.add(apply)
+            val operation = applicationRoutingAway(backgroundScope, owner)
+            val screenWaiter = launch(start = CoroutineStart.UNDISPATCHED) { operation.await() }
+            entered.await()
+            screenWaiter.cancelAndJoin()
+            assertTrue(operation.isActive); assertTrue(backgroundScope.isActive)
+            assertEquals(MacRoutingAction.SETTING_AWAY, owner.snapshot().action)
+            release.complete(Unit)
+            assertTrue(operation.await())
+            assertEquals(MacRoutingAction.ACKNOWLEDGED, owner.snapshot().action)
+            assertEquals(RoutingStatusMode.AWAY, owner.snapshot().observation?.response?.state?.mode)
+            assertEquals(1, prepare.challenges); assertEquals(1, apply.applies); assertEquals(1, f.signs)
+        } finally { release.complete(Unit); owner.close() }
+    }
+
 }

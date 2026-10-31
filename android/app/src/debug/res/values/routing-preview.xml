@@ -1,0 +1,5 @@
+<resources>
+    <string name="routing_preview_notice">Synthetic display preview · no host connection or routing actions</string>
+    <string name="routing_preview_studio">Studio Mac</string>
+    <string name="routing_preview_laptop">Travel Mac</string>
+</resources>

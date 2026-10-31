@@ -122,6 +122,13 @@ class RemozioApplication : Application() {
     }
     internal val foregroundRouting by lazy { ForegroundRoutingConnections(routing::acquireActive) { routingWorkSettings.read().refreshSeconds * 1000L } }
 
+    /** The application owns explicit routing work across navigation and activity replacement. */
+    internal fun setRoutingAway(connection: MacRoutingConnection): kotlinx.coroutines.Deferred<Boolean> =
+        applicationRoutingAway(scope, connection)
+
+    internal fun refreshRouting(connection: MacRoutingConnection): kotlinx.coroutines.Deferred<Boolean> =
+        scope.async(Dispatchers.IO) { connection.refresh() }
+
     internal val pairing by lazy {
         StoredPairingHost(
             { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
