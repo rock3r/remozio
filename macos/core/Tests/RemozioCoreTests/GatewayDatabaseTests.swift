@@ -1581,7 +1581,7 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertEqual(try db.head(), 0)
     }
 
-    private final class Fixture {
+    final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }
         var path: String { directory + "/gateway.sqlite" }
