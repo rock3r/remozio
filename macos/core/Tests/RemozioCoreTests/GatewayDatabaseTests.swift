@@ -38,10 +38,11 @@ final class GatewayDatabaseTests: XCTestCase {
             nowUnixMillis: wall, now: AuthorityMoment(epoch: clock ?? epoch, milliseconds: monotonic))
     }
     private func open(_ fixture: Fixture, initialize: Bool = false, owner: UInt8 = 1, maximum: Int = 10, pending: Int = 2,
-                      lifetime: UInt64 = 1000, busy: UInt32 = 100, registration: GatewayRegistrationIdentity? = nil, migrate: Bool = false, probePolicy: GatewayProbePolicy? = nil) throws -> GatewayDatabase {
+                      lifetime: UInt64 = 1000, busy: UInt32 = 100, registration: GatewayRegistrationIdentity? = nil, migrate: Bool = false, probePolicy: GatewayProbePolicy? = nil, health: Bool = false) throws -> GatewayDatabase {
         try GatewayDatabase(lease: fixture.lease(), identity: registration ?? identity(owner: owner), payloadLimits: limits, signingLimits: limits,
             maximumOperations: maximum, maximumPendingPerEnrollment: pending, maximumLifetimeMillis: lifetime,
-            clockEpoch: epoch, busyMilliseconds: busy, initialize: initialize, migrateLegacyStore: migrate, probePolicy: probePolicy)
+            clockEpoch: epoch, busyMilliseconds: busy, initialize: initialize, migrateLegacyStore: migrate, probePolicy: probePolicy,
+            readOnlyForUpdateHealth: health)
     }
     private func fails(_ expected: GatewayDatabaseError, _ action: () throws -> Any, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try action(), file: file, line: line) { XCTAssertEqual($0 as? GatewayDatabaseError, expected, file: file, line: line) }
@@ -1491,6 +1492,93 @@ final class GatewayDatabaseTests: XCTestCase {
                 XCTAssertThrowsError(try owner.accept(.init(canonicalPayload: head.canonicalPayload, signature: head.signature), now: headMoment(2)))
             }
         }
+    }
+
+    func testUpdateHealthOpenPreservesPendingTokenAndProbeBytes() throws {
+        for dispatch in [false, true] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true, probePolicy: probePolicy()), snapshot = UUID()
+            _ = try admit(db); let ticket = try reserve(db, snapshot: snapshot)
+            if dispatch { _ = try take(db, ticket, snapshot: snapshot) }
+            let evidence = try db.headEvidence(), progress = try db.probeProgress(candidateOperationID: id(1))
+            try db.close()
+            let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
+            let health = try open(fixture, probePolicy: probePolicy(), health: true)
+            let current = try health.updateHealthEvidence()
+            XCTAssertEqual(current.revision, evidence.revision)
+            XCTAssertEqual(current.receipt?.canonicalPayload, evidence.receipt?.canonicalPayload)
+            XCTAssertEqual(current.receipt?.signature, evidence.receipt?.signature)
+            let currentProgress = try health.probeProgress(candidateOperationID: id(1))
+            XCTAssertEqual(currentProgress?.number, progress?.number)
+            XCTAssertEqual(currentProgress?.status, progress?.status)
+            XCTAssertEqual(currentProgress?.retryAtMilliseconds, progress?.retryAtMilliseconds)
+            XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 1)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), before)
+            try health.close()
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), before)
+            let normal = try open(fixture, probePolicy: probePolicy()); defer { try? normal.close() }
+            XCTAssertEqual(try normal.probeProgress(candidateOperationID: id(1))?.status, .terminal)
+            XCTAssertEqual(try normal.head(), evidence.revision)
+            XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_candidates_v1 WHERE token IS NOT NULL"), 0)
+        }
+    }
+    func testUpdateHealthModeRejectsWritesWithoutChangingTheStore() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        _ = try admit(db); try db.close()
+        let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path)), health = try open(fixture, health: true)
+        defer { try? health.close() }
+        fails(.readOnly) { try health.expireCandidates(now: .init(epoch: epoch, milliseconds: 99999)) }
+        fails(.readOnly) { try admit(health, candidate(2, revision: 2), head: 1) }
+        XCTAssertEqual(try health.updateHealthEvidence().revision, 1)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), before)
+    }
+    func testUpdateHealthModeCannotInitializeOrMigrate() throws {
+        let fixture = try Fixture(), empty = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
+        fails(.invalidConfiguration) { try open(fixture, initialize: true, health: true) }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), empty)
+        let db = try open(fixture, initialize: true); _ = try admit(db); try db.close()
+        let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
+        fails(.invalidConfiguration) { try open(fixture, migrate: true, health: true) }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), before)
+        try fixture.sql("PRAGMA user_version=3")
+        let legacy = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
+        fails(.incompatibleStore) { try open(fixture, health: true) }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), legacy)
+        XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), 3)
+    }
+    func testUpdateHealthOwnerKeepsTheExclusiveLeaseUntilClose() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true); try db.close()
+        let health = try open(fixture, health: true)
+        XCTAssertThrowsError(try fixture.lease()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
+        _ = try health.updateHealthEvidence(); try health.close(); try health.close()
+        XCTAssertThrowsError(try health.updateHealthEvidence()) { XCTAssertEqual($0 as? GatewayDatabaseError, .closed) }
+        let lease = try fixture.lease(); lease.close()
+    }
+    func testUpdateHealthEvidenceRejectsACorruptSignedHeadWithoutRepair() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true)
+        _ = try admit(db); try db.close()
+        try fixture.sql("UPDATE gateway_candidates_v1 SET signature=zeroblob(64)")
+        let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path)), health = try open(fixture, health: true)
+        defer { try? health.close() }
+        fails(.corruptData) { try health.updateHealthEvidence() }
+        fails(.unavailable) { try health.updateHealthEvidence() }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.path)), before)
+    }
+    func testUpdateHealthEvidenceRejectsAReplacedDatabaseAndRetainsItsLease() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true); try db.close()
+        let health = try open(fixture, health: true), retained = fixture.path + ".original"
+        defer { try? health.close() }
+        XCTAssertEqual(rename(fixture.path, retained), 0)
+        try Data(contentsOf: URL(fileURLWithPath: retained)).write(to: URL(fileURLWithPath: fixture.path))
+        XCTAssertEqual(chmod(fixture.path, 0o600), 0)
+        XCTAssertThrowsError(try health.updateHealthEvidence()) { XCTAssertEqual($0 as? JournalLeaseError, .identityChanged) }
+        XCTAssertThrowsError(try fixture.lease()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
+        try health.close()
+        let lease = try fixture.lease(); lease.close()
+    }
+    func testOrdinaryRuntimeCannotBePresentedAsAReadOnlyHealthOpen() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true); defer { try? db.close() }
+        fails(.invalidConfiguration) { try db.updateHealthEvidence() }
+        XCTAssertEqual(try db.head(), 0)
     }
 
     private final class Fixture {
