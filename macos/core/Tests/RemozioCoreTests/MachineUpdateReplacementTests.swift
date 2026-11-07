@@ -1044,6 +1044,80 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(try archive.capture(accountID: account)?.completion?.encoded, try capture.completion?.encoded)
     }
 
+    private func restartWithRetainedBackend(_ f: Fixture, complete: Bool) throws
+        -> (MachineUpdateRestartSource, UpdateRestartAdmissionLease) {
+        let configuration = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let store = f.machine.store
+        let backend = try store.upgradeMachineUpdateBackendEpochStorage(expected: configuration,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        let retained = try store.retainMachineUpdateBackendEpoch(backend,
+            captures: [.init(accountID: f.machine.account, source: nil, startup: nil, completion: nil)],
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        if complete {
+            _ = try store.advanceMachineUpdateBackendPublication(retained, operation: .begin,
+                candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        }
+        let restart = try f.quiet.releaseActivityForRestart()
+        do {
+            let activation = try store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+                restart: restart, verifyCurrent: {})
+            return (try store.machineUpdateRestartSource(activation, directory: f.directory), restart)
+        } catch {
+            restart.close()
+            throw error
+        }
+    }
+
+    func testRestartSnapshotRejectsAnIncompleteBackendEpoch() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: false)
+        defer { restart.close() }
+        XCTAssertThrowsError(try f.machine.store.machineUpdateRestartSnapshot(expected: source,
+            directory: f.directory, restart: restart)) {
+            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+        }
+    }
+
+    func testRestartSnapshotScopeExpiresAndRejectsReentry() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let store = f.machine.store
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        XCTAssertEqual(snapshot.source, source)
+        XCTAssertEqual(snapshot.configuration.record.publication?.complete, true)
+        XCTAssertEqual(snapshot.backend.record.publication?.complete, true)
+        let escaped = try store.withCurrentMachineUpdateRestartSnapshot(snapshot, directory: f.directory, restart: restart) { scope in
+            try scope.read().requireSame(as: snapshot)
+            XCTAssertThrowsError(try store.machineUpdateBackendEpoch()) {
+                XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+            }
+            return scope
+        }
+        XCTAssertThrowsError(try escaped.read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        let wrong = MachineUpdateRestartSnapshot(source: source,
+            configuration: .init(record: snapshot.configuration.record, artifacts: []), backend: snapshot.backend)
+        XCTAssertThrowsError(try store.withCurrentMachineUpdateRestartSnapshot(wrong,
+            directory: f.directory, restart: restart) { _ in XCTFail("Changed archive reached the reader") }) {
+            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+        }
+    }
+
+    func testRestartPlacementRequiresTheObservedOriginalParentsAndBundleIdentities() throws {
+        let f = try Fixture(), foreign = try Fixture()
+        let record = try f.run().record
+        try MachineUpdateRestartPlacement.require(record, installed: f.installed, prepared: f.machine.destination)
+        XCTAssertThrowsError(try MachineUpdateRestartPlacement.require(record,
+            installed: foreign.installed, prepared: f.machine.destination))
+        let moved = f.oldURL.appendingPathExtension("moved")
+        try FileManager.default.moveItem(at: f.oldURL, to: moved)
+        try FileManager.default.copyItem(at: moved, to: f.oldURL)
+        XCTAssertThrowsError(try MachineUpdateRestartPlacement.require(record,
+            installed: f.installed, prepared: f.machine.destination)) {
+            XCTAssertEqual($0 as? MachineUpdateReplacementError, .changedBinding)
+        }
+    }
+
     func testReleaseBoundGatewayCommitStaysOutOfOrdinaryReader() throws {
         let f = try Fixture(); _ = try f.run()
         let binding = try releaseBinding(f, source: restartSource(f), policy: releasePolicySnapshot(f))

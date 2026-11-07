@@ -2613,6 +2613,83 @@ public final class PreparationIntentStore {
         }
     }
 
+    func machineUpdateRestartSnapshot(expected: MachineUpdateRestartSource, directory: ReleaseDestinationLease,
+        restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartSnapshot {
+        try restart.withClosedAdmission {
+            try transaction(write: false) {
+                try loadMachineUpdateRestartSnapshot(expected: expected, directory: directory, restart: restart)
+            }
+        }
+    }
+
+    /// A callback-bound read of the current machine transaction. It cannot cross a thread or survive the callback.
+    final class HealthSnapshotScope: @unchecked Sendable {
+        private let lock = NSRecursiveLock()
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private let snapshot: MachineUpdateRestartSnapshot
+        private let verifyCurrent: () throws -> Void
+        private var active = true
+
+        fileprivate init(snapshot: MachineUpdateRestartSnapshot, verifyCurrent: @escaping () throws -> Void) {
+            self.snapshot = snapshot; self.verifyCurrent = verifyCurrent
+        }
+        func read() throws -> MachineUpdateRestartSnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
+                throw JournalLeaseError.invalidated
+            }
+            return try lock.withLock {
+                guard active else { throw JournalLeaseError.invalidated }
+                do {
+                    try verifyCurrent()
+                    guard active else { throw JournalLeaseError.invalidated }
+                    return snapshot
+                } catch { active = false; throw error }
+            }
+        }
+        fileprivate func expire() { lock.withLock { active = false } }
+    }
+
+    func withCurrentMachineUpdateRestartSnapshot<Value>(_ expected: MachineUpdateRestartSnapshot,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        _ body: (HealthSnapshotScope) throws -> Value) throws -> Value {
+        try restart.withClosedAdmission {
+            try transaction(write: false) {
+                let initial = try loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory, restart: restart)
+                try initial.requireSame(as: expected)
+                let scope = HealthSnapshotScope(snapshot: initial, verifyCurrent: { [weak self] in
+                    guard let self, self.active else { throw JournalLeaseError.invalidated }
+                    try restart.validate()
+                    let current = try self.loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory, restart: restart)
+                    try current.requireSame(as: initial)
+                })
+                defer { scope.expire() }
+                _ = try scope.read()
+                let value = try body(scope)
+                _ = try scope.read()
+                return value
+            }
+        }
+    }
+
+    private func loadMachineUpdateRestartSnapshot(expected: MachineUpdateRestartSource,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartSnapshot {
+        try identity(macID)
+        guard expected.replacement.activation.phase == .restartChecking, try scalar("PRAGMA user_version") == 20,
+              let configuration = try loadMachineUpdateConfigurationEpoch(),
+              configuration.record.publication?.complete == true,
+              let backend = try loadMachineUpdateBackendEpoch(epoch: configuration),
+              backend.record.accounts != nil, backend.record.publication?.complete == true else {
+            throw PreparationStoreError.staleRevision
+        }
+        let current = try requireCurrentConfigurationEpoch(configuration.record, directory: directory)
+        guard current == expected, try machineEpochSourceDigest() == backend.record.currentSourceDigest else {
+            throw PreparationStoreError.staleRevision
+        }
+        try restart.validateMachineBoundary(directory: directory, expected: current.replacement.admission.machine)
+        return .init(source: current, configuration: configuration, backend: backend)
+    }
+
     func machineUpdateBackendEpoch() throws -> MachineUpdateBackendEpoch.Archive? {
         try transaction(write: false) {
             try identity(macID)
