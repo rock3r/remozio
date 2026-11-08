@@ -1,4 +1,6 @@
+import CryptoKit
 import Darwin
+import Synchronization
 import Foundation
 import RemozioProtocol
 import XCTest
@@ -160,15 +162,25 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         let binding: RuntimeReleaseBinding
         let policy: AuthorityCodePolicySnapshot
 
-        init() throws {
+        init(registration: GatewayRegistrationIdentity? = nil) throws {
             let files = try Fixture()
             let requirement = try MachineUpdateRoleChallengeTests.Fixture().requirement(mac: 1, account: 2)
+            let gatewayPolicy: GatewayAuthorityPolicy?
+            if registration != nil {
+                let value = try GatewayAuthorityPolicy(payloadLimits: files.limits, signingLimits: files.limits,
+                    maximumControls: 20, candidateLifetimeMillis: 1000, clockEpoch: UUID())
+                try files.journal.enableGatewayPolicy(value, macID: requirement.binding.macID, accountID: requirement.binding.accountID)
+                gatewayPolicy = value
+            } else {
+                gatewayPolicy = nil
+            }
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             let code = try AuthorityCodePolicy(entries: [requirement.code])
             let commits = CheckpointedJournal(journal: files.journal, continuity: files.store)
             let policy = try commits.write(epoch: files.epoch) {
                 _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: [1]]),
                     allowedContracts: [contract])
+                if let registration { try $0.configureGatewayAuthority(registration) }
                 return try $0.installCodePolicy(code, expectedRevision: nil)
             }
             let configuration = try AuthorityServiceConfiguration(macID: requirement.binding.macID,
@@ -183,8 +195,8 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
             self.configuration = configuration
             self.binding = requirement.binding
             self.policy = policy
-            journal = try AuthorityJournal(updateHealthStorage: files.openTransferredStorage(readOnlyForCutover: true),
-                validateSelf: { _ in })
+            journal = try AuthorityJournal(updateHealthStorage: files.openTransferredStorage(readOnlyForCutover: true,
+                gatewayPolicy: gatewayPolicy), validateSelf: { _ in })
         }
 
         func validate(binding: RuntimeReleaseBinding? = nil, policy: AuthorityCodePolicySnapshot? = nil,
@@ -234,5 +246,116 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
             }
         }
         try fixture.validate(requests: [fixture.declaration()])
+    }
+
+    private final class ScopeState: Sendable {
+        let valid = Mutex(true)
+        let releases = Mutex(0)
+    }
+
+    private struct GatewayFixture {
+        let paired: ContractFixture
+        let signer: MachineUpdateRoleChallengeTests.Fixture
+        let gateway: GatewayServiceConfiguration
+        let requirement: MachineUpdateRestartHealthPlan.Requirement
+        let state = ScopeState()
+
+        init() throws {
+            let signer = MachineUpdateRoleChallengeTests.Fixture()
+            let seed = try signer.requirement(role: .notificationGateway, uid: 20001, mac: 1, account: 2)
+            let registration = try GatewayRegistrationIdentity(ownerID: Data(repeating: 1, count: 16),
+                macID: seed.binding.macID, accountID: seed.binding.accountID,
+                gatewayID: Data(repeating: 4, count: 16), lifecycleEpoch: Data(repeating: 5, count: 16),
+                rootPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+            let paired = try ContractFixture(registration: registration)
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: seed.binding.encoded) as? [String: Any])
+            fields["sourcePolicyRevision"] = paired.policy.revision.uuidString
+            fields["sourcePolicyDigest"] = try MachineUpdateActivationRecord.digest(paired.policy.storedBytes).base64EncodedString()
+            let binding = try RuntimeReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            let settings = try GatewayServiceSettings(delivery: .init(maximumFlights: 1, minimumSendIntervalMillis: 1000),
+                probe: .init(maximumAttempts: 1, minimumRetryDelayMillis: 1000, maximumTTLSeconds: 60),
+                wake: .init(maximumEntries: 8, maximumAttempts: 1, minimumEnrollmentIntervalMillis: 1000,
+                    maximumLifetimeMillis: 10000, maximumTTLSeconds: 60))
+            let root = paired.files.root
+            gateway = try .init(registration: registration, receiptPublicKey: seed.publicKey,
+                directoryPath: root.appendingPathComponent("gateway").path, providerPath: root.appendingPathComponent("provider.json").path,
+                receiptKeyPath: root.appendingPathComponent("receipt.cbor").path, serviceUID: seed.executionUID, ownerUID: 20002,
+                serviceName: "dev.sebastiano.remozio.macos.gateway.health-test", teamID: "ABCDEFGHIJ",
+                authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [Data(repeating: 7, count: 20)],
+                project: "health-fixture", packageName: "dev.remozio.fixture", settings: settings)
+            requirement = .init(binding: binding, configurationEpoch: seed.configurationEpoch,
+                configurationRevision: seed.configurationRevision, backendEpoch: seed.backendEpoch,
+                backendRevision: seed.backendRevision, role: seed.role, executionUID: seed.executionUID,
+                code: seed.code, publicKey: seed.publicKey)
+            self.paired = paired
+            self.signer = signer
+        }
+
+        func owner(policy: AuthorityCodePolicySnapshot? = nil) throws -> MachineUpdateGatewayPairedHealthReader {
+            let state = state
+            return try .init(journal: paired.journal, configuration: paired.configuration, expected: requirement,
+                gateway: gateway, rootPublicKey: gateway.registration.rootPublicKey,
+                policy: policy ?? paired.policy, requests: [paired.declaration()],
+                verifyCurrent: {
+                    guard state.valid.withLock({ $0 }) else { throw Failure.injected }
+                }, release: { state.releases.withLock { $0 += 1 } })
+        }
+
+        func proof() throws -> MachineUpdateConsumerHealthProof {
+            let registration = gateway.registration
+            let moment = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+            let session = try MachineUpdateConsumerHealthChallengeSession(requirement: requirement, registration: registration,
+                clock: { moment }, verifyCurrent: {})
+            let request = try session.makeRequest()
+            let role = try signer.answer(request, expected: requirement)
+            let fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .unsigned(1), 2: .bytes(try registration.encode()),
+                3: .bytes(MachineUpdateGatewayHealthQuery.nonce(request)), 4: .unsigned(0), 5: .unsigned(0),
+                6: .bytes(Data()), 7: .bytes(Data())]
+            let payload = try DeterministicCBOR.encode(.map(fields), limits: paired.files.limits)
+            let signature = try signer.key.signature(for: Data("Remozio/GatewayHeadReply/v1\u{0}".utf8) + payload).rawRepresentation
+            let packet = try MachineUpdateConsumerHealthPacket(roleReply: role,
+                gatewayHead: .init(canonicalPayload: payload, signature: signature)).encoded
+            return try session.accept(packet, authenticatePeer: { _ in })
+        }
+    }
+
+    func testPairedGatewayReaderConsumesOneProofWithoutWriting() throws {
+        let fixture = try GatewayFixture()
+        let before = try bytes(fixture.paired.files)
+        let owner = try fixture.owner()
+        XCTAssertThrowsError(try owner.validateHealthScope())
+        let proof = try fixture.proof()
+        try owner.accept(proof)
+        try owner.validateHealthScope()
+        XCTAssertThrowsError(try owner.accept(proof))
+        try owner.close()
+        try owner.close()
+        XCTAssertEqual(fixture.state.releases.withLock { $0 }, 1)
+        XCTAssertEqual(try bytes(fixture.paired.files), before)
+    }
+
+    func testPairedGatewayReaderRetiresAfterAnInvalidScope() throws {
+        let fixture = try GatewayFixture()
+        let owner = try fixture.owner()
+        defer { try? owner.close() }
+        try owner.accept(fixture.proof())
+        fixture.state.valid.withLock { $0 = false }
+        XCTAssertThrowsError(try owner.validateHealthScope()) { XCTAssertTrue($0 is Failure) }
+        fixture.state.valid.withLock { $0 = true }
+        XCTAssertThrowsError(try owner.validateHealthScope()) {
+            XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .unavailable)
+        }
+    }
+
+    func testPairedGatewayReaderRejectsForeignSourcePolicyAndReleasesItsStores() throws {
+        let fixture = try GatewayFixture()
+        let policy = fixture.paired.policy
+        let foreign = AuthorityCodePolicySnapshot(revision: UUID(), policy: policy.policy, roleRevisions: policy.roleRevisions)
+        XCTAssertThrowsError(try fixture.owner(policy: foreign)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        XCTAssertEqual(fixture.state.releases.withLock { $0 }, 1)
+        try fixture.paired.files.reopen()
     }
 }
