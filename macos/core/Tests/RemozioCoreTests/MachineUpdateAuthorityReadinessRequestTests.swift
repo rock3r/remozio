@@ -119,4 +119,47 @@ final class MachineUpdateAuthorityReadinessRequestTests: XCTestCase {
         fields[3] = .bytes(Data())
         XCTAssertThrowsError(try MachineUpdateAuthorityReadinessRequest.decode(DeterministicCBOR.encode(.map(fields), limits: limits)))
     }
+
+    func testInstalledReadinessPeerAuthenticatesBeforeItParsesAndRetiresOnRefusal() throws {
+        let fixture = try Fixture()
+        let peer = MachineUpdateConsumerHealthPeer.owned(expected: fixture.root, authorityInstalledReadiness: true,
+            authenticateInvocation: { throw AdmissionFailure.refused },
+            verifyPeer: { XCTFail("Peer verification ran after authentication failed") }, verifyCurrent: {})
+
+        XCTAssertThrowsError(try peer.accept(Data())) { XCTAssertEqual($0 as? AdmissionFailure, .refused) }
+        XCTAssertThrowsError(try peer.accept(Data())) { XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .unavailable) }
+    }
+
+    func testInstalledReadinessPeerClaimsTheExactEnvelopeOnce() throws {
+        let fixture = try Fixture()
+        let root = try fixture.rootRequest()
+        let exchange = try fixture.exchange(rootRequest: root)
+        let envelope = try MachineUpdateAuthorityReadinessRequest(challenge: root, gateway: exchange).encoded
+        let peer = MachineUpdateConsumerHealthPeer.owned(expected: fixture.root, authorityInstalledReadiness: true,
+            authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+
+        let request = try peer.accept(envelope)
+        XCTAssertEqual(request.requirement, fixture.root)
+        XCTAssertEqual(request.bytes, root)
+        XCTAssertEqual(try request.authorityReadiness?.encoded, envelope)
+        try request.claim()
+        XCTAssertThrowsError(try request.claim())
+        peer.close()
+        XCTAssertThrowsError(try request.validate())
+    }
+
+    func testRawRoleAndInstalledReadinessPeersRejectEachOthersWireFormats() throws {
+        let fixture = try Fixture()
+        let root = try fixture.rootRequest()
+        let envelope = try MachineUpdateAuthorityReadinessRequest(challenge: root, gateway: nil).encoded
+        let installed = MachineUpdateConsumerHealthPeer.owned(expected: fixture.root, authorityInstalledReadiness: true,
+            authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+        let raw = MachineUpdateConsumerHealthPeer.owned(expected: fixture.root,
+            authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+
+        XCTAssertThrowsError(try installed.accept(root))
+        XCTAssertThrowsError(try raw.accept(envelope))
+    }
+
+    private enum AdmissionFailure: Error { case refused }
 }
