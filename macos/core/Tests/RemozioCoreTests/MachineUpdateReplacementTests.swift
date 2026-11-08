@@ -92,8 +92,8 @@ private final class MachineReplacementFixture {
             installed: installed, prepared: machine.destination, store: machine.store, quiescence: quiet,
             readPolicy: policy ?? { self.machine.policy }, inspect: inspect, didStage: stage)
     }
-    func reopen() throws {
-        quiet.close(); try machine.reopen()
+    func reopen(inventoryRecordLimit: Int32 = 278_528) throws {
+        quiet.close(); try machine.reopen(inventoryRecordLimit: inventoryRecordLimit)
         let drain = try UpdateActivationAdmission(anchor: files.root.path, relativeDirectory: "machine",
             owner: getuid(), expected: files.machine.store.updateAdmissionRegistration()!.machine).beginDrain()
         quiet = try XCTUnwrap(drain.acquireQuiescence())
@@ -986,6 +986,62 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try verify(XCTUnwrap(store.machineUpdateBackendEpoch()))
         }
         XCTAssertEqual(record.publication?.complete, true)
+    }
+
+    func testBackendPublicationAdvancesOperandsAboveTheOrdinaryRecordLimit() throws {
+        var gatewayFixture: GatewayJournalSetupExchangeTests.Fixture?
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
+            let setup = try GatewayJournalSetupExchangeTests.Fixture(runtime: files.machine.f)
+            try setup.retainCompletion(.decode(setup.initialize()))
+            let store = files.machine.store
+            let activation = try GatewayRuntimeActivationPlan(journal: setup.state(),
+                foreground: setup.runtime.plan, inventory: XCTUnwrap(store.inventory()))
+            try store.retainGatewayRuntimeActivation(activation)
+            try store.markGatewayRuntimePublished(activation)
+            _ = try store.enrollGatewayRuntimeActivation(activation)
+            try store.markGatewayRuntimeRegistered(activation)
+            gatewayFixture = setup
+        })
+        let setup = try XCTUnwrap(gatewayFixture)
+        let published = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let account = f.machine.account
+        let configured = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch()?.configuration(accountID: account))
+        let machine = try restartSource(f)
+        let source = try RuntimeReleaseBackendSource(foreground: setup.runtime.plan,
+            activation: XCTUnwrap(f.machine.store.gatewayRuntimeActivation(accountID: account).plan), journal: setup.state(),
+            settings: f.machine.store.gatewaySettingsTransition(accountID: account), inventory: machine.replacement.inventory)
+        func plan(_ value: RuntimeReleaseConfigurationPlan) throws -> RuntimeReleaseBackendPlan {
+            try .init(configuration: value, source: source, sourceConfiguration: configured.source,
+                machine: machine, currentPolicy: releasePolicySnapshot(f), candidate: f.newRelease)
+        }
+        let capture = try MachineUpdateBackendEpoch.Capture(accountID: account, source: source,
+            startup: plan(configured.startup), completion: plan(configured.completion))
+
+        // Valid fixture plans stay far below the 278,528-byte ordinary limit, so the store reopens with a lower one.
+        // Every plan row then exceeds the ordinary limit, as a large retained plan would in production.
+        let ordinaryLimit: Int32 = 32_768
+        XCTAssertGreaterThan(try XCTUnwrap(capture.startup).encoded.count, Int(ordinaryLimit))
+        XCTAssertGreaterThan(try XCTUnwrap(capture.completion).encoded.count, Int(ordinaryLimit))
+        try f.reopen(inventoryRecordLimit: ordinaryLimit)
+        let store = f.machine.store
+        let initial = try store.upgradeMachineUpdateBackendEpochStorage(expected: published,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        let retained = try store.retainMachineUpdateBackendEpoch(initial, captures: [capture], candidate: f.newRelease,
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        XCTAssertEqual(try store.machineUpdateBackendEpoch()?.record, retained)
+        func advance(_ previous: MachineUpdateBackendEpochRecord, _ operation: MachineUpdateBackendPublicationOperation)
+            throws -> MachineUpdateBackendEpochRecord {
+            try store.advanceMachineUpdateBackendPublication(previous, operation: operation, candidate: f.newRelease,
+                directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        }
+        let file = try XCTUnwrap(MachineUpdateBackendPublicationProgress.File.allCases.first)
+        var record = try advance(retained, .begin)
+        record = try advance(record, .prepare(account, file))
+        record = try advance(record, .complete(account, file))
+        let archive = try XCTUnwrap(store.machineUpdateBackendEpoch())
+        XCTAssertEqual(archive.record, record)
+        XCTAssertEqual(archive.record.operands, retained.operands)
+        XCTAssertEqual(try archive.capture(accountID: account)?.completion?.encoded, try capture.completion?.encoded)
     }
 
     func testReleaseBoundGatewayCommitStaysOutOfOrdinaryReader() throws {
