@@ -152,4 +152,87 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         try owner.close()
         XCTAssertEqual(try bytes(fixture), before)
     }
+
+    private struct ContractFixture {
+        let files: Fixture
+        let journal: AuthorityJournal
+        let configuration: AuthorityServiceConfiguration
+        let binding: RuntimeReleaseBinding
+        let policy: AuthorityCodePolicySnapshot
+
+        init() throws {
+            let files = try Fixture()
+            let requirement = try MachineUpdateRoleChallengeTests.Fixture().requirement(mac: 1, account: 2)
+            let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+            let code = try AuthorityCodePolicy(entries: [requirement.code])
+            let commits = CheckpointedJournal(journal: files.journal, continuity: files.store)
+            let policy = try commits.write(epoch: files.epoch) {
+                _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: [1]]),
+                    allowedContracts: [contract])
+                return try $0.installCodePolicy(code, expectedRevision: nil)
+            }
+            let configuration = try AuthorityServiceConfiguration(macID: requirement.binding.macID,
+                accountID: requirement.binding.accountID, journalDirectory: files.root.appendingPathComponent("journal").path,
+                serviceName: "dev.sebastiano.remozio.macos.authority.health-test", teamID: "ABCDEFGHIJ",
+                transportIdentifier: "dev.sebastiano.remozio.macos.transport",
+                transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
+                continuityDirectory: files.root.appendingPathComponent("continuity").path)
+            try files.journal.close()
+            files.store.close()
+            self.files = files
+            self.configuration = configuration
+            self.binding = requirement.binding
+            self.policy = policy
+            journal = try AuthorityJournal(updateHealthStorage: files.openTransferredStorage(readOnlyForCutover: true),
+                validateSelf: { _ in })
+        }
+
+        func validate(binding: RuntimeReleaseBinding? = nil, policy: AuthorityCodePolicySnapshot? = nil,
+                      requests: [ReleaseRequestContract]) throws {
+            let configuration = configuration, expectedBinding = binding ?? self.binding, expectedPolicy = policy ?? self.policy
+            try journal.readForUpdateHealth {
+                try MachineUpdateAuthorityHealthJournalValidation.requireCurrent($0, configuration: configuration,
+                    binding: expectedBinding, policy: expectedPolicy, requests: requests)
+            }
+        }
+
+        func declaration(schema: UInt64 = 1, features: Set<UInt64> = [1]) throws -> ReleaseRequestContract {
+            try .init(kind: 0, wireVersion: 1, schemaVersion: schema, actions: [0], purposes: [.issuedRequest], features: features)
+        }
+    }
+
+    func testHealthJournalValidatesRetainedPolicyAndContractsWithoutWriting() throws {
+        let fixture = try ContractFixture()
+        let before = try bytes(fixture.files)
+        try fixture.validate(requests: [fixture.declaration()])
+        try fixture.journal.close()
+        XCTAssertEqual(try bytes(fixture.files), before)
+    }
+
+    func testHealthJournalRejectsAStalePolicyAndForeignBinding() throws {
+        let fixture = try ContractFixture()
+        let request = try fixture.declaration()
+        let stale = AuthorityCodePolicySnapshot(revision: UUID(), policy: fixture.policy.policy,
+            roleRevisions: fixture.policy.roleRevisions)
+        XCTAssertThrowsError(try fixture.validate(policy: stale, requests: [request])) {
+            XCTAssertEqual($0 as? AuthorityCodePolicyError, .staleRevision)
+        }
+        let other = try MachineUpdateRoleChallengeTests.Fixture().requirement(mac: 9, account: 2).binding
+        XCTAssertThrowsError(try fixture.validate(binding: other, requests: [request])) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        try fixture.validate(requests: [request])
+    }
+
+    func testHealthJournalRequiresTheExactRequestVersionAndEveryFeature() throws {
+        let fixture = try ContractFixture()
+        let wrongVersion = try fixture.declaration(schema: 2)
+        let missingFeature = try fixture.declaration(features: [])
+        for requests in [[], [wrongVersion], [missingFeature]] {
+            XCTAssertThrowsError(try fixture.validate(requests: requests)) {
+                XCTAssertEqual($0 as? ReleaseCompatibilityError, .invalidRequirements)
+            }
+        }
+        try fixture.validate(requests: [fixture.declaration()])
+    }
 }
