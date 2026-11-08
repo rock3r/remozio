@@ -262,4 +262,80 @@ final class MachineUpdateConsumerHealthChannelTests: XCTestCase, @unchecked Send
         XCTAssertEqual(driver.state.withLock { $0.checks }, 1)
     }
 
+
+    private final class AnonymousHealthEndpoint: NSObject, MachineUpdateConsumerHealthXPCProtocol, NSXPCListenerDelegate, @unchecked Sendable {
+        let fixture: Driver
+        private let lock = NSLock()
+        private var connections: [NSXPCConnection] = []
+        init(_ fixture: Driver) { self.fixture = fixture }
+        func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+            connection.exportedInterface = NSXPCInterface(with: MachineUpdateConsumerHealthXPCProtocol.self)
+            connection.exportedObject = self
+            lock.withLock { connections.append(connection) }
+            connection.activate()
+            return true
+        }
+        func close() {
+            let owned = lock.withLock {
+                let owned = connections
+                connections.removeAll()
+                return owned
+            }
+            for connection in owned { connection.invalidate() }
+        }
+        func healthHello(reply: @escaping @Sendable (UInt64, Data?) -> Void) {
+            fixture.state.withLock { $0.hellos += 1 }
+            reply(MachineUpdateConsumerHealthChannel.wireVersion, Data([1, 2, 3]))
+        }
+        func checkUpdateHealth(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
+            fixture.state.withLock { $0.checks += 1 }
+            reply(try? fixture.packet(payload))
+        }
+    }
+
+    /// The anonymous listener exercises NSXPC transport with injected credentials.
+    func testAnonymousNativeDriverReturnsOneAuthenticatedProof() async throws {
+        let fixture = try Driver()
+        let endpoint = AnonymousHealthEndpoint(fixture), listener = NSXPCListener.anonymous()
+        listener.delegate = endpoint
+        listener.activate()
+        defer { listener.invalidate(); endpoint.close() }
+        let connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
+        let credentials = XPCPeerCredentials(processID: 123, userID: fixture.requirement.executionUID, auditSessionID: 0)
+        let driver = NativeMachineUpdateConsumerHealthDriver(connection: connection, inspectPeer: { credentials })
+        let moment = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+        let channel = try MachineUpdateConsumerHealthChannel(driver: driver, expectedHello: Data([1, 2, 3]),
+            requirement: fixture.requirement, registration: nil, timeoutMilliseconds: 4000, clock: { moment })
+
+        let proof = try await channel.execute()
+        XCTAssertEqual(proof.role.requirement, fixture.requirement)
+        XCTAssertEqual(fixture.state.withLock { $0.hellos }, 1)
+        XCTAssertEqual(fixture.state.withLock { $0.checks }, 1)
+    }
+
+    func testAnonymousNativeDriverRejectsChangedCredentialsBeforeChallenge() async throws {
+        let fixture = try Driver()
+        let endpoint = AnonymousHealthEndpoint(fixture), listener = NSXPCListener.anonymous()
+        listener.delegate = endpoint
+        listener.activate()
+        defer { listener.invalidate(); endpoint.close() }
+        let inspections = TestState(0)
+        let uid = fixture.requirement.executionUID
+        let connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
+        let driver = NativeMachineUpdateConsumerHealthDriver(connection: connection, inspectPeer: {
+            let count = inspections.lock.withLock { $0 += 1; return $0 }
+            return XPCPeerCredentials(processID: count == 1 ? 123 : 124, userID: uid, auditSessionID: 0)
+        })
+        let moment = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+        let channel = try MachineUpdateConsumerHealthChannel(driver: driver, expectedHello: Data([1, 2, 3]),
+            requirement: fixture.requirement, registration: nil, timeoutMilliseconds: 4000, clock: { moment })
+
+        do {
+            _ = try await channel.execute()
+            XCTFail("A changed peer sent a challenge")
+        } catch XPCPeerPolicyError.wrongPeer {}
+        XCTAssertEqual(fixture.state.withLock { $0.hellos }, 1)
+        XCTAssertEqual(fixture.state.withLock { $0.checks }, 0)
+        XCTAssertEqual(inspections.lock.withLock { $0 }, 2)
+    }
 }
