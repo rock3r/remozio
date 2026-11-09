@@ -3437,8 +3437,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
             var changedStartupFields = startup
             changedStartupFields["revision"] = UUID().uuidString
             let changedStartup = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(json(changedStartupFields))
-            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(accountID: account.accountID,
-                id: changedStartup.id, revision: changedStartup.revision, bytes: changedStartup.encoded))")
+            let changedStartupRow = try row(accountID: account.accountID, id: changedStartup.id,
+                revision: changedStartup.revision, bytes: changedStartup.encoded)
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(changedStartupRow)")
             try requireCorruptRows("different startup row")
             try fixture.files.sql("DELETE FROM \(policyTable)")
             try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(startupRow)")
