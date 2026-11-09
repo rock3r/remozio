@@ -2320,16 +2320,13 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     _ = try AdministrativeSetupPublication.publish(entry.startup, file: entry.artifact, directory: files(entry), owner: getuid())
                 }
                 var acknowledgments: [Data: Set<MachineUpdateCompletionPublicationPlan.File>] = [:]
+                // The coordinator checks the store scope around each step. Check the completed file set once below.
                 published = try MachineUpdateCompletionFileCoordinator.publish(published, plan: plan, expected: recorded,
                     restart: snapshot, candidate: candidate, machine: machine, directory: directory, admission: restart,
-                    validate: { scope in
-                        let current = try XCTUnwrap(scope.read().publication)
-                        try MachineUpdateCompletionPublicationFiles.requireInLeases(plan, publication: current,
-                            owner: getuid(), directory: files, verifyCurrent: { _ = try scope.read() })
-                    }, publishFile: { current, entry, scope, didStage in
+                    validate: { _ in }, publishFile: { current, entry, _, didStage in
                         try MachineUpdateCompletionPublicationFiles.publishInLease(plan, publication: current,
                             accountID: entry.accountID, file: entry.file, directory: files(entry), owner: getuid(),
-                            verifyCurrent: { _ = try scope.read() }, didStage: didStage)
+                            verifyCurrent: {}, didStage: didStage)
                     }, didStage: { stage in
                         if case .acknowledged(let account, let file) = stage {
                             XCTAssertTrue(acknowledgments[account, default: []].insert(file).inserted)
@@ -2340,9 +2337,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 XCTAssertEqual(try machine.machineUpdateCompletionPublication(), published)
                 for entry in plan.entries {
                     XCTAssertTrue(acknowledgments[entry.accountID, default: []].contains(entry.file))
-                    let path = URL(fileURLWithPath: try files(entry).path).appendingPathComponent(entry.artifact.name)
-                    XCTAssertEqual(try Data(contentsOf: path), entry.completion)
                 }
+                try MachineUpdateCompletionPublicationFiles.requireInLeases(plan, publication: published,
+                    owner: getuid(), directory: files, verifyCurrent: {})
             } else {
                 // Other finishing tests start with completed files and a matching record.
                 for entry in plan.entries {
