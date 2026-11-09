@@ -34,7 +34,8 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
-         stableFormats: Bool = false, policyReaderFormats: Bool = false, enableSecondReadiness: Bool = false,
+         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false,
+         enableSecondReadiness: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
@@ -81,6 +82,7 @@ private final class MachineReplacementFixture {
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
+            if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
@@ -1635,14 +1637,15 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false,
+        enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
         var gateway: GatewayJournalSetupExchangeTests.Fixture?
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats,
             enableSecondReadiness: enableSecondReadiness, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
@@ -2262,15 +2265,16 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false,
+        enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, enableSecondReadiness: enableSecondReadiness,
-            didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats,
+            enableSecondReadiness: enableSecondReadiness, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
             func readPair(_ accountID: Data) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
@@ -3218,6 +3222,120 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertNotEqual(atCapacity.currentRowsDigest, current.currentRowsDigest)
             try fixture.machine.close()
             try fixture.files.sql("INSERT INTO \(table) VALUES \(try XCTUnwrap(rows.last))")
+            try fixture.files.reopen()
+            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testRetainedSetupCompletionReadsSchema26AndRequiresTheExactStartupRow() throws {
+        var retained: AccountPreparationIntent?
+        try withFinishingFixture(stableFormats: true, policyReaderFormats: true, completionReaderFormats: true,
+            beforeActivation: { retained = try self.prepareSecondForeground($0).account }) { fixture, finishing, _ in
+            let account = try XCTUnwrap(retained)
+            let candidate = fixture.candidate
+            let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
+            let loan = try stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try fixture.machine.withCurrentMachineUpdateReadiness(candidate: candidate, directory: fixture.directory, loan: loan) {
+                try MachineUpdateInstalledReadinessPlan(scope: $0, candidate: candidate)
+            }
+            _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
+                directory: fixture.directory, loan: loan) { _, _ in }
+            XCTAssertNil(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID, ownerUID: owner.uid, candidate: candidate))
+            let reader = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
+            defer { try? reader.close() }
+            let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
+                journal: reader, candidate: candidate)
+            let prepared = try MachineUpdateRetainedSetupPolicyIntentRecord(source: source)
+            try reader.close()
+
+            let storage = try fixture.policyStorage(readOnly: false, accountID: account.accountID)
+            defer { try? storage.close() }
+            let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+            let startupPolicy = try commits.write(epoch: source.accountPolicy.checkpoint.journalEpoch) {
+                try $0.installCodePolicy(source.policy.startupPolicy, expectedRevision: source.policy.source.revision)
+            }
+            let checkpoint = try storage.continuity.read().committed
+            try storage.close()
+            func json(_ fields: [String: Any]) throws -> Data {
+                try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+            }
+            var startup = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.encoded) as? [String: Any])
+            startup["phase"] = MachineUpdateRetainedSetupPolicyIntentRecord.Phase.recorded.rawValue
+            startup["committedPolicy"] = [
+                "revision": startupPolicy.revision.uuidString, "bytes": try startupPolicy.storedBytes.base64EncodedString()
+            ]
+            startup["committedCheckpoint"] = try checkpoint.bytes.base64EncodedString()
+            let startupRecord = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(json(startup))
+            func digest(_ bytes: Data) -> String { MachineUpdateActivationRecord.digest(bytes).base64EncodedString() }
+            let syntheticDigest = digest(Data("archive fixture".utf8))
+            // The row reader binds the two archives. It does not open an activation plan or prove native startup.
+            var binding: [String: Any] = [
+                "formatVersion": 1, "macID": account.macID.base64EncodedString(), "installationID": account.installationID.base64EncodedString(),
+                "accountID": account.accountID.base64EncodedString(), "ownerUID": owner.uid, "activationAttempt": finishing.activation.attemptID.uuidString,
+                "initializationDigest": startupRecord.initializationDigest.base64EncodedString(),
+                "provisioningReleaseDigest": account.releaseDigest.base64EncodedString(),
+                "installedReleaseDigest": startupRecord.installedReleaseDigest.base64EncodedString(),
+                "retainedSourceDigest": startupRecord.sourceDigest.base64EncodedString(), "policyIntentDigest": try digest(startupRecord.encoded),
+                "sourcePolicyDigest": try digest(source.policy.source.storedBytes), "sourceCheckpointDigest": digest(startupRecord.sourceCheckpoint),
+                "startupPolicyDigest": digest(startupRecord.startupPolicy), "startupPolicySnapshotDigest": try digest(startupPolicy.storedBytes),
+                "startupCheckpointDigest": try digest(checkpoint.bytes), "completionPolicyDigest": digest(startupRecord.completionPolicy),
+            ]
+            for name in ["candidateDigest", "admissionDigest", "updateID", "stableSealDigest", "installedEpochDigest", "sealedInventoryDigest",
+                         "sourceAccountDigest", "preparationDigest", "provisioningInventoryDigest", "previousInstalledReleaseDigest", "runtimeReferenceDigest"] {
+                binding[name] = syntheticDigest
+            }
+            var completionFields: [String: Any] = [
+                "formatVersion": 1, "id": UUID().uuidString, "revision": UUID().uuidString, "phase": 1,
+                "startupIntent": startup, "binding": binding, "activationPlanDigest": syntheticDigest, "inventoryDigest": syntheticDigest,
+            ]
+            let record = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))
+            XCTAssertEqual(try RuntimeRetainedSetupReleaseBinding.decode(record.binding.encoded), record.binding)
+            XCTAssertEqual(record.startupIntent, startupRecord)
+            completionFields["phase"] = MachineUpdateRetainedSetupCompletionIntentRecord.Phase.recorded.rawValue
+            XCTAssertThrowsError(try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+
+            let policyTable = MachineUpdateRetainedSetupPolicyStorage.tableName
+            let completionTable = MachineUpdateRetainedSetupCompletionStorage.tableName
+            func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
+            func row(id: UUID, revision: UUID, bytes: Data) -> String {
+                let id = id.uuidString.replacingOccurrences(of: "-", with: "")
+                let revision = revision.uuidString.replacingOccurrences(of: "-", with: "")
+                return "(X'\(hex(account.accountID))',X'\(id)',X'\(revision)',X'\(hex(bytes))')"
+            }
+            try fixture.machine.close()
+            try fixture.files.sql(MachineUpdateRetainedSetupPolicyStorage.createSQL)
+            try fixture.files.sql(MachineUpdateRetainedSetupCompletionStorage.createSQL)
+            try fixture.files.sql("PRAGMA user_version=26")
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(id: startupRecord.id, revision: startupRecord.revision, bytes: startupRecord.encoded))")
+            try fixture.files.reopen()
+            let empty = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
+            XCTAssertEqual(empty.schemaVersion, 26)
+            try fixture.machine.close()
+            try fixture.files.sql("INSERT INTO \(completionTable) VALUES \(try row(id: record.id, revision: record.revision, bytes: record.encoded))")
+            try fixture.files.reopen()
+            let actual = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
+            XCTAssertNotEqual(actual.currentRowsDigest, empty.currentRowsDigest)
+            XCTAssertEqual(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID, ownerUID: owner.uid, candidate: candidate), record)
+            XCTAssertThrowsError(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID,
+                ownerUID: owner.uid + 1, candidate: candidate)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+            XCTAssertThrowsError(try fixture.machine.writeInventory(actual.inventory, expectedRevision: actual.inventory.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+
+            // Keep the startup row canonical and in the same namespace, but replace its revision and bytes.
+            let newRevision = UUID()
+            startup["revision"] = newRevision.uuidString
+            let changedStartup = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(json(startup))
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM \(policyTable)")
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(id: changedStartup.id, revision: changedStartup.revision, bytes: changedStartup.encoded))")
             try fixture.files.reopen()
             XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
