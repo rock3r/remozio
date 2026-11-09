@@ -46,7 +46,8 @@ struct MachineUpdateInstalledReadinessPlan: Sendable {
                   let transportHost = configuration.transport.settingsHost else {
                 throw RuntimePreparationError.changedScope
             }
-            // Settlement reopens admission for the entire machine. Every registered account must prove readiness first.
+            // Every registered account must prove readiness before settlement can reopen machine admission.
+            // Mixed readiness prevents the settlement owner from opening. The update stays in finishing with admission closed.
             guard configuration.host.installedReadinessEnabled else {
                 throw MachineUpdateHealthCoordinatorError.installedReadinessDisabled
             }

@@ -2762,6 +2762,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     XCTAssertEqual(selected.inventory.accountIDs, [enabledID])
                     XCTAssertTrue(selected.inventory.preservedAccounts.isEmpty)
                     XCTAssertEqual(selected.unselectedRegisteredAccounts, [disabledID])
+                    XCTAssertThrowsError(try MachineUpdateInstalledTerminalReadBridge(plan: selected, candidate: candidate,
+                        readFinishing: { XCTFail("A focused plan reached the finishing reader"); throw ReplacementFixtureError.injected },
+                        readStable: { XCTFail("A focused plan reached the stable reader"); throw ReplacementFixtureError.injected })) {
+                            XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                        }
                     try selected.requireCurrent(scope: scope, candidate: candidate)
                     XCTAssertNil(try MachineUpdateNativeFinalization.selectReadiness(host: disabled,
                         compatibility: compatibility, scope: scope, candidate: candidate))
