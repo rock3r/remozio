@@ -3318,6 +3318,37 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertEqual(try record.committedPolicy?.snapshot(), completionPolicy)
             XCTAssertEqual(record.committedCheckpoint, try completionCheckpoint.bytes)
 
+            // Use the same real boundary at all three phases to exercise a no-op completion receipt.
+            let unchangedPolicy = try completionPolicy.policy.bytes
+            let unchangedCheckpoint = try completionCheckpoint.bytes
+            var unchangedStartup = startup
+            unchangedStartup["sourcePolicy"] = completionFields["committedPolicy"]
+            unchangedStartup["committedPolicy"] = completionFields["committedPolicy"]
+            unchangedStartup["sourceCheckpoint"] = unchangedCheckpoint.base64EncodedString()
+            unchangedStartup["committedCheckpoint"] = unchangedCheckpoint.base64EncodedString()
+            unchangedStartup["startupPolicy"] = unchangedPolicy.base64EncodedString()
+            unchangedStartup["completionPolicy"] = unchangedPolicy.base64EncodedString()
+            var unchangedBinding = binding
+            unchangedBinding["policyIntentDigest"] = try digest(json(unchangedStartup))
+            let unchangedSnapshotDigest = try digest(completionPolicy.storedBytes)
+            unchangedBinding["sourcePolicyDigest"] = unchangedSnapshotDigest
+            unchangedBinding["startupPolicySnapshotDigest"] = unchangedSnapshotDigest
+            unchangedBinding["sourceCheckpointDigest"] = digest(unchangedCheckpoint)
+            unchangedBinding["startupCheckpointDigest"] = digest(unchangedCheckpoint)
+            unchangedBinding["startupPolicyDigest"] = digest(unchangedPolicy)
+            unchangedBinding["completionPolicyDigest"] = digest(unchangedPolicy)
+            var unchangedCompletion = completionFields
+            unchangedCompletion["startupIntent"] = unchangedStartup
+            unchangedCompletion["binding"] = unchangedBinding
+            let noOp = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(unchangedCompletion))
+            XCTAssertEqual(noOp.phase, .recorded)
+            XCTAssertEqual(try noOp.committedPolicy?.snapshot(), completionPolicy)
+            XCTAssertEqual(noOp.committedCheckpoint, unchangedCheckpoint)
+            unchangedCompletion["committedCheckpoint"] = try checkpoint.bytes.base64EncodedString()
+            XCTAssertThrowsError(try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(unchangedCompletion))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+
             let policyTable = MachineUpdateRetainedSetupPolicyStorage.tableName
             let completionTable = MachineUpdateRetainedSetupCompletionStorage.tableName
             func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
@@ -3392,6 +3423,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 return (policyRecord, try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completion)))
             }
             let originalRecord = try hex(record.encoded)
+            // The namespace checks provide defense in depth. These rows also fail the startup row match.
             for (field, value) in [("macID", account.macID), ("installationID", account.installationID)] {
                 let (_, foreign) = try archivePair(changing: field, to: changed(value))
                 try rejectCompletionUpdate("record=X'\(try hex(foreign.encoded))'",
@@ -3426,8 +3458,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertNotEqual(atCapacity.currentRowsDigest, actual.currentRowsDigest)
             try fixture.machine.close()
 
-            // A valid startup table has only 64 rows. Drop the completion primary key in the fixture
-            // to put a second copy of its highest account at position 65 without adding a startup row.
+            // The row cap provides defense in depth. A valid startup table has only 64 rows.
+            // Drop the fixture's completion primary key to add a duplicate at position 65.
+            // The duplicate also violates the account uniqueness check.
             let copy = "fixture_completion_rows"
             try fixture.files.sql("ALTER TABLE \(completionTable) RENAME TO \(copy)")
             try fixture.files.sql("CREATE TABLE \(completionTable) AS SELECT * FROM \(copy)")
