@@ -3258,6 +3258,16 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 try $0.installCodePolicy(source.policy.startupPolicy, expectedRevision: source.policy.source.revision)
             }
             let checkpoint = try storage.continuity.read().committed
+            let completionPolicy = try commits.write(epoch: checkpoint.journalEpoch) {
+                try $0.installCodePolicy(source.policy.completionPolicy, expectedRevision: startupPolicy.revision)
+            }
+            let completionCheckpoint = try storage.continuity.read().committed
+            XCTAssertNotEqual(completionPolicy.revision, startupPolicy.revision)
+            XCTAssertEqual(completionCheckpoint.generation, checkpoint.generation + 1)
+            XCTAssertEqual(completionCheckpoint.authorityGeneration, checkpoint.currentAuthorityGeneration + 1)
+            for (before, after) in zip(startupPolicy.policy.entries, completionPolicy.policy.entries) {
+                XCTAssertEqual(before == after, startupPolicy.roleRevisions[before.role] == completionPolicy.roleRevisions[after.role])
+            }
             try storage.close()
             func json(_ fields: [String: Any]) throws -> Data {
                 try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -3291,32 +3301,41 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 "formatVersion": 1, "id": UUID().uuidString, "revision": UUID().uuidString, "phase": 1,
                 "startupIntent": startup, "binding": binding, "activationPlanDigest": syntheticDigest, "inventoryDigest": syntheticDigest,
             ]
-            let record = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))
-            XCTAssertEqual(try RuntimeRetainedSetupReleaseBinding.decode(record.binding.encoded), record.binding)
-            XCTAssertEqual(record.startupIntent, startupRecord)
+            let preparedCompletion = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))
+            XCTAssertEqual(try RuntimeRetainedSetupReleaseBinding.decode(preparedCompletion.binding.encoded), preparedCompletion.binding)
+            XCTAssertEqual(preparedCompletion.startupIntent, startupRecord)
             completionFields["phase"] = MachineUpdateRetainedSetupCompletionIntentRecord.Phase.recorded.rawValue
             XCTAssertThrowsError(try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
             }
 
+            completionFields["committedPolicy"] = [
+                "revision": completionPolicy.revision.uuidString, "bytes": try completionPolicy.storedBytes.base64EncodedString()
+            ]
+            completionFields["committedCheckpoint"] = try completionCheckpoint.bytes.base64EncodedString()
+            let record = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))
+            XCTAssertEqual(record.phase, .recorded)
+            XCTAssertEqual(try record.committedPolicy?.snapshot(), completionPolicy)
+            XCTAssertEqual(record.committedCheckpoint, try completionCheckpoint.bytes)
+
             let policyTable = MachineUpdateRetainedSetupPolicyStorage.tableName
             let completionTable = MachineUpdateRetainedSetupCompletionStorage.tableName
             func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
-            func row(id: UUID, revision: UUID, bytes: Data) -> String {
+            func row(accountID: Data, id: UUID, revision: UUID, bytes: Data) -> String {
                 let id = id.uuidString.replacingOccurrences(of: "-", with: "")
                 let revision = revision.uuidString.replacingOccurrences(of: "-", with: "")
-                return "(X'\(hex(account.accountID))',X'\(id)',X'\(revision)',X'\(hex(bytes))')"
+                return "(X'\(hex(accountID))',X'\(id)',X'\(revision)',X'\(hex(bytes))')"
             }
             try fixture.machine.close()
             try fixture.files.sql(MachineUpdateRetainedSetupPolicyStorage.createSQL)
             try fixture.files.sql(MachineUpdateRetainedSetupCompletionStorage.createSQL)
             try fixture.files.sql("PRAGMA user_version=26")
-            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(id: startupRecord.id, revision: startupRecord.revision, bytes: startupRecord.encoded))")
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(accountID: account.accountID, id: startupRecord.id, revision: startupRecord.revision, bytes: startupRecord.encoded))")
             try fixture.files.reopen()
             let empty = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
             XCTAssertEqual(empty.schemaVersion, 26)
             try fixture.machine.close()
-            try fixture.files.sql("INSERT INTO \(completionTable) VALUES \(try row(id: record.id, revision: record.revision, bytes: record.encoded))")
+            try fixture.files.sql("INSERT INTO \(completionTable) VALUES \(try row(accountID: account.accountID, id: record.id, revision: record.revision, bytes: record.encoded))")
             try fixture.files.reopen()
             let actual = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
             XCTAssertNotEqual(actual.currentRowsDigest, empty.currentRowsDigest)
@@ -3329,17 +3348,92 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
             }
 
-            // Keep the startup row canonical and in the same namespace, but replace its revision and bytes.
-            let newRevision = UUID()
-            startup["revision"] = newRevision.uuidString
-            let changedStartup = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(json(startup))
-            try fixture.machine.close()
-            try fixture.files.sql("DELETE FROM \(policyTable)")
-            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(id: changedStartup.id, revision: changedStartup.revision, bytes: changedStartup.encoded))")
-            try fixture.files.reopen()
-            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)) {
-                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            func changed(_ value: Data, offset: UInt8 = 1) -> Data {
+                var result = value
+                result[result.index(before: result.endIndex)] &+= offset
+                return result
             }
+            func requireCorruptRows(_ description: String) throws {
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate), description) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord, description)
+                }
+                try fixture.machine.close()
+            }
+            func rejectCompletionUpdate(_ update: String, restoring original: String, field: String) throws {
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE \(completionTable) SET \(update)")
+                try requireCorruptRows(field)
+                try fixture.files.sql("UPDATE \(completionTable) SET \(original)")
+            }
+            let recordID = record.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = record.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            try rejectCompletionUpdate("account=X'\(hex(changed(account.accountID)))'",
+                restoring: "account=X'\(hex(account.accountID))'", field: "completion account column")
+            try rejectCompletionUpdate("id=zeroblob(16)", restoring: "id=X'\(recordID)'", field: "completion ID column")
+            try rejectCompletionUpdate("revision=zeroblob(16)", restoring: "revision=X'\(revision)'", field: "completion revision column")
+
+            func archivePair(changing field: String, to value: Data, newIDs: Bool = false)
+                throws -> (MachineUpdateRetainedSetupPolicyIntentRecord, MachineUpdateRetainedSetupCompletionIntentRecord) {
+                var policy = startup
+                var operands = binding
+                var completion = completionFields
+                policy[field] = value.base64EncodedString()
+                operands[field] = policy[field]
+                if newIDs {
+                    policy["id"] = UUID().uuidString
+                    completion["id"] = UUID().uuidString
+                }
+                let policyBytes = try json(policy)
+                let policyRecord = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(policyBytes)
+                operands["policyIntentDigest"] = digest(policyBytes)
+                completion["startupIntent"] = policy
+                completion["binding"] = operands
+                return (policyRecord, try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completion)))
+            }
+            let originalRecord = try hex(record.encoded)
+            for (field, value) in [("macID", account.macID), ("installationID", account.installationID)] {
+                let (_, foreign) = try archivePair(changing: field, to: changed(value))
+                try rejectCompletionUpdate("record=X'\(try hex(foreign.encoded))'",
+                    restoring: "record=X'\(originalRecord)'", field: field)
+            }
+
+            let startupRow = try row(accountID: account.accountID, id: startupRecord.id,
+                revision: startupRecord.revision, bytes: startupRecord.encoded)
+            try fixture.files.sql("DELETE FROM \(policyTable)")
+            try requireCorruptRows("missing startup row")
+            var changedStartupFields = startup
+            changedStartupFields["revision"] = UUID().uuidString
+            let changedStartup = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(json(changedStartupFields))
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(try row(accountID: account.accountID,
+                id: changedStartup.id, revision: changedStartup.revision, bytes: changedStartup.encoded))")
+            try requireCorruptRows("different startup row")
+            try fixture.files.sql("DELETE FROM \(policyTable)")
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(startupRow)")
+
+            var policyRows: [String] = []
+            var completionRows: [String] = []
+            for offset in 1...63 {
+                let other = changed(account.accountID, offset: UInt8(offset))
+                let (policy, completion) = try archivePair(changing: "accountID", to: other, newIDs: true)
+                policyRows.append(try row(accountID: other, id: policy.id, revision: policy.revision, bytes: policy.encoded))
+                completionRows.append(try row(accountID: other, id: completion.id, revision: completion.revision, bytes: completion.encoded))
+            }
+            try fixture.files.sql("INSERT INTO \(policyTable) VALUES \(policyRows.joined(separator: ","))")
+            try fixture.files.sql("INSERT INTO \(completionTable) VALUES \(completionRows.joined(separator: ","))")
+            try fixture.files.reopen()
+            let atCapacity = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
+            XCTAssertNotEqual(atCapacity.currentRowsDigest, actual.currentRowsDigest)
+            try fixture.machine.close()
+
+            // A valid startup table has only 64 rows. Drop the completion primary key in the fixture
+            // to put a second copy of its highest account at position 65 without adding a startup row.
+            let copy = "fixture_completion_rows"
+            try fixture.files.sql("ALTER TABLE \(completionTable) RENAME TO \(copy)")
+            try fixture.files.sql("CREATE TABLE \(completionTable) AS SELECT * FROM \(copy)")
+            try fixture.files.sql("DROP TABLE \(copy)")
+            try fixture.files.sql("INSERT INTO \(completionTable) SELECT * FROM \(completionTable) ORDER BY account DESC LIMIT 1")
+            try requireCorruptRows("65th completion row")
         }
     }
 
