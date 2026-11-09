@@ -2325,7 +2325,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     validate: { scope in
                         let current = try XCTUnwrap(scope.read().publication)
                         try MachineUpdateCompletionPublicationFiles.requireInLeases(plan, publication: current,
-                            owner: getuid(), directory: { try XCTUnwrap(directories[$0]) }, verifyCurrent: { _ = try scope.read() })
+                            owner: getuid(), directory: files, verifyCurrent: { _ = try scope.read() })
                     }, publishFile: { current, entry, scope, didStage in
                         try MachineUpdateCompletionPublicationFiles.publishInLease(plan, publication: current,
                             accountID: entry.accountID, file: entry.file, directory: files(entry), owner: getuid(),
