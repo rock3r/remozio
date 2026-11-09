@@ -3172,8 +3172,52 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
             }
 
+            func replacingLastByte(_ bytes: Data, by offset: UInt8 = 1) -> Data {
+                var result = bytes
+                result[result.index(before: result.endIndex)] &+= offset
+                return result
+            }
+            let originalFields = try XCTUnwrap(JSONSerialization.jsonObject(with: intent.encoded) as? [String: Any])
+            func editedRecord(_ fields: [String: String]) throws -> Data {
+                var edited = originalFields
+                for (name, value) in fields { edited[name] = value }
+                let bytes = try JSONSerialization.data(withJSONObject: edited, options: [.sortedKeys, .withoutEscapingSlashes])
+                _ = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(bytes)
+                return bytes
+            }
+            func requireCorruptRow(_ update: String, restoring original: String, field: String) throws {
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE \(table) SET \(update)")
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate), field) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord, field)
+                }
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE \(table) SET \(original)")
+            }
+            try requireCorruptRow("account=X'\(hex(replacingLastByte(intent.accountID)))'",
+                restoring: "account=X'\(hex(intent.accountID))'", field: "account column")
+            try requireCorruptRow("id=zeroblob(16)", restoring: "id=X'\(id)'", field: "ID column")
+            try requireCorruptRow("revision=zeroblob(16)", restoring: "revision=X'\(revision)'", field: "revision column")
+            for (field, value) in [("macID", intent.macID), ("installationID", intent.installationID)] {
+                let foreign = try editedRecord([field: replacingLastByte(value).base64EncodedString()])
+                try requireCorruptRow("record=X'\(hex(foreign))'", restoring: "record=X'\(record)'", field: field)
+            }
+
+            // Each synthetic row is canonical and has its own account and ID. Only the last insert exceeds the cap.
+            let rows = try (1...64).map { offset in
+                let account = replacingLastByte(intent.accountID, by: UInt8(offset))
+                let rowID = UUID().uuidString
+                let bytes = try editedRecord(["accountID": account.base64EncodedString(), "id": rowID])
+                let rowIDHex = rowID.replacingOccurrences(of: "-", with: "")
+                return "(X'\(hex(account))',X'\(rowIDHex)',X'\(revision)',X'\(hex(bytes))')"
+            }
+            try fixture.files.sql("INSERT INTO \(table) VALUES \(rows.dropLast().joined(separator: ","))")
+            try fixture.files.reopen()
+            let atCapacity = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
+            XCTAssertNotEqual(atCapacity.currentRowsDigest, current.currentRowsDigest)
             try fixture.machine.close()
-            try fixture.files.sql("UPDATE \(table) SET revision=zeroblob(16)")
+            try fixture.files.sql("INSERT INTO \(table) VALUES \(try XCTUnwrap(rows.last))")
             try fixture.files.reopen()
             XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
