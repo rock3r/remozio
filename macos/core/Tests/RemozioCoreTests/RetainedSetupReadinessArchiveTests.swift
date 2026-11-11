@@ -171,7 +171,9 @@ final class RetainedSetupReadinessArchiveTests: XCTestCase {
         }
         let foreign = try RetainedSetupPromotionArchiveTests.Fixture()
         var foreignFields = foreign.recordFields; foreignFields[4] = .unsigned(3)
-        XCTAssertThrowsError(try record.requirePublication(.decode(foreign.record(foreignFields))))
+        XCTAssertThrowsError(try record.requirePublication(.decode(foreign.record(foreignFields)))) {
+            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+        }
         foreignFields[2] = .bytes(Fixture.bytes(f.promotion.id))
         foreignFields[3] = .bytes(Fixture.bytes(f.promotion.revision))
         let changedPublication = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(foreign.record(foreignFields))
@@ -185,8 +187,8 @@ final class RetainedSetupReadinessArchiveTests: XCTestCase {
 
     func testRejectsValidSignaturesWithDifferentArchivedOperandsOrCode() throws {
         let f = try Fixture()
-        let other = try Fixture()
-        let otherBinding = try XCTUnwrap(other.rootFields[2])
+        let foreignScope = try Fixture()
+        let otherBinding = try XCTUnwrap(foreignScope.rootFields[2])
         XCTAssertNotEqual(otherBinding, f.rootFields[2])
         for key in [UInt64(2), 3, 4, 9] {
             var root = f.rootFields, transport = f.transportFields
@@ -194,7 +196,9 @@ final class RetainedSetupReadinessArchiveTests: XCTestCase {
             transport[key] = root[key]
             let pair = try f.exchange(root: root, transport: transport)
             let record = try MachineUpdateRetainedSetupPromotionReadyRecord.decode(f.encode(f.readyFields(exchange: pair)))
-            XCTAssertThrowsError(try record.requirePublication(f.promotion))
+            XCTAssertThrowsError(try record.requirePublication(f.promotion)) {
+                XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope)
+            }
         }
         let policy = try f.promotion.publication().configuration.host.codePolicy
         let old = try XCTUnwrap(policy.entries.first { $0.role == .authority && $0.active })
@@ -204,7 +208,9 @@ final class RetainedSetupReadinessArchiveTests: XCTestCase {
         var root = f.rootFields; root[7] = .bytes(try AuthorityCodePolicy(entries: [other]).bytes)
         let pair = try f.exchange(root: root)
         let record = try MachineUpdateRetainedSetupPromotionReadyRecord.decode(f.encode(f.readyFields(exchange: pair)))
-        XCTAssertThrowsError(try record.requirePublication(f.promotion))
+        XCTAssertThrowsError(try record.requirePublication(f.promotion)) {
+            XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope)
+        }
     }
 
     func testRequiresPromotionScopeInsteadOfEarlierHealthVersions() throws {
@@ -363,13 +369,19 @@ final class RetainedSetupReadinessArchiveTests: XCTestCase {
         var db: OpaquePointer?; XCTAssertEqual(sqlite3_open(":memory:", &db), SQLITE_OK)
         let opened = try XCTUnwrap(db); defer { sqlite3_close(opened) }
         XCTAssertEqual(sqlite3_exec(opened, MachineUpdateRetainedSetupPromotionReadyStorage.createSQL, nil, nil, nil), SQLITE_OK)
-        func insert(record: String) -> Int32 {
+        func insert(account: String = "zeroblob(16)", id: String = "zeroblob(16)",
+                    revision: String = "zeroblob(16)", record: String) -> Int32 {
             XCTAssertEqual(sqlite3_exec(opened, "DELETE FROM retained_setup_promotion_ready_v1", nil, nil, nil), SQLITE_OK)
-            return sqlite3_exec(opened, "INSERT INTO retained_setup_promotion_ready_v1 VALUES(zeroblob(16),zeroblob(16),zeroblob(16),\(record))", nil, nil, nil)
+            return sqlite3_exec(opened, "INSERT INTO retained_setup_promotion_ready_v1 VALUES(\(account),\(id),\(revision),\(record))", nil, nil, nil)
         }
         XCTAssertEqual(insert(record: "zeroblob(71680)"), SQLITE_OK)
         XCTAssertNotEqual(insert(record: "zeroblob(71681)"), SQLITE_OK)
         XCTAssertNotEqual(insert(record: "zeroblob(0)"), SQLITE_OK)
         XCTAssertNotEqual(insert(record: "'x'"), SQLITE_OK)
+        XCTAssertEqual(insert(record: "zeroblob(1)"), SQLITE_OK)
+        XCTAssertEqual(insert(account: "zeroblob(15)", record: "zeroblob(1)"), SQLITE_CONSTRAINT)
+        XCTAssertEqual(insert(id: "zeroblob(15)", record: "zeroblob(1)"), SQLITE_CONSTRAINT)
+        XCTAssertEqual(insert(revision: "zeroblob(15)", record: "zeroblob(1)"), SQLITE_CONSTRAINT)
+        XCTAssertEqual(insert(account: "'0123456789abcdef'", record: "zeroblob(1)"), SQLITE_CONSTRAINT)
     }
 }
