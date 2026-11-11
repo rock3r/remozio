@@ -150,6 +150,35 @@ final class RetainedSetupActivationArchiveTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeRetainedSetupActivationArchive.decode(f.bytes(fields)))
         fields = f.fields; fields[1] = .bytes(try original.reference.encoded)
         XCTAssertThrowsError(try RuntimeRetainedSetupActivationArchive.decode(f.bytes(fields)))
+
+        let active = f.source.reference
+        let withoutActivity = try RuntimeMaterialReference(materialID: active.materialID, services: active.services,
+            materialDigest: active.materialDigest, transportPublicKeyInfo: active.transportPublicKeyInfo,
+            gateway: active.gateway)
+        XCTAssertNil(withoutActivity.serviceActivity)
+        var inactiveBindingFields = f.source.startup
+        inactiveBindingFields["runtimeReferenceDigest"] = MachineUpdateActivationRecord.digest(
+            try withoutActivity.encoded).base64EncodedString()
+        let inactiveBinding = try RuntimeRetainedSetupReleaseBinding.decode(f.source.json(inactiveBindingFields))
+        XCTAssertNoThrow(try inactiveBinding.requireHistoricalRuntime(withoutActivity))
+        XCTAssertNoThrow(try inactiveBinding.requireStartupPolicy(f.host.codePolicy))
+        fields = f.fields; fields[1] = .bytes(try withoutActivity.encoded); fields[9] = .bytes(try inactiveBinding.encoded)
+        // The external binding is coherent. The host equality checks also refuse this combination.
+        XCTAssertThrowsError(try RuntimeRetainedSetupActivationArchive.decode(f.bytes(fields))) {
+            XCTAssertEqual($0 as? RuntimeActivationError, .invalidPlan)
+        }
+
+        let disabledHost = try InstalledAuthorityCommandConfiguration(machineDirectory: f.host.machineDirectory,
+            installationID: f.host.installationID, releaseDigest: f.host.releaseDigest, codePolicy: f.host.codePolicy,
+            command: f.host.command, label: f.host.label, plistName: f.host.plistName,
+            jobPlacement: f.host.jobPlacement, gatewaySettingsControlEnabled: false)
+        XCTAssertFalse(disabledHost.gatewaySettingsControlEnabled)
+        XCTAssertNoThrow(try InstalledAuthorityCommandConfiguration.decode(disabledHost.canonicalBytes))
+        XCTAssertNoThrow(try f.binding.requireStartupPolicy(disabledHost.codePolicy))
+        fields = f.fields; fields[3] = .bytes(disabledHost.canonicalBytes)
+        XCTAssertThrowsError(try RuntimeRetainedSetupActivationArchive.decode(f.bytes(fields))) {
+            XCTAssertEqual($0 as? RuntimeActivationError, .invalidPlan)
+        }
     }
 
     func testRejectsMissingUnknownNoncanonicalAndOversizedRecords() throws {
