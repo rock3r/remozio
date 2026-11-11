@@ -5,7 +5,7 @@ import XCTest
 
 /// Uses owned fixture records and synthetic archive facts. It does not register jobs or prove native startup.
 final class RetainedSetupConsumerHostArchiveTests: XCTestCase {
-    private final class Fixture {
+    final class Fixture {
         let f: ConsumerHostMetadataFixture
         let reference: RuntimeMaterialReference
         let startup: [String: Any]
@@ -102,6 +102,9 @@ final class RetainedSetupConsumerHostArchiveTests: XCTestCase {
             let archived = try TransportPairingStartupConfiguration.decodeForReleaseArchive(transport.canonicalBytes)
             XCTAssertEqual(archived.settingsHost, host)
             XCTAssertEqual(archived.canonicalBytes, transport.canonicalBytes)
+            XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(transport.canonicalBytes)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
             XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(transport.canonicalBytes))
             XCTAssertThrowsError(try archived.requireLegacyStartup()) {
                 XCTAssertEqual($0 as? TransportPairingControlError, .unsupportedVersion)

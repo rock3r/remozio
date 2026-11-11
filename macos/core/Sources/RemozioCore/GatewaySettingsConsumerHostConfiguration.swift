@@ -182,7 +182,8 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
     static func decode(_ bytes: Data) throws -> Self {
         try decode(bytes, allowReleaseBound: false)
     }
-    /// Reads archived host metadata. Ordinary startup uses the separate decoder and rejects retained setup formats.
+    /// Reads archived host metadata. Native startup also decodes here.
+    /// GatewaySettingsConsumerStartupMode.select accepts ordinary format 1 or update-health format 2.
     static func decodeForReleaseArchive(_ bytes: Data) throws -> Self {
         try decode(bytes, allowReleaseBound: true)
     }
