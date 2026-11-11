@@ -3328,6 +3328,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let completionBoundary = AuthorityJournal.MachineUpdatePolicyBoundary(macID: account.macID,
                 accountID: account.accountID, policy: completionPolicy, checkpoint: completionCheckpoint)
             XCTAssertNoThrow(try completionBinding.requireRecordedBoundary(completionBoundary))
+            XCTAssertNotEqual(try startupPolicy.policy.bytes, try completionPolicy.policy.bytes)
+            XCTAssertNoThrow(try completionBinding.requireCompletionPolicy(completionPolicy.policy))
+            XCTAssertThrowsError(try completionBinding.requireCompletionPolicy(startupPolicy.policy)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
             let otherRevision = AuthorityCodePolicySnapshot(revision: UUID(), policy: completionPolicy.policy,
                 roleRevisions: completionPolicy.roleRevisions)
             XCTAssertEqual(try otherRevision.storedBytes, try completionPolicy.storedBytes)
