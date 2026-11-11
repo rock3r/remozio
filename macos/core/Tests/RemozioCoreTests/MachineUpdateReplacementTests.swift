@@ -3404,6 +3404,10 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     func testRetainedSetupPromotionReadsSchema27AndRejectsOrdinaryWrites() throws {
         try withPromotionReaderFixture { fixture, account, completion, promotion in
+            let recordBytes = try promotion.encoded
+            // This fixture fits the ordinary cell bound. It does not prove acceptance above that bound.
+            XCTAssertLessThanOrEqual(recordBytes.count, 278_528,
+                "The fixture exceeds the ordinary cell bound. Update its declared coverage before accepting this test.")
             let snapshot = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
             XCTAssertEqual(snapshot.schemaVersion, 27)
             XCTAssertEqual(try fixture.machine.retainedSetupPromotionIntent(accountID: account.accountID,
