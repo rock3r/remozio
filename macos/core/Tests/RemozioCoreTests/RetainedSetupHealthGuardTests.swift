@@ -40,6 +40,7 @@ final class RetainedSetupHealthGuardTests: XCTestCase {
         XCTAssertThrowsError(try Evidence.verifyJointRootReply(request: pair.0, response: pair.1.rootReply, expected: other, transportDigest: digest)) {
             XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .invalidMessage)
         }
+        // The request echo and canonical reply reconstruction both reject this case.
         let anotherRequest = try challenge(f, requirement: pair.2, nonce: 7)
         let anotherReply = try joint(f, request: anotherRequest, digest: digest, key: f.rootKey)
         XCTAssertNoThrow(try Evidence.verifyJointRootReply(request: anotherRequest, response: anotherReply, expected: pair.2, transportDigest: digest))
@@ -85,6 +86,7 @@ final class RetainedSetupHealthGuardTests: XCTestCase {
     func testTransportScopeRejectsWrongParentAndChildRolesWithValidSignatures() throws {
         let f = try Fixture(), pair = try f.exchange()
         XCTAssertNoThrow(try Evidence.verifyTransportReply(request: pair.1.transportRequest, response: pair.1.transportReply, expected: pair.3, boundTo: pair.0))
+        // After validation, the parent authority role and UID zero are equivalent. This case covers the pair.
         for (parent, child, key) in [(pair.3, pair.3, f.transportKey), (pair.2, pair.2, f.rootKey)] {
             XCTAssertNoThrow(try parent.validate()); XCTAssertNoThrow(try child.validate())
             let root = try challenge(f, requirement: parent)
