@@ -48,7 +48,7 @@ final class RetainedSetupActivationArchiveTests: XCTestCase {
             let services: [InstallationService]
             if let account {
                 services = [try .init(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-                    label: "dev.remozio.archive-fixture.authority", plistName: "archive-fixture.plist", accountID: account.accountID)]
+                    label: "dev.remozio.archive-fixture.authority", plistName: "dev.sebastiano.remozio.macos.archive-fixture.authority.plist", accountID: account.accountID)]
             } else { services = inventory.services }
             let changed = try InstallationInventory(macID: macID ?? inventory.macID,
                 installationID: installationID ?? inventory.installationID, revision: inventory.revision,
