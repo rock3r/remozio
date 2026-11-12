@@ -87,7 +87,7 @@ struct MachineUpdateRetainedSetupCompletionIntentRecord: Codable, Equatable, Sen
     /// Proposes a separate completion receipt. The immutable startup receipt remains exact.
     func recording(_ receipt: AuthorityJournal.MachineUpdatePolicyCommitReceipt) throws -> Self {
         try validate(); guard phase == .writing else { throw PreparationStoreError.invalidTransition }
-        try requireSource(receipt.source.boundary)
+        try requireSource(receipt.source)
         return try advanced(to: .recorded, policy: .init(receipt.policy), checkpoint: receipt.checkpoint.bytes)
     }
     /// An unchanged pair grants no retry authority. A recovered receipt is a proposal for its separate owner.
