@@ -61,7 +61,8 @@ final class RuntimeActivationCompatibilityProjectionTests: XCTestCase {
             let selected = [(mask & 1 != 0, try PhoneRoutingReleaseContract.requirements),
                 (mask & 2 != 0, try PhoneAuditReleaseContract.requirements),
                 (mask & 4 != 0, try PhoneUpdateSchedulingReleaseContract.requirements)]
-            let baseline = try GatewaySettingsNativeHostPlan.releaseRequirements.formats + RuntimeRetainedSetupReleaseBinding.requirements
+            let baseline = try GatewaySettingsNativeHostPlan.releaseRequirements.formats +
+                RuntimeRetainedSetupReleaseBinding.requirements + MachineUpdatePreflightCompatibility.retainedSetupActivationRequirements
             let expectedFormats = baseline + selected.filter { $0.0 }.flatMap { $0.1 }
             for role in [AuthorityCodeRole.authority, .setupController] {
                 let expected = expectedFormats.filter { $0.role == role && $0.name == RuntimeActivationPlan.formatName }
