@@ -100,12 +100,7 @@ struct RuntimeRetainedSetupReleaseBinding: Codable, Equatable, Sendable, CustomS
               try Self.digest(boundary.checkpoint.bytes) == startupCheckpointDigest else { throw RuntimeActivationError.changedScope }
     }
     static var requirements: [RetainedReleaseFormat] { get throws {
-        try [AuthorityCodeRole.authority, .transport, .notificationGateway, .setupController].flatMap { role in
-            try [RetainedReleaseFormat(role: role, name: formatName, readVersions: [1], writeVersions: role == .setupController ? [1] : []),
-                 RetainedReleaseFormat(role: role, name: GatewaySettingsConsumerHostConfiguration.formatName,
-                    readVersions: [GatewaySettingsConsumerHostConfiguration.retainedSetupVersion],
-                    writeVersions: role == .setupController ? [GatewaySettingsConsumerHostConfiguration.retainedSetupVersion] : [])]
-        }
+        try MachineUpdatePreflightCompatibility.retainedSetupRequirements
     } }
     static func requireFormats(_ candidate: SignedReleaseEvidence) throws {
         for requirement in try requirements {
