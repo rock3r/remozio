@@ -1,6 +1,7 @@
 # Schema 27 writer plan
 
-This is a source-only plan for Toni1429,1434,1436 and1438, with reviewer1437. No product code, build, parse or test ran for this plan.
+This is the source-only plan delta for Toni1440/1446 and reviewer1443, on G0 source d8972ae1.
+The original170ebb44 plan stays immutable. G0 is committed and source-reviewed; it is not locally compiled or tested. No product code, build, parse or test ran for this plan.
 Inspected checkout: eeb9f346e3f75e15495b4818620946e25adc5626, tree fb2b91cc37ee4743a26c79686ad1f5ebee003b73.
 Donor: 669ec2e99edb89d6f10e8b964b60c7405f5a9415. The Mac belongs to Toni after his acknowledgment1429.
 The F pre-gate passed on this checkout. It does not qualify Toni's rebased candidate c2e28b77.
@@ -50,7 +51,8 @@ Test every remaining format and role. Fail if a codec constant changes without i
 Also compare actual canonical record versions and generated declarations; a shared-constant assertion alone is insufficient.
 Ordinary readers must still accept an adequate reader-only candidate.
 
-Unproven: producer availability for schemas25/26 and the native writer. No manifest writer claim is enabled by this guard correction.
+Unproven: producer availability for schemas25/26 and the native writer. No manifest writer claim is enabled by this guard correction. The Python test in G0 checks generated reader versions and empty intent writer sets only.
+It does not require the real manifest to satisfy the prospective producer union, so G0 has no dependency on G2 or the producers.
 
 ## G1: typed compatibility
 
@@ -73,16 +75,23 @@ Tests: `RuntimeReleaseCompatibilityTests`, the v6 SQL cases in `MachineUpdateRep
 Cover ordinary v1–v5, typed v6, a mixed account set, malformed or unknown versions, wrong columns, wrong ownership and registration.
 Compare the full declared requirement sets, including phone features and host versions. Reject changed external import evidence.
 Retain the ordinary v6 decoder refusal and schema23/24 ordinary-entry refusals as regression controls.
+A valid retained v6 row must not quarantine the machine. Test store usability after a successful stable read and after ordinary compatibility refusal.
+Reject a known valid unsupported v6 row with a non-corruption error before the ordinary decoder can poison the transaction.
+Malformed records retain their corruption behavior. Do not widen the ordinary codec.
+The stable-entry callers are G4 native verifyCurrent, E03 activation verification and G9 selection, always with a checked retained snapshot and candidate.
+These callers bind the activation snapshot and separately authenticate the exact policy/completion/promotion rows through the corresponding readers.
 
 Unproven: signed release inspection, actual native enrollment and registration. A typed projection grants no startup or migration authority.
 
 ## G2: release declarations
 
-Update the existing generator, not the donor's entire2635-line JSON contract.
+Update the existing generator, not the donor's entire2635-line JSON contract. G2 declares readers only.
 Add `runtime.retained-setup-release` v1 and consumer-host v3 for authority, transport, gateway and Setup.
-The three consumers receive readers. Setup receives the writers that the checked file codecs implement.
-Include the typed activation v6 requirement for authority and Setup, with its writer limited to Setup.
-Include the completed-host v4 and completion binding/archive/configuration/publication requirements used by F.
+All four roles receive only the corresponding readers in G2. Setup writers wait for the slice that makes each write reachable.
+Include typed activation v6 readers for authority and Setup. Its Setup writer is declared with the reachable activation producer in C06.
+Include the completed-host v4 and completion binding/archive/configuration/publication readers used by F.
+C06 enables only the actual initial host3/retained-release/v6 producers. G9 enables completed-host4 and completion-publication producers.
+G7/G8 add library code; they do not enable those declarations before the authenticated route exists.
 Derive the complete matrix from the current Swift requirement tables. Do not copy every donor declaration.
 Keep schema28 and later writers disabled. Do not add deployment or service actions.
 
@@ -93,6 +102,7 @@ Test the missing-version and wrong-role cases against the current requirements, 
 
 Unproven: a signed product artifact and a callable native producer.
 Schema25/26 and intent-row writer declarations remain gated on their actual producers. A synthetic candidate is not that proof.
+The appendix assigns those producer slices and their authenticated route. It does not leave them as unscheduled prerequisites.
 
 ## G3: read-only native support
 
@@ -257,12 +267,12 @@ No service, signing secret, physical device or attended provider test is authori
 | Promotion native entry and recorded-pair helper |64+30 lines | Yes | Split the read-only pair into G3/G5; entry in G9. |
 | Promotion proposal selector |86 lines | Yes | G9; adapt source validation through G5. |
 | ActivationNative scope and material checks |111+31 lines | Yes, selected checks only | G4. Keep the full validation; adapt typed fields and metadata transitions. |
-| Other ActivationNative methods |79 lines outside those ranges | No direct dependency | Leave activation registration/pair sequencing outside. The promotion owner handles its own connection lifetime. |
+| Other ActivationNative methods |79 lines outside those ranges | Not in direct G4; required by prerequisites | E03 and R02 carry the actual activation/registration path. The G8 promotion owner retains its separate connection lifetime. |
 | PolicyNative paths and read-only storage opener |11+21 lines | Yes | G3. No policy mutation or policy owner. |
-| Remaining PolicyNative code |253 lines outside those ranges | No | Leave its policy writer, source-phase pair machinery and native resume outside. |
-| Scoped verification loan |20 lines plus wrapper/imports | Yes | G3. Do not import the226-line stable publication module. |
+| Remaining PolicyNative code |253 lines outside those ranges | Not in direct G3; required by P04 | P04 implements the native policy producer and mutable pair. Do not import it merely to obtain the read-only G3 opener. |
+| Scoped verification loan |20 lines plus wrapper/imports | Yes | G3. G3 does not import the226-line stable publication module. E04 adapts its retained file responsibility later. |
 | RootStartup source artifact list |6 lines | Yes | G5 checks the command host and two job files directly. |
-| CompletionStartup/RootStartup health wrappers |Not proposed for import | No | G5 supplies the file and pair checks. Health listeners, startup selection and challenges remain separate. |
+| CompletionStartup/RootStartup health wrappers |57+242 donor lines | Required by native-input prerequisites | H03 and H13 supply the health/startup path. G5 alone still needs only file/pair validation. |
 | Donor retained-format JSON |2635 lines | No wholesale dependency | Use current generator and current requirements in G2. |
 
 The stored source excerpts and hashes are in `source-inspection.json` and `inspection-excerpts/`.
@@ -289,9 +299,216 @@ Name new test methods only when implemented; this plan claims no new test count,
 The current known baseline is5718 Core cases on eeb9f346. Derive every later count from its actual source.
 
 Schemas25/26 need their actual producers and authenticated enrolled/registered inputs before a native schema27 success can be claimed.
+The appendix below assigns the source and native-input producer closure before G6/G9; its code is not applied by this plan.
 The stable reader still requires inventory==installed epoch. This plan does not weaken that invariant to synthesize an input.
 If valid registration needs a separate reader/producer contract, schedule and qualify it explicitly before G6/G9 become reachable.
 The real release must truthfully satisfy the complete producer union. Missing prerequisites must fail outside the SQL transaction.
 Owned pairs, injected callbacks and structural probes do not prove native custody, signatures, service health or installed startup.
 Schema28 readiness, final health, ordinary startup, job registration, admission reopening and unattended dispatch remain outside this writer plan.
 All original failed runs and historical receipts remain unchanged. No source was applied and no native operation ran for this plan.
+
+
+# Appendix: complete producer route before schema27
+
+Toni1440 asks for the missing distance to a usable writer. This appendix plans42 additional prerequisite slices.
+Together with G0–G9, the current source-port plan contains52 focused slices from the F baseline.
+G0 has a source-only commit. None of the42 prerequisite slices is implemented or qualified here.
+This is a proposed slice count, not a count of features or historical files. Measured source and future changed-line estimates are separate.
+
+The directed closure includes stable preparation, policy25, typed enrollment, native health registration and completion26.
+Stopping at two SQL methods would leave no legitimate producer of the input that G6/G9 consume.
+Schema28 readiness, final ordinary startup, providers and the wider audit/update/export/scheduling goal remain beyond this writer route.
+Thus52 is not a full-project completion count.
+
+## Required order
+
+G0 → G1 → G2 → G3 → G4 → G5
+→ A01–A08 → P01–P04 → A09–A11 → E01–E05
+→ H01–H13 → R01–R02 → C00–C06 → G6 → G7 → G8 → G9.
+
+The P block belongs between material creation and initial file publication. A09 needs recorded policy25 from P04.
+The H block produces authenticated registration/completion proofs. R02 must never replace those proofs with a fixture flag.
+C06 supplies the authenticated Setup route that creates a real recorded completion26 input.
+The input code exists after these slices; actual native success still needs the separately allowed installed test.
+C05/C06 must never map retained completion to an ordinary-ready UI result before the final startup gates.
+G6/G9 may consume that input only after its actual source/registration/receipt checks succeed.
+No writer calls code from a later slice. Before its owner exists, a helper is unreachable and its writer declaration stays disabled.
+
+G3/G4/G5 add read-only promotion helpers, not the entire donor activation/policy owner hierarchy.
+The P/E blocks introduce the actual stage-specific producer owners. They reuse only helpers whose complete contracts match.
+The activation stage cannot borrow the promotion context by dropping its completion or registration checks.
+
+## Additional slices
+
+Every production cap below is less than400 additions plus deletions. Names refer to RemozioCore sources unless another path appears.
+The source column names measured donor locations. It does not claim that every donor line is missing or safe to apply unchanged.
+Current public fixes, typed state, private constructors and policy-v2 canonical bytes must survive each adaptation.
+No raw donor type may replace a current checked typed plan. Audit every added call against its current declaration.
+The Core column is a test-design budget, not an executed timing or a guaranteed forecast.
+
+### Stable preparation and initial runtime
+
+| Slice | Complete responsibility and measured donor source | Production estimate; cap | Required tests | What remains unproven | Core addition budget |
+| --- | --- | --- | --- | --- | --- |
+| A01 | Stable account reservation. PreparationIntentStore.swift:4234–4358 (125 donor lines) | 150–240; 320 | Actual admission loan, revision/owner/target UID and disclosure refusals; other rows fixed | No account keys or initialized stores | 5–15s |
+| A02 | Stable account storage SQL. PreparationIntentStore.swift:3985–4233 (249) | 270–350; 390 | Private authorization; exact public key and paired initialization; stale/rollback/foreign rows | No native credential or directory writes | 10–25s |
+| A03 | Native account preparation. MachineUpdateStableAccountPreparation.swift (143) | 160–260; 340 | Owned key/storage operations, ordinary UID first, partial-state recovery, no disclosure bypass | Real protected identity and stores remain attended | 3–10s |
+| A04 | Stable service account producer. PreparationIntentStore.swift:3212–3327 (116); MachineUpdateStableServiceAccountPreparation.swift (146) | 290–360; 390 | Reserve/complete exact plan; user/group identity conflicts; protected rows; native refusal first | Actual OS users/groups are not exercised by unit fixtures | 10–25s |
+| A05 | Runtime material metadata and import change. PreparationIntentStore.swift:3837–3984 (148) | 190–290; 360 | Private runtime authorization, material/published flags, import exact source and rollback | No runtime file producer yet | 10–25s |
+| A06 | Read-only initial configuration and view. RuntimeRetainedSetupInitialConfiguration.swift (56); MachineUpdateStableRuntimeView.swift (173); MachineUpdateStableRuntimePublishedSelection.swift (89) | 300–360; 390 | Exact source view, clients, canonical config, unsafe path and policy-revision changes | No initial file write; adapt to current typed snapshots | 5–15s |
+| A07 | Retained runtime inputs and import preparation. MachineUpdateRetainedSetupRuntimeInputs.swift (92); MachineUpdateStableRuntimeImportPreparation.swift (131) | 240–320; 380 | Fresh shared-import snapshot, relay selection, import acknowledgement, expired input loan | No credential disclosure or invented import acknowledgement | 5–15s |
+| A08 | Native material preparation. MachineUpdateRetainedSetupMaterialPreparation.swift (167); selected Scope/loan from MachineUpdateStableRuntimePublication.swift (238 total) | 190–280; 360 | Material retain/re-read, custody acceptance, activity/metadata fences and ordinary UID refusal | Port only the required scope; ordinary publication path stays out | 5–15s |
+| A09 | Initial retained publication and completion. MachineUpdateRetainedSetupInitialPublication.swift (104); MachineUpdateRetainedSetupInitialCompletion.swift (165) | 290–360; 390 | Owned source files, exact bytes and material before/after publication, phase changes, source policy stays exact | Needs recorded policy from P04; no jobs registered | 15–35s |
+| A10 | Initial runtime sequence. MachineUpdateRetainedSetupInitialRuntime.swift (150); MachineUpdateRetainedSetupRuntimeSequence.swift (174) | 320–365; 390 | Material→policy→publication→acknowledgement order; changed inputs; escaped callback and provider rejection | No authenticated Setup dispatch yet | 10–25s |
+| A11 | Native runtime provider. MachineUpdateRetainedSetupRuntimeNative.swift (190) | 210–300; 370 | Close each machine connection, borrowed input lifetime, verifyCurrent at every stage, partial runtime recovery | Actual native account context remains attended | 5–15s |
+
+### Schema25 policy producer
+
+| Slice | Complete responsibility and measured donor source | Production estimate; cap | Required tests | What remains unproven | Core addition budget |
+| --- | --- | --- | --- | --- | --- |
+| P01 | Policy-v2 source and phase proposals. MachineUpdateRetainedSetupPolicyIntentRecord.swift: donor requireSource/preparingWrite/recording/reconciling/transition; current v2 source factory | 100–190; 260 | Real second paired commit, exact receipt/no-op, role/global revisions/checkpoint; unchanged writing grants no retry | Preserve v2 scope and current observe/codec; no donor-v1 restoration | 10–20s |
+| P02 | Schema25 policy SQL and single-use acknowledgement. PreparationIntentStore.swift:5031–5267 (237) | 270–350; 390 | 24→25 migration, private gate, all other rows, id/revision predicates, fresh changed acknowledgement, rollback | No journal commit can occur before acknowledged writing and machine close | 20–45s |
+| P03 | Policy journal permit and owner. AuthorityJournal.swift: retained startup hook within735–783; MachineUpdateRetainedSetupPolicyOwner.swift (221) | 260–340; 390 | Permit one-use/process/thread/closed-store checks; full phase order; exact recovered receipt; escaped/reentrant body | Unresolved writing remains owner intervention; no automatic replay | 15–40s |
+| P04 | Native policy custody and writable pair. MachineUpdateRetainedSetupPolicyNative.swift (285; reuse G3 path/read-only parts) | 250–330; 390 | Explicit mutable-pair authority, protected identity/material/activity, close on every path, current owner checks | Real native policy commit remains attended; no generic readOnly bypass Boolean | 5–15s |
+
+### Real typed plan and enrollment
+
+| Slice | Complete responsibility and measured donor source | Production estimate; cap | Required tests | What remains unproven | Core addition budget |
+| --- | --- | --- | --- | --- | --- |
+| E01 | Checked retained enrollment inventory projection. PreparationIntentStore.swift: donor5513–5551; MachineUpdateStableReleaseSnapshot.swift (87 donor); typed retained plan inventory binding | 180–300; 380 | Sealed inventory unchanged; only exact authenticated retained account/service additions; all foreign additions/removals/code and seal changes rejected | New explicit reader contract; never delete inventory==installed-epoch guard | 15–35s |
+| E02 | Typed v6 retention and enrollment SQL. PreparationIntentStore.swift:3373–3530 plus3594–3603; protected digest support near3800–3836 | 230–330; 390 | Retain exact v6 bytes; enroll exact derived account/jobs; private actual-frame adoption; all other rows pinned | No registration flag or proof until R02; typed state only | 20–45s |
+| E03 | Activation native read-only scope. MachineUpdateRetainedSetupActivationNative.swift (221) | 240–330; 390 | Current typed metadata/code/custody/material; account and service identity; pair scope expiry | Keep separate activation and promotion stage invariants; no widening of G4 | 3–10s |
+| E04 | Typed activation file publication. MachineUpdateStableRuntimeActivationPublication.swift (226 donor; adapt retained-only portion) | 210–320; 380 | Exact typed plan/host/job files, actual read-back and unknown exchange result; no ordinary decoder fallback | No live registration or ordinary runtime enablement | 10–25s |
+| E05 | Retained activation enrollment owner. MachineUpdateRetainedSetupActivationOwner.swift (215) | 230–320; 380 | Source proposal, durable plan, checked file publication then enrollment, closed machine and exact actual frames | Native registration still absent until H/R blocks | 10–30s |
+
+### Authenticated native health closure
+
+| Slice | Complete responsibility and measured donor source | Production estimate; cap | Required tests | What remains unproven | Core addition budget |
+| --- | --- | --- | --- | --- | --- |
+| H01 | Registration/completion health plans. MachineUpdateRetainedSetupHealth.swift: plan portion7–269 (exclude promotion-only construction) | 170–260; 340 | Exact role, purpose, retained binding, policy/checkpoint and typed plan; reject crossed stages | No authenticated reply or channel yet | 2–5s |
+| H02 | Health challenge and reply validation. MachineUpdateRetainedSetupHealth.swift:270–441 (172); MachineUpdateRetainedSetupJointHealth.swift (102) | 290–350; 390 | Nonce/deadline/signature/role/purpose binding; one consumption; joint root/transport transcript | Owned signatures are not native peer proof | 5–15s |
+| H03 | Root startup metadata and read-only pair. MachineUpdateRetainedSetupRootStartup.swift (242); CompletionStartup.swift (57); selected checked store getter5682–5694 | 320–370; 399 | Exact command host/job files, actual pair/completion phase, native identity first; checked getter precedes generic CLI selection | No command admission or startup readiness claim | 3–8s |
+| H04 | Health hello and XPC protocol. MachineUpdateRetainedSetupHealthXPCEndpoint.swift:5–64 (60) | 70–130; 200 | Explicit wire versions, role/purpose substitution, malformed payload and bounds | No endpoint executes requests yet | 1–3s |
+| H05 | Native health peer and claimed request. MachineUpdateRetainedSetupHealthPeer.swift (315; omit promotion-only factories) | 270–340; 390 | Code/UID/connection identity, hello schema, immutable request, native vs owned claim, replay and close | Owned requests cannot pass native-only claims | 3–8s |
+| H06 | Native authority/transport health keys. MachineUpdateRetainedSetupAuthorityHealthKey.swift (188); MachineUpdateRetainedSetupTransportHealthKey.swift (172); exclude promotion-only native paths | 270–340; 390 | Exact requested key/provenance, purpose, custody and peer fence; ordinary UID before key paths | Actual installed key access is attended; no secrets in artifacts | 5–15s |
+| H07 | Transport driver, scope and channel. MachineUpdateRetainedSetupTransportHealthChannel.swift (354); omit native promotion factory | 320–365; 399 | Typed host3, exact root transcript and transport signature, connection failure/timeout/cancellation, scope lifetime | Native transport operation remains untested by owned driver | 5–15s |
+| H08 | Authority channel core and peer fence (owned path only). MachineUpdateRetainedSetupAuthorityHealthChannel.swift:5–169 +170–185 +254–365 (293 selected) | 310–360; 399 | Owned channel state, one open, peer fence lifetime, close/late replies, purpose ownership | No reference to future concrete native contexts or raw native-proof constructor | 5–15s |
+| H09 | Native authority health owner. MachineUpdateRetainedSetupAuthorityHealthOwner.swift (250); exclude promotion-only owner/context | 180–280; 360 | Claimed native request, typed startup scope, transport proof, current material/pair fences and resource release | No standalone native success claim | 3–8s |
+| H10 | Native registration context/factory. MachineUpdateRetainedSetupAuthorityHealthChannel.swift:186–202 +366–445 (97 selected) | 120–210; 290 | Actual registered jobs observed before marking metadata; native-purpose proof, no owned-fence substitution | No registered database bit yet | 3–8s |
+| H11 | Native completion/recovery context/factories. MachineUpdateRetainedSetupAuthorityHealthChannel.swift:203–236 +446–569 (158 selected) | 180–280; 360 | Fresh completion-purpose proof, exact before/after pair classification and recovery source; scope expiry | Cannot substitute registration or future promotion proof | 3–8s |
+| H12 | Endpoint and retained listeners. MachineUpdateRetainedSetupHealthXPCEndpoint.swift:66–187 (122); MachineUpdateRetainedSetupHealthListeners.swift (134) | 280–350; 390 | Bounded XPC work, request claim, no reply after close, asynchronous settlement and activity release | Starting actual services is attended; fixtures check lifecycle only | 3–10s |
+| H13 | Authenticated startup selection and CLI routing. HealthStartupSelection.swift (25); RuntimeStartup (10); selected bool/CLI getters5650–5681,5696–5706; startup call sites; generator/Python health-v1/v2 matrix | 130–240; 330 | Actual v6/stage selection, fixed path, no ordinary/gateway fallback; declare health1/2 only with reachable listeners | No installed running job proof until native test | 3–10s |
+
+### Actual native registration
+
+| Slice | Complete responsibility and measured donor source | Production estimate; cap | Required tests | What remains unproven | Core addition budget |
+| --- | --- | --- | --- | --- | --- |
+| R01 | Native registration observation. MachineUpdateRetainedSetupRegistrationObservation.swift (129) | 150–240; 320 | Native PeerFence bound to challenge/source/lease, process/thread/one-use expiry; owned proof rejection | No SQL registration marker yet | 5–15s |
+| R02 | Actual job registration and metadata marker. MachineUpdateRetainedSetupRegistrationNative.swift (139); PreparationIntentStore.swift:3531–3593; private activation gate extensions | 230–330; 390 | Ensure actual fixed jobs, obtain live health then compare exact v6 row and registered=0; no proof-free marker; rollback/close | Actual Root execution and jobs still require attended verification | 15–35s |
+
+### Schema26 completion and authenticated dispatch
+
+| Slice | Complete responsibility and measured donor source | Production estimate; cap | Required tests | What remains unproven | Core addition budget |
+| --- | --- | --- | --- | --- | --- |
+| C00 | Read-only native completion observation. MachineUpdateRetainedSetupCompletionObservation.swift (176) | 190–280; 360 | Native completion PeerFence, sequence/use scope, exact source and native-only rejection | Must exist before C01 authorization references its proof | 5–15s |
+| C01 | Schema26 completion writer and journal permit. PreparationIntentStore.swift:4802–5028 (227); AuthorityJournal.swift retained completion hook in735–783 | 270–350; 390 | 25→26 exact receipt, other rows, single-use changed write acknowledgement, closed-machine journal commit, pre-BEGIN formats | No completion owner or native floor update yet | 20–45s |
+| C02 | Completion policy owner. MachineUpdateRetainedSetupCompletionOwner.swift (222) | 240–330; 390 | Prepared→writing→actual floor commit→recorded; exact recovered receipt; sourceUnchanged refuses replay; frame and callback expiry | No synthetic receipt can authorize a native floor write | 15–40s |
+| C03 | Native completion entry. MachineUpdateRetainedSetupCompletionNative.swift (161); read-only startup helper already in H03 | 180–270; 350 | Native completion fence and sequence-use scope; current pair/material/custody, fresh health and closed stores | Keep all native proof checks; real floor commit is attended | 3–10s |
+| C04 | Registration/completion sequence and providers. MachineUpdateRetainedSetupActivationNativeSequence.swift (86); selected MachineUpdateStableSetupAccountOperations.swift (113) | 190–290; 370 | Distinct registration then completion proofs, activity retained through callbacks, cancellation/cleanup; exact final recorded snapshot | No automatic ordinary promotion or admission reopening | 10–25s |
+| C05 | Authenticated stable account/service dispatch. SetupAccountOwner.swift: stable selection355–397, enrollment398–466, service progress467–521; injection/verification fields | 220–330; 390 | Caller UID, disclosure, target UIDs, revisions, existing consent and progress semantics; foreign caller rejection | No synthetic selection or direct private store escape | 5–15s |
+| C06 | Authenticated runtime/activation dispatch and truthful declarations. SetupAccountOwner.swift: runtime522–664 and retained activation branches2312–2449; generator and test declarations | 300–365; 399 | Existing custody acceptance, exact requested progress, native sequence and real recorded completion; declare only reachable25/26/file producers | Return retained completion state, not ordinary-ready; no provider/hardware success claim | 10–25s |
+
+## Dependency details that must not disappear
+
+1. Policy25 is a real v2 producer, not the donor's old v1 codec.
+P01 adds checked phase proposals beside the current private validation and v2 source digest.
+P02 keeps the complete single-use acknowledgement. P03 changes the paired journal only through that acknowledgement after the machine closes.
+A writing marker with an unchanged source remains unavailable for replay. A recovered receipt is recorded only after an exact fresh pair read.
+
+2. Enrollment requires a new explicit reader contract in E01.
+The current frame requires inventory==installed epoch. The donor accepts later inventory rows; that condition cannot be copied without proof.
+Keep the strict sealed-base reader and the installed epoch unchanged.
+A separate checked retained-enrollment projection must reconstruct only the exact additions authorized by typed v6 plans and their actual policy/preparation rows.
+Bind account/owner, service labels, execution IDs, bundle/release, seal, original inventory and every other protected row.
+Reject missing original rows, arbitrary new accounts/services, changed reservations, crossed plans or unsupported schema changes.
+Only the retained path may use that projection. Ordinary unsupported reads must refuse without treating a known valid retained state as corruption.
+E02 authorizes one exact before/after image under closed admission. It cannot grant arbitrary inventory mutation.
+This is additional source work, not permission to delete an equality check to obtain a passing fixture.
+
+3. Real registration needs the whole native health path.
+The donor registration/completion observations require AuthorityHealthScope.PeerFence with a native purpose and fresh authenticated reply.
+The source flags jobsRegistered and inInventory are results, not substitutes for that proof.
+H10 and H11 mint distinct registration/completion scopes. Owned requests and owned signatures must fail native-only consumption.
+H13 launches/selects only the retained health path. It never falls through to ordinary commands or the gateway runtime.
+H13 includes the exact native registration/completion health format declarations and Python tests for health-v1/v2 roles.
+No native-promotion factory or health-v3 writer is enabled by this prerequisite block.
+Actual service execution, key custody, signing identity and native transport remain attended checks; no such execution occurs during planning.
+
+4. Completion26 changes the actual paired policy floor.
+C01 must retain the receipt namespace and changed/one-use checks. Its floor commit uses the current journal permit contract.
+C02/C03 retain the material, identity, closed admission, exact pair and native completion proof through the commit and final recorded marker.
+P03 and C02 preserve unresolved-writing intervention. They do not replay a policy write merely because a method is named resume.
+
+5. Authenticated dispatch is part of the distance to usability.
+The donor entry is MachineUpdateStableSetupAccountOperations.native, injected into SetupAccountOwner.
+C05 covers account/service selection and consent. C06 covers runtime custody acceptance and the retained activation/completion branch.
+Bind caller UID, actual request revision and existing host authorization. Keep the normal Setup UX and refusal paths.
+A retained completion result must not be reported as ordinary-ready before promotion and the separate final gates.
+No automatic activation, shared-update owner change, admission reopening or service restart is added by a planning shortcut.
+
+6. Writer declarations follow actual reachability.
+G2 adds readers only. C05/C06 and G9 add the corresponding writer declarations with their complete reachable producers.
+C06 can declare initial host3, retained-release v1, activation6 and actual policy25/completion26 emitters once their native route exists.
+G9 declares completed-host4 and binding/archive/configuration/publication writers with the completed publication route.
+Do not declare a policy-v1 emitter or future schema28 writer. Check the complete current role/version union before BEGIN.
+When actual producers become reachable, update the current empty-writer assertions in G0 and the manifest tests to the exact new role matrix.
+Keep their codec reader comparisons intact. A deliberate new producer contract must not leave an obsolete read-only assertion behind.
+
+7. More code than one cap is not an excuse to cut a guard.
+The611-line authority channel is staged in H08/H10/H11 within its original file, keeping private constructors private.
+H08 adds only the core and owned path. H10 adds native registration; H11 adds completion and recovery.
+H04 introduces the hello/protocol before H05 peer code uses it. H02 includes the joint-health transcript/proof/session.
+H08 has no field whose concrete native context is defined only in H10/H11. Native constructors stay private in the same file.
+H03 includes its checked store getter and the completion startup helper; it does not call the later H13 generic selector.
+C00 introduces the read-only completion observation before C01 references it in a private writer authorization.
+The donor stable compatibility wrapper is not a wholesale dependency; its current callers use the G1 checked stable entry.
+C04 omits the donor ordinary-stable activation owner and post-promotion finalization provider. Neither can be a temporary stub.
+The native-promotion context and factories are outside this prerequisite block; they are not silently enabled.
+Source code already present in public models is reused. A missing donor filename is not proof that its type or responsibility is missing.
+
+## Core and CI capacity
+
+The F Core stage used1776.876s of2700s, leaving923.124s. No timeout increase or local method sharding is assumed.
+G0 adds two full-fixture methods; a20–40s test budget is provisional, using the observed focused F cost only as a rough guide.
+Other slices should use owned lightweight fixtures and grouped independent assertions instead of repeating the entire replacement setup for every edge.
+Each negative case still starts from a valid control. Stores must be fresh or re-resolved after reopen. No mutable global fixture sharing is proposed.
+
+| Original slice | Provisional incremental Core budget |
+| --- | --- |
+| G0 | 20–40s |
+| G1 | 15–45s |
+| G2 | 0–0s |
+| G3 | 3–10s |
+| G4 | 5–15s |
+| G5 | 10–30s |
+| G6 | 25–60s |
+| G7 | 5–15s |
+| G8 | 20–60s |
+| G9 | 5–15s |
+
+The42 prerequisite budgets sum to323–838s. G0–G9 add108–290s.
+The crude additive range is therefore2208–2905s of Core time. It is not measured qualification evidence.
+The upper estimate exceeds2700s. Do not claim that all future source will fit the existing gate.
+Treat actual per-case timings as a capacity gate after each slice. Before remaining work exhausts headroom, qualify a fixture-cost improvement separately.
+Preserve all assertions, isolation and actual case outcomes. Do not skip tests, increase the budget, fake transfer evidence or rerun passed stages for bookkeeping.
+This performance follow-up is conditional on actual timings; the52-slice source plan can require additional measured fixture work.
+CI method/class weights are owned by chiacchiersaturn, from actual CI logs, in small PRs between feature slices per1446.
+A new heavy class must not silently receive a misleading median weight. CI balancing does not lower the serial local Core cost.
+
+## Source-only status
+
+The source inspection records40 named donor files and10 selected SQL/journal excerpts in producer-closure-inventory.json.
+They are a directed dependency inventory, not a feature count or a private-snapshot publication plan.
+The existing G0 commit d8972ae1 is separate. This appendix applies no product source and runs no parse/build/test.
+The original donor-decision table is now explicit about direct G dependencies versus prerequisites in P/E/H/R/C.
+All producer and native-success claims above remain future obligations. No installed credentials, devices, services or signing identities were accessed.
