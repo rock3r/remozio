@@ -58,14 +58,20 @@ final class RuntimeActivationCompatibilityProjectionTests: XCTestCase {
                 XCTAssertTrue(requirement.readVersions.isSubset(of: actual.readVersions))
                 XCTAssertTrue(requirement.writeVersions.isSubset(of: actual.writeVersions))
             }
-            for role in [AuthorityCodeRole.authority, .setupController] {
-                XCTAssertEqual(formats.first { $0.role == role && $0.name == RuntimeActivationPlan.formatName }?.readVersions, [6])
-                XCTAssertEqual(formats.first { $0.role == role && $0.name == "authority.command-host-config" }?.readVersions,
-                    [plan.host.formatVersion])
-            }
             let selected = [(mask & 1 != 0, try PhoneRoutingReleaseContract.requirements),
                 (mask & 2 != 0, try PhoneAuditReleaseContract.requirements),
                 (mask & 4 != 0, try PhoneUpdateSchedulingReleaseContract.requirements)]
+            let baseline = try GatewaySettingsNativeHostPlan.releaseRequirements.formats + RuntimeRetainedSetupReleaseBinding.requirements
+            let expectedFormats = baseline + selected.filter { $0.0 }.flatMap { $0.1 }
+            for role in [AuthorityCodeRole.authority, .setupController] {
+                let expected = expectedFormats.filter { $0.role == role && $0.name == RuntimeActivationPlan.formatName }
+                let actual = try XCTUnwrap(formats.first { $0.role == role && $0.name == RuntimeActivationPlan.formatName })
+                XCTAssertTrue(actual.readVersions.contains(RuntimeRetainedSetupActivationArchive.formatVersion))
+                XCTAssertEqual(actual.readVersions, Set(expected.flatMap { $0.readVersions }))
+                XCTAssertEqual(actual.writeVersions, Set(expected.flatMap { $0.writeVersions }))
+                XCTAssertEqual(formats.first { $0.role == role && $0.name == "authority.command-host-config" }?.readVersions,
+                    [plan.host.formatVersion])
+            }
             for (enabled, requirements) in selected where enabled {
                 for requirement in requirements {
                     let actual = try XCTUnwrap(formats.first { $0.role == requirement.role && $0.name == requirement.name })

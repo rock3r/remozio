@@ -4384,6 +4384,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     let directory = try ProtectedSetupDirectory(anchor: anchor, relativePath: "machine/SharedSetupImport",
                         owner: getuid(), createIfMissing: true)
                     defer { directory.close() }
+                    _ = try SetupDatabaseFileProvisioning.prepare(directory: directory, kind: .sharedSetupImport, owner: getuid())
                     let lease = try ProtectedStorageLease(anchor: anchor, relativeDirectory: "machine/SharedSetupImport",
                         owner: getuid(), ancestorOwner: getuid(), databaseName: "setup-import.sqlite")
                     let journal = try SharedSetupImportJournal(lease: lease, owner: getuid(), macID: inventory.macID,
