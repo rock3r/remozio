@@ -4142,7 +4142,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertEqual(try revised.policy.storedBytes, try f.current.policy.storedBytes)
             let binding = try f.capture().binding
             XCTAssertNoThrow(try binding.requireRecordedBoundary(revised))
-            for changedAfter in 1...13 {
+            for changedAfter in 0...13 {
                 var reads = 0
                 XCTAssertThrowsError(try RuntimeRetainedSetupPublishedSelection.capture(snapshot: f.snapshot,
                     readPolicyBoundary: {
