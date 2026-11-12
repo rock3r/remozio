@@ -3703,6 +3703,242 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// The published flag is an injected value. No file publication or native custody is claimed.
+    private func retainedConfigurationPublishedValue(_ runtime: MachineUpdateStableRuntimePreparationSnapshot) throws
+        -> MachineUpdateStableRuntimePreparationSnapshot {
+        try .init(setup: runtime.setup, services: .init(plan: runtime.plan, complete: true),
+            state: .init(reference: runtime.state.reference, configurationPublished: true), reservedNumbers: runtime.reservedNumbers)
+    }
+
+    private func retainedConfigurationChanging(_ bytes: Data, key: UInt64, value: CBORValue) throws -> Data {
+        let limits = try CBORLimits(maxBytes: 262144, maxDepth: 16, maxItems: 8192)
+        guard case .map(var fields) = try DeterministicCBOR.decode(bytes, limits: limits) else {
+            throw RuntimePreparationError.invalidRecord
+        }
+        fields[key] = value
+        return try DeterministicCBOR.encode(.map(fields), limits: limits)
+    }
+
+    func testRetainedConfigurationInitialPreservesBindingAndLeavesMetadataUnchanged() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, owner, _, snapshot, current in
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            let runtime = snapshot.activation.runtime, inventory = runtime.setup.source.actual.inventory
+            let binding = try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: fixture.candidate)
+            let presence = try PresenceConfiguration(idleMilliseconds: 123000,
+                observationLifetimeMilliseconds: 9000, unavailableGraceMilliseconds: 41000)
+            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy,
+                presencePolicyOverride: presence, relayPortOverride: 45678)
+            let transport = try XCTUnwrap(bundle.transport.settingsHost), gateway = try XCTUnwrap(bundle.gatewaySettingsHost)
+            XCTAssertEqual(transport.retainedSetupBinding, binding)
+            XCTAssertEqual(gateway.retainedSetupBinding, binding)
+            XCTAssertEqual(transport.policyStage, .startup); XCTAssertEqual(gateway.policyStage, .startup)
+            XCTAssertEqual(transport.runtime, runtime.state.reference)
+            XCTAssertEqual(gateway.installedReleaseDigest, inventory.releaseDigest)
+            XCTAssertNotEqual(gateway.runtime.services.releaseDigest, inventory.releaseDigest)
+            XCTAssertEqual(bundle.command.presence.presence.policy.idleMilliseconds, presence.idleMilliseconds)
+            XCTAssertEqual(bundle.command.presence.presence.policy.observationLifetimeMilliseconds, presence.observationLifetimeMilliseconds)
+            XCTAssertEqual(bundle.command.presence.presence.policy.unavailableGraceMilliseconds, presence.unavailableGraceMilliseconds)
+            XCTAssertEqual(bundle.transport.relayPort, 45678)
+            let hosts = try GatewaySettingsNativeHostPlan(host: transport)
+            XCTAssertEqual(hosts.gateway, gateway); XCTAssertEqual(hosts.transport, transport)
+            XCTAssertNoThrow(try hosts.validateRelease(fixture.candidate))
+            XCTAssertNoThrow(try transport.requireConfigurationScope(account: runtime.preparation, inventory: inventory))
+            // Value selection does not open either ordinary decoder or the existing startup validator.
+            XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(transport.encoded))
+            XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(bundle.transport.canonicalBytes))
+            XCTAssertThrowsError(try transport.validate(account: runtime.preparation, inventory: inventory)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertEqual(RuntimeActivationPlan.supportedVersions, [1, 2, 3, 4, 5])
+            XCTAssertEqual(try GatewaySettingsConsumerHostConfiguration.decodeForReleaseArchive(gateway.encoded), gateway)
+            try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+            try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate).requireSame(as: snapshot)
+        }
+    }
+
+    func testRetainedConfigurationInitialRequiresRecordedPolicyAndTheExactStartupCode() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, source, snapshot, current in
+            XCTAssertNoThrow(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy))
+            XCTAssertThrowsError(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: source.policy.source.policy)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let changed = AuthorityJournal.MachineUpdatePolicyBoundary(macID: current.macID, accountID: current.accountID,
+                policy: .init(revision: UUID(), policy: current.policy.policy, roleRevisions: current.policy.roleRevisions),
+                checkpoint: current.checkpoint)
+            XCTAssertThrowsError(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: changed,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        }
+        try withRetainedPolicySourceFixture { fixture, _, _, snapshot, current in
+            XCTAssertEqual(snapshot.intent?.phase, .prepared)
+            XCTAssertThrowsError(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+        }
+    }
+
+    func testRetainedConfigurationInitialRejectsAnAlreadyPublishedValue() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            XCTAssertNoThrow(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy))
+            let runtime = try retainedConfigurationPublishedValue(snapshot.activation.runtime)
+            let activation = try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime,
+                state: snapshot.activation.state, candidate: fixture.candidate)
+            let published = try MachineUpdateRetainedSetupPolicySnapshot(activation: activation,
+                intent: snapshot.intent, candidate: fixture.candidate)
+            XCTAssertNoThrow(try RuntimeRetainedSetupReleaseBinding(snapshot: published, current: current, candidate: fixture.candidate))
+            XCTAssertThrowsError(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: published, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedConfigurationCompletedPreservesEveryClientAndCommandTunable() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let original = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy, relayPortOverride: 45678)
+            let runtime = try retainedConfigurationPublishedValue(snapshot.activation.runtime)
+            let reference = try XCTUnwrap(runtime.state.reference)
+            let command = try AuthorityCommandStartupConfiguration.decode(retainedConfigurationChanging(
+                original.command.canonicalBytes, key: 7, value: .unsigned(17)))
+            let presence = try AuthorityPresenceClientConfiguration.decode(retainedConfigurationChanging(
+                original.presenceClient.canonicalBytes, key: 8, value: .unsigned(9000)))
+            let pairing = try TransportPairingControlConfiguration.decode(retainedConfigurationChanging(
+                original.pairingClient.canonicalBytes, key: 11, value: .unsigned(7000)))
+            let frontend = try CommandFrontendConfiguration.decode(retainedConfigurationChanging(
+                original.frontendClient.canonicalBytes, key: 10,
+                value: .map([0: .unsigned(9000), 1: .unsigned(50), 2: .unsigned(500), 3: .unsigned(1000)])))
+            let clients = RuntimeActivationClients(presence: presence, pairing: pairing, frontend: frontend)
+            let completed = try RuntimeConfigurationBundle.stableCompleted(snapshot: runtime, reference: reference,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy,
+                command: command, transport: original.transport, clients: clients)
+            XCTAssertNotEqual(command.canonicalBytes, original.command.canonicalBytes)
+            XCTAssertNotEqual(presence.canonicalBytes, original.presenceClient.canonicalBytes)
+            XCTAssertNotEqual(pairing.canonicalBytes, original.pairingClient.canonicalBytes)
+            XCTAssertNotEqual(frontend.canonicalBytes, original.frontendClient.canonicalBytes)
+            XCTAssertEqual(completed.command.canonicalBytes, command.canonicalBytes)
+            XCTAssertEqual(completed.transport.canonicalBytes, original.transport.canonicalBytes)
+            XCTAssertEqual(completed.presenceClient.canonicalBytes, presence.canonicalBytes)
+            XCTAssertEqual(completed.pairingClient.canonicalBytes, pairing.canonicalBytes)
+            XCTAssertEqual(completed.frontendClient.canonicalBytes, frontend.canonicalBytes)
+            XCTAssertEqual(try completed.gatewaySettingsHost, try original.gatewaySettingsHost)
+            XCTAssertFalse(snapshot.activation.runtime.state.configurationPublished)
+        }
+    }
+
+    func testRetainedConfigurationCompletedRejectsEachValidForeignClient() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
+            let runtime = try retainedConfigurationPublishedValue(snapshot.activation.runtime)
+            let reference = try XCTUnwrap(runtime.state.reference)
+            let clients = RuntimeActivationClients(presence: bundle.presenceClient,
+                pairing: bundle.pairingClient, frontend: bundle.frontendClient)
+            func completed(_ clients: RuntimeActivationClients) throws -> RuntimeConfigurationBundle {
+                try .stableCompleted(snapshot: runtime, reference: reference, candidate: fixture.candidate,
+                    currentCodePolicy: current.policy.policy, command: bundle.command, transport: bundle.transport, clients: clients)
+            }
+            XCTAssertNoThrow(try completed(clients))
+            let foreign = CBORValue.bytes(AccountPreparationIntent.randomID())
+            let presence = try AuthorityPresenceClientConfiguration.decode(retainedConfigurationChanging(
+                clients.presence.canonicalBytes, key: 2, value: foreign))
+            let pairing = try TransportPairingControlConfiguration.decode(retainedConfigurationChanging(
+                clients.pairing.canonicalBytes, key: 2, value: foreign))
+            let frontend = try CommandFrontendConfiguration.decode(retainedConfigurationChanging(
+                clients.frontend.canonicalBytes, key: 2, value: foreign))
+            for changed in [RuntimeActivationClients(presence: presence, pairing: clients.pairing, frontend: clients.frontend),
+                            .init(presence: clients.presence, pairing: clients.pairing, frontend: frontend)] {
+                XCTAssertThrowsError(try completed(changed)) { XCTAssertEqual($0 as? RuntimeActivationError, .changedScope) }
+            }
+            XCTAssertThrowsError(try completed(.init(presence: clients.presence, pairing: pairing, frontend: clients.frontend))) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedConfigurationCompletedRequiresPublicationAndTheExactMaterialReference() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
+            let runtime = try retainedConfigurationPublishedValue(snapshot.activation.runtime)
+            let reference = try XCTUnwrap(runtime.state.reference)
+            let clients = RuntimeActivationClients(presence: bundle.presenceClient,
+                pairing: bundle.pairingClient, frontend: bundle.frontendClient)
+            func completed(_ runtime: MachineUpdateStableRuntimePreparationSnapshot,
+                _ reference: RuntimeMaterialReference) throws -> RuntimeConfigurationBundle {
+                try .stableCompleted(snapshot: runtime, reference: reference, candidate: fixture.candidate,
+                    currentCodePolicy: current.policy.policy, command: bundle.command, transport: bundle.transport, clients: clients)
+            }
+            XCTAssertNoThrow(try completed(runtime, reference))
+            XCTAssertThrowsError(try completed(snapshot.activation.runtime, reference)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+            let now = Date()
+            let material = try RuntimePreparationMaterial.create(services: runtime.plan,
+                notValidBefore: now.addingTimeInterval(-60), notValidAfter: now.addingTimeInterval(600),
+                serviceActivity: reference.serviceActivity, auditDeliveryVersion: reference.auditDeliveryVersion)
+            let foreign = try material.reference
+            XCTAssertNoThrow(try foreign.validate(account: runtime.preparation, services: runtime.plan))
+            XCTAssertNotEqual(foreign, reference)
+            XCTAssertThrowsError(try completed(runtime, foreign)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedConfigurationHostSelectionRejectsAnotherValidBinding() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
+            let runtime = snapshot.activation.runtime, host = try XCTUnwrap(bundle.transport.settingsHost)
+            let hosts = try GatewaySettingsNativeHostPlan(host: host)
+            XCTAssertNoThrow(try hosts.selecting(bundle.transport))
+            let binding = try XCTUnwrap(host.retainedSetupBinding)
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: binding.encoded) as? [String: Any])
+            fields["retainedSourceDigest"] = Data(repeating: 76, count: 32).base64EncodedString()
+            let changed = try RuntimeRetainedSetupReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            let other = try GatewaySettingsNativeHostPlan(reference: XCTUnwrap(runtime.state.reference),
+                bundlePath: host.bundlePath, policy: current.policy.policy, retainedSetupBinding: changed)
+            let transport = try TransportPairingStartupConfiguration(transport: bundle.transport.transport,
+                control: bundle.transport.control, wake: bundle.transport.wake, relayPort: bundle.transport.relayPort,
+                settingsHost: other.transport)
+            XCTAssertNotEqual(other.transport, host)
+            XCTAssertThrowsError(try hosts.selecting(transport)) { XCTAssertEqual($0 as? GatewayPreparationError, .changedScope) }
+        }
+    }
+
+    func testRetainedConfigurationValueScopeRejectsEachValidForeignInventoryField() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
+            let runtime = snapshot.activation.runtime, inventory = runtime.setup.source.actual.inventory
+            let host = try XCTUnwrap(bundle.transport.settingsHost)
+            XCTAssertNoThrow(try host.requireConfigurationScope(account: runtime.preparation, inventory: inventory))
+            func inventoryValue(macID: Data? = nil, installationID: Data? = nil, releaseDigest: Data? = nil,
+                bundlePath: String? = nil) throws -> InstallationInventory {
+                try .init(macID: macID ?? inventory.macID, installationID: installationID ?? inventory.installationID,
+                    revision: inventory.revision, bundlePath: bundlePath ?? inventory.bundlePath,
+                    releaseDigest: releaseDigest ?? inventory.releaseDigest, accounts: inventory.accounts,
+                    services: inventory.services, formatVersion: inventory.formatVersion)
+            }
+            for changed in [try inventoryValue(macID: AccountPreparationIntent.randomID()),
+                            try inventoryValue(installationID: AccountPreparationIntent.randomID()),
+                            try inventoryValue(releaseDigest: Data(repeating: 79, count: 32)),
+                            try inventoryValue(bundlePath: "/private/tmp/OtherRemozio.app")] {
+                XCTAssertThrowsError(try host.requireConfigurationScope(account: runtime.preparation, inventory: changed)) {
+                    XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+                }
+            }
+        }
+    }
+
     func testRetainedSetupPolicyReadsSchema25WithoutGrantingWritesOrSettlementAdoption() throws {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: true,
