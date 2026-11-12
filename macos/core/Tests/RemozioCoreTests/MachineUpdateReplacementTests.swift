@@ -4390,14 +4390,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertFalse(actual.state.jobsRegistered)
             try actual.requireRetention(plan, from: before)
             try actual.requirePair(f.boundary()); try actual.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
-            XCTAssertThrowsError(try f.fixture.machine.runtimeActivation(accountID: plan.accountID)) {
-                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
-            }
             XCTAssertThrowsError(try before.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
             }
             XCTAssertThrowsError(try actual.requireRetention(plan, from: actual)) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            XCTAssertThrowsError(try f.fixture.machine.runtimeActivation(accountID: plan.accountID)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
             }
         }
     }
