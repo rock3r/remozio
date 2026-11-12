@@ -154,6 +154,21 @@ Verify rejection both before and after each external read. Check cleanup and con
 Unproven: real Root execution, signatures from a built artifact, service activity and protected installed placement.
 Owned fixtures and injected identity operations test ordering only.
 
+G4 reads the actual machine store itself, outside a transaction. It accepts no callback that returns a writer view.
+The owner supplies each approved completion frame. G4 compares the actual frame exactly before and after every external read.
+Reuse requirePromotionMetadataChange(from:) to pin immutable operands; compare schemaVersion and currentRowsDigest exactly against each approval.
+G4 does not authorize 26 to 27. G6 must add a private transaction-bound loan before a writer frame can be borrowed.
+
+Test debt approved in Toni1533: the complete successful fresh-read path through G4 and G5 remains unproven.
+Current completion/promotion fixtures contain checked values, not a completed actual machine store.
+Keep the current stable-reader inventory and installed-epoch contract. Do not fabricate a positive store or add an arbitrary snapshot callback.
+When E01 and the producers through C06 make a completed actual store constructible, add the positive end-to-end G4 and G5 tests in that slice.
+Those tests must also cover context expiry and all later fault stages reached only after the fresh completed-frame read succeeds.
+Until those tests pass, source review and negative owned controls cannot qualify that path.
+
+The G4 draft has nine new methods that reuse owned replacement fixtures. Its old 5 to 15 second estimate is not supported by this draft.
+Measure its actual focused cost before qualification. Keep this debt and the measured cost visible in each later handoff.
+
 ## G5: actual pair and source files
 
 Capture the full `MachineUpdatePolicyBoundary` and its classification kind once for each validation scope.
