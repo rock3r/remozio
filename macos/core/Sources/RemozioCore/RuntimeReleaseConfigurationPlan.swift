@@ -134,7 +134,7 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
         try host.validateRelease(candidate, bundlePath: gateway.bundlePath)
         try gateway.validateRelease(candidate); try transportHost.validateRelease(candidate)
         return (archive: archive,
-            sourceDigest: digest(host: original.host, transport: original.transport, gateway: sourceGateway, clients: sourceClients),
+            sourceDigest: try digest(host: original.host, transport: original.transport, gateway: sourceGateway, clients: sourceClients),
             host: host, transport: transport, gateway: gateway, clients: clients)
     }
     /// Checks completed archive values only. It grants no current source, publication, or startup authority.
