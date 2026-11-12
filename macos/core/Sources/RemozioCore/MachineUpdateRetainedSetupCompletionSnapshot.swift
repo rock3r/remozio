@@ -78,8 +78,8 @@ struct MachineUpdateRetainedSetupCompletionSnapshot {
               activation.runtime.reservedNumbers == before.activation.runtime.reservedNumbers,
               try activation.runtime.plan.encoded == before.activation.runtime.plan.encoded,
               activation.runtime.setup.account?.origin == before.activation.runtime.setup.account?.origin,
-              try frame.installed.configuration().configuration(accountID: activation.runtime.preparation.accountID).completion?.encoded
-                == prior.installed.configuration().configuration(accountID: before.activation.runtime.preparation.accountID).completion?.encoded else {
+              try frame.installed.configuration().configuration(accountID: activation.runtime.preparation.accountID)?.completion.encoded
+                == prior.installed.configuration().configuration(accountID: before.activation.runtime.preparation.accountID)?.completion.encoded else {
             throw PreparationStoreError.staleRevision
         }
         try activation.state.requireSame(as: before.activation.state)
