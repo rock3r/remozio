@@ -4320,6 +4320,240 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    private func withRetainedActivationValueFixture(_ body: (RetainedSelectionFixture,
+        MachineUpdateRetainedSetupActivationSnapshot, RuntimeRetainedSetupActivationPlan) throws -> Void) throws {
+        try withRetainedSelectionFixture { f in
+            let selected = try f.capture()
+            let plan = try RuntimeRetainedSetupActivationPlan.retainingRetainedSetup(snapshot: f.snapshot,
+                selection: selected, current: f.current, candidate: f.fixture.candidate)
+            let snapshot = try f.fixture.machine.retainedSetupActivationSnapshot(owner: f.owner, candidate: f.fixture.candidate)
+            try body(f, snapshot, plan)
+        }
+    }
+
+    /// Injects an owned test row. This helper grants no production writer or native authority.
+    private func injectRetainedActivationRow(_ f: RetainedSelectionFixture, bytes: Data, materialID: Data,
+        digest: Data? = nil, registered: Int = 0) throws {
+        func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
+        let account = f.snapshot.activation.runtime.preparation.accountID
+        try f.fixture.machine.close()
+        try f.fixture.files.sql("DELETE FROM runtime_activation_v1 WHERE account=X'\(hex(account))'")
+        try f.fixture.files.sql("INSERT INTO runtime_activation_v1 VALUES(X'\(hex(account))',X'\(hex(materialID))',X'\(hex(digest ?? MachineUpdateActivationRecord.digest(bytes)))',\(registered),X'\(hex(bytes))')")
+        try f.fixture.files.reopen()
+    }
+
+    /// Constructs value operands only. It does not enroll the account in the actual machine store.
+    private func retainedActivationRuntime(_ f: RetainedSelectionFixture, inventory: InstallationInventory,
+        reservedNumbers: Set<UInt32>? = nil, rowsDigest: Data = Data(repeating: 88, count: 32)) throws
+        -> MachineUpdateStableRuntimePreparationSnapshot {
+        let runtime = f.snapshot.activation.runtime, source = runtime.setup.source, actual = source.actual
+        let changed = MachineUpdateStableReleaseSnapshot(schemaVersion: actual.schemaVersion, inventory: inventory,
+            activation: actual.activation, admission: actual.admission, candidate: actual.candidate,
+            installed: actual.installed, seal: actual.seal, currentRowsDigest: rowsDigest)
+        let selected = try MachineUpdateStableRuntimeSource(actual: changed, preparations: source.preparations,
+            initializations: source.initializations, candidate: f.fixture.candidate)
+        let setup = try MachineUpdateStableAccountSetupSnapshot(source: selected, owner: f.owner)
+        return try .init(setup: setup, services: .init(plan: runtime.plan, complete: true), state: runtime.state,
+            reservedNumbers: reservedNumbers ?? runtime.reservedNumbers)
+    }
+
+    func testRetainedActivationCaptureReadsTheExactPolicyAndUnactivatedStateWithoutWriting() throws {
+        try withRetainedActivationValueFixture { f, snapshot, plan in
+            let before = try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate)
+            XCTAssertNil(snapshot.state.plan); XCTAssertFalse(snapshot.state.jobsRegistered)
+            XCTAssertEqual(snapshot.intent, f.snapshot.intent)
+            try snapshot.requirePair(f.boundary()); try snapshot.requirePlan(plan, candidate: f.fixture.candidate)
+            try snapshot.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+            XCTAssertEqual(snapshot.description, "MachineUpdateRetainedSetupActivationSnapshot(redacted)")
+            XCTAssertEqual(snapshot.debugDescription, snapshot.description)
+            XCTAssertThrowsError(try MachineUpdateRetainedSetupActivationSnapshot(runtime: f.unpublished.activation.runtime,
+                state: .init(plan: nil, jobsRegistered: false), intent: snapshot.intent, candidate: f.fixture.candidate)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            XCTAssertThrowsError(try RuntimeRetainedSetupActivationState(plan: nil, jobsRegistered: true)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate).requireSame(as: before)
+        }
+    }
+
+    func testRetainedActivationSQLReadsV6AndTheOrdinaryStateReaderStillRejectsIt() throws {
+        try withRetainedActivationValueFixture { f, before, plan in
+            try injectRetainedActivationRow(f, bytes: plan.encoded, materialID: plan.reference.materialID)
+            let actual = try f.fixture.machine.retainedSetupActivationSnapshot(owner: f.owner, candidate: f.fixture.candidate)
+            XCTAssertEqual(try actual.state.plan?.encoded, try plan.encoded)
+            XCTAssertFalse(actual.state.jobsRegistered)
+            try actual.requireRetention(plan, from: before)
+            try actual.requirePair(f.boundary()); try actual.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+            XCTAssertThrowsError(try f.fixture.machine.runtimeActivation(accountID: plan.accountID)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+            XCTAssertThrowsError(try before.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try actual.requireRetention(plan, from: actual)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedActivationSQLRejectsAValidOrdinaryPlanThatTheOrdinaryReaderAccepts() throws {
+        try withRetainedActivationValueFixture { f, _, retained in
+            let runtime = f.snapshot.activation.runtime, account = runtime.preparation
+            let provisioning = try runtime.setup.source.provisioningInventory(accountID: account.accountID,
+                ownerUID: account.ownerUID, releaseDigest: account.releaseDigest)
+            let ordinary = try RuntimeActivationPlan(account: account, initialization: f.initialization,
+                runtime: runtime.state, inventory: provisioning, gatewaySettingsRelease: f.fixture.previousRelease)
+            XCTAssertTrue(RuntimeActivationPlan.supportedVersions.contains(ordinary.formatVersion))
+            XCTAssertEqual(try RuntimeActivationPlan.decode(ordinary.encoded).encoded, try ordinary.encoded)
+            try injectRetainedActivationRow(f, bytes: ordinary.encoded, materialID: ordinary.reference.materialID)
+            XCTAssertEqual(try f.fixture.machine.runtimeActivation(accountID: retained.accountID).plan?.encoded, try ordinary.encoded)
+            XCTAssertThrowsError(try f.fixture.machine.retainedSetupActivationSnapshot(owner: f.owner, candidate: f.fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testRetainedActivationSQLRequiresTheExactMaterialAndDigestColumns() throws {
+        try withRetainedActivationValueFixture { f, _, plan in
+            try injectRetainedActivationRow(f, bytes: plan.encoded, materialID: plan.reference.materialID)
+            XCTAssertNoThrow(try f.fixture.machine.retainedSetupActivationSnapshot(owner: f.owner, candidate: f.fixture.candidate))
+            for wrongMaterial in [true, false] {
+                try injectRetainedActivationRow(f, bytes: plan.encoded,
+                    materialID: wrongMaterial ? AccountPreparationIntent.randomID() : plan.reference.materialID,
+                    digest: wrongMaterial ? nil : Data(repeating: 0, count: 32))
+                XCTAssertThrowsError(try f.fixture.machine.retainedSetupActivationSnapshot(owner: f.owner, candidate: f.fixture.candidate)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+            }
+            try injectRetainedActivationRow(f, bytes: plan.encoded, materialID: plan.reference.materialID, registered: 1)
+            XCTAssertThrowsError(try f.fixture.machine.retainedSetupActivationSnapshot(owner: f.owner, candidate: f.fixture.candidate)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedActivationRuntimeChecksTheFullReceiptAroundEveryInjectedRead() throws {
+        try withRetainedActivationValueFixture { f, snapshot, plan in
+            var reads = 0
+            try snapshot.validateRuntime(plan: plan, material: f.material, readPolicyBoundary: f.boundary,
+                candidate: f.fixture.candidate, verifyCurrent: {
+                    try snapshot.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+                }, read: { artifact in reads += 1; return try f.read(artifact) })
+            XCTAssertEqual(reads, 11)
+            let revised = AuthorityJournal.MachineUpdatePolicyBoundary(macID: f.current.macID, accountID: f.current.accountID,
+                policy: .init(revision: UUID(), policy: f.current.policy.policy, roleRevisions: f.current.policy.roleRevisions),
+                checkpoint: f.current.checkpoint)
+            for changedAfter in 0...11 {
+                reads = 0
+                XCTAssertThrowsError(try snapshot.validateRuntime(plan: plan, material: f.material, readPolicyBoundary: {
+                    if reads >= changedAfter { return revised }
+                    return try f.boundary()
+                }, candidate: f.fixture.candidate, verifyCurrent: f.verifyMarker,
+                    read: { artifact in reads += 1; return try f.read(artifact) })) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+                XCTAssertEqual(reads, changedAfter)
+            }
+        }
+    }
+
+    func testRetainedActivationOwnerVerificationDetectsAnIntentChangeAfterARead() throws {
+        try withRetainedActivationValueFixture { f, snapshot, plan in
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: snapshot.intent.encoded) as? [String: Any])
+            fields["revision"] = UUID().uuidString
+            let changed = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            XCTAssertNotEqual(changed, snapshot.intent)
+            try changed.requireRecorded(f.boundary())
+            var reads = 0
+            XCTAssertThrowsError(try snapshot.validateRuntime(plan: plan, material: f.material, readPolicyBoundary: f.boundary,
+                candidate: f.fixture.candidate, verifyCurrent: {
+                    try snapshot.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+                }, read: { artifact in
+                    reads += 1
+                    if reads == 1 {
+                        func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+                        let revision = changed.revision.uuidString.replacingOccurrences(of: "-", with: "")
+                        try f.fixture.machine.close()
+                        try f.fixture.files.sql("UPDATE retained_setup_policy_intents_v1 SET revision=X'\(revision)',record=X'\(try hex(changed.encoded))' WHERE account=X'\(hex(changed.accountID))'")
+                        try f.fixture.files.reopen()
+                    }
+                    return try f.read(artifact)
+                })) { XCTAssertEqual($0 as? PreparationStoreError, .staleRevision) }
+            XCTAssertEqual(reads, 1)
+            XCTAssertNoThrow(try f.verifyMarker())
+        }
+    }
+
+    func testRetainedActivationRejectsAnotherValidPlanAndDifferentValidMaterial() throws {
+        try withRetainedActivationValueFixture { f, snapshot, plan in
+            try snapshot.requirePlan(plan, candidate: f.fixture.candidate)
+            let reference = try f.material.reference, now = Date()
+            let other = try RuntimePreparationMaterial.create(services: f.material.services,
+                notValidBefore: now.addingTimeInterval(-60), notValidAfter: now.addingTimeInterval(600),
+                serviceActivity: reference.serviceActivity, auditDeliveryVersion: reference.auditDeliveryVersion)
+            var reads = 0
+            XCTAssertThrowsError(try snapshot.validateRuntime(plan: plan, material: other, readPolicyBoundary: f.boundary,
+                candidate: f.fixture.candidate, verifyCurrent: f.verifyMarker,
+                read: { artifact in reads += 1; return try f.read(artifact) })) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .conflictingMaterial)
+            }
+            XCTAssertEqual(reads, 0)
+            try withRetainedActivationValueFixture { otherFixture, otherSnapshot, otherPlan in
+                try otherSnapshot.requirePlan(otherPlan, candidate: otherFixture.fixture.candidate)
+                XCTAssertThrowsError(try snapshot.requirePlan(otherPlan, candidate: f.fixture.candidate)) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+                }
+            }
+        }
+    }
+
+    func testRetainedActivationEnrollmentAndRegistrationCompareOnlyTheAllowedValues() throws {
+        try withRetainedActivationValueFixture { f, snapshot, plan in
+            let retained = try MachineUpdateRetainedSetupActivationSnapshot(runtime: snapshot.runtime,
+                state: .init(plan: plan, jobsRegistered: false), intent: snapshot.intent, candidate: f.fixture.candidate)
+            try retained.requireRetention(plan, from: snapshot)
+            let proposed = try plan.enrolledInventory(snapshot.runtime.setup.source.actual.inventory)
+            let inventory = try InstallationInventory(macID: proposed.macID, installationID: proposed.installationID,
+                revision: AccountPreparationIntent.randomID(), bundlePath: proposed.bundlePath, releaseDigest: proposed.releaseDigest,
+                accounts: proposed.accounts, services: proposed.services, formatVersion: proposed.formatVersion)
+            let runtime = try retainedActivationRuntime(f, inventory: inventory)
+            let enrolled = try MachineUpdateRetainedSetupActivationSnapshot(runtime: runtime,
+                state: retained.state, intent: retained.intent, candidate: f.fixture.candidate)
+            try enrolled.requireInventoryEnrollment(plan, from: retained)
+            XCTAssertThrowsError(try enrolled.requireInventoryEnrollment(plan, from: enrolled)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let registeredRuntime = try retainedActivationRuntime(f, inventory: inventory, rowsDigest: Data(repeating: 89, count: 32))
+            let registered = try MachineUpdateRetainedSetupActivationSnapshot(runtime: registeredRuntime,
+                state: .init(plan: plan, jobsRegistered: true), intent: enrolled.intent, candidate: f.fixture.candidate)
+            try registered.requireRegistrationMarker(plan, from: enrolled)
+            XCTAssertThrowsError(try registered.requireRegistrationMarker(plan, from: registered)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            XCTAssertThrowsError(try enrolled.requireSame(as: registered)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertNil(try f.fixture.machine.runtimeActivation(accountID: plan.accountID).plan)
+        }
+    }
+
+    func testRetainedActivationRetentionRejectsAValidUnrelatedServiceReservationChange() throws {
+        try withRetainedActivationValueFixture { f, before, plan in
+            let valid = try MachineUpdateRetainedSetupActivationSnapshot(runtime: before.runtime,
+                state: .init(plan: plan, jobsRegistered: false), intent: before.intent, candidate: f.fixture.candidate)
+            try valid.requireRetention(plan, from: before)
+            let runtime = try retainedActivationRuntime(f, inventory: before.runtime.setup.source.actual.inventory,
+                reservedNumbers: before.runtime.reservedNumbers.union([29999]))
+            let changed = try MachineUpdateRetainedSetupActivationSnapshot(runtime: runtime,
+                state: valid.state, intent: valid.intent, candidate: f.fixture.candidate)
+            XCTAssertThrowsError(try changed.requireRetention(plan, from: before)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
     func testRetainedSetupPolicyReadsSchema25WithoutGrantingWritesOrSettlementAdoption() throws {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: true,
