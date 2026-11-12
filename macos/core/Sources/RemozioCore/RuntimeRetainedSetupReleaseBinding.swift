@@ -91,7 +91,8 @@ struct RuntimeRetainedSetupReleaseBinding: Codable, Equatable, Sendable, CustomS
         guard try Self.digest(policy.bytes) == startupPolicyDigest else { throw RuntimeActivationError.changedScope }
     }
 
-    /// Requires the exact recorded pair for publication. A later checkpoint is not the retained startup acknowledgement.
+    /// Compares stored policy bytes and the checkpoint. It does not compare the global policy revision.
+    /// Publication must also use requireSourceForPublication with the current snapshot and boundary.
     func requireRecordedBoundary(_ boundary: AuthorityJournal.MachineUpdatePolicyBoundary) throws {
         try validate(); try requireStartupPolicy(boundary.policy.policy)
         guard boundary.macID == macID, boundary.accountID == accountID,
