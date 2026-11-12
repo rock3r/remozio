@@ -4060,7 +4060,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try journal.captureRetainedSetupPolicyBoundary(expected: initialization)
         }
         func verifyMarker() throws {
-            let state = try fixture.machine.runtimePreparation(accountID: snapshot.activation.runtime.preparation.accountID)
+            let state = try fixture.machine.stableRuntimePreparationSnapshot(owner: owner, candidate: fixture.candidate).state
             guard state.configurationPublished, state.reference == snapshot.activation.runtime.state.reference else {
                 throw RuntimeActivationError.changedScope
             }
@@ -4107,6 +4107,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
     func testRetainedSelectionReadsOnlyScopedInjectedFilesAndPreservesTheirBytes() throws {
         try withRetainedSelectionFixture { f in
             let before = try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate)
+            let retained = try f.fixture.machine.stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.fixture.candidate)
+            XCTAssertEqual(retained.state, f.snapshot.activation.runtime.state)
+            XCTAssertThrowsError(try f.fixture.machine.runtimePreparation(accountID: retained.preparation.accountID)) {
+                XCTAssertEqual($0 as? ServiceAccountProvisioningError, .changedScope)
+            }
             var events: [String] = [], reads: [String] = []
             let selected = try RuntimeRetainedSetupPublishedSelection.capture(snapshot: f.snapshot,
                 readPolicyBoundary: { events.append("pair"); return try f.boundary() }, material: f.material,
