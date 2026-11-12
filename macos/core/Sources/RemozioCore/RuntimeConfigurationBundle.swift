@@ -260,6 +260,14 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
             policy: account.initialAuthority.codePolicy, clients: clients)
     }
 
+    /// Retains checked v6 values. This overload cannot create an ordinary executable activation plan.
+    init(retaining plan: RuntimeRetainedSetupActivationPlan, account: AccountPreparationIntent,
+        initialization: AuthorityInitializationIntent, inventory: InstallationInventory, clients: RuntimeActivationClients) throws {
+        try plan.requireConfigurationScope(account: account, initialization: initialization, inventory: inventory)
+        try self.init(retaining: plan.host.command, transport: plan.transport, reference: plan.reference,
+            account: account, initialization: initialization, inventory: inventory, policy: plan.host.codePolicy, clients: clients)
+    }
+
     /// Validates completed bytes against current code and frozen provisioning. It does not rebuild tunable values.
     static func stableCompleted(snapshot: MachineUpdateStableRuntimePreparationSnapshot, reference: RuntimeMaterialReference,
         candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,

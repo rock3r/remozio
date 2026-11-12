@@ -3939,6 +3939,108 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    private func withRetainedPlanValueFixture(
+        _ body: (CompletionFixture, MachineUpdateRetainedSetupPolicySnapshot,
+            AuthorityJournal.MachineUpdatePolicyBoundary, RuntimeConfigurationBundle, RuntimeRetainedSetupActivationPlan) throws -> Void) throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let runtime = snapshot.activation.runtime, inventory = runtime.setup.source.actual.inventory
+            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
+                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
+            let binding = try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: fixture.candidate)
+            let label = try RuntimePreparationPaths(accountID: runtime.preparation.accountID).namespace + ".authority"
+            let host = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
+                installationID: inventory.installationID, releaseDigest: inventory.releaseDigest,
+                codePolicy: current.policy.policy, command: bundle.command, label: label, plistName: label + ".plist",
+                jobPlacement: .systemAccount, gatewaySettingsControlEnabled: true)
+            let archive = try RuntimeRetainedSetupActivationArchive(reference: XCTUnwrap(runtime.state.reference),
+                bundlePath: inventory.bundlePath, host: host, transport: bundle.transport,
+                gatewaySettingsHost: XCTUnwrap(bundle.gatewaySettingsHost), phoneRoutingVersion: nil,
+                phoneAuditVersion: 1, phoneUpdateSchedulingVersion: nil, binding: binding, inventory: inventory)
+            try body(fixture, snapshot, current, bundle, RuntimeRetainedSetupActivationPlan(archive: archive))
+        }
+    }
+
+    func testRetainedPlanValueConfigurationRequiresExactPreparationInitializationAndClients() throws {
+        try withRetainedPlanValueFixture { fixture, snapshot, _, bundle, plan in
+            let runtime = snapshot.activation.runtime, account = runtime.preparation
+            let initial = try XCTUnwrap(runtime.setup.account?.initialization)
+            let inventory = runtime.setup.source.actual.inventory
+            let clients = RuntimeActivationClients(presence: bundle.presenceClient,
+                pairing: bundle.pairingClient, frontend: bundle.frontendClient)
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            XCTAssertNoThrow(try plan.validate(account: account, reference: XCTUnwrap(runtime.state.reference)))
+            let restored = try plan.configurationBundle(account: account, initialization: initial, inventory: inventory, clients: clients)
+            XCTAssertEqual(restored.command.canonicalBytes, bundle.command.canonicalBytes)
+            XCTAssertEqual(restored.transport.canonicalBytes, bundle.transport.canonicalBytes)
+            XCTAssertEqual(restored.presenceClient.canonicalBytes, clients.presence.canonicalBytes)
+            XCTAssertEqual(restored.pairingClient.canonicalBytes, clients.pairing.canonicalBytes)
+            XCTAssertEqual(restored.frontendClient.canonicalBytes, clients.frontend.canonicalBytes)
+            XCTAssertEqual(try restored.gatewaySettingsHost, try bundle.gatewaySettingsHost)
+            let other = try XCTUnwrap(runtime.setup.source.accounts.first { $0.accountID != account.accountID }?.initialization)
+            XCTAssertThrowsError(try plan.configurationBundle(account: account, initialization: other, inventory: inventory, clients: clients)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let frontend = try CommandFrontendConfiguration.decode(retainedConfigurationChanging(
+                clients.frontend.canonicalBytes, key: 2, value: .bytes(AccountPreparationIntent.randomID())))
+            XCTAssertThrowsError(try plan.configurationBundle(account: account, initialization: initial, inventory: inventory,
+                clients: .init(presence: clients.presence, pairing: clients.pairing, frontend: frontend))) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let reference = plan.reference, now = Date()
+            let material = try RuntimePreparationMaterial.create(services: runtime.plan,
+                notValidBefore: now.addingTimeInterval(-60), notValidAfter: now.addingTimeInterval(600),
+                serviceActivity: reference.serviceActivity, auditDeliveryVersion: reference.auditDeliveryVersion)
+            let foreign = try material.reference
+            XCTAssertNoThrow(try foreign.validate(account: account, services: runtime.plan))
+            XCTAssertThrowsError(try plan.validate(account: account, reference: foreign)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+            XCTAssertFalse(runtime.state.configurationPublished)
+        }
+    }
+
+    func testRetainedPlanValueRequiresAuditDeliveryAndEveryDeclaredReaderWriter() throws {
+        try withRetainedPlanValueFixture { fixture, _, _, _, plan in
+            let archive = plan.archive
+            XCTAssertEqual(archive.reference.auditDeliveryVersion, 1)
+            XCTAssertEqual(plan.phoneAuditVersion, 1)
+            XCTAssertNoThrow(try RuntimeRetainedSetupActivationPlan.requireFormats(fixture.candidate))
+            XCTAssertThrowsError(try RuntimeRetainedSetupActivationArchive(reference: archive.reference,
+                bundlePath: archive.bundlePath, host: archive.host, transport: archive.transport,
+                gatewaySettingsHost: archive.gatewaySettingsHost, phoneRoutingVersion: nil, phoneAuditVersion: nil,
+                phoneUpdateSchedulingVersion: nil, binding: archive.binding, inventory: archive.inventory)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .invalidPlan)
+            }
+            for requirement in try RuntimeRetainedSetupActivationPlan.requirements {
+                for dropWriter in requirement.writeVersions.isEmpty ? [false] : [false, true] {
+                    let components = try fixture.candidate.manifest.components.map { component in
+                        var formats = component.formats
+                        if component.role == requirement.role {
+                            let index = try XCTUnwrap(formats.firstIndex { $0.name == requirement.name })
+                            let format = formats[index]
+                            if dropWriter {
+                                formats[index] = try .init(name: format.name, readers: format.readers,
+                                    writers: format.writers.subtracting(requirement.writeVersions))
+                            } else { formats.remove(at: index) }
+                        }
+                        return try ReleaseComponent(role: component.role, identifier: component.identifier,
+                            generation: component.generation, relativePath: component.relativePath,
+                            codeDirectoryHash: component.codeDirectoryHash, build: component.build, teamID: component.teamID,
+                            formats: formats, requests: component.requests)
+                    }
+                    let missing = try SignedReleaseEvidence(manifest: .init(release: fixture.candidate.manifest.release,
+                        build: fixture.candidate.manifest.build, components: components, dependencies: fixture.candidate.manifest.dependencies),
+                        codeDirectoryHashes: fixture.candidate.codeDirectoryHashes,
+                        dependencyCodeDirectoryHashes: fixture.candidate.dependencyCodeDirectoryHashes)
+                    XCTAssertThrowsError(try RuntimeRetainedSetupActivationPlan.requireFormats(missing)) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                    }
+                }
+            }
+        }
+    }
+
     func testRetainedSetupPolicyReadsSchema25WithoutGrantingWritesOrSettlementAdoption() throws {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: true,
