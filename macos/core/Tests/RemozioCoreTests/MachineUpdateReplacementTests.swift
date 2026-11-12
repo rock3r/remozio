@@ -34,7 +34,7 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
-         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false,
+         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false,
          enableSecondReadiness: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
@@ -82,6 +82,7 @@ private final class MachineReplacementFixture {
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
+            if retainedPolicySourceFormats { requiredFormats += try RuntimeRetainedSetupReleaseBinding.requirements }
             if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             if promotionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
             if readinessReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
@@ -1639,7 +1640,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false,
         enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
@@ -1647,7 +1648,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats,
             enableSecondReadiness: enableSecondReadiness, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
@@ -2267,7 +2268,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false,
         enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -2275,7 +2276,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats,
             enableSecondReadiness: enableSecondReadiness, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
@@ -3193,10 +3194,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withUnpublishedActivationReadFixture(
+    private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false,
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupPolicyMaterial) throws -> Void) throws {
         var retained: AccountPreparationIntent?
-        try withFinishingFixture(stableFormats: true,
+        try withFinishingFixture(stableFormats: true, policyReaderFormats: policySourceFormats,
+            retainedPolicySourceFormats: policySourceFormats,
             beforeActivation: { retained = try self.prepareSecondForeground($0).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
@@ -3382,6 +3384,305 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 state: .init(reference: reference, configurationPublished: true), reservedNumbers: runtime.reservedNumbers)
             XCTAssertThrowsError(try MachineUpdateStableRuntimeActivationSnapshot(runtime: changed, state: state, candidate: fixture.candidate)) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
+    /// Uses owned policy commits and injected rows. It proves no native publication or current file custody.
+    private func withRetainedPolicySourceFixture(recorded: Bool = false,
+        _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupActivationSource,
+            MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
+        try withUnpublishedActivationReadFixture(policySourceFormats: true) { fixture, owner, material in
+            let account = material.runtime.preparation.accountID
+            let reader = try fixture.openPolicyPair(readOnly: true, accountID: account)
+            defer { try? reader.close() }
+            let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
+                journal: reader, candidate: fixture.candidate)
+            let prepared = try MachineUpdateRetainedSetupPolicyIntentRecord(source: source)
+            let empty = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
+            XCTAssertNil(empty.intent)
+            XCTAssertNoThrow(try prepared.requireSnapshot(empty.activation, candidate: fixture.candidate))
+            try reader.close()
+            let intent: MachineUpdateRetainedSetupPolicyIntentRecord
+            let current: AuthorityJournal.MachineUpdatePolicyBoundary
+            if recorded {
+                let storage = try fixture.policyStorage(readOnly: false, accountID: account)
+                defer { try? storage.close() }
+                let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+                XCTAssertNotEqual(source.policy.startupPolicy, source.policy.source.policy)
+                let policy = try commits.write(epoch: source.accountPolicy.checkpoint.journalEpoch) {
+                    try $0.installCodePolicy(source.policy.startupPolicy, expectedRevision: source.policy.source.revision)
+                }
+                let checkpoint = try storage.continuity.read().committed
+                try storage.close()
+                var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.encoded) as? [String: Any])
+                fields["phase"] = MachineUpdateRetainedSetupPolicyIntentRecord.Phase.recorded.rawValue
+                fields["committedPolicy"] = ["revision": policy.revision.uuidString, "bytes": try policy.storedBytes.base64EncodedString()]
+                fields["committedCheckpoint"] = try checkpoint.bytes.base64EncodedString()
+                intent = try .decode(JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))
+                let fresh = try fixture.openPolicyPair(readOnly: true, accountID: account)
+                defer { try? fresh.close() }
+                current = try fresh.captureRetainedSetupPolicyBoundary(expected: material.initialization)
+                XCTAssertEqual(current.policy, policy); XCTAssertEqual(current.checkpoint, checkpoint)
+                try fresh.close()
+            } else { intent = prepared; current = source.accountPolicy }
+            func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
+            let id = intent.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = intent.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let bytes = try hex(intent.encoded)
+            try fixture.machine.close()
+            try fixture.files.sql(MachineUpdateRetainedSetupPolicyStorage.createSQL)
+            try fixture.files.sql("PRAGMA user_version=25")
+            try fixture.files.sql("INSERT INTO retained_setup_policy_intents_v1 VALUES(X'\(hex(account))',X'\(id)',X'\(revision)',X'\(bytes)')")
+            try fixture.files.reopen()
+            let snapshot = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
+            XCTAssertEqual(snapshot.intent, intent)
+            try body(fixture, owner, source, snapshot, current)
+        }
+    }
+
+    func testRetainedPolicySnapshotReconstructsTheExactPublicV2DigestAndRevision() throws {
+        try withRetainedPolicySourceFixture { fixture, owner, source, snapshot, _ in
+            let runtime = source.runtime, original = source.original
+            let initialization = try XCTUnwrap(runtime.setup.account?.initialization)
+            let reference = try XCTUnwrap(runtime.state.reference), policy = source.policy
+            let checkpoint = source.accountPolicy.checkpoint
+            let actual = runtime.setup.source.actual
+            var fields: [UInt64: CBORValue] = [
+                0: .text("remozio/retained-setup-activation-source/v2"),
+                1: .bytes(actual.inventory.canonicalBytes), 2: .bytes(try actual.seal.encoded),
+                3: .bytes(original.sourceDigest), 4: .bytes(try runtime.preparation.bytes),
+                5: .bytes(try initialization.bytes), 6: .bytes(try runtime.plan.encoded), 7: .bytes(try reference.encoded),
+                8: .bytes(try policy.source.storedBytes), 9: .bytes(try checkpoint.bytes),
+                10: .bytes(try policy.startupPolicy.bytes), 11: .bytes(try policy.completionPolicy.bytes),
+                12: .text(policy.source.revision.uuidString.lowercased())
+            ]
+            let limits = try CBORLimits(maxBytes: 1_048_576, maxDepth: 3, maxItems: 40)
+            let expected = MachineUpdateActivationRecord.digest(try DeterministicCBOR.encode(.map(fields), limits: limits))
+            XCTAssertEqual(expected, source.digest)
+            XCTAssertEqual(try MachineUpdateRetainedSetupActivationSource.retainedScopeDigest(snapshot: snapshot.activation,
+                sourcePolicy: policy.source, sourceCheckpoint: checkpoint, candidate: fixture.candidate), expected)
+            let material = try fixture.machine.retainedSetupPolicyMaterial(owner: owner, candidate: fixture.candidate)
+            XCTAssertEqual(try material.scopeDigest(policy: policy, checkpoint: checkpoint), expected)
+            fields[0] = .text("remozio/retained-setup-activation-source/v1"); fields[12] = nil
+            XCTAssertNotEqual(MachineUpdateActivationRecord.digest(try DeterministicCBOR.encode(.map(fields), limits: limits)), expected)
+            let revised = AuthorityCodePolicySnapshot(revision: UUID(), policy: policy.source.policy, roleRevisions: policy.source.roleRevisions)
+            XCTAssertEqual(try revised.storedBytes, try policy.source.storedBytes)
+            XCTAssertNotEqual(try MachineUpdateRetainedSetupActivationSource.retainedScopeDigest(snapshot: snapshot.activation,
+                sourcePolicy: revised, sourceCheckpoint: checkpoint, candidate: fixture.candidate), expected)
+            let intent = try XCTUnwrap(snapshot.intent)
+            var record = try XCTUnwrap(JSONSerialization.jsonObject(with: intent.encoded) as? [String: Any])
+            record["sourcePolicy"] = ["revision": revised.revision.uuidString, "bytes": try revised.storedBytes.base64EncodedString()]
+            let changed = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(
+                JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]))
+            XCTAssertNoThrow(try intent.requireSnapshot(snapshot.activation, candidate: fixture.candidate))
+            XCTAssertThrowsError(try changed.requireSnapshot(snapshot.activation, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            let recordFields = try XCTUnwrap(JSONSerialization.jsonObject(with: intent.encoded) as? [String: Any])
+            for (name, value): (String, Any) in [
+                ("macID", Data(repeating: 61, count: 16).base64EncodedString()),
+                ("installationID", Data(repeating: 62, count: 16).base64EncodedString()),
+                ("accountID", Data(repeating: 63, count: 16).base64EncodedString()),
+                ("ownerUID", owner.uid + 1),
+                ("initializationDigest", Data(repeating: 64, count: 32).base64EncodedString()),
+                ("sourceDigest", Data(repeating: 65, count: 32).base64EncodedString()),
+                ("installedReleaseDigest", Data(repeating: 66, count: 32).base64EncodedString()),
+            ] {
+                var edited = recordFields; edited[name] = value
+                let other = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(
+                    JSONSerialization.data(withJSONObject: edited, options: [.sortedKeys, .withoutEscapingSlashes]))
+                XCTAssertThrowsError(try other.requireSnapshot(snapshot.activation, candidate: fixture.candidate), name) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+            }
+        }
+    }
+
+    func testRetainedPolicyRecordedScopeRequiresObservedAccountsAndServicesToRemainCurrent() throws {
+        try withRetainedPolicySourceFixture { fixture, owner, source, snapshot, _ in
+            let runtime = snapshot.activation.runtime, inventory = runtime.setup.source.actual.inventory
+            func digest(_ runtime: MachineUpdateStableRuntimePreparationSnapshot, _ observed: InstallationInventory) throws -> Data {
+                try MachineUpdateRetainedSetupActivationSource.recordedScopeDigest(runtime: runtime,
+                    observedInventory: observed, sourcePolicy: source.policy.source,
+                    sourceCheckpoint: source.accountPolicy.checkpoint, candidate: fixture.candidate)
+            }
+            XCTAssertEqual(try digest(runtime, inventory), source.digest)
+            let account = try InstallationAccount(accountID: runtime.preparation.accountID, ownerUID: owner.uid)
+            let enrolled = try InstallationInventory(macID: inventory.macID, installationID: inventory.installationID,
+                revision: AccountPreparationIntent.randomID(), bundlePath: inventory.bundlePath, releaseDigest: inventory.releaseDigest,
+                accounts: inventory.accounts + [account], services: inventory.services, formatVersion: inventory.formatVersion)
+            let afterEnrollment = try replacingStableActivationInventory(enrolled, in: snapshot.activation,
+                owner: owner, candidate: fixture.candidate)
+            XCTAssertEqual(afterEnrollment.setup.account?.inInventory, true)
+            XCTAssertEqual(try digest(afterEnrollment, inventory), source.digest)
+            XCTAssertNotEqual(try digest(afterEnrollment, enrolled), source.digest)
+            XCTAssertThrowsError(try digest(runtime, enrolled)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let declaration = try XCTUnwrap(inventory.services.first { $0.role == .authority && $0.kind == .daemon })
+            let replacement = try InstallationService(role: declaration.role, kind: declaration.kind,
+                domainUID: declaration.domainUID, executionUID: declaration.executionUID, label: declaration.label + ".other",
+                plistName: declaration.plistName, accountID: declaration.accountID)
+            let changed = try InstallationInventory(macID: inventory.macID, installationID: inventory.installationID,
+                revision: inventory.revision, bundlePath: inventory.bundlePath, releaseDigest: inventory.releaseDigest,
+                accounts: inventory.accounts, services: inventory.services.map { $0 == declaration ? replacement : $0 },
+                formatVersion: inventory.formatVersion)
+            XCTAssertNoThrow(try runtime.setup.source.actual.seal.requireCurrentInventory(changed,
+                epoch: runtime.setup.source.actual.installed, candidate: fixture.candidate))
+            XCTAssertEqual(changed.accounts, inventory.accounts)
+            XCTAssertThrowsError(try digest(runtime, changed)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedPolicyRecordedScopeRequiresTheOriginalPolicyAndCheckpoint() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, source, snapshot, current in
+            let runtime = snapshot.activation.runtime, inventory = runtime.setup.source.actual.inventory
+            func digest(_ policy: AuthorityCodePolicySnapshot, _ checkpoint: ContinuityCheckpoint) throws -> Data {
+                try MachineUpdateRetainedSetupActivationSource.recordedScopeDigest(runtime: runtime,
+                    observedInventory: inventory, sourcePolicy: policy, sourceCheckpoint: checkpoint, candidate: fixture.candidate)
+            }
+            XCTAssertEqual(try digest(source.policy.source, source.accountPolicy.checkpoint), source.digest)
+            XCTAssertNotEqual(current.policy.policy, source.policy.source.policy)
+            XCTAssertThrowsError(try digest(current.policy, source.accountPolicy.checkpoint)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            XCTAssertNotEqual(current.checkpoint, source.accountPolicy.checkpoint)
+            XCTAssertThrowsError(try digest(source.policy.source, current.checkpoint)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedPolicySnapshotReadsActualMetadataWithoutGrantingWrites() throws {
+        try withRetainedPolicySourceFixture { fixture, owner, _, snapshot, _ in
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            let current = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
+            XCTAssertNoThrow(try current.requireSame(as: snapshot))
+            XCTAssertEqual(try fixture.machine.retainedSetupPolicyIntent(owner: owner, candidate: fixture.candidate), snapshot.intent)
+            XCTAssertTrue(snapshot.activation.requiresRetainedMaterialCustody)
+            XCTAssertThrowsError(try fixture.machine.writeInventory(before.inventory, expectedRevision: before.inventory.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+            let empty = try MachineUpdateRetainedSetupPolicySnapshot(activation: snapshot.activation, intent: nil, candidate: fixture.candidate)
+            XCTAssertThrowsError(try snapshot.requireSame(as: empty)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        }
+    }
+
+    func testRetainedPolicySnapshotRequiresTheExactStoredRecordIdentityColumns() throws {
+        try withRetainedPolicySourceFixture { fixture, owner, _, snapshot, _ in
+            let intent = try XCTUnwrap(snapshot.intent)
+            for (column, id) in [("id", intent.id), ("revision", intent.revision)] {
+                XCTAssertNoThrow(try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate))
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE retained_setup_policy_intents_v1 SET \(column)=zeroblob(16)")
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+                try fixture.machine.close()
+                let hex = id.uuidString.replacingOccurrences(of: "-", with: "")
+                try fixture.files.sql("UPDATE retained_setup_policy_intents_v1 SET \(column)=X'\(hex)'")
+                try fixture.files.reopen()
+                XCTAssertNoThrow(try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate))
+            }
+        }
+    }
+
+    func testRetainedReleaseBindingRequiresTheExactRecordedPairAndCurrentSource() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, source, snapshot, current in
+            let binding = try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: fixture.candidate)
+            XCTAssertEqual(try RuntimeRetainedSetupReleaseBinding.decode(binding.encoded), binding)
+            XCTAssertEqual(binding.retainedSourceDigest, source.digest)
+            XCTAssertEqual(binding.preparationDigest, try MachineUpdateActivationRecord.digest(source.runtime.preparation.bytes))
+            XCTAssertNoThrow(try binding.requireSourceForPublication(snapshot, current: current, candidate: fixture.candidate))
+            XCTAssertNoThrow(try binding.requirePreparation(source.runtime.preparation))
+            XCTAssertNoThrow(try binding.requireHistoricalRuntime(XCTUnwrap(source.runtime.state.reference)))
+            XCTAssertNoThrow(try binding.requireRecordedBoundary(current))
+            let empty = try MachineUpdateRetainedSetupPolicySnapshot(activation: snapshot.activation, intent: nil, candidate: fixture.candidate)
+            XCTAssertThrowsError(try RuntimeRetainedSetupReleaseBinding(snapshot: empty, current: current, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            let recordedIntent = try XCTUnwrap(snapshot.intent)
+            var preparedFields = try XCTUnwrap(JSONSerialization.jsonObject(with: recordedIntent.encoded) as? [String: Any])
+            preparedFields["phase"] = MachineUpdateRetainedSetupPolicyIntentRecord.Phase.prepared.rawValue
+            preparedFields["committedPolicy"] = nil; preparedFields["committedCheckpoint"] = nil
+            let prepared = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(
+                JSONSerialization.data(withJSONObject: preparedFields, options: [.sortedKeys, .withoutEscapingSlashes]))
+            let unrecorded = try MachineUpdateRetainedSetupPolicySnapshot(activation: snapshot.activation, intent: prepared, candidate: fixture.candidate)
+            XCTAssertThrowsError(try RuntimeRetainedSetupReleaseBinding(snapshot: unrecorded, current: current, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            let otherAccount = try XCTUnwrap(source.runtime.setup.source.accounts.first { $0.accountID != source.runtime.preparation.accountID }?.preparation)
+            XCTAssertThrowsError(try binding.requirePreparation(otherAccount)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let otherPolicy = AuthorityJournal.MachineUpdatePolicyBoundary(macID: current.macID, accountID: current.accountID,
+                policy: source.policy.source, checkpoint: current.checkpoint)
+            XCTAssertThrowsError(try binding.requireRecordedBoundary(otherPolicy)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let otherCheckpoint = AuthorityJournal.MachineUpdatePolicyBoundary(macID: current.macID, accountID: current.accountID,
+                policy: current.policy, checkpoint: source.accountPolicy.checkpoint)
+            XCTAssertThrowsError(try binding.requireRecordedBoundary(otherCheckpoint)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            var mac = current.macID; mac[mac.startIndex] ^= 1
+            let other = AuthorityJournal.MachineUpdatePolicyBoundary(macID: mac, accountID: current.accountID,
+                policy: current.policy, checkpoint: current.checkpoint)
+            XCTAssertThrowsError(try binding.requireRecordedBoundary(other)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let revised = AuthorityCodePolicySnapshot(revision: UUID(), policy: current.policy.policy, roleRevisions: current.policy.roleRevisions)
+            XCTAssertEqual(try revised.storedBytes, try current.policy.storedBytes)
+            let changedRevision = AuthorityJournal.MachineUpdatePolicyBoundary(macID: current.macID, accountID: current.accountID,
+                policy: revised, checkpoint: current.checkpoint)
+            // Encoded policy bytes omit the global revision. The enclosing exact receipt check retains it.
+            XCTAssertNoThrow(try binding.requireRecordedBoundary(changedRevision))
+            XCTAssertThrowsError(try binding.requireSourceForPublication(snapshot, current: changedRevision, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: binding.encoded) as? [String: Any])
+            fields["retainedSourceDigest"] = Data(repeating: 42, count: 32).base64EncodedString()
+            let changed = try RuntimeRetainedSetupReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            XCTAssertNotEqual(changed, binding)
+            XCTAssertThrowsError(try changed.requireSourceForPublication(snapshot, current: current, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+
+    func testRetainedReleaseBindingRequiresEverySelectedReaderAndWriterFormat() throws {
+        try withRetainedPolicySourceFixture(recorded: true) { fixture, _, _, snapshot, current in
+            let candidate = fixture.candidate
+            XCTAssertNoThrow(try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: candidate))
+            for requirement in try RuntimeRetainedSetupReleaseBinding.requirements {
+                for dropWriter in requirement.writeVersions.isEmpty ? [false] : [false, true] {
+                    let components = try candidate.manifest.components.map { component in
+                        var formats = component.formats
+                        if component.role == requirement.role {
+                            let index = try XCTUnwrap(formats.firstIndex { $0.name == requirement.name })
+                            if dropWriter {
+                                formats[index] = try .init(name: formats[index].name, readers: formats[index].readers, writers: [])
+                            } else { formats.remove(at: index) }
+                        }
+                        return try ReleaseComponent(role: component.role, identifier: component.identifier,
+                            generation: component.generation, relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
+                            build: component.build, teamID: component.teamID, formats: formats, requests: component.requests)
+                    }
+                    let missing = try SignedReleaseEvidence(manifest: .init(release: candidate.manifest.release,
+                        build: candidate.manifest.build, components: components, dependencies: candidate.manifest.dependencies),
+                        codeDirectoryHashes: candidate.codeDirectoryHashes, dependencyCodeDirectoryHashes: candidate.dependencyCodeDirectoryHashes)
+                    XCTAssertThrowsError(try RuntimeRetainedSetupReleaseBinding.requireFormats(missing)) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                    }
+                }
             }
         }
     }
