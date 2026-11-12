@@ -126,8 +126,8 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
             codePolicy: policy, command: command, label: original.host.label, plistName: original.host.plistName,
             jobPlacement: original.host.jobPlacement, gatewaySettingsControlEnabled: original.host.gatewaySettingsControlEnabled,
             installedReadinessEnabled: original.host.installedReadinessEnabled)
-        let gateway = try GatewaySettingsConsumerHostConfiguration(role: .gateway, runtime: original.reference,
-            bundlePath: original.bundlePath, codePolicy: policy, policyStage: .completion, retainedSetupCompletionBinding: binding)
+        let gateway = try GatewaySettingsConsumerHostConfiguration.retainedSetupCompletion(role: .gateway, runtime: original.reference,
+            bundlePath: original.bundlePath, codePolicy: policy, binding: binding)
         let transportHost = try gateway.selecting(role: .transport)
         let transport = try Self.transport(original.transport, host: transportHost, policy: policy)
         let clients = try Self.clients(sourceClients, policy: policy)
