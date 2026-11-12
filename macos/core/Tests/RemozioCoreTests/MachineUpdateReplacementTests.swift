@@ -82,7 +82,10 @@ private final class MachineReplacementFixture {
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
-            if retainedPolicySourceFormats { requiredFormats += try RuntimeRetainedSetupReleaseBinding.requirements }
+            if retainedPolicySourceFormats {
+                requiredFormats += try RuntimeRetainedSetupReleaseBinding.requirements
+                    + MachineUpdatePreflightCompatibility.retainedSetupActivationRequirements
+            }
             if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             if promotionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
             if readinessReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
@@ -3112,7 +3115,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
     /// Uses owned metadata fixtures. These reads prove no current files, native health, or writer authority.
     private func withStableActivationReadFixture(registerSecondForeground: Bool = false,
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateStableRuntimeActivationSnapshot) throws -> Void) throws {
-        try withFinishingFixture(registerSecondForeground: registerSecondForeground, stableFormats: true) {
+        try withFinishingFixture(registerSecondForeground: registerSecondForeground, stableFormats: true,
+            enableSecondReadiness: registerSecondForeground) {
             fixture, finishing, boundary in
             let loan = try stableFixtureLoan(fixture, finishing: finishing)
             defer { loan.close() }
@@ -3305,8 +3309,20 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertNoThrow(try MachineUpdateStableRuntimeActivationSnapshot(runtime: control,
                 state: snapshot.state, candidate: fixture.candidate))
             for role in [AuthorityCodeRole.authority, .transport] {
-                let services = inventory.services.filter { !($0.accountID == snapshot.runtime.preparation.accountID && $0.role == role) }
-                XCTAssertEqual(services.count, inventory.services.count - 1)
+                let declaration = try XCTUnwrap(inventory.services.first {
+                    $0.accountID == snapshot.runtime.preparation.accountID && $0.role == role
+                })
+                let services: [InstallationService]
+                if role == .authority {
+                    let other = try InstallationService(role: declaration.role, kind: declaration.kind,
+                        domainUID: declaration.domainUID, executionUID: declaration.executionUID,
+                        label: declaration.label + ".other", plistName: declaration.plistName, accountID: declaration.accountID)
+                    services = inventory.services.map { $0 == declaration ? other : $0 }
+                    XCTAssertEqual(services.count, inventory.services.count)
+                } else {
+                    services = inventory.services.filter { $0 != declaration }
+                    XCTAssertEqual(services.count, inventory.services.count - 1)
+                }
                 let changed = try InstallationInventory(macID: inventory.macID, installationID: inventory.installationID,
                     revision: inventory.revision, bundlePath: inventory.bundlePath, releaseDigest: inventory.releaseDigest,
                     accounts: inventory.accounts, services: services, formatVersion: inventory.formatVersion)
