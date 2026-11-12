@@ -5124,17 +5124,17 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     func testRetainedPromotionSQLKeepsTheExactEmbeddedCompletionReceipt() throws {
         try withRetainedPromotionValueFixture { f in
-            let machine = f.source.fixture.machine, files = f.source.fixture.files
+            let files = f.source.fixture.files
             let completion = try XCTUnwrap(f.completion.intent)
             try injectRetainedCompletionRow(f.source, record: completion)
             func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
-            try machine.close(); try files.sql(MachineUpdateRetainedSetupPromotionStorage.createSQL)
+            try f.source.fixture.machine.close(); try files.sql(MachineUpdateRetainedSetupPromotionStorage.createSQL)
             try files.sql("PRAGMA user_version=27")
             try files.sql("INSERT INTO retained_setup_promotion_intents_v1 VALUES(X'\(hex(completion.binding.accountID))',X'\(f.prepared.id.uuidString.replacingOccurrences(of: "-", with: ""))',X'\(f.prepared.revision.uuidString.replacingOccurrences(of: "-", with: ""))',X'\(try hex(f.prepared.encoded))')")
             try files.reopen()
-            XCTAssertEqual(try machine.retainedSetupPromotionIntent(accountID: completion.binding.accountID,
+            XCTAssertEqual(try f.source.fixture.machine.retainedSetupPromotionIntent(accountID: completion.binding.accountID,
                 ownerUID: f.source.owner.uid, candidate: f.candidate), f.prepared)
-            XCTAssertThrowsError(try machine.retainedSetupPromotionSnapshot(owner: f.source.owner, candidate: f.candidate)) {
+            XCTAssertThrowsError(try f.source.fixture.machine.retainedSetupPromotionSnapshot(owner: f.source.owner, candidate: f.candidate)) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
             }
             var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: completion.encoded) as? [String: Any])
@@ -5142,11 +5142,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let changed = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(JSONSerialization.data(withJSONObject: fields,
                 options: [.sortedKeys, .withoutEscapingSlashes]))
             try changed.requireRecorded(f.current)
-            try machine.close()
+            try f.source.fixture.machine.close()
             try files.sql("UPDATE retained_setup_completion_intents_v1 SET revision=X'\(changed.revision.uuidString.replacingOccurrences(of: "-", with: ""))',record=X'\(try hex(changed.encoded))'")
             try files.reopen()
             // This intentional corruption is the last operation on the store.
-            XCTAssertThrowsError(try machine.retainedSetupPromotionIntent(accountID: completion.binding.accountID,
+            XCTAssertThrowsError(try f.source.fixture.machine.retainedSetupPromotionIntent(accountID: completion.binding.accountID,
                 ownerUID: f.source.owner.uid, candidate: f.candidate)) { XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord) }
         }
     }
