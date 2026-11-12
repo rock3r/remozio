@@ -232,15 +232,15 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
     private static func requireExpected(_ expected: Snapshot, candidate: SignedReleaseEvidence,
         currentCodePolicy: AuthorityCodePolicy) throws -> AuthorityInitializationIntent {
         try expected.requireSame(as: .init(activation: expected.activation, intent: expected.intent, candidate: candidate))
-        guard let committed = try expected.intent?.committedPolicy?.snapshot(), committed.policy == currentCodePolicy else {
-            throw RuntimeActivationError.changedScope
-        }
         let runtime = expected.activation.runtime
         guard expected.intent?.phase == .recorded, [Int64(26), 27].contains(runtime.setup.source.actual.schemaVersion),
               let initial = runtime.setup.account?.initialization, initial.complete,
               initial.macID == runtime.preparation.macID, initial.installationID == runtime.preparation.installationID,
               initial.accountID == runtime.preparation.accountID, initial.initializationBytes == runtime.preparation.initializationBytes,
               runtime.state.reference?.serviceActivity != nil else { throw RuntimeActivationError.incomplete }
+        guard let committed = try expected.intent?.committedPolicy?.snapshot(), committed.policy == currentCodePolicy else {
+            throw RuntimeActivationError.changedScope
+        }
         return initial
     }
 }

@@ -98,7 +98,7 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
         }
     }
 
-    func testAValidDifferentCodePolicyFailsBeforeOpeningTheMachineStore() throws {
+    func testIncompleteCompletionAndForeignPolicyFailBeforeOpeningTheMachineStore() throws {
         try fixture { f in
             let changed = try f.policy.retainingFormat(with: f.policy.entries.map { entry in
                 guard entry.role == .app else { return entry }
@@ -121,6 +121,25 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
             XCTAssertThrowsError(try Context.withOwnedContext(expected: f.completion, candidate: f.candidate,
                 currentCodePolicy: changed, controls: controls) { _ in XCTFail("A foreign policy entered the context") }) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            var incomplete = [try MachineUpdateRetainedSetupCompletionSnapshot(activation: f.completion.activation,
+                intent: nil, candidate: f.candidate)]
+            for phase in [MachineUpdateRetainedSetupCompletionIntentRecord.Phase.prepared, .writing] {
+                var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(f.completion.intent).encoded) as? [String: Any])
+                fields["phase"] = phase.rawValue
+                fields["committedPolicy"] = nil; fields["committedCheckpoint"] = nil
+                let intent = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(JSONSerialization.data(withJSONObject: fields,
+                    options: [.sortedKeys, .withoutEscapingSlashes]))
+                incomplete.append(try .init(activation: f.completion.activation, intent: intent, candidate: f.candidate))
+            }
+            for snapshot in incomplete {
+                XCTAssertThrowsError(try Context.withOwnedContext(expected: snapshot, candidate: f.candidate,
+                    currentCodePolicy: changed, controls: controls) { _ in XCTFail("An incomplete intent entered the context") }) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+                }
+                XCTAssertThrowsError(try Context.requireApproved(snapshot, from: snapshot, candidate: f.candidate)) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+                }
             }
             XCTAssertEqual(opened, 0); XCTAssertNoThrow(try f.machine.inventory())
         }
