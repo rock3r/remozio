@@ -3407,9 +3407,16 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func readinessReaderRecord(_ promotion: MachineUpdateRetainedSetupPromotionIntentRecord,
-        rootKey: P256.Signing.PrivateKey, transportKey: P256.Signing.PrivateKey) throws -> MachineUpdateRetainedSetupPromotionReadyRecord {
+        rootKey: P256.Signing.PrivateKey, transportKey: P256.Signing.PrivateKey,
+        ownerUID: UInt32? = nil) throws -> MachineUpdateRetainedSetupPromotionReadyRecord {
         let publication = try promotion.publication(), archive = publication.configuration.archive
         let original = try archive.originalActivation(), completion = try archive.completionIntent()
+        let binding: RuntimeRetainedSetupReleaseBinding
+        if let ownerUID {
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: original.binding.encoded) as? [String: Any])
+            fields["ownerUID"] = ownerUID
+            binding = try .decode(JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))
+        } else { binding = original.binding }
         let policy = try XCTUnwrap(completion.committedPolicy?.snapshot())
         let checkpoint = try XCTUnwrap(completion.committedCheckpoint)
         func uuid(_ id: UUID) -> Data { var raw = id.uuid; return withUnsafeBytes(of: &raw) { Data($0) } }
@@ -3424,7 +3431,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(rootKey.publicKey.x963Representation, original.reference.services.authorityPublicKey)
         XCTAssertEqual(transportKey.publicKey.x963Representation, try original.reference.transportPublicKeyX963)
         func requirement(_ role: AuthorityCodeRole) throws -> Data {
-            try MachineUpdateRetainedSetupHealthEvidence.Requirement(binding: original.binding,
+            try MachineUpdateRetainedSetupHealthEvidence.Requirement(binding: binding,
                 activationPlanDigest: MachineUpdateActivationRecord.digest(archive.originalActivationBytes),
                 inventoryDigest: MachineUpdateActivationRecord.digest(archive.recordedInventoryBytes), role: role,
                 executionUID: role == .authority ? 0 : transport.serviceUID,
@@ -3451,7 +3458,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned fixture keys and a historical exchange. It proves no native peer or fresh readiness.
-    private func withReadinessReaderFixture(readerFormats: Bool = true,
+    private func withReadinessReaderFixture(readerFormats: Bool = true, differentOwnerUID: Bool = false,
         _ body: (CompletionFixture, AccountPreparationIntent, MachineUpdateRetainedSetupCompletionIntentRecord,
             MachineUpdateRetainedSetupPromotionIntentRecord, MachineUpdateRetainedSetupPromotionReadyRecord) throws -> Void) throws {
         var material: RuntimePreparationMaterial?
@@ -3462,8 +3469,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 limits: CBORLimits(maxBytes: 16384, maxDepth: 1, maxItems: 9)),
                   case .bytes(let key) = identity[2] else { throw ReplacementFixtureError.injected }
             let ready = try readinessReaderRecord(promotion, rootKey: fixture.files.f.f.signingKey,
-                transportKey: P256.Signing.PrivateKey(x963Representation: key))
-            XCTAssertNoThrow(try ready.requirePublication(promotion))
+                transportKey: P256.Signing.PrivateKey(x963Representation: key),
+                ownerUID: differentOwnerUID ? account.ownerUID + 1 : nil)
+            XCTAssertNoThrow(try ready.requirePublishedIntent(promotion))
+            if differentOwnerUID {
+                XCTAssertThrowsError(try ready.requirePublication(promotion)) {
+                    XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope)
+                }
+            } else { XCTAssertNoThrow(try ready.requirePublication(promotion)) }
             XCTAssertNil(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
                 ownerUID: account.ownerUID, candidate: fixture.candidate))
             func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
@@ -3561,6 +3574,25 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try fixture.machine.close()
             try fixture.files.sql("DELETE FROM retained_setup_completion_intents_v1")
             try fixture.files.reopen(); readRejected()
+        }
+    }
+
+    func testRetainedSetupReadinessRejectsOnlyTheDifferentSignedBindingOwner() throws {
+        try withReadinessReaderFixture(differentOwnerUID: true) { fixture, account, _, promotion, ready in
+            let binding = try MachineUpdateRetainedSetupHealthEvidence.decodeRequestedRequirement(ready.request).binding
+            let selected = try promotion.publication().configuration.archive.binding.startupBinding
+            XCTAssertEqual(binding.macID, selected.macID)
+            XCTAssertEqual(binding.installationID, selected.installationID)
+            XCTAssertEqual(binding.accountID, selected.accountID)
+            XCTAssertEqual(binding.accountID, account.accountID)
+            XCTAssertEqual(binding.ownerUID, account.ownerUID + 1)
+            XCTAssertNotEqual(binding.ownerUID, selected.ownerUID)
+            XCTAssertNoThrow(try ready.requirePublishedIntent(promotion))
+            XCTAssertEqual(try MachineUpdateRetainedSetupPromotionReadyRecord.decode(ready.encoded), ready)
+            XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
         }
     }
 
