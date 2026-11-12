@@ -52,11 +52,18 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
         fileprivate func expire() { lock.withLock { body = nil; approved = nil } }
     }
 
+    /// Proves native custody only during its enclosing scope. Owned contexts cannot construct this type.
+    final class NativeContext {
+        private let context: Context
+        fileprivate init(_ context: Context) { self.context = context }
+        func verify(_ frame: Snapshot) throws { try context.verify(frame) }
+    }
+
     /// Opens no authority pair and exposes no registration, policy writer or startup operation.
     static func withNativeScope<Value>(machineDirectory: String, expected: Snapshot, candidate: SignedReleaseEvidence,
-        currentCodePolicy: AuthorityCodePolicy, perform: (Context) throws -> Value) throws -> Value {
+        currentCodePolicy: AuthorityCodePolicy, perform: (NativeContext) throws -> Value) throws -> Value {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        let initial = try requireExpected(expected, candidate: candidate)
+        let initial = try requireExpected(expected, candidate: candidate, currentCodePolicy: currentCodePolicy)
         _ = try MachineUpdateRetainedSetupPromotionNativeSupport.Paths(accountID: initial.accountID,
             journalPath: initial.journalPath, continuityPath: initial.continuityPath)
         let original = expected.activation.runtime.setup.source.actual
@@ -116,13 +123,13 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
             try RuntimeMaterialPreparation.validateServiceActivity(account: account, activity: activity, verifyCurrent: current)
         })
         return try withOwnedContext(expected: expected, candidate: candidate, currentCodePolicy: currentCodePolicy,
-            controls: controls, perform: perform)
+            controls: controls) { try perform(NativeContext($0)) }
     }
 
     /// Fixture connections still use the real store readers. No callback can provide an unchecked snapshot or writer view.
     static func withOwnedContext<Value>(expected: Snapshot, candidate: SignedReleaseEvidence,
         currentCodePolicy: AuthorityCodePolicy, controls: Controls, perform: (Context) throws -> Value) throws -> Value {
-        _ = try requireExpected(expected, candidate: candidate)
+        _ = try requireExpected(expected, candidate: candidate, currentCodePolicy: currentCodePolicy)
         let context = Context { approved in
             try requireApproved(approved, from: expected, candidate: candidate)
             func frame() throws {
@@ -199,8 +206,9 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
 
     /// Compares the owner's frame; it does not authorize a migration or protect rows for a future writer.
     static func requireApproved(_ approved: Snapshot, from initial: Snapshot, candidate: SignedReleaseEvidence) throws {
-        _ = try requireExpected(initial, candidate: candidate)
-        _ = try requireExpected(approved, candidate: candidate)
+        guard let policy = try initial.intent?.committedPolicy?.snapshot().policy else { throw RuntimeActivationError.incomplete }
+        _ = try requireExpected(initial, candidate: candidate, currentCodePolicy: policy)
+        _ = try requireExpected(approved, candidate: candidate, currentCodePolicy: policy)
         let before = initial.activation.runtime.setup.source.actual, after = approved.activation.runtime.setup.source.actual
         if before.schemaVersion == after.schemaVersion, before.currentRowsDigest == after.currentRowsDigest {
             try approved.requireSame(as: initial)
@@ -221,8 +229,12 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
         } catch { try? machine.close(); throw error }
     }
 
-    private static func requireExpected(_ expected: Snapshot, candidate: SignedReleaseEvidence) throws -> AuthorityInitializationIntent {
+    private static func requireExpected(_ expected: Snapshot, candidate: SignedReleaseEvidence,
+        currentCodePolicy: AuthorityCodePolicy) throws -> AuthorityInitializationIntent {
         try expected.requireSame(as: .init(activation: expected.activation, intent: expected.intent, candidate: candidate))
+        guard let committed = try expected.intent?.committedPolicy?.snapshot(), committed.policy == currentCodePolicy else {
+            throw RuntimeActivationError.changedScope
+        }
         let runtime = expected.activation.runtime
         guard expected.intent?.phase == .recorded, [Int64(26), 27].contains(runtime.setup.source.actual.schemaVersion),
               let initial = runtime.setup.account?.initialization, initial.complete,

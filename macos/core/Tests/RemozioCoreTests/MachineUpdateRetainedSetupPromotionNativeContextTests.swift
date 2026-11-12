@@ -12,13 +12,8 @@ struct RetainedPromotionNativeContextFixture {
     let machine: PreparationIntentStore
     let changingFrame: (Int64, Data, Set<UInt32>?) throws -> MachineUpdateRetainedSetupCompletionSnapshot
 
-    func policy() throws -> AuthorityCodePolicy {
-        try .init(entries: candidate.manifest.components.map { component in
-            try .init(role: component.role, teamID: XCTUnwrap(component.teamID), identifier: component.identifier,
-                installedGeneration: component.generation, minimumGeneration: component.generation,
-                codeDirectoryHash: XCTUnwrap(candidate.codeDirectoryHashes[component.role]), active: true)
-        })
-    }
+    let policy: AuthorityCodePolicy
+
 }
 
 final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
@@ -32,7 +27,7 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
         try fixture { f in
             XCTAssertNotEqual(getuid(), 0)
             XCTAssertThrowsError(try Context.withNativeScope(machineDirectory: "/does-not-exist",
-                expected: f.completion, candidate: f.candidate, currentCodePolicy: f.policy()) { _ in
+                expected: f.completion, candidate: f.candidate, currentCodePolicy: f.policy) { _ in
                     XCTFail("An ordinary identity entered the native context")
                 }) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
             XCTAssertNoThrow(try f.machine.inventory())
@@ -84,7 +79,7 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
 
     func testOwnedReleaseEvidencePinsTheAppAndSetupCodePolicies() throws {
         try fixture { f in
-            let policy = try f.policy()
+            let policy = f.policy
             XCTAssertNoThrow(try Context.requireRelease(f.candidate, approved: f.completion,
                 candidate: f.candidate, currentCodePolicy: policy))
             for role in [AuthorityCodeRole.app, .setupController] {
@@ -100,6 +95,34 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
                 XCTAssertThrowsError(try Context.requireRelease(f.candidate, approved: f.completion,
                     candidate: f.candidate, currentCodePolicy: changed))
             }
+        }
+    }
+
+    func testAValidDifferentCodePolicyFailsBeforeOpeningTheMachineStore() throws {
+        try fixture { f in
+            let changed = try f.policy.retainingFormat(with: f.policy.entries.map { entry in
+                guard entry.role == .app else { return entry }
+                var hash = entry.codeDirectoryHash; hash[hash.startIndex] ^= 1
+                return try .init(role: entry.role, teamID: entry.teamID, identifier: entry.identifier,
+                    installedGeneration: entry.installedGeneration, minimumGeneration: entry.minimumGeneration,
+                    codeDirectoryHash: hash, active: entry.active)
+            })
+            XCTAssertNotEqual(changed, f.policy)
+            XCTAssertEqual(try AuthorityCodePolicy.decode(changed.bytes), changed)
+            var opened = 0
+            let controls = Context.Controls(openMachine: { opened += 1; throw Failed.injected },
+                lookupOwner: { _ in XCTFail("A foreign policy reached owner lookup"); throw Failed.injected },
+                validateCustody: { XCTFail("A foreign policy reached custody validation") },
+                inspectRelease: { XCTFail("A foreign policy reached release inspection"); throw Failed.injected },
+                validateExecutingCode: { XCTFail("A foreign policy reached code validation") },
+                validateServices: { _ in XCTFail("A foreign policy reached service lookup") },
+                readMaterial: { _ in XCTFail("A foreign policy reached material read"); throw Failed.injected },
+                validateActivity: { _, _, _ in XCTFail("A foreign policy reached activity validation") })
+            XCTAssertThrowsError(try Context.withOwnedContext(expected: f.completion, candidate: f.candidate,
+                currentCodePolicy: changed, controls: controls) { _ in XCTFail("A foreign policy entered the context") }) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            XCTAssertEqual(opened, 0); XCTAssertNoThrow(try f.machine.inventory())
         }
     }
 
@@ -124,7 +147,7 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
                 validateExecutingCode: {}, validateServices: { _ in }, readMaterial: { _ in try f.material.encoded },
                 validateActivity: { _, _, _ in XCTFail("Activity was checked without an actual completed frame") })
             XCTAssertThrowsError(try Context.withOwnedContext(expected: f.completion, candidate: f.candidate,
-                currentCodePolicy: f.policy(), controls: controls) { _ in XCTFail("Value-only completion entered the context") })
+                currentCodePolicy: f.policy, controls: controls) { _ in XCTFail("Value-only completion entered the context") })
             XCTAssertEqual(opened, 1); XCTAssertEqual(inspected, 0)
             XCTAssertThrowsError(try f.machine.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
         }
@@ -141,7 +164,7 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
                 readMaterial: { _ in XCTFail("Material read preceded the fresh store"); throw Failed.injected },
                 validateActivity: { _, _, _ in XCTFail("Activity check preceded the fresh store") })
             XCTAssertThrowsError(try Context.withOwnedContext(expected: f.completion, candidate: f.candidate,
-                currentCodePolicy: f.policy(), controls: controls) { _ in XCTFail("The body ran after acquisition failed") }) {
+                currentCodePolicy: f.policy, controls: controls) { _ in XCTFail("The body ran after acquisition failed") }) {
                 XCTAssertTrue($0 is Failed)
             }
             XCTAssertEqual(opened, 1); XCTAssertNoThrow(try f.machine.inventory())

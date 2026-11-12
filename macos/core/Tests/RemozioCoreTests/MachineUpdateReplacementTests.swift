@@ -5005,7 +5005,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try body(.init(completion: f.completion, candidate: f.candidate, material: f.source.material,
                 machine: f.source.fixture.machine, changingFrame: { schema, digest, reservations in
                     try suite.retainedPromotionCompletion(f, schema: schema, rowsDigest: digest, reservedNumbers: reservations)
-                }))
+                }, policy: f.current.policy.policy))
         }
     }
 
