@@ -151,6 +151,50 @@ final class MachineUpdateRetainedSetupPromotionNativeSupportTests: XCTestCase {
         XCTAssertEqual(try fixture.bytes(), before); try fixture.assertReleased()
     }
 
+    // This probe holds no store ownership. Only the synchronous verifier reads its weak reference.
+    private final class JournalReadProbe: @unchecked Sendable {
+        weak var journal: JournalDatabase?
+        var reads = 0
+        func verify() throws {
+            if let journal { try journal.read { _ in }; reads += 1 }
+        }
+    }
+
+    func testEveryCustodyCallbackCanReadTheSameConnectionOutsideATransaction() throws {
+        let fixture = try Fixture(), probe = JournalReadProbe(), before = try fixture.bytes()
+        var events = [String]()
+        try Support.withReadOnlyPair(initial: fixture.initial, verifyCurrent: {
+            events.append("verify"); try probe.verify()
+        }, openStorage: {
+            events.append("open")
+            let storage = try fixture.open()
+            probe.journal = storage.journal
+            return storage
+        }) { _, verify in
+            events.append("body")
+            XCTAssertEqual(events, ["verify", "open", "verify", "verify", "verify", "body"])
+            try verify()
+        }
+        XCTAssertEqual(Array(events.prefix(3)), ["verify", "open", "verify"])
+        XCTAssertGreaterThan(probe.reads, 0)
+        XCTAssertEqual(try fixture.bytes(), before); try fixture.assertReleased()
+    }
+
+    func testFailureImmediatelyAfterTheConstructorClosesBothStores() throws {
+        let fixture = try Fixture(), before = try fixture.bytes()
+        var verifies = 0, opened = false
+        XCTAssertThrowsError(try Support.withReadOnlyPair(initial: fixture.initial, verifyCurrent: {
+            verifies += 1
+            if verifies == 2 { throw Failed.injected }
+        }, openStorage: {
+            XCTAssertEqual(verifies, 1)
+            opened = true
+            return try fixture.open()
+        }) { _, _ in XCTFail("The body ran after verification failed") }) { XCTAssertTrue($0 is Failed) }
+        XCTAssertTrue(opened); XCTAssertEqual(verifies, 2)
+        XCTAssertEqual(try fixture.bytes(), before); try fixture.assertReleased()
+    }
+
     func testMutableStorageIsRefusedBeforeTheBodyAndIsClosed() throws {
         let fixture = try Fixture(), before = try fixture.bytes()
         XCTAssertThrowsError(try Support.withReadOnlyPair(initial: fixture.initial, verifyCurrent: {}, openStorage: fixture.openMutable) {

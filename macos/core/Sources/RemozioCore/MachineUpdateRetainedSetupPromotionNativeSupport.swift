@@ -84,14 +84,16 @@ enum MachineUpdateRetainedSetupPromotionNativeSupport {
     }
 
     /// Pins the actual pair while the caller checks its policy phase. Every return closes both stores.
+    /// The G4 verifier must check app and Setup code identities and policies outside storage transactions.
     static func withReadOnlyPair<Value>(initial: AuthorityInitializationIntent, verifyCurrent: Verify,
         openStorage: () throws -> sending AuthorityStorage,
         perform: (AuthorityJournal, @escaping Verify) throws -> Value) throws -> Value {
         guard initial.complete else { throw RuntimeActivationError.incomplete }
         return try withScopedVerification(verifyCurrent) { current in
             try current()
-            let journal = try AuthorityJournal(updateHealthStorage: openStorage(), validateSelf: { _ in try current() })
+            let journal = try AuthorityJournal(updateHealthStorage: openStorage(), validateSelf: { _ in })
             do {
+                try current()
                 func boundary() throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
                     try current()
                     let pair = try journal.captureRetainedSetupPolicyBoundary(expected: initial)
