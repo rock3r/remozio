@@ -36,6 +36,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'authority.machine-update-completion-publication', 'authority.installed-release-state',
                  'authority.stable-release-state', 'authority.retained-setup-policy-intent',
                  'authority.retained-setup-completion-intent', 'authority.retained-setup-promotion-intent',
+                 'authority.retained-setup-promotion-ready',
                  'authority.update-scheduling-ipc', 'phone.update-scheduling-frame', 'update.scheduling-control',
                  'update.scheduling-challenge', 'update.scheduling-status-response'}
         def legacy(role):
@@ -87,7 +88,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     self.assertNotIn(name, by_name)
             if role in (2, 8):
                 preparation = by_name['authority.installation-preparation']
-                self.assertEqual(preparation[1], list(range(1, 28)))
+                self.assertEqual(preparation[1], list(range(1, 29)))
                 self.assertEqual(preparation[2], list(range(1, 25)))
                 self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
 
@@ -124,9 +125,22 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             if role in (2, 8):
                 self.assertEqual(by_name[name], {0: name, 1: [1], 2: [], 3: {}})
                 preparation = by_name['authority.installation-preparation']
-                self.assertEqual(preparation[1], list(range(1, 28)))
+                self.assertEqual(preparation[1], list(range(1, 29)))
                 self.assertEqual(preparation[2], list(range(1, 25)))
                 self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
+            else:
+                self.assertNotIn(name, by_name)
+
+    def test_retained_setup_readiness_is_declared_read_only(self):
+        name = 'authority.retained-setup-promotion-ready'
+        for role, *_ in MANIFEST.COMPONENTS:
+            by_name = {value[0]: value for value in MANIFEST.declarations(role)}
+            if role in (2, 8):
+                self.assertEqual(by_name[name], {0: name, 1: [1], 2: [], 3: {}})
+                preparation = by_name['authority.installation-preparation']
+                self.assertEqual(preparation[1], list(range(1, 29)))
+                self.assertEqual(preparation[2], list(range(1, 25)))
+                self.assertNotIn(27, preparation[3])
             else:
                 self.assertNotIn(name, by_name)
 
@@ -373,7 +387,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3, 4])
         self.assertEqual(declarations['authority.installation-preparation'],
-                         {0: 'authority.installation-preparation', 1: list(range(1, 28)), 2: list(range(1, 25)), 3: {1: 2}})
+                         {0: 'authority.installation-preparation', 1: list(range(1, 29)), 2: list(range(1, 25)), 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16, 17])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -383,7 +397,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
             self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), (list(range(1, 12)), list(range(1, 12))))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][1], list(range(1, 28)))
+        self.assertEqual(by_role[8]['authority.installation-preparation'][1], list(range(1, 29)))
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])
