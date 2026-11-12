@@ -3140,6 +3140,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertEqual(try installed.encoded,
                 try before.installed.configuration().configuration(accountID: runtime.preparation.accountID)?.completion.encoded)
             XCTAssertEqual(snapshot.selectedHost?.canonicalBytes, installed.host.canonicalBytes)
+            XCTAssertNil(installed.gateway.retainedSetupBinding)
+            XCTAssertNil(installed.gateway.retainedSetupCompletionBinding)
+            XCTAssertNotEqual(installed.gateway.installedReleaseDigest, runtime.plan.releaseDigest)
+            XCTAssertThrowsError(try installed.gateway.validate(account: runtime.preparation, inventory: before.inventory)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertNoThrow(try installed.gateway.validateRelease(fixture.candidate))
+            XCTAssertNoThrow(try installed.binding.requirePolicy(installed.gateway.codePolicy, stage: .completion))
             XCTAssertFalse(snapshot.requiresRetainedMaterialCustody)
             XCTAssertEqual(try snapshot.progress, try SetupActivationProgress(account: runtime.preparation,
                 runtime: runtime.state, state: state))
@@ -3268,8 +3276,113 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertNotNil(foreign.state.plan)
             XCTAssertThrowsError(try MachineUpdateStableRuntimeActivationSnapshot(runtime: snapshot.runtime,
                 state: foreign.state, candidate: fixture.candidate)) {
+                    XCTAssertEqual($0 as? ServiceAccountProvisioningError, .changedScope)
+                }
+        }
+    }
+
+    private func replacingStableActivationInventory(_ inventory: InstallationInventory,
+        in snapshot: MachineUpdateStableRuntimeActivationSnapshot, owner: LocalAccountIdentity,
+        candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimePreparationSnapshot {
+        let original = snapshot.runtime.setup.source, actual = original.actual
+        let frame = MachineUpdateStableReleaseSnapshot(schemaVersion: actual.schemaVersion, inventory: inventory,
+            activation: actual.activation, admission: actual.admission, candidate: actual.candidate,
+            installed: actual.installed, seal: actual.seal, currentRowsDigest: actual.currentRowsDigest)
+        let source = try MachineUpdateStableRuntimeSource(actual: frame, preparations: original.preparations,
+            initializations: original.initializations, candidate: candidate)
+        let setup = try MachineUpdateStableAccountSetupSnapshot(source: source, owner: owner)
+        return try .init(setup: setup, services: .init(plan: snapshot.runtime.plan, complete: true),
+            state: snapshot.runtime.state, reservedNumbers: snapshot.runtime.reservedNumbers)
+    }
+
+    func testStableActivationSnapshotRequiresBothInstalledHostDeclarations() throws {
+        try withStableActivationReadFixture { fixture, owner, snapshot in
+            let actual = snapshot.runtime.setup.source.actual, inventory = actual.inventory
+            let host = try XCTUnwrap(snapshot.installed).host
+            let control = try replacingStableActivationInventory(inventory, in: snapshot, owner: owner, candidate: fixture.candidate)
+            XCTAssertNoThrow(try MachineUpdateStableRuntimeActivationSnapshot(runtime: control,
+                state: snapshot.state, candidate: fixture.candidate))
+            for role in [AuthorityCodeRole.authority, .transport] {
+                let services = inventory.services.filter { !($0.accountID == snapshot.runtime.preparation.accountID && $0.role == role) }
+                XCTAssertEqual(services.count, inventory.services.count - 1)
+                let changed = try InstallationInventory(macID: inventory.macID, installationID: inventory.installationID,
+                    revision: inventory.revision, bundlePath: inventory.bundlePath, releaseDigest: inventory.releaseDigest,
+                    accounts: inventory.accounts, services: services, formatVersion: inventory.formatVersion)
+                XCTAssertNoThrow(try actual.seal.requireCurrentInventory(changed, epoch: actual.installed, candidate: fixture.candidate))
+                let runtime = try replacingStableActivationInventory(changed, in: snapshot, owner: owner, candidate: fixture.candidate)
+                XCTAssertEqual(runtime.setup.account?.inInventory, true)
+                XCTAssertThrowsError(try host.validate(inventory: changed, release: fixture.candidate, bundlePath: changed.bundlePath)) {
+                    XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongInstallation)
+                }
+                XCTAssertThrowsError(try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime,
+                    state: snapshot.state, candidate: fixture.candidate)) {
+                        XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongInstallation)
+                    }
+            }
+        }
+    }
+
+    func testStableActivationSnapshotRejectsAValidPlanForAnotherBundlePath() throws {
+        try withStableActivationReadFixture { fixture, _, snapshot in
+            let runtime = snapshot.runtime, source = runtime.setup.source, inventory = source.historicalInventory
+            let initial = try XCTUnwrap(runtime.setup.account?.initialization)
+            let control = try RuntimeActivationPlan(account: runtime.preparation, initialization: initial,
+                runtime: runtime.state, inventory: inventory, gatewaySettingsRelease: fixture.previousRelease)
+            XCTAssertNoThrow(try control.validate(account: runtime.preparation, reference: XCTUnwrap(runtime.state.reference)))
+            XCTAssertNoThrow(try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime,
+                state: .init(plan: control, jobsRegistered: false), candidate: fixture.candidate))
+            let changed = try InstallationInventory(macID: inventory.macID, installationID: inventory.installationID,
+                revision: inventory.revision, bundlePath: "/private/tmp/OtherRemozio.app", releaseDigest: inventory.releaseDigest,
+                accounts: inventory.accounts, services: inventory.services, formatVersion: inventory.formatVersion)
+            let plan = try RuntimeActivationPlan(account: runtime.preparation, initialization: initial,
+                runtime: runtime.state, inventory: changed, gatewaySettingsRelease: fixture.previousRelease)
+            XCTAssertNoThrow(try plan.validate(account: runtime.preparation, reference: XCTUnwrap(runtime.state.reference)))
+            XCTAssertNotEqual(plan.bundlePath, source.actual.inventory.bundlePath)
+            XCTAssertThrowsError(try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime,
+                state: .init(plan: plan, jobsRegistered: false), candidate: fixture.candidate)) {
                     XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
                 }
+        }
+    }
+
+    func testStableActivationSnapshotRejectsAValidPlanBeforeRetainedPublication() throws {
+        try withUnpublishedActivationReadFixture { fixture, _, material in
+            let runtime = material.runtime, state = RuntimeActivationState(plan: nil, jobsRegistered: false)
+            XCTAssertNoThrow(try MachineUpdateStableRuntimeActivationSnapshot.retainedSetupPolicyMaterial(
+                runtime: runtime, state: state, candidate: fixture.candidate))
+            let inventory = try runtime.setup.source.provisioningInventory(accountID: runtime.preparation.accountID,
+                ownerUID: runtime.preparation.ownerUID, releaseDigest: runtime.preparation.releaseDigest)
+            // The proposed values are local controls. The stored publication marker remains false.
+            let published = RuntimePreparationState(reference: material.reference, configurationPublished: true)
+            let plan = try RuntimeActivationPlan(account: runtime.preparation, initialization: material.initialization,
+                runtime: published, inventory: inventory, gatewaySettingsRelease: fixture.previousRelease)
+            XCTAssertNoThrow(try plan.validate(account: runtime.preparation, reference: material.reference))
+            XCTAssertEqual(plan.bundlePath, runtime.setup.source.actual.inventory.bundlePath)
+            XCTAssertFalse(runtime.state.configurationPublished)
+            XCTAssertThrowsError(try MachineUpdateStableRuntimeActivationSnapshot.retainedSetupPolicyMaterial(
+                runtime: runtime, state: .init(plan: plan, jobsRegistered: false), candidate: fixture.candidate)) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+                }
+        }
+    }
+
+    func testStableActivationSnapshotRejectsAValidForeignMaterialReference() throws {
+        try withStableActivationReadFixture { fixture, _, snapshot in
+            let runtime = snapshot.runtime, state = RuntimeActivationState(plan: nil, jobsRegistered: false)
+            XCTAssertNoThrow(try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime, state: state, candidate: fixture.candidate))
+            let original = try XCTUnwrap(runtime.state.reference), now = Date()
+            let material = try RuntimePreparationMaterial.create(services: runtime.plan,
+                notValidBefore: now.addingTimeInterval(-60), notValidAfter: now.addingTimeInterval(600),
+                serviceActivity: original.serviceActivity, auditDeliveryVersion: original.auditDeliveryVersion)
+            let reference = try material.reference
+            XCTAssertNoThrow(try reference.validate(account: runtime.preparation, services: runtime.plan))
+            XCTAssertNotEqual(reference, original)
+            let changed = try MachineUpdateStableRuntimePreparationSnapshot(setup: runtime.setup,
+                services: .init(plan: runtime.plan, complete: true),
+                state: .init(reference: reference, configurationPublished: true), reservedNumbers: runtime.reservedNumbers)
+            XCTAssertThrowsError(try MachineUpdateStableRuntimeActivationSnapshot(runtime: changed, state: state, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
         }
     }
 

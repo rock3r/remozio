@@ -57,7 +57,17 @@ struct MachineUpdateStableRuntimeActivationSnapshot: CustomStringConvertible, Cu
             if scope.inInventory {
                 _ = try installed.host.validate(inventory: actual.inventory, release: candidate, bundlePath: actual.inventory.bundlePath)
             }
-            try installed.gateway.validate(account: runtime.preparation, inventory: actual.inventory)
+            let gateway = installed.gateway, services = gateway.runtime.services
+            guard gateway.retainedSetupBinding == nil, gateway.retainedSetupCompletionBinding == nil else {
+                throw GatewayPreparationError.changedScope
+            }
+            try gateway.runtime.validate(account: runtime.preparation, services: services)
+            guard actual.inventory.macID == services.macID, actual.inventory.installationID == services.installationID,
+                  actual.inventory.releaseDigest == gateway.installedReleaseDigest,
+                  actual.inventory.bundlePath == gateway.bundlePath else { throw GatewayPreparationError.changedScope }
+            try installed.binding.requireHistoricalRuntime(gateway.runtime)
+            try installed.binding.requirePolicy(gateway.codePolicy, stage: .completion)
+            try gateway.validateRelease(candidate)
         } else if scope.origin == .currentRelease, let plan = state.plan {
             try plan.host.validateRelease(candidate, bundlePath: actual.inventory.bundlePath)
             if scope.inInventory {
