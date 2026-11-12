@@ -75,7 +75,30 @@ final class RuntimeActivationCompatibilityProjectionTests: XCTestCase {
             }
             XCTAssertThrowsError(try RuntimeActivationPlan.decode(bytes))
             XCTAssertThrowsError(try RuntimeActivationState.Plan(encoded: bytes))
+            XCTAssertFalse(formats.contains { $0.name == MachineUpdateAuthorityReadinessDeclaration.formatName })
         }
+        let original = f.host
+        let host = try InstalledAuthorityCommandConfiguration(machineDirectory: original.machineDirectory,
+            installationID: original.installationID, releaseDigest: original.releaseDigest, codePolicy: original.codePolicy,
+            command: original.command, label: original.label, plistName: original.plistName, jobPlacement: original.jobPlacement,
+            gatewaySettingsControlEnabled: true, installedReadinessEnabled: true)
+        let archive = try RuntimeRetainedSetupActivationArchive(reference: f.source.reference, bundlePath: f.gateway.bundlePath,
+            host: host, transport: f.transport, gatewaySettingsHost: f.gateway, phoneRoutingVersion: nil,
+            phoneAuditVersion: nil, phoneUpdateSchedulingVersion: nil, binding: f.binding, inventory: f.inventory)
+        let bytes = try archive.encoded
+        XCTAssertEqual(try RuntimeActivationCompatibilityProjection.decode(bytes).host.formatVersion, 4)
+        let inputs = RuntimeReleaseCompatibilitySnapshot.Inputs(schemaVersion: 7, macID: archive.reference.services.macID,
+            inventory: archive.inventory.canonicalBytes, runtimes: [.init(reference: archive.reference,
+                configurationPublished: true, activationRecord: bytes, jobsRegistered: false)], gateways: [])
+        let formats = try RuntimeReleaseCompatibilitySnapshot.describe(inputs: inputs).requirements.formats
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            XCTAssertEqual(formats.first { $0.role == role && $0.name == "authority.command-host-config" }?.readVersions, [3, 4])
+        }
+        let readiness = try XCTUnwrap(formats.first {
+            $0.role == .authority && $0.name == MachineUpdateAuthorityReadinessDeclaration.formatName
+        })
+        XCTAssertEqual(readiness.readVersions, [MachineUpdateAuthorityReadinessDeclaration.version])
+        XCTAssertEqual(readiness.writeVersions, [MachineUpdateAuthorityReadinessDeclaration.version])
     }
 
     func testProjectionRejectsUnknownMalformedAndNoncanonicalRecords() throws {

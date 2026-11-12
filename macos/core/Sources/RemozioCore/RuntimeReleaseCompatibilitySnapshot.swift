@@ -275,9 +275,13 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                     try include(record.role, record.name, record.readVersions, record.writeVersions)
                 }
             }
-            if case .retained? = plan {
+            if case .retained(let retained)? = plan {
                 for item in try RuntimeRetainedSetupReleaseBinding.requirements {
                     try include(item.role, item.name, item.readVersions, item.writeVersions)
+                }
+                if retained.host.installedReadinessEnabled {
+                    let version = MachineUpdateAuthorityReadinessDeclaration.version
+                    try include(.authority, MachineUpdateAuthorityReadinessDeclaration.formatName, [version], [version])
                 }
             }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)
