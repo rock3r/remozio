@@ -71,7 +71,7 @@ final class MachineUpdateRetainedSetupPromotionNativeSupportTests: XCTestCase {
                     decisionLimits: limits, maximumConsumptions: 10, busyMilliseconds: 100, initialize: false)
             }, openContinuity: { excluded in
                 try ContinuityStore(lease: .init(anchor: anchor, relativeDirectory: "continuity", owner: getuid(),
-                    excludingDirectory: excluded), macID: initial.macID, accountID: initial.accountID)
+                    excludingDirectory: excluded), macID: initial.macID, accountID: initial.accountID, initialize: nil)
             })
         }
         func bytes() throws -> [Data] {
