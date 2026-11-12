@@ -1,15 +1,16 @@
 # Schema 27 writer plan
 
-This is the source-only plan delta for Toni1440/1446 and reviewer1443, on G0 source d8972ae1.
-The original170ebb44 plan stays immutable. G0 is committed and source-reviewed; it is not locally compiled or tested. No product code, build, parse or test ran for this plan.
-Inspected checkout: eeb9f346e3f75e15495b4818620946e25adc5626, tree fb2b91cc37ee4743a26c79686ad1f5ebee003b73.
-Donor: 669ec2e99edb89d6f10e8b964b60c7405f5a9415. The Mac belongs to Toni after his acknowledgment1429.
-The F pre-gate passed on this checkout. It does not qualify Toni's rebased candidate c2e28b77.
+This small plan delta records Toni1458/1460 and reviewer1459. It follows the approved dependency plan on G0 source d8972ae1.
+The original170ebb44 and delta8b109091 plans stay immutable. G0 is compiled, with focused tests running separately. This plan change runs no build or test.
+The original inspection used F source eeb9f346, tree fb2b91cc. Current G0 is d8972ae1, tree53cbf0c1.
+Donor: 669ec2e99edb89d6f10e8b964b60c7405f5a9415. Toni returned the Mac to Bepi in1456 for G0 validation.
+The F pre-gate remains separate. Toni reported his full F gate passed on b6ef0bb2/treec2e28b77 in1456.
 
-Toni1436 puts policy codec alignment first. Slice55 stays unchanged during its gate.
-The current policy record emits and accepts v2. The prospective promotion guard still requires policy v1 from the donor.
-The F positive fixture declares a policy-v1 writer. Its passing guard test does not prove real producer compatibility.
-Change that guard in the first writer slice. Do not publish a fictitious v1 producer or change the record codec.
+Toni1436 put policy codec alignment first. F retained the old policy-v1 guard and positive fixture during its gate.
+Those passing F tests did not prove compatibility with the actual policy-v2 producer.
+G0 now uses the three current codec constants. Its fixture declares policy v2.
+G0 has an accepted source review and a successful compile. The focused and full runs remain separate obligations.
+Do not publish a fictitious v1 producer or change the record codec.
 
 ## Order and size
 
@@ -330,13 +331,25 @@ The P block belongs between material creation and initial file publication. A09 
 The H block produces authenticated registration/completion proofs. R02 must never replace those proofs with a fixture flag.
 C06 supplies the authenticated Setup route that creates a real recorded completion26 input.
 The input code exists after these slices; actual native success still needs the separately allowed installed test.
-C05/C06 must never map retained completion to an ordinary-ready UI result before the final startup gates.
+C05/C06 must preserve the existing Setup UX. They add no visible state or changed ready result.
+If correct integration requires a visible change, stop that part and obtain Seb's product decision through Toni.
 G6/G9 may consume that input only after its actual source/registration/receipt checks succeed.
 No writer calls code from a later slice. Before its owner exists, a helper is unreachable and its writer declaration stays disabled.
 
 G3/G4/G5 add read-only promotion helpers, not the entire donor activation/policy owner hierarchy.
 The P/E blocks introduce the actual stage-specific producer owners. They reuse only helpers whose complete contracts match.
 The activation stage cannot borrow the promotion context by dropping its completion or registration checks.
+
+## Per-slice validation and test placement
+
+G0 keeps the assigned compile, focused12 and full5720 pre-gate sequence.
+From G1, Bepi compiles and runs the new or affected test classes. Toni's gate runs the full Core suite.
+If a slice changes PreparationIntentStore or shared fixtures, Bepi also runs the entire MachineUpdateReplacementTests class.
+The full local publication gate remains Toni's responsibility before each push.
+
+Add new test classes per block. Do not add prerequisite tests to the already heavy MachineUpdateReplacementTests class.
+Existing regressions in that class remain required. G0's completed source is unchanged by this placement rule.
+Keep fixture isolation and all assertions. The reviewer owns CI weights in separate measured PRs.
 
 ## Additional slices
 
@@ -416,7 +429,7 @@ The Core column is a test-design budget, not an executed timing or a guaranteed 
 | C03 | Native completion entry. MachineUpdateRetainedSetupCompletionNative.swift (161); read-only startup helper already in H03 | 180–270; 350 | Native completion fence and sequence-use scope; current pair/material/custody, fresh health and closed stores | Keep all native proof checks; real floor commit is attended | 3–10s |
 | C04 | Registration/completion sequence and providers. MachineUpdateRetainedSetupActivationNativeSequence.swift (86); selected MachineUpdateStableSetupAccountOperations.swift (113) | 190–290; 370 | Distinct registration then completion proofs, activity retained through callbacks, cancellation/cleanup; exact final recorded snapshot | No automatic ordinary promotion or admission reopening | 10–25s |
 | C05 | Authenticated stable account/service dispatch. SetupAccountOwner.swift: stable selection355–397, enrollment398–466, service progress467–521; injection/verification fields | 220–330; 390 | Caller UID, disclosure, target UIDs, revisions, existing consent and progress semantics; foreign caller rejection | No synthetic selection or direct private store escape | 5–15s |
-| C06 | Authenticated runtime/activation dispatch and truthful declarations. SetupAccountOwner.swift: runtime522–664 and retained activation branches2312–2449; generator and test declarations | 300–365; 399 | Existing custody acceptance, exact requested progress, native sequence and real recorded completion; declare only reachable25/26/file producers | Return retained completion state, not ordinary-ready; no provider/hardware success claim | 10–25s |
+| C06 | Authenticated runtime/activation dispatch and truthful declarations. SetupAccountOwner.swift: runtime522–664 and retained activation branches2312–2449; generator and test declarations | 300–365; 399 | Existing custody acceptance, exact requested progress, native sequence and real recorded completion; declare only reachable25/26/file producers | Keep retained completion internal; no new visible state or ordinary-ready claim; no provider/hardware success claim | 10–25s |
 
 ## Dependency details that must not disappear
 
@@ -426,6 +439,9 @@ P02 keeps the complete single-use acknowledgement. P03 changes the paired journa
 A writing marker with an unchanged source remains unavailable for replay. A recovered receipt is recorded only after an exact fresh pair read.
 
 2. Enrollment requires a new explicit reader contract in E01.
+Before E01 code, write a short design note listing accepted and rejected images and the invariants that remain.
+Chiacchiersaturn reviews the note. Toni approves it before implementation.
+If the design weakens an existing security invariant, Toni takes that decision to Seb. The note cannot approve that change.
 The current frame requires inventory==installed epoch. The donor accepts later inventory rows; that condition cannot be copied without proof.
 Keep the strict sealed-base reader and the installed epoch unchanged.
 A separate checked retained-enrollment projection must reconstruct only the exact additions authorized by typed v6 plans and their actual policy/preparation rows.
@@ -453,7 +469,9 @@ P03 and C02 preserve unresolved-writing intervention. They do not replay a polic
 The donor entry is MachineUpdateStableSetupAccountOperations.native, injected into SetupAccountOwner.
 C05 covers account/service selection and consent. C06 covers runtime custody acceptance and the retained activation/completion branch.
 Bind caller UID, actual request revision and existing host authorization. Keep the normal Setup UX and refusal paths.
-A retained completion result must not be reported as ordinary-ready before promotion and the separate final gates.
+Keep retained completion as an internal result. Do not show a new Setup state or change the existing visible completion behavior.
+Do not report ordinary-ready before promotion and the separate final gates.
+If these constraints require a visible UX change, Toni must obtain Seb's product decision before that change.
 No automatic activation, shared-update owner change, admission reopening or service restart is added by a planning shortcut.
 
 6. Writer declarations follow actual reachability.
@@ -478,7 +496,10 @@ Source code already present in public models is reused. A missing donor filename
 
 ## Core and CI capacity
 
-The F Core stage used1776.876s of2700s, leaving923.124s. No timeout increase or local method sharding is assumed.
+The budget baseline is Toni's full F Core stage:2123s of2700s, leaving577s, as reported in1456.
+Bepi's1776.876s F pre-gate is a separate measurement and does not set Toni's gate headroom.
+After #690 merges, Toni owns splitting his local Core stage with scripts/run-xctest-shards.py --concurrent.
+Preserve the exactly-once outcome check. This plan does not claim the change is already applied or qualified.
 G0 adds two full-fixture methods; a20–40s test budget is provisional, using the observed focused F cost only as a rough guide.
 Other slices should use owned lightweight fixtures and grouped independent assertions instead of repeating the entire replacement setup for every edge.
 Each negative case still starts from a valid control. Stores must be fresh or re-resolved after reopen. No mutable global fixture sharing is proposed.
@@ -497,13 +518,15 @@ Each negative case still starts from a valid control. Stores must be fresh or re
 | G9 | 5–15s |
 
 The42 prerequisite budgets sum to323–838s. G0–G9 add108–290s.
-The crude additive range is therefore2208–2905s of Core time. It is not measured qualification evidence.
-The upper estimate exceeds2700s. Do not claim that all future source will fit the existing gate.
-Treat actual per-case timings as a capacity gate after each slice. Before remaining work exhausts headroom, qualify a fixture-cost improvement separately.
+The crude serial range on Toni's2123s baseline is2554–3251s. It is not measured qualification evidence.
+The serial upper estimate exceeds2700s. Toni owns the local stage split and its validation after #690.
+Do not claim that future sources fit a gate until their actual gate completes.
+Keep actual per-case timings and lightweight fixtures for each slice. Toni owns full Core capacity and stage scheduling.
+Qualify measured fixture improvements separately when needed.
 Preserve all assertions, isolation and actual case outcomes. Do not skip tests, increase the budget, fake transfer evidence or rerun passed stages for bookkeeping.
 This performance follow-up is conditional on actual timings; the52-slice source plan can require additional measured fixture work.
 CI method/class weights are owned by chiacchiersaturn, from actual CI logs, in small PRs between feature slices per1446.
-A new heavy class must not silently receive a misleading median weight. CI balancing does not lower the serial local Core cost.
+A new heavy class must not receive a misleading median weight. CI balancing and Toni's local stage split have separate validation.
 
 ## Source-only status
 
