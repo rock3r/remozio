@@ -111,13 +111,13 @@ Status: proposal sent for Toni's scope direction. No A09 code is applied or qual
 
 ## A09c contract (decided by toni after bepi found the override and import-scope gap)
 
-Problem found before the gate: `RuntimeConfigurationBundle.retainedSetupInitial` and `RuntimeRetainedSetupInitialConfiguration` accept free `presencePolicyOverride` and `relayPortOverride` values, so two calls with the same recorded snapshot can produce different bytes. A recorded import also fails `SharedSetupImportIntent.Scope`, because that scope is built from the retained preparation and the current inventory, while the import was recorded for the historical ones.
+Problem found before the gate: `RuntimeConfigurationBundle.retainedSetupInitial` and `RuntimeRetainedSetupInitialConfiguration` accept free `presencePolicyOverride` and `relayPortOverride` values, so two calls with the same recorded snapshot can produce different bytes. The import intent and relay plan also come from the caller, so nothing ties them to the durable records. (An earlier reading said the import scope check fails for retained accounts. It does not: `stableInitial` already passes the historical provisioning inventory to `initialSelection`.)
 
 Contract:
 1. The retained publication path takes no free overrides. Add a retained-only entry without the override parameters; the existing ordinary entries keep theirs unchanged.
 2. The tunables come only from durable records read fresh inside the publication scope: the retained account's actual journal import record and its relay record. If the journal holds no import record, the defaults apply, but the absence must come from an actual read, never from a nil argument.
-3. An import record is accepted only when its scope equals the scope of the historical preparation and provisioning inventory it was recorded for. Those come from the pinned snapshot (`provisioningHistory`, `preparations`), with an exact account binding. Do not weaken `SharedSetupImportIntent.Scope` for other callers.
-4. A typed adapter maps the accepted import and relay plan to the new files' presence and relay settings. Pin the import and relay digests in the configuration digest, so a changed record changes the digest and refuses.
+3. The import record keeps the existing scope check: `initialSelection` already compares it with the retained preparation and its historical provisioning inventory, including the account binding. Do not change `SharedSetupImportIntent.Scope`.
+4. No new scope adapter is needed. Pin the import and relay record digests in the configuration digest, so a changed record changes the digest and refuses.
 5. Bytes are a function of: recorded snapshot, current pair, candidate, current code policy, import record and relay record. Tests: the same inputs give identical bytes twice; a non-default import fixture gives its own values; a changed import or relay record refuses; a free override cannot reach the retained path.
 
-Split: A09c1 is the value contract above (retained entry, import adapter, digest pins; no file writes). A09c2 is the owned publication of the eight files through the fixed publisher wrapper, using A09c1. Each stays within 200 production lines.
+Split: A09c1 is the value contract above (retained entry without overrides, durable import and relay selection, digest pins; no file writes). A09c2 is the owned publication of the eight files through the fixed publisher wrapper, using A09c1. Each stays within 200 production lines.
