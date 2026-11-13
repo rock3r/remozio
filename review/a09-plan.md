@@ -1,0 +1,102 @@
+# A09 initial retained publication and completion
+
+Base:32fc0753abcfcc94e12783903d6836e49d05f895, treed4168ae997aa46590bb4cc7417bba564f684bd6d.
+Toni2157 requests the plan before code. No product source, build, test or native operation changes in this preparation.
+The approved source plan is5b2d745e:review/schema27-writer-plan.md, SHA2566472c6637dfca667c25abdeb98745c86beaac31097109154dce43505efd9e99c.
+Its A09 row covers initial retained publication and completion after recorded policy25. Its donor estimate is not the current implementation footprint.
+
+## Source findings
+
+1. RuntimeRetainedSetupInitialConfiguration already binds the recorded policy, startup policy, runtime material, import options and exact canonical bundle.
+RuntimeRetainedSetupPublishedSelection and RuntimePublishedArtifactValidation already read and validate the existing files.
+The first publication uses the ordinary eight-file set: elevation policy, command configuration, transport identity, transport configuration, gateway host and three clients.
+It does not publish command-host or job manifests. Those belong to the later activation stage.
+
+2. RuntimePublicationController.publishNative already owns fixed paths, file modes, protected directories and the publication primitive.
+A narrow retained wrapper can reuse it after validating the retained binding. No general file replacement API is needed.
+AdministrativeSetupPublication.publish creates absent files or retains exact existing bytes. Conflicting files refuse.
+A failure after rename does not prove that nothing was published. Recovery must read actual bytes before another action.
+
+3. completeStableRuntimePublication is not a retained writer. PreparationIntentStore.swift:4217 rejects every origin except currentRelease.
+StableRuntimePreparationAuthorization repeats this guard. MachineUpdateStableRuntimePreparationSnapshot.requireRuntimeInputs also preserves it.
+The donor completion path calls this ordinary writer, so copying the two donor files would be incomplete and unsafe.
+A09 needs an explicit retained-only authorization. The ordinary guard and its refusal classification must stay unchanged.
+
+4. PolicySnapshot has no requirePublication comparison. The retained material snapshot forbids a published state.
+A separate exact false-to-true comparison is required. It must keep the recorded policy row and every other runtime operand fixed.
+No material snapshot bypass or ordinary decoder fallback is proposed.
+
+5. P04a Context.verify accepts only an equal frame or policy retention/transition. It cannot accept the publication bit change.
+Do not widen P04a or reuse its policy context for completion. The missing donor native pair/single-machine helpers also cannot be assumed present.
+The native facades therefore need an explicit later closure, described below, rather than temporary stubs.
+
+## Proposed source cuts
+
+Each proposed cut has a200-line cap across all production paths, including helpers, guards and deletions.
+These are estimates. Measure the complete production diff before adding test source. Revise the plan if a complete responsibility exceeds the cap.
+Each cut gets its local build/new-class gate. Toni owns wider tests, publication, actual merge order and main reconciliation.
+
+| Cut | Complete responsibility | Expected production paths | Estimate |
+| --- | --- | --- | --- |
+| A09a | Exact retained publication transition model | MachineUpdateRetainedSetupPolicySnapshot.swift; a narrow new comparison helper only if needed |80–140 |
+| A09b | Private retained publication SQL authorization | PreparationIntentStore.swift, including transaction gates and writer exclusions |160–195 |
+| A09c | Owned initial file publication with fixed native file primitive | new MachineUpdateRetainedSetupInitialPublication.swift; RuntimePublicationController.swift |140–195 |
+| A09d | Owned completion and actual-state recovery | new MachineUpdateRetainedSetupInitialCompletion.swift |150–195 |
+
+A09a must compare the same recorded intent, owner, preparation, initialization, inventory, installed epoch, seal, admission, schema and reservations.
+Only runtime_preparation_v1.complete may change from0 to1, with the same exact material reference. Plan, jobs and enrollment stay unchanged.
+An already-published recovery read accepts only the exact recorded pair and actual matching files. The comparison itself grants no write authority.
+
+A09b must add a private retained-only writer. It updates one existing matching runtime row and requires sqlite_changes==1.
+Bind the authorization to this store, process, thread, held admission, exact candidate, original frame and typed next frame.
+Pin the entire catalog and every other row, including policy intent and activation. No schema migration, table creation or policy commit occurs.
+Check formats before BEGIN. Preserve the ordinary writer refusal and mutually exclude all other writer authorizations.
+Lend checked actual frames during callbacks. Do not start a nested public snapshot transaction.
+Failures before commit roll back. Attempted or uncertain commit closes the writer and requires fresh state resolution.
+Repeated exact published state must cause no second UPDATE.
+
+A09c requires recorded policy and the exact paired boundary before any file operation. Prepared and unresolved writing refuse.
+Check admission, current machine frame, material bytes, service activity, configuration digest and the pair around each callback.
+Read material twice and reject changed bytes. Preserve current import, relay and client tunables.
+Use the existing eight-file artifact set and publication rules. Read back every artifact after publication.
+This step does not change metadata. Partial or uncertain publication is resolved through fresh reads; conflicting bytes refuse.
+Verification loans must expire on return, throw, recursion, another thread or another process.
+
+A09d verifies files and material before invoking A09b, around each actual writer frame and after the final actual read.
+Use borrowed transaction frames without querying the same store again. Preserve the exact recorded pair throughout.
+Any error leaves the invocation. A new attempt reads the actual disk state and does not reuse an advanced frame after rollback.
+After a lost acknowledgement, an actual published row plus exact files can be observed without republishing or another UPDATE.
+Missing or changed material, source, pair or artifacts refuse. No jobs are registered and no ordinary-ready result is added.
+
+## Native closure proposal requiring Toni's direction
+
+Keep A09a–d as complete library/owned responsibilities. Add no incomplete native facade or fabricated custody proof.
+Move the donor prepareNative/completeNative facades into the explicit A11 native-runtime-provider closure.
+A11 must build a stage-specific publication custody context and the read-only pair scope before those facades can call the owned operations.
+It must preserve P04a's policy-only transition guard and reuse P04b's fresh current-authority selection contract.
+This is a proposed schedule change, not permission to omit native work. If native facades must remain in A09, add separately sized native cuts before coding them.
+No command, RPC, service or automatic activation calls the new operations in A09. No new manifest writers are enabled here.
+
+## Tests and gates
+
+- A09a: valid recorded control, exact bit transition, already-published equality, changed reference/intent/revision/checkpoint/owner/runtime inputs, foreign or ordinary account.
+- A09b: exact one-row update, duplicate no-op, unrelated-row/catalog protection, pre-BEGIN format refusal, writer exclusion, callback rollback and uncertain/post-commit closure.
+- A09c: all eight artifact bytes and access kinds, valid existing-file retention, conflicting/symlink/metadata refusal through existing primitives, partial publication and changed material/pair/import evidence.
+- A09d: actual publication then one metadata update, callback frames without nested queries, escaped scopes, rollback then fresh invocation, lost acknowledgement, changed files and idempotent actual-state recovery.
+
+Use fresh owned stores and isolated temporary artifacts. Group independent negative cases around a valid control where that preserves isolation.
+Injected publication and identity controls prove ordering only. They do not prove Root, service identities, signatures or protected installed placement.
+Build and run only the new or changed classes through installed ATC when Toni returns native ownership. Retain exact per-case timings and actual terminals.
+Toni owns full regression capacity and publication; the reviewer owns CI weights. Do not raise budgets or skip assertions to fit a slice.
+
+## Decisions and excluded work
+
+Toni2161 and issue722 comment6856960221 decide P05 separately. It follows the busy check in725.
+P05 is an attended owner action only, with exact fresh source policy/revision/checkpoint equality. Resume stays unavailable and P05 never writes the journal.
+A09 is not blocked by P05. A09 requires recorded policy; a writing marker stops it before publication. A09 adds no reset or replay path.
+
+Issue725 applies to the first real caller, not A09. Derive its authority ID from verified peer/account authority instead of an argument.
+Before writing that caller, perform the attended busy check with the authority service active. Retain the end-to-end commit and inspection timing checks too.
+No live Root, key, service, device or installed publication check runs during this plan. Existing UX, consent, admission and ready-state semantics stay unchanged.
+
+Status: proposal sent for Toni's scope direction. No A09 code is applied or qualified. The full Remozio objective remains incomplete.
