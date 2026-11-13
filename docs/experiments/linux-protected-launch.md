@@ -274,6 +274,11 @@ and adopting the candidate for decision 5 is the Linux host owner's decision.
 - **The production frontend.** The fixture is C. The product frontend must also be
   static, with no loader and the same kind of allowlist. A Swift static executable
   is possible but unmeasured.
+- **The identity of descriptor 3.** The inventory checks that descriptor 3 is a
+  socket, not that it is the end of the connection that the monitor accepted. The
+  verified frontend closes every inherited descriptor above 2 and opens one socket,
+  so in this fixture it is. The production monitor should tie that descriptor to the
+  accepted connection.
 - The composition with the stopped handoff, the executor, installed services and
   packaging, update serialization (decision 6), TPM roles (decision 4) and a real
   phone approval.
