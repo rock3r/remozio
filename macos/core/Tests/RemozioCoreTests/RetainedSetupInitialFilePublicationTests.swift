@@ -237,7 +237,9 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: state, custody: false)) {
                 XCTAssertEqual($0 as? RuntimePreparationError, .custodyNotAccepted)
             }
-            XCTAssertEqual(state.pairReads, 0); XCTAssertEqual(state.materialReads, 0)
+            XCTAssertEqual(state.fullReads, 0); XCTAssertEqual(state.materialReads, 0)
+            XCTAssertEqual(state.pairReads, 5); XCTAssertEqual(state.c1SnapshotReads, 4)
+            XCTAssertEqual(state.artifactReads, 0); XCTAssertEqual(state.publishCalls, 0)
         }
     }
 
