@@ -22,10 +22,16 @@ the Linux host owner's session (see [Run](#run)).
   resets every signal disposition and the signal mask, sets `no_new_privs`, and
   installs one seccomp filter. The filter kills the process on another
   architecture, on an x32 system call number, and on any system call outside a
-  fixed list taken from the full protocol path. The list allows `mmap` only for
-  private anonymous memory without `PROT_EXEC`, `mprotect` only without
-  `PROT_EXEC`, and `socket` only for one close-on-exec `AF_UNIX`
-  `SOCK_SEQPACKET` socket. It has no `execve`, `clone` or file `open`.
+  fixed list taken from the full protocol path: `read`, `write`, `close`,
+  `connect`, `sendmsg`, `recvmsg`, `exit`, `exit_group`, `rt_sigreturn`,
+  `rt_sigprocmask`, `restart_syscall`, `brk`, `munmap`, `mmap`, `mprotect` and
+  `socket`. It allows `mmap` only for private anonymous memory without
+  `PROT_EXEC`, `mprotect` only without `PROT_EXEC`, and `socket` only for one
+  close-on-exec `AF_UNIX` `SOCK_SEQPACKET` socket. It has no `execve`, `clone`,
+  file `open` or `poll` (the path does not wait on more than one descriptor).
+  Descriptors 0–2 stay open as the caller's standard streams. The fixture uses
+  them only in the N1 `hold` mode, for a readiness line and one byte; the product
+  frontend must not take input from them.
 - **Socket gate.** Root binds the command socket as `root:<frontend group>` mode
   `0660` in a `root:root` `0755` parent, as a systemd socket unit with
   `SocketGroup=` and `SocketMode=` would. Only a process whose effective or
@@ -43,7 +49,8 @@ the Linux host owner's session (see [Run](#run)).
     is not in the supplementary list;
   - one thread, `Seccomp: 2`, `Seccomp_filters: 1`, `NoNewPrivs: 1`, the monitor as
     tracer, no ignored or blocked signals, personality 0, `AT_SECURE` 1, not
-    dumpable;
+    dumpable (read from the owner of `/proc/<pid>/environ`, which is Root only when
+    the dumpable value is not 1);
   - `/proc/<pid>/exe` is the same device and inode as the installed file, which is
     still `root:<group>` `2755` with one link;
   - every file-backed mapping is that inode, no mapping is writable and executable,
@@ -104,10 +111,11 @@ The runner:
    new root-owned directory `/var/lib/remozio-protected-launch-experiment-<random>`;
 2. creates a disposable system group with a random name and checks that it has no
    members and is no account's primary group, and a disposable system user for the
-   monitor;
+   monitor. Each name must be free before creation;
 3. installs the frontend as `root:<group>` `2755` (owner first, then mode), a copy
-   without set-ID bits as the control, and the monitor and attacker as `root:root`
-   `0755`;
+   without set-ID bits as the control, and the monitor, a second monitor build
+   (N13) and the attacker as `root:root` `0755`. If any setup check fails, no case
+   runs and the report does not pass;
 4. runs each case with a fresh socket. The attacker runs as the operator (the
    `SUDO_UID` account, with its normal group list) and launches the frontend itself,
    so it is the frontend's parent. The monitor starts as Root and drops to the
@@ -115,11 +123,14 @@ The runner:
    default, 5 to 60 with `--timeout`), after which the runner kills its process
    groups. The monitor uses `PTRACE_O_EXITKILL`;
 5. removes the files, then the user, then the group, also after a failure or
-   `SIGTERM`, and reports whether each removal is complete. If one is not, it prints
-   a warning on standard error.
+   `SIGTERM`, and reports whether each removal is complete. It removes an account
+   whose creation it started even when the tool timed out, and never one that
+   existed before. If a removal is not complete, it prints a warning on standard
+   error.
 
 The report holds booleans, errno names, outcome categories, the OS release and
-numeric kernel version, the settings `ptrace_scope`, `suid_dumpable`,
+numeric kernel version with the distribution revision (for example `6.17.0-41`),
+the settings `ptrace_scope`, `suid_dumpable`,
 `protected_hardlinks`, AppArmor's status and its unprivileged user namespace
 restriction, the AppArmor label categories of the monitor and the frontend, source
 hashes and the hash of the seccomp filter that the installed frontend dumps. It
@@ -129,14 +140,17 @@ fixture report with an unknown key or value is dropped, not published.
 Unit tests (any host):
 
 ```sh
-python3 -m unittest tests.test_linux_protected_launch_experiment
+python3 -m unittest discover -s tests -p test_linux_protected_launch_experiment.py
+REMOZIO_LINUX_PROTECTED_LAUNCH_LIVE=1 python3 -m unittest discover -s tests -p test_linux_protected_launch_experiment.py
 ```
 
-They cover the case table, the report validation and sanitizing, the refusal paths
-(for example a missing `SO_PEERPIDFD`) and the cleanup order. With
-`REMOZIO_LINUX_PROTECTED_LAUNCH_LIVE=1` on Linux x86_64 they also build the fixtures
-and check their unprivileged mechanics: the seccomp self-tests are killed, and the
-same-UID attacks work against a copy without set-ID bits. These checks do not
+They cover the case table, the report validation and sanitizing, the setup gate,
+the refusal paths and the cleanup order, including an interrupted account creation.
+With `REMOZIO_LINUX_PROTECTED_LAUNCH_LIVE=1` on Linux x86_64 they also build the
+fixtures and check their unprivileged mechanics: the seccomp self-tests are killed,
+and the same-UID attacks work against a copy without set-ID bits. The monitor
+refuses to run without Root, so its refusal of a missing `SO_PEERPIDFD` is measured
+by case N13 in the supervised run, with the real monitor code. These checks do not
 replace the supervised run.
 
 ## Cases
@@ -154,6 +168,7 @@ replace the supervised run.
 | `n9-untraced`, `n9-traced` | N9 | Control: the operator holds the group as a supplementary group, untraced and traced before exec | Elevation kept in both; the monitor refuses on the supplementary list only |
 | `n10` | N10 | Control: the monitor without `CAP_SYS_PTRACE` | Seize refused with `EPERM`; rejected |
 | `n12` | N12 | `unshare(CLONE_NEWUSER)` before exec | Namespace refused, or no elevation and connect fails with `EACCES` |
+| `n13` | Added | Control: a clean launch against a monitor build that asks for an unknown socket option in place of `SO_PEERPIDFD` | `ENOPROTOOPT`; no seize attempt; rejected |
 | `n8` | N8 | The parent keeps an `O_PATH` descriptor, the runner replaces the installed file, the parent runs the old inode with `execveat` | The kernel elevates the old inode; the monitor refuses on the executable identity only |
 
 In the controls (N8, N9) every other monitor check must pass, so the report shows
@@ -184,6 +199,11 @@ guarantee is not weakened to fit.
   the running filter. It relies on the executable identity, `Seccomp_filters: 1`
   and the argument above. The runner records the hash of the filter that the
   installed image dumps.
+- The N13 monitor is the same source built with `-DRMZPL_PEERPIDFD_OPTION=32767`,
+  an option number the kernel does not know. The kernel then answers as it does
+  without `SO_PEERPIDFD`, so the case runs the real refusal path.
+- A fixture whose report does not fit its buffer prints `{"error":"overflow"}`
+  instead of a truncated report, so the failure stays attributable.
 
 ## What this experiment does not establish
 

@@ -30,14 +30,21 @@
 #ifndef SO_PEERPIDFD
 #define SO_PEERPIDFD 77
 #endif
+/* The runner's missing-pidfd control builds a second monitor with an unknown option here,
+ * so getsockopt fails as it would on a kernel without SO_PEERPIDFD. */
+#ifndef RMZPL_PEERPIDFD_OPTION
+#define RMZPL_PEERPIDFD_OPTION SO_PEERPIDFD
+#endif
 #define CAPBIT(c) (1ULL << (c))
 
 static char json[8192];
 static size_t used;
+static int overflow;
 
 static void field(const char *key, const char *value) {
     int n = snprintf(json + used, sizeof json - used, "%s\"%s\":\"%s\"", used > 1 ? "," : "", key, value);
     if (n > 0 && (size_t)n < sizeof json - used) used += (size_t)n;
+    else overflow = 1;
 }
 
 static void flag(const char *key, int value) { field(key, value ? "yes" : "no"); }
@@ -56,6 +63,11 @@ static const char *errname(int error) {
 }
 
 static int finish(int code) {
+    if (overflow || sizeof json - used < 3) {
+        fputs("{\"error\":\"overflow\"}\n", stdout); /* a dropped key must not look like a property */
+        fflush(stdout);
+        return 3;
+    }
     used += (size_t)snprintf(json + used, sizeof json - used, "}\n");
     fputs(json, stdout);
     fflush(stdout);
@@ -271,7 +283,7 @@ int main(int argc, char **argv) {
     }
     int pidfd = -1;
     socklen_t length = sizeof pidfd;
-    int pidfd_ok = getsockopt(conn, SOL_SOCKET, SO_PEERPIDFD, &pidfd, &length) == 0 && pidfd >= 0;
+    int pidfd_ok = getsockopt(conn, SOL_SOCKET, RMZPL_PEERPIDFD_OPTION, &pidfd, &length) == 0 && pidfd >= 0;
     field("peerPidfd", pidfd_ok ? "ok" : errname(errno));
     struct ucred cred;
     length = sizeof cred;
@@ -339,8 +351,10 @@ int main(int argc, char **argv) {
         for (ssize_t i = 0; aux_bytes > 0 && i + 1 < aux_bytes / 8; i += 2)
             if (auxv[i] == 23 /* AT_SECURE */) at_secure = auxv[i + 1] == 1;
 
+        /* procfs gives a task's entries a root owner when it is not dumpable (dumpable is not
+         * 1); the frontend's UID is never 0, so a root-owned environ means "not dumpable". */
         struct stat environ_info;
-        not_dumpable = dir_ok && fstatat(dir, "environ", &environ_info, 0) == 0 && environ_info.st_uid == 0;
+        not_dumpable =dir_ok && fstatat(dir, "environ", &environ_info, 0) == 0 && environ_info.st_uid == 0;
 
         struct stat running, installed;
         int exe = dir_ok ? openat(dir, "exe", O_RDONLY | O_CLOEXEC) : -1;

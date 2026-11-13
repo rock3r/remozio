@@ -52,9 +52,11 @@ EXITS = frozenset({"accepted", "rejected", "forbidden-returned", "usage", "polic
                    "spawn-failed"})
 LABELS = frozenset({"unconfined", "confined", "unavailable", "not-attempted"})
 ATTACKER_VALUES = YES_NO | ERRNO | EXITS | {"not-attempted", "mismatch", "short", "unreadable", "created", "refused",
-                                            "failed", "missing"}
-MONITOR_ERRORS = frozenset({"usage", "privilege-drop", "accept", "accept-timeout"})
-SPAWN_FAILURE_KEYS = frozenset({"spawn", "installed.spawn", "control.spawn"})
+                                            "failed", "missing", "overflow"}
+MONITOR_ERRORS = frozenset({"usage", "privilege-drop", "accept", "accept-timeout", "overflow"})
+FAILURE_KEYS = frozenset({"spawn", "installed.spawn", "control.spawn", "error"})
+# The missing-pidfd control monitor asks for a socket option the kernel does not know.
+MONITOR_BUILDS = {"monitor": (), "monitor-nopidfd": ("-DRMZPL_PEERPIDFD_OPTION=32767",)}
 
 # Every monitor report carries exactly these keys, in this vocabulary.
 MONITOR_KEYS = {
@@ -79,6 +81,7 @@ ADMITTED = {"monitorCredentialsExact": "yes", "peerPidfd": "ok", "peerCredEffect
             "accepted": "yes", "verdictSent": "yes"}
 NOT_SEIZED = {**ADMITTED, "seize": "EPERM", "pidfdAssociated": "no", "stopHeld": "no",
               **dict.fromkeys(STOP_CHECKS, "no"), "fdDirectoryListing": "not-attempted", "accepted": "no"}
+PIDFD_MISSING = {**NOT_SEIZED, "peerPidfd": "ENOPROTOOPT", "seize": "not-attempted"}
 PROBES = ("ready", "procMemOpen", "procMemReadMarker", "procMemWrite", "vmRead", "vmWrite", "pidfdGetfd", "seize")
 REFUSED_ATTACK = {"ready": "yes", "procMemOpen": ("EACCES", "EPERM"), "procMemReadMarker": "not-attempted",
                   "procMemWrite": "not-attempted", "vmRead": "EPERM", "vmWrite": "EPERM", "pidfdGetfd": "EPERM",
@@ -93,16 +96,16 @@ def _expect(values):
     return {key: frozenset(value if isinstance(value, tuple) else (value,)) for key, value in values.items()}
 
 
-def _case(argument, attacker, monitor=None, member=False):
+def _case(argument, attacker, monitor=None, member=False, mode="cap", binary="monitor"):
     """attacker: one or more alternative exact outcomes; monitor: required values or None."""
     alternatives = attacker if isinstance(attacker, list) else [attacker]
     return {"argument": argument, "member": member, "attacker": [_expect(item) for item in alternatives],
-            "monitorMode": None if monitor is None else ("nocap" if monitor is NOT_SEIZED else "cap"),
+            "monitorMode": None if monitor is None else mode, "monitorBinary": None if monitor is None else binary,
             "monitor": None if monitor is None else _expect(monitor)}
 
 
 # n8 runs last: it replaces the installed image. Plan names: P1-P3 and N11 are the p1 monitor
-# report; N9 has an untraced and a traced member.
+# report; N9 has an untraced and a traced member; n13 is the missing-SO_PEERPIDFD control.
 CASES = {
     "p1": _case("p1", {"frontendExit": "accepted"}, ADMITTED),
     "n1": _case("n1", {**{f"installed.{k}": v for k, v in REFUSED_ATTACK.items()},
@@ -117,8 +120,9 @@ CASES = {
                          member=True),
     "n9-traced": _case("n9-traced", {"execStop": "yes", **MEMBER},
                        {**ADMITTED, "groupsExcludeFrontendGroup": "no", "accepted": "no"}, member=True),
-    "n10": _case("n10", {"frontendExit": "rejected"}, NOT_SEIZED),
+    "n10": _case("n10", {"frontendExit": "rejected"}, NOT_SEIZED, mode="nocap"),
     "n12": _case("n12", [{"userNamespace": "refused"}, {"userNamespace": "created", **NO_ELEVATION}]),
+    "n13": _case("p1", {"frontendExit": "rejected"}, PIDFD_MISSING, binary="monitor-nopidfd"),
     "n8": _case("n8", {"oPathOpen": "ok", "frontendExit": "rejected"},
                 {**ADMITTED, "exeIsCurrentInstalledImage": "no", "mapsAllowed": "no", "accepted": "no"}),
 }
@@ -164,7 +168,7 @@ def evaluate_case(case, attacker_raw, attacker_rc, monitor_raw=None, monitor_rc=
     except (ValueError, RecursionError):
         result["error_type"] = "InvalidAttackerReport"
         return result
-    allowed_keys = set().union(*(set(item) for item in spec["attacker"])) | SPAWN_FAILURE_KEYS
+    allowed_keys = set().union(*(set(item) for item in spec["attacker"])) | FAILURE_KEYS
     if set(attacker) - allowed_keys or any(value not in ATTACKER_VALUES for value in attacker.values()):
         result["error_type"] = "InvalidAttackerReport"
         return result
@@ -307,9 +311,10 @@ def _os_release():
 
 def host_metadata():
     # Numeric kernel version only: custom build strings can carry names or paths.
-    match = re.match(r"^([0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,6})?)(?:[^0-9]|$)", platform.release())
+    # Keep the distribution's numeric ABI revision (6.17.0-41) but no flavor or build text.
+    match = re.match(r"^([0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,6})?(?:-[0-9]{1,6})?)(?:[^0-9]|$)", platform.release())
     python = platform.python_version()
-    apparmor = {b"Y\n": True, b"Y": True, b"N\n": False, b"N": False}.get(
+    apparmor ={b"Y\n": True, b"Y": True, b"N\n": False, b"N": False}.get(
         _policy_bytes("/sys/module/apparmor/parameters/enabled", 64), "unavailable")
     return {"os": "Linux", "architecture": "x86_64", "runsAsRoot": True, "osRelease": _os_release(),
             "kernelVersion": match[1] if match else "unknown",
@@ -424,8 +429,8 @@ class Run:
             os.mkdir(self.base / name, mode)
             os.chmod(self.base / name, mode)
         builds = {}
-        for name, source, extra in (("frontend", FRONTEND, ("-static", "-no-pie")), ("monitor", MONITOR, ()),
-                                    ("attacker", ATTACKER, ())):
+        for name, source, extra in (("frontend", FRONTEND, ("-static", "-no-pie")), ("attacker", ATTACKER, ()),
+                                    *((name, MONITOR, flags) for name, flags in MONITOR_BUILDS.items())):
             output = self.base / "build" / name
             code, _ = run_owned([shutil.which("cc", path=TOOL_ENV["PATH"]) or "/usr/bin/cc", *CC_FLAGS, *extra,
                                  "-o", str(output), str(source)], min(60, 4 * self.timeout))
@@ -435,27 +440,22 @@ class Run:
         self.frontend_bytes = builds["frontend"]
         self.frontend_sha256 = hashlib.sha256(self.frontend_bytes).hexdigest()
 
-        if run_owned(["groupadd", "--system", self.group_name], self.timeout)[0] != 0:
-            raise RuntimeError("group creation failed")
-        self.group_created = True
-        group = grp.getgrnam(self.group_name)
-        self.gid = group.gr_gid
-        if run_owned(["useradd", "--system", "--no-create-home", "--home-dir", "/", "--shell", "/usr/sbin/nologin",
-                      "--user-group", self.monitor_name], self.timeout)[0] != 0:
-            raise RuntimeError("monitor user creation failed")
-        self.monitor_created = True
+        self._create("group_created", ["groupadd", "--system", self.group_name], (self.group_name,))
+        self.gid = grp.getgrnam(self.group_name).gr_gid
+        self._create("monitor_created", ["useradd", "--system", "--no-create-home", "--home-dir", "/", "--shell",
+                                         "/usr/sbin/nologin", "--user-group", self.monitor_name], (self.monitor_name,))
         account = pwd.getpwnam(self.monitor_name)
         self.monitor_uid, self.monitor_gid = account.pw_uid, account.pw_gid
         if 0 in (self.gid, self.monitor_uid, self.monitor_gid):
             raise RuntimeError("disposable identity is privileged")
 
         run = self.base / "run"
-        self.installed, self.control = run / "remozio", run / "control"
-        self.monitor, self.attacker = run / "monitor", run / "attacker"
+        self.installed, self.control, self.attacker = run / "remozio", run / "control", run / "attacker"
         write_root_file(self.installed, self.frontend_bytes, 0o2755, self.gid)
         write_root_file(self.control, self.frontend_bytes, 0o755)
-        write_root_file(self.monitor, builds["monitor"], 0o755)
         write_root_file(self.attacker, builds["attacker"], 0o755)
+        for name in MONITOR_BUILDS:
+            write_root_file(run / name, builds[name], 0o755)
         self.operator_groups = [g for g in os.getgrouplist(self.operator.pw_name, self.operator.pw_gid)]
         members = grp.getgrgid(self.gid).gr_mem
         return {"frontendGroupHasNoMembers": members == [],
@@ -463,6 +463,15 @@ class Run:
                 "operatorOutsideFrontendGroup": self.gid not in self.operator_groups,
                 "installedImageExact": installed_exact(self.installed, self.gid, self.frontend_sha256),
                 "frontendStaticNonPie": static_non_pie(self.installed)}
+
+    def _create(self, flag, arguments, names):
+        """The names must be free first; the attempt is recorded before the tool runs, so a
+        timeout or cancellation part-way still leads cleanup to whatever the tool created."""
+        if not all(_absent(pwd.getpwnam, name) and _absent(grp.getgrnam, name) for name in names):
+            raise RuntimeError("disposable name already exists")
+        setattr(self, flag, True)
+        if run_owned(arguments, self.timeout)[0] != 0:
+            raise RuntimeError("disposable account creation failed")
 
     def operator_options(self, extra_group=False):
         groups = self.operator_groups + ([self.gid] if extra_group else [])
@@ -494,7 +503,7 @@ class Run:
         try:
             if spec["monitorMode"]:
                 monitor = subprocess.Popen(
-                    [str(self.monitor), spec["monitorMode"], str(listener.fileno()), str(self.gid),
+                    [str(self.base / "run" / spec["monitorBinary"]), spec["monitorMode"], str(listener.fileno()), str(self.gid),
                      str(self.installed), str(self.monitor_uid), str(self.monitor_gid), self.fixture_seconds],
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     pass_fds=(listener.fileno(),), env={}, cwd="/", start_new_session=True)
@@ -538,11 +547,11 @@ class Run:
         Each step runs even when an earlier one fails; only state this run created is touched."""
         if self.base_created:
             _attempt(shutil.rmtree, self.base)
-        if self.monitor_created:
+        if self.monitor_created and not _absent(pwd.getpwnam, self.monitor_name):
             _attempt(run_owned, ["userdel", self.monitor_name], self.timeout)
-            if not _absent(grp.getgrnam, self.monitor_name):
-                _attempt(run_owned, ["groupdel", self.monitor_name], self.timeout)
-        if self.group_created:
+        if self.monitor_created and not _absent(grp.getgrnam, self.monitor_name):
+            _attempt(run_owned, ["groupdel", self.monitor_name], self.timeout)
+        if self.group_created and not _absent(grp.getgrnam, self.group_name):
             _attempt(run_owned, ["groupdel", self.group_name], self.timeout)
         return {"filesRemoved": not self.base.exists(),
                 "monitorUserRemoved": _absent(pwd.getpwnam, self.monitor_name)
@@ -592,14 +601,19 @@ def measure(timeout=15):
     with subreaper():
         try:
             setup = run.setup()
-            policy = run.seccomp_policy_sha256()
-            cases = {case: run.run_case(case) for case in CASES}
+            # A failed setup check (a group member, a wrong image, a dynamic executable) means the
+            # cases would not measure the design, so none starts.
+            policy, cases = "not-measured", {}
+            if all(setup.values()):
+                policy = run.seccomp_policy_sha256()
+                cases = {case: run.run_case(case) for case in CASES}
         finally:
             cleanup = run.cleanup()
             if not all(cleanup.values()):
                 sys.stderr.write(f"Disposable state not fully removed: inspect {BASE_PARENT}/{BASE_PREFIX}* and the "
                                  "rmzpl*/rmzpm* system accounts.\n")
-    passed =all(setup.values()) and all(cleanup.values()) and all(item["passed"] for item in cases.values())
+    passed = (all(setup.values()) and all(cleanup.values()) and set(cases) == set(CASES)
+              and all(item["passed"] for item in cases.values()))
     return {"experiment": "linux-protected-launch-v1",
             "measuredAtUTC": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "supervised": True, "trustedCode": False, "productionAdmission": False,
@@ -625,7 +639,7 @@ def main():
             report = measure(args.timeout)
         except KeyboardInterrupt:
             parser.exit(130, "Protected launch experiment cancelled.\n")
-        except (RuntimeError, ValueError, OSError, KeyError):
+        except (RuntimeError, ValueError, OSError, KeyError, subprocess.SubprocessError):
             parser.exit(2, "Protected launch experiment unavailable; no raw diagnostic data published.\n")
     finally:
         for number, handler in previous.items():

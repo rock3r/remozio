@@ -57,10 +57,25 @@ def linux_root():
 
 class CaseTableTests(unittest.TestCase):
     def test_every_plan_case_is_measured_and_replacement_runs_last(self):
-        # P1-P3 and N11 are the p1 monitor report; N9 has an untraced and a traced member.
+        # P1-P3 and N11 are the p1 monitor report; N9 has an untraced and a traced member; n13
+        # is the added missing-SO_PEERPIDFD control.
         self.assertEqual(set(EXPERIMENT.CASES), {"p1", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n9-untraced",
-                                                 "n9-traced", "n10", "n12", "n8"})
+                                                 "n9-traced", "n10", "n12", "n13", "n8"})
         self.assertEqual(list(EXPERIMENT.CASES)[-1], "n8")
+
+    def test_missing_pidfd_control_runs_the_real_monitor_with_an_unknown_option(self):
+        spec = EXPERIMENT.CASES["n13"]
+        self.assertEqual((spec["argument"], spec["monitorMode"], spec["monitorBinary"]),
+                         ("p1", "cap", "monitor-nopidfd"))
+        self.assertEqual(spec["monitor"]["peerPidfd"], {"ENOPROTOOPT"})
+        self.assertEqual(spec["monitor"]["seize"], {"not-attempted"})
+        self.assertEqual(spec["monitor"]["accepted"], {"no"})
+        monitor = EXPERIMENT.MONITOR.read_text()
+        self.assertIn("getsockopt(conn, SOL_SOCKET, RMZPL_PEERPIDFD_OPTION,", monitor)
+        self.assertEqual(EXPERIMENT.MONITOR_BUILDS, {"monitor": (),
+                                                     "monitor-nopidfd": ("-DRMZPL_PEERPIDFD_OPTION=32767",)})
+        self.assertTrue(all(spec["monitorBinary"] in (None, *EXPERIMENT.MONITOR_BUILDS)
+                            for spec in EXPERIMENT.CASES.values()))
 
     def test_monitor_tables_require_every_property_except_observed_labels(self):
         for case, spec in EXPERIMENT.CASES.items():
@@ -86,7 +101,7 @@ class CaseTableTests(unittest.TestCase):
                 self.assertEqual({key for key in admitted if monitor[key] != admitted[key]}, differing)
         self.assertTrue(EXPERIMENT.CASES["n9-untraced"]["member"])
         self.assertFalse(EXPERIMENT.CASES["p1"]["member"])
-        self.assertEqual(EXPERIMENT.CASES["n10"]["monitorMode"], "nocap")
+        self.assertEqual({case for case, spec in EXPERIMENT.CASES.items() if spec["monitorMode"] == "nocap"}, {"n10"})
 
 
 class EvaluateCaseTests(unittest.TestCase):
@@ -149,6 +164,10 @@ class EvaluateCaseTests(unittest.TestCase):
     def test_monitor_error_publishes_a_known_category_only(self):
         known = evaluate("p1", monitor=b'{"monitorCredentialsExact":"yes","error":"accept-timeout"}')
         self.assertEqual((known["error_type"], known["monitorError"]), ("MonitorError", "accept-timeout"))
+        overflow = evaluate("p1", monitor=b'{"error":"overflow"}')
+        self.assertEqual(overflow["monitorError"], "overflow")
+        attacker = evaluate("p1", attacker=b'{"error":"overflow"}')
+        self.assertEqual((attacker["passed"], attacker["mismatches"]), (False, ["attacker.keys"]))
         unknown = evaluate("p1", monitor=b'{"error":"/etc/private"}')
         self.assertEqual(unknown, {"passed": False, "error_type": "MonitorError", "attacker": {"frontendExit": "accepted"}})
 
@@ -209,7 +228,7 @@ class HelperTests(unittest.TestCase):
         with patch.object(EXPERIMENT, "_policy_bytes", side_effect=lambda path, limit=4096: settings.get(path)), \
              patch.object(EXPERIMENT.platform, "release", return_value="6.17.0-41-generic-private-host"):
             host = EXPERIMENT.host_metadata()
-        self.assertEqual(host["kernelVersion"], "6.17.0")
+        self.assertEqual(host["kernelVersion"], "6.17.0-41")
         self.assertEqual(host["osRelease"], {"id": "ubuntu", "versionId": "25.10"})
         self.assertEqual(host["settings"], {"ptraceScope": 1, "suidDumpable": 2, "protectedHardlinks": 1,
                                             "apparmorEnabled": True, "apparmorRestrictUnprivilegedUserns": 1,
@@ -291,6 +310,62 @@ class PreconditionTests(unittest.TestCase):
         run.cleanup.assert_called_once_with()
         self.assertIn("not fully removed", stderr.getvalue())
 
+    def measure_with(self, run):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        with linux_root(), patch.object(EXPERIMENT, "operator_account", return_value=operator), \
+             patch.object(EXPERIMENT, "root_owned_ancestry", return_value=True), \
+             patch.object(EXPERIMENT.os, "statvfs", return_value=SimpleNamespace(f_flag=0)), \
+             patch.object(EXPERIMENT, "Run", return_value=run), \
+             patch.object(EXPERIMENT, "subreaper", contextlib.nullcontext), \
+             patch.object(EXPERIMENT, "host_metadata", return_value={}):
+            return EXPERIMENT.measure()
+
+    def test_a_failed_setup_check_starts_no_case(self):
+        run = Mock()
+        run.setup.return_value = {"frontendGroupHasNoMembers": False, "installedImageExact": True}
+        run.cleanup.return_value = {"filesRemoved": True}
+        report = self.measure_with(run)
+        run.seccomp_policy_sha256.assert_not_called()
+        run.run_case.assert_not_called()
+        self.assertEqual((report["passed"], report["cases"], report["seccompPolicySha256"]),
+                         (False, {}, "not-measured"))
+
+    def test_every_case_must_run_and_pass(self):
+        run = Mock()
+        run.setup.return_value = {"frontendGroupHasNoMembers": True}
+        run.cleanup.return_value = {"filesRemoved": True}
+        run.seccomp_policy_sha256.return_value = "0" * 64
+        run.run_case.return_value = {"passed": True}
+        report = self.measure_with(run)
+        self.assertEqual([call.args[0] for call in run.run_case.call_args_list], list(EXPERIMENT.CASES))
+        self.assertTrue(report["passed"])
+
+    def test_interrupted_account_creation_is_still_removed(self):
+        run = EXPERIMENT.Run(SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator"), 15)
+        exists = set()
+
+        def create(arguments, _timeout, **_options):
+            exists.add(arguments[-1])  # the tool changed the account database, then timed out
+            raise subprocess.TimeoutExpired(arguments[0], 15)
+
+        absent = lambda _lookup, name: name not in exists
+        with patch.object(EXPERIMENT, "run_owned", side_effect=create), patch.object(EXPERIMENT, "_absent", absent):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run._create("group_created", ["groupadd", "--system", run.group_name], (run.group_name,))
+        self.assertTrue(run.group_created)
+        with patch.object(EXPERIMENT, "run_owned") as tool, patch.object(EXPERIMENT, "_absent", absent):
+            run.cleanup()
+        self.assertEqual([call.args[0] for call in tool.call_args_list], [["groupdel", run.group_name]])
+
+    def test_an_existing_name_is_never_created_or_removed(self):
+        run = EXPERIMENT.Run(SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator"), 15)
+        with patch.object(EXPERIMENT, "_absent", return_value=False), patch.object(EXPERIMENT, "run_owned") as tool:
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                run._create("group_created", ["groupadd", run.group_name], (run.group_name,))
+            run.cleanup()
+        self.assertFalse(run.group_created)
+        tool.assert_not_called()
+
     def test_cleanup_touches_only_state_this_run_created(self):
         run = EXPERIMENT.Run(SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator"), 15)
         with patch.object(EXPERIMENT.shutil, "rmtree") as remove, patch.object(EXPERIMENT, "run_owned") as tool:
@@ -310,13 +385,15 @@ class PreconditionTests(unittest.TestCase):
         self.assertEqual(state["monitorUserRemoved"], False)
 
     def test_main_reports_no_raw_data_on_failure(self):
-        stderr = io.StringIO()
-        with patch.object(EXPERIMENT, "measure", side_effect=OSError("/private/path")), \
-             patch.object(sys, "argv", ["runner"]), patch.object(sys, "stderr", stderr):
-            with self.assertRaises(SystemExit) as raised:
-                EXPERIMENT.main()
-        self.assertEqual(raised.exception.code, 2)
-        self.assertNotIn("/private/path", stderr.getvalue())
+        for error in (OSError("/private/path"), subprocess.TimeoutExpired("/private/path", 1)):
+            stderr = io.StringIO()
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(EXPERIMENT, "measure", side_effect=error), \
+                 patch.object(sys, "argv", ["runner"]), patch.object(sys, "stderr", stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    EXPERIMENT.main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertNotIn("/private/path", stderr.getvalue())
 
 
 @unittest.skipUnless(platform.system() == "Linux", "Linux owned-process cleanup")
@@ -353,9 +430,9 @@ class LiveFixtureTests(unittest.TestCase):
         if compiler is None:
             raise unittest.SkipTest("no C compiler")
         cls.frontend, cls.attacker = build / "frontend", build / "attacker"
+        monitors = tuple((build / name, EXPERIMENT.MONITOR, flags) for name, flags in EXPERIMENT.MONITOR_BUILDS.items())
         for output, source, extra in ((cls.frontend, EXPERIMENT.FRONTEND, ("-static", "-no-pie")),
-                                      (build / "monitor", EXPERIMENT.MONITOR, ()),
-                                      (cls.attacker, EXPERIMENT.ATTACKER, ())):
+                                      (cls.attacker, EXPERIMENT.ATTACKER, ()), *monitors):
             subprocess.run([compiler, *FIXTURE_FLAGS, *extra, "-o", str(output), str(source)], check=True, timeout=120)
 
     @classmethod

@@ -27,12 +27,19 @@
 
 static char json[4096];
 static size_t used;
+static int overflow;
 static const char *installed, *control, *socket_path;
 static unsigned long frontend_gid;
 
 static void field(const char *key, const char *value) {
     int n = snprintf(json + used, sizeof json - used, "%s\"%s\":\"%s\"", used > 1 ? "," : "", key, value);
     if (n > 0 && (size_t)n < sizeof json - used) used += (size_t)n;
+    else overflow = 1;
+}
+
+static void close_pair(int pair[2]) {
+    for (int i = 0; i < 2; i++)
+        if (pair[i] >= 0) close(pair[i]);
 }
 
 static void prefixed(const char *prefix, const char *key, const char *value) {
@@ -118,11 +125,16 @@ static int prepare(enum setup setup) {
 /* Starts image with argv; share_fs uses clone(CLONE_FS) so the parent shares fs_struct.
  * Returns 0 once the exec happened (the close-on-exec report pipe reached EOF). */
 static int spawn(struct child *child, const char *image, const char *mode, enum setup setup, int piped, int share_fs) {
-    int to_child[2] = {-1, -1}, from_child[2] = {-1, -1}, report[2];
-    if ((piped && (pipe2(to_child, O_CLOEXEC) || pipe2(from_child, O_CLOEXEC))) || pipe2(report, O_CLOEXEC))
+    int to_child[2] = {-1, -1}, from_child[2] = {-1, -1}, report[2] = {-1, -1};
+    pid_t pid = -1;
+    if ((!piped || (!pipe2(to_child, O_CLOEXEC) && !pipe2(from_child, O_CLOEXEC))) && !pipe2(report, O_CLOEXEC))
+        pid = share_fs ? (pid_t)syscall(SYS_clone, CLONE_FS | SIGCHLD, 0, 0, 0, 0) : fork();
+    if (pid < 0) {
+        close_pair(to_child);
+        close_pair(from_child);
+        close_pair(report);
         return -1;
-    pid_t pid = share_fs ? (pid_t)syscall(SYS_clone, CLONE_FS | SIGCHLD, 0, 0, 0, 0) : fork();
-    if (pid < 0) return -1;
+    }
     if (pid == 0) {
         if (piped && (dup2(to_child[0], 0) < 0 || dup2(from_child[1], 1) < 0)) _exit(120);
         int code = prepare(setup);
@@ -308,6 +320,10 @@ int main(int argc, char **argv) {
     else if (!strcmp(name, "n9-traced")) launch_and_observe(TRACEME, 0, 1);
     else if (!strcmp(name, "n12")) launch_and_observe(USERNS, 0, 0);
     else return 4;
+    if (overflow || sizeof json - used < 3) {
+        fputs("{\"error\":\"overflow\"}\n", stdout); /* a dropped key must not look like a result */
+        return 0;
+    }
     used += (size_t)snprintf(json + used, sizeof json - used, "}\n");
     fputs(json, stdout);
     return 0;
