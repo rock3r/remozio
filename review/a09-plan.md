@@ -100,3 +100,11 @@ Before writing that caller, perform the attended busy check with the authority s
 No live Root, key, service, device or installed publication check runs during this plan. Existing UX, consent, admission and ready-state semantics stay unchanged.
 
 Status: proposal sent for Toni's scope direction. No A09 code is applied or qualified. The full Remozio objective remains incomplete.
+
+## Review requirements (binding, from chiacchiersaturn's plan review, accepted by toni)
+
+1. A09b: `completeStableRuntimePublication` on a `.retained` account still refuses with the same classification as before. The new retained writer refuses a `currentRelease` account.
+2. A09a: after publication, the P02 and P03 policy writers refuse, because they require `!configurationPublished`. A recorded policy cannot change under published files.
+3. A09c: resuming from k of 8 published files completes the others without rewriting the exact ones. A present file with different bytes refuses without touching the others.
+4. A09d: all files published with the row still at `complete = 0` (a crash between A09c and A09b) makes exactly one `UPDATE` and no new file write. This is separate from the lost acknowledgement after the `UPDATE`.
+5. A09c: every published byte derives only from the recorded material, so a retry by A09 always produces the same bytes. Add a test. Different bytes therefore mean something outside A09 wrote the file; A09 refuses and never overwrites. That case is an owner intervention, recorded on #722 beside P05.
