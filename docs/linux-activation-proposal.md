@@ -218,8 +218,8 @@ this proposal still chooses none of them.
    holds the stop and spawns; C: pause until a production design exists) remain
    open, and nothing here selects one.
    **Open.** It depends on the protected-launch design (decision 5); review it
-   again when that design has a candidate. Decision 5 now has a candidate; this
-   review is due once its measured result is recorded.
+   again when that design has a candidate. Decision 5 now has a candidate with a
+   recorded result, so this review is due.
 2. **Monitor and execution privilege.** Ptrace access is checked in layers. Ubuntu's
    default Yama mode adds an ancestry rule: without `CAP_SYS_PTRACE`, a tracer may
    attach only to its descendants. Being the frontend's parent satisfies only that
@@ -233,9 +233,12 @@ this proposal still chooses none of them.
    narrowly privileged monitor needs its own review (lines 110–114).
    **Open.** It depends on the protected-launch design (decision 5) and on where
    the monitor runs. Candidate for the monitor, from the decision 5 design: a
-   dedicated system service user that keeps only `CAP_SYS_PTRACE`. That capability
-   can trace Root processes, so production also needs confinement to the frontend
-   peer, a separate experiment. The execution identity stays open.
+   dedicated system service user that keeps only `CAP_SYS_PTRACE`. The protected
+   launch experiment measured that this capability set is enough for every check
+   except an outside reading of the frontend's personality, which the frontend
+   reports itself. That capability can trace Root processes, so production also
+   needs confinement to the frontend peer, a separate experiment. The execution
+   identity stays open.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would
    break `sudo` inside the command, and `ProtectSystem=` would make system paths
@@ -266,14 +269,16 @@ this proposal still chooses none of them.
    cannot meet the claim, the capability is reported as unsupported, and a
    narrower guarantee needs the separately reviewed contract decision that the
    contract already requires.
-   **Candidate, result pending.** A static frontend installed set-group-ID to
+   **Candidate, measured on one host.** A static frontend installed set-group-ID to
    `remozio-frontend`, a group with no members; a command socket that only that
    group can open; a code policy that the frontend applies before it reads its
    arguments; and a monitor that keeps only `CAP_SYS_PTRACE` and seizes and checks
    the frontend from outside. The
-   [protected launch experiment](experiments/linux-protected-launch.md) measures it
-   on Ubuntu in a supervised Root run, which has not run yet. Production execution
-   stays off.
+   [protected launch experiment](experiments/linux-protected-launch.md) passed all
+   14 cases in one supervised Root run on Ubuntu 25.10 (kernel `6.17.0-41`) on
+   2026-11-13. Adopting the candidate is the Linux host owner's decision. Production
+   execution stays off: monitor confinement, the production frontend, the stopped
+   handoff (decision 1) and the installed services are not measured.
 6. **Package and update trust.** Release manifests, version floors and update
    serialization have no Linux design yet. Updates must also avoid a
    `systemd-tmpfiles --create` run that would repair live `/run/remozio` paths.

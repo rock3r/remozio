@@ -9,9 +9,9 @@ does not install a service, approve a command, execute a user command, change th
 [contract](../linux-host-contract.md), or select the open line 67 handoff
 (decision 1).
 
-**Recorded result: pending the supervised run.** The fixtures, runner and unit
-tests are complete. The privileged measurement needs one supervised Root step in
-the Linux host owner's session (see [Run](#run)).
+**Recorded result: passed on one Ubuntu host on 2026-11-13** (see
+[Recorded result](#recorded-result)). Production execution stays off: the result
+covers the measured properties only.
 
 ## Candidate design
 
@@ -188,11 +188,42 @@ installed file.
 
 ## Recorded result
 
-Pending the supervised run. The evidence will be committed as
-`linux-protected-launch-evidence.json` next to this page, and this section and the
-activation proposal will state the measured result. If a required property fails,
-the docs will report that property as unsupported on the measured host; the
-guarantee is not weakened to fit.
+**Passed on one host, 2026-11-13**
+([evidence](linux-protected-launch-evidence.json)): Ubuntu 25.10, kernel
+`6.17.0-41`, x86_64, `ptrace_scope` 1, `suid_dumpable` 2, AppArmor enabled with its
+unprivileged user namespace restriction on. The Linux host owner ran it as Root
+through classic sudo 1.9.17. Every setup check, all 14 cases and every cleanup
+check passed. The source hashes in the evidence match the fixtures and the runner
+in this change.
+
+- **P1, N5, N6:** accepted. Every monitor check held, including `AT_SECURE` from the
+  stack, not dumpable, the executable identity, the mappings, the namespaces and
+  the descriptor inventory. Listing `/proc/<pid>/fd` failed with `EACCES`. AppArmor
+  confined neither the monitor nor the frontend.
+- **N1:** on the installed image, opening `/proc/<pid>/mem` failed with `EACCES`,
+  and `process_vm_readv`, `process_vm_writev`, `pidfd_getfd` and `PTRACE_SEIZE`
+  failed with `EPERM`. On the copy without set-ID bits, all of them succeeded.
+- **N2, N3, N4:** no elevation; connect failed with `EACCES`.
+- **N12:** the user namespace was created (the AppArmor restriction does not refuse
+  the call); the kernel did not elevate, and connect failed with `EACCES`.
+- **N7:** all six self-tests were killed by `SIGSYS`.
+- **N8:** the kernel elevated the replaced inode; the monitor refused on the
+  executable identity and the mappings only.
+- **N9:** with the operator in the group, the kernel kept the elevation, traced and
+  untraced; the monitor refused on the supplementary list only.
+- **N10:** without `CAP_SYS_PTRACE` the seize failed with `EPERM`; rejected.
+- **N13:** without `SO_PEERPIDFD` (`ENOPROTOOPT`) the monitor did not seize;
+  rejected.
+
+A first run on the same day measured every case as required except N7. Classic
+sudo gives the command a hard core limit of 0 (`rlimit_core`), so the attacker could
+not set the limit of 1 that its self-tests used, and they did not start. The
+attacker now keeps 0 in that case, and the recorded evidence is the second run.
+
+On this host the candidate meets every property that the experiment measures. That
+does not make production execution available (see
+[What this experiment does not establish](#what-this-experiment-does-not-establish)),
+and adopting the candidate for decision 5 is the Linux host owner's decision.
 
 ## Implementation notes
 
