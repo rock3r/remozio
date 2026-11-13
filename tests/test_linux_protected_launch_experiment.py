@@ -246,6 +246,7 @@ class HelperTests(unittest.TestCase):
                     EXPERIMENT.write_root_file(target, b"other", 0o755)
             self.assertEqual(path.read_bytes(), b"image")
 
+    @unittest.skipUnless(platform.system() == "Linux", "AF_UNIX SOCK_SEQPACKET with SOCK_CLOEXEC is Linux only")
     def test_socket_gate_binds_under_a_restrictive_umask_and_checks_the_result(self):
         calls = []
         record_chown = lambda _path, uid, gid: calls.append(("chown", uid, gid))
