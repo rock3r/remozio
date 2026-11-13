@@ -1,0 +1,218 @@
+# Linux protected launch experiment
+
+This experiment measures a candidate design for the
+[activation proposal's decision 5](../linux-activation-proposal.md#decisions),
+protected frontend launch and code policy, on Ubuntu. The Linux host owner chose
+"strict first": the Linux host keeps the Mac guarantee, and production execution
+stays off until a protected-launch experiment passes. This is that experiment. It
+does not install a service, approve a command, execute a user command, change the
+[contract](../linux-host-contract.md), or select the open line 67 handoff
+(decision 1).
+
+**Recorded result: pending the supervised run.** The fixtures, runner and unit
+tests are complete. The privileged measurement needs one supervised Root step in
+the Linux host owner's session (see [Run](#run)).
+
+## Candidate design
+
+- **Frontend.** A static, non-PIE executable with no program interpreter, installed
+  as `root:<frontend group>` mode `2755`. The frontend group has **no members**:
+  no account lists it as a supplementary or primary group. Before the frontend
+  reads its arguments or creates a socket, it closes every descriptor above 2,
+  resets every signal disposition and the signal mask, sets `no_new_privs`, and
+  installs one seccomp filter. The filter kills the process on another
+  architecture, on an x32 system call number, and on any system call outside a
+  fixed list taken from the full protocol path. The list allows `mmap` only for
+  private anonymous memory without `PROT_EXEC`, `mprotect` only without
+  `PROT_EXEC`, and `socket` only for one close-on-exec `AF_UNIX`
+  `SOCK_SEQPACKET` socket. It has no `execve`, `clone` or file `open`.
+- **Socket gate.** Root binds the command socket as `root:<frontend group>` mode
+  `0660` in a `root:root` `0755` parent, as a systemd socket unit with
+  `SocketGroup=` and `SocketMode=` would. Only a process whose effective or
+  supplementary groups include the frontend group can connect. With no members,
+  that is only the set-group-ID frontend.
+- **Monitor.** A dedicated system user that keeps only `CAP_SYS_PTRACE` (effective
+  and permitted; bounding set reduced to it; no inheritable or ambient
+  capabilities; `no_new_privs`), with the listening descriptor inherited from Root.
+  It requires `SO_PEERPIDFD` and refuses without it. It checks that the
+  `SO_PEERCRED` effective GID is the frontend group, then seizes the peer with
+  `PTRACE_O_EXITKILL` and the clone, fork, vfork and exec events, confirms that the
+  peer pidfd still names the seized PID, and holds a `PTRACE_INTERRUPT` stop while
+  it checks the frontend from outside:
+  - real GID is not the group; effective, saved and filesystem GIDs are; the group
+    is not in the supplementary list;
+  - one thread, `Seccomp: 2`, `Seccomp_filters: 1`, `NoNewPrivs: 1`, the monitor as
+    tracer, no ignored or blocked signals, personality 0, `AT_SECURE` 1, not
+    dumpable;
+  - `/proc/<pid>/exe` is the same device and inode as the installed file, which is
+    still `root:<group>` `2755` with one link;
+  - every file-backed mapping is that inode, no mapping is writable and executable,
+    and anonymous mappings are only the heap, stack, vDSO, vvar, vsyscall or
+    unnamed regions;
+  - every namespace equals the monitor's;
+  - descriptors 0–2 and the socket at 3, and nothing else.
+
+## Why set-group-ID
+
+A set-ID exec gives kernel-enforced properties that an ordinary executable lacks
+(`fs/exec.c` `bprm_fill_uid` and `begin_new_exec`, `security/commoncap.c`
+`cap_bprm_creds_from_file`, Linux 6.17):
+
+- The process is not dumpable (it takes the `suid_dumpable` value, 2 on the target
+  host). Same-UID `ptrace`, `/proc/<pid>/mem`, `process_vm_readv`/`writev` and
+  `pidfd_getfd` then need `CAP_SYS_PTRACE`, so the user's other processes cannot
+  inspect or change it.
+- `AT_SECURE` is set, and the personality flags in `PER_CLEAR_ON_SETID` are cleared.
+- The kernel does not grant the elevation when the launch is traced by a tracer
+  without `CAP_SYS_PTRACE`, when `no_new_privs` is set, or when the filesystem state
+  is shared with another process (`CLONE_FS`). A launch an attacker controls before
+  exec therefore cannot reach the socket.
+
+The last rule applies only when the exec changes credentials. If the group is
+already one of the caller's groups (`in_group_p`), the kernel treats the exec as no
+change and a tracer keeps the elevation. That is why the group must have no members,
+and why the monitor also refuses a caller whose supplementary list holds the group.
+Case N9 measures that control.
+
+Why the monitor's `Seccomp_filters: 1` is the frontend's own filter: an inherited
+filter needs `no_new_privs` or `CAP_SYS_ADMIN` in the installer's user namespace.
+`no_new_privs` before exec removes the elevation (N3). A new user namespace does not
+map the root-owned file or the group, so the kernel ignores the set-ID bits, and the
+monitor also requires the host namespaces (N12). So an elevated frontend that
+connects started with no filter, and the one filter it has is the one it installed.
+
+## Run
+
+The privileged part is a **supervised step** under the
+[human testing boundary](../linux-validation.md#human-testing-boundary). Run it once,
+as Root through `sudo`, from the operator's own session in a checkout of this branch:
+
+```sh
+sudo python3 -I scripts/run-linux-protected-launch-experiment.py > linux-protected-launch-evidence.json
+```
+
+Requirements: Ubuntu x86_64, Python 3.11 or later, `cc` with static glibc
+(`libc6-dev`), `groupadd`, `useradd`, `userdel`, `groupdel`, and a `/var/lib` on a
+filesystem mounted without `nosuid`, with every path component owned by Root and
+not writable by group or others. The runner refuses before it changes anything when
+it does not run as Root, when `SUDO_UID` and `SUDO_GID` do not name an ordinary
+account, or when `/var/lib` does not qualify.
+
+The runner:
+
+1. builds the three fixtures from `experiments/linux-protected-launch/` as Root, in a
+   new root-owned directory `/var/lib/remozio-protected-launch-experiment-<random>`;
+2. creates a disposable system group with a random name and checks that it has no
+   members and is no account's primary group, and a disposable system user for the
+   monitor;
+3. installs the frontend as `root:<group>` `2755` (owner first, then mode), a copy
+   without set-ID bits as the control, and the monitor and attacker as `root:root`
+   `0755`;
+4. runs each case with a fresh socket. The attacker runs as the operator (the
+   `SUDO_UID` account, with its normal group list) and launches the frontend itself,
+   so it is the frontend's parent. The monitor starts as Root and drops to the
+   disposable user before it accepts. Each case has a deadline (15 seconds by
+   default, 5 to 60 with `--timeout`), after which the runner kills its process
+   groups. The monitor uses `PTRACE_O_EXITKILL`;
+5. removes the files, then the user, then the group, also after a failure or
+   `SIGTERM`, and reports whether each removal is complete. If one is not, it prints
+   a warning on standard error.
+
+The report holds booleans, errno names, outcome categories, the OS release and
+numeric kernel version, the settings `ptrace_scope`, `suid_dumpable`,
+`protected_hardlinks`, AppArmor's status and its unprivileged user namespace
+restriction, the AppArmor label categories of the monitor and the frontend, source
+hashes and the hash of the seccomp filter that the installed frontend dumps. It
+holds no UIDs, GIDs, user or group names, paths, host names or boot identifiers. A
+fixture report with an unknown key or value is dropped, not published.
+
+Unit tests (any host):
+
+```sh
+python3 -m unittest tests.test_linux_protected_launch_experiment
+```
+
+They cover the case table, the report validation and sanitizing, the refusal paths
+(for example a missing `SO_PEERPIDFD`) and the cleanup order. With
+`REMOZIO_LINUX_PROTECTED_LAUNCH_LIVE=1` on Linux x86_64 they also build the fixtures
+and check their unprivileged mechanics: the seccomp self-tests are killed, and the
+same-UID attacks work against a copy without set-ID bits. These checks do not
+replace the supervised run.
+
+## Cases
+
+| Runner | Plan | Case | Required result |
+| --- | --- | --- | --- |
+| `p1` | P1, P2, P3, N11 | Clean launch by the operator | Frontend accepted. Every monitor check above passes; listing `/proc/<pid>/fd` is refused (the reason for the `FDSize` and `pidfd_getfd` inventory) |
+| `n1` | N1 | The launching parent attacks the frontend in its wait before connect, then the same attacks on the copy | Installed: `/proc/<pid>/mem` open refused, `process_vm_readv`/`writev`, `pidfd_getfd` and `PTRACE_SEIZE` refused with `EPERM`. Copy: all succeed, including a read and a same-bytes write of a known data symbol |
+| `n2` | N2 | The parent traces the launch (`PTRACE_TRACEME`) | No elevation at the exec stop; connect fails with `EACCES` |
+| `n3` | N3 | `no_new_privs` before exec | No elevation; connect fails with `EACCES` |
+| `n4` | N4 | The frontend starts from a `CLONE_FS` child | No elevation; connect fails with `EACCES` |
+| `n5` | N5 | `READ_IMPLIES_EXEC` and `ADDR_NO_RANDOMIZE` before exec | Personality 0; accepted |
+| `n6` | N6 | Inherited descriptors 7 and 40, `SIGINT` ignored, `SIGTERM` blocked | Closed and reset; accepted |
+| `n7` | N7 | Self-tests: `execve`, `PROT_EXEC` `mprotect`, `MAP_SHARED`, `clone`, an x32 call | Each killed by `SIGSYS` |
+| `n9-untraced`, `n9-traced` | N9 | Control: the operator holds the group as a supplementary group, untraced and traced before exec | Elevation kept in both; the monitor refuses on the supplementary list only |
+| `n10` | N10 | Control: the monitor without `CAP_SYS_PTRACE` | Seize refused with `EPERM`; rejected |
+| `n12` | N12 | `unshare(CLONE_NEWUSER)` before exec | Namespace refused, or no elevation and connect fails with `EACCES` |
+| `n8` | N8 | The parent keeps an `O_PATH` descriptor, the runner replaces the installed file, the parent runs the old inode with `execveat` | The kernel elevates the old inode; the monitor refuses on the executable identity only |
+
+In the controls (N8, N9) every other monitor check must pass, so the report shows
+which single check refuses. The runner runs N8 last because it replaces the
+installed file.
+
+## Recorded result
+
+Pending the supervised run. The evidence will be committed as
+`linux-protected-launch-evidence.json` next to this page, and this section and the
+activation proposal will state the measured result. If a required property fails,
+the docs will report that property as unsupported on the measured host; the
+guarantee is not weakened to fit.
+
+## Implementation notes
+
+- The monitor drops its own privileges (bounding set, groups, IDs, capabilities,
+  `no_new_privs`) instead of starting under `setpriv`, so it can verify and report
+  its own credentials in the same run.
+- The monitor confirms the pidfd-to-PID association from the pidfd's `fdinfo`
+  (`Pid:` shows `-1` once the task is gone). It does not use
+  `pidfd_send_signal(…, 0)`: that call checks kill permission, which needs
+  `CAP_KILL` across UIDs.
+- A process that is not dumpable has a root-owned, mode `0500`
+  `/proc/<pid>/fd` directory, which `CAP_SYS_PTRACE` alone cannot list. The monitor
+  reads `FDSize` and calls `pidfd_getfd` for each number below it instead.
+- `PTRACE_SECCOMP_GET_FILTER` needs `CAP_SYS_ADMIN`, so the monitor does not dump
+  the running filter. It relies on the executable identity, `Seccomp_filters: 1`
+  and the argument above. The runner records the hash of the filter that the
+  installed image dumps.
+
+## What this experiment does not establish
+
+- **Monitor confinement.** `CAP_SYS_PTRACE` can trace Root processes. Before
+  production the monitor needs confinement to the frontend peer (for example an
+  AppArmor `ptrace (trace) peer=` rule) and a review of its IPC surface. That is a
+  separate experiment and a decision for the Linux host owner.
+- **The production frontend.** The fixture is C. The product frontend must also be
+  static, with no loader and the same kind of allowlist. A Swift static executable
+  is possible but unmeasured.
+- The composition with the stopped handoff, the executor, installed services and
+  packaging, update serialization (decision 6), TPM roles (decision 4) and a real
+  phone approval.
+- Other kernels and distributions. The evidence records the kernel version; a later
+  change to set-ID exec semantics needs a new run.
+- An administrator who adds a member to the frontend group. The monitor refuses
+  such a caller, but that member's other processes lose the tracer protection. The
+  installer and the monitor must report any member.
+
+## Kernel references
+
+- `fs/exec.c`: `bprm_fill_uid` (set-ID bits, `PER_CLEAR_ON_SETID`, unmapped IDs),
+  `begin_new_exec` (dumpability, personality), `check_unsafe_exec` (`CLONE_FS`).
+- `security/commoncap.c`: `cap_bprm_creds_from_file` (`in_group_p`, the downgrade
+  under an unprivileged tracer or `no_new_privs`, `AT_SECURE`).
+- `kernel/ptrace.c`: `__ptrace_may_access` (credentials, dumpability,
+  `CAP_SYS_PTRACE`); `security/yama/yama_lsm.c` (relational scope).
+- `fs/proc/base.c` and `fs/proc/fd.c`: owner of a non-dumpable task's entries,
+  `proc_fd_permission`.
+- `kernel/pid.c`: `pidfd_getfd`; `fs/pidfs.c`: pidfd `fdinfo`.
+- `kernel/seccomp.c`: filter installation requires `no_new_privs` or
+  `CAP_SYS_ADMIN`.
