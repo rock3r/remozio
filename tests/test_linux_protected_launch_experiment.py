@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 import importlib.util
 import io
 import json
@@ -7,6 +8,9 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import socket
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -91,6 +95,13 @@ class CaseTableTests(unittest.TestCase):
         dispatched = set(re.findall(r'!strcmp\(name, "([a-z0-9-]+)"\)', attacker))
         self.assertEqual(dispatched, {spec["argument"] for spec in EXPERIMENT.CASES.values()})
 
+    def test_monitor_reads_only_procfs_entries_open_to_cap_sys_ptrace(self):
+        # personality and auxv are root-owned mode 0400 for a task that is not dumpable.
+        monitor = EXPERIMENT.MONITOR.read_text()
+        opened = set(re.findall(r'read_at\(dir, "([a-z/]+)"', monitor))
+        self.assertEqual(opened, {"status", "stat", "maps", "attr/apparmor/current", "attr/current"})
+        self.assertIn("process_vm_readv(pid,", monitor)
+
     def test_controls_isolate_the_refusal_they_measure(self):
         admitted = EXPERIMENT._expect(EXPERIMENT.ADMITTED)
         for case, differing in (("n8", {"exeIsCurrentInstalledImage", "mapsAllowed", "accepted"}),
@@ -117,6 +128,11 @@ class EvaluateCaseTests(unittest.TestCase):
         self.assertTrue(evaluate("n12", attacker_report("n12", 1))["passed"])
         elevated = evaluate("n12", attacker_report("n12", 1, effectiveGidElevated="yes"))
         self.assertEqual(elevated["mismatches"], ["attacker.effectiveGidElevated"])
+        # Only a policy errno counts as a refusal; any other unshare failure fails the case.
+        for errno_name in ("EPERM", "EACCES"):
+            self.assertTrue(evaluate("n12", attacker_report("n12", 0, userNamespace=errno_name))["passed"])
+        self.assertFalse(evaluate("n12", attacker_report("n12", 0, userNamespace="other"))["passed"])
+        self.assertIn('field("userNamespace", errname(code))', EXPERIMENT.ATTACKER.read_text())
 
     def test_admitted_launch_fails_on_any_failed_property(self):
         for key in EXPERIMENT.STOP_CHECKS:
@@ -212,6 +228,40 @@ class HelperTests(unittest.TestCase):
                 with self.subTest(expected=expected, size=len(data)):
                     path.write_bytes(data)
                     self.assertEqual(EXPERIMENT.static_non_pie(path), expected)
+
+    def test_root_file_gets_its_owner_before_its_mode_and_is_never_reused(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(EXPERIMENT.os, "fchown", side_effect=lambda _fd, uid, gid: calls.append(("chown", uid, gid))), \
+             patch.object(EXPERIMENT.os, "fchmod", side_effect=lambda _fd, mode: calls.append(("chmod", mode))):
+            path = Path(directory) / "image"
+            EXPERIMENT.write_root_file(path, b"image", 0o2755, 4242)
+            # chown clears set-ID bits, so the mode must come after the owner.
+            self.assertEqual(calls, [("chown", 0, 4242), ("chmod", 0o2755)])
+            link = Path(directory) / "link"
+            link.symlink_to(path)
+            for target in (path, link):
+                with self.subTest(target=target.name), self.assertRaises(FileExistsError):
+                    EXPERIMENT.write_root_file(target, b"other", 0o755)
+            self.assertEqual(path.read_bytes(), b"image")
+
+    def test_socket_gate_binds_under_a_restrictive_umask_and_checks_the_result(self):
+        calls = []
+        record_chown = lambda _path, uid, gid: calls.append(("chown", uid, gid))
+        record_chmod = lambda _path, mode: calls.append(("chmod", mode))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "a.sock"
+            with patch.object(EXPERIMENT.os, "chown", side_effect=record_chown), \
+                 patch.object(EXPERIMENT.os, "chmod", side_effect=record_chmod):
+                # Without the real chown and chmod the inode stays the caller's: the check refuses.
+                with self.assertRaisesRegex(RuntimeError, "socket gate"):
+                    EXPERIMENT.make_listener(path, 4242)
+            self.assertEqual(calls, [("chown", 0, 4242), ("chmod", 0o660)])
+            self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o600)  # the bind ran under umask 0177
+            exact = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_uid=0, st_gid=4242)
+            with patch.object(EXPERIMENT.os, "chown"), patch.object(EXPERIMENT.os, "chmod"), \
+                 patch.object(EXPERIMENT.os, "lstat", return_value=exact):
+                EXPERIMENT.make_listener(Path(directory) / "b.sock", 4242).close()
 
     def test_root_owned_ancestry_refuses_user_owned_or_writable_components(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -451,7 +501,73 @@ class LiveFixtureTests(unittest.TestCase):
         self.assertTrue(output and len(output) % 8 == 0)
 
     def test_forbidden_operations_are_killed_by_the_filter(self):
-        self.assertEqual(self.attack("n7"), dict.fromkeys(("exec", "mprotect", "shared", "clone", "x32"), "SIGSYS"))
+        self.assertEqual(self.attack("n7"), dict.fromkeys(("exec", "mprotect", "mmap-exec", "shared", "clone", "x32"),
+                                                          "SIGSYS"))
+
+    def test_hello_carries_the_personality_read_before_the_filter(self):
+        libc = ctypes.CDLL(None, use_errno=True)
+        for persona, expected in ((None, b"RMZPL1 00000000\n"), (0x0040000, b"RMZPL1 00040000\n")):  # ADDR_NO_RANDOMIZE
+            with self.subTest(persona=persona), tempfile.TemporaryDirectory() as directory, \
+                 socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+                path = Path(directory) / "s"
+                listener.bind(str(path))
+                listener.listen(1)
+                listener.settimeout(10)
+                # The copy has no set-ID bits, so the kernel keeps the personality across exec.
+                set_persona = None if persona is None else (lambda: libc.personality(persona))
+                frontend = subprocess.Popen([str(self.frontend), "run", str(path)], preexec_fn=set_persona)
+                connection, _ = listener.accept()
+                with connection:
+                    hello = connection.recv(64)
+                    connection.send(b"A")
+                self.assertEqual(frontend.wait(timeout=10), 0)
+                self.assertEqual(hello, expected)
+
+    def test_dumped_filter_allows_exactly_the_protocol_path(self):
+        """Decodes the installed program and runs it, so a wrong hand-counted jump fails here."""
+        dump = subprocess.run([str(self.frontend), "dump-filter"], capture_output=True, check=True, timeout=10).stdout
+        program = [struct.unpack_from("<HBBI", dump, offset) for offset in range(0, len(dump), 8)]
+        allow, kill = 0x7FFF0000, 0x80000000  # SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS
+
+        def verdict(nr, *args, arch=0xC000003E):  # struct seccomp_data; AUDIT_ARCH_X86_64
+            data = struct.pack("<iIQ6Q", nr, arch, 0, *args, *([0] * (6 - len(args))))
+            pc = acc = 0
+            for _ in program:  # classic BPF jumps only forward
+                code, jt, jf, k = program[pc]
+                if code == 0x20:  # BPF_LD | BPF_W | BPF_ABS
+                    acc, pc = struct.unpack_from("<I", data, k)[0], pc + 1
+                elif code in (0x15, 0x35, 0x45):  # BPF_JMP | BPF_K with JEQ, JGE, JSET
+                    taken = acc == k if code == 0x15 else acc >= k if code == 0x35 else bool(acc & k)
+                    pc += 1 + (jt if taken else jf)
+                elif code == 0x06:  # BPF_RET | BPF_K
+                    return k
+                else:
+                    self.fail(f"unexpected instruction {code:#x}")
+            self.fail("program ran off its end")
+
+        # read write close connect sendmsg recvmsg exit exit_group rt_sigreturn rt_sigprocmask
+        # restart_syscall brk munmap; with all arguments zero only these and mprotect pass.
+        simple = {0, 1, 3, 42, 46, 47, 60, 231, 15, 14, 219, 12, 11}
+        self.assertEqual({nr for nr in range(512) if verdict(nr) == allow}, simple | {10})
+        read_write, private_anonymous, high = 0x3, 0x22, 1 << 32
+        self.assertEqual(verdict(9, 0, 4096, read_write, private_anonymous), allow)
+        for prot, flags in ((read_write | 0x4, private_anonymous), (read_write, 0x21), (read_write, 0x02),
+                            (read_write, private_anonymous | 0x10), (read_write | high, private_anonymous),
+                            (read_write, private_anonymous | high)):
+            with self.subTest(mmap=(hex(prot), hex(flags))):
+                self.assertEqual(verdict(9, 0, 4096, prot, flags), kill)
+        self.assertEqual(verdict(10, 0, 4096, 0x1), allow)
+        for prot in (0x5, 0x4, 0x1 | high):
+            with self.subTest(mprotect=hex(prot)):
+                self.assertEqual(verdict(10, 0, 4096, prot), kill)
+        seqpacket_cloexec = 5 | 0o2000000
+        self.assertEqual(verdict(41, 1, seqpacket_cloexec, 0), allow)
+        for domain, kind in ((2, seqpacket_cloexec), (1, 1 | 0o2000000), (1, 5), (1 | high, seqpacket_cloexec),
+                             (1, seqpacket_cloexec | high)):
+            with self.subTest(socket=(hex(domain), hex(kind))):
+                self.assertEqual(verdict(41, domain, kind, 0), kill)
+        self.assertEqual(verdict(0x40000000), kill)  # x32 read
+        self.assertEqual(verdict(0, arch=0x40000003), kill)  # AUDIT_ARCH_I386
 
     def test_same_uid_attacks_work_on_a_copy_without_set_id(self):
         expected = {f"{prefix}.{key}": value for prefix in ("installed", "control")

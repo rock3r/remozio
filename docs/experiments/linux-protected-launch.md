@@ -17,10 +17,11 @@ the Linux host owner's session (see [Run](#run)).
 
 - **Frontend.** A static, non-PIE executable with no program interpreter, installed
   as `root:<frontend group>` mode `2755`. The frontend group has **no members**:
-  no account lists it as a supplementary or primary group. Before the frontend
-  reads its arguments or creates a socket, it closes every descriptor above 2,
-  resets every signal disposition and the signal mask, sets `no_new_privs`, and
-  installs one seccomp filter. The filter kills the process on another
+  no account lists it as a supplementary or primary group. At the start of `main`
+  (after the static C library startup), before it reads its arguments or creates a
+  socket, the frontend reads its personality (a query only), closes every
+  descriptor above 2, resets every signal disposition and the signal mask, sets
+  `no_new_privs`, and installs one seccomp filter. The filter kills the process on another
   architecture, on an x32 system call number, and on any system call outside a
   fixed list taken from the full protocol path: `read`, `write`, `close`,
   `connect`, `sendmsg`, `recvmsg`, `exit`, `exit_group`, `rt_sigreturn`,
@@ -41,23 +42,30 @@ the Linux host owner's session (see [Run](#run)).
   and permitted; bounding set reduced to it; no inheritable or ambient
   capabilities; `no_new_privs`), with the listening descriptor inherited from Root.
   It requires `SO_PEERPIDFD` and refuses without it. It checks that the
-  `SO_PEERCRED` effective GID is the frontend group, then seizes the peer with
+  `SO_PEERCRED` effective GID is the frontend group and that the hello is exact
+  (`RMZPL1`, the frontend's personality as 8 hex digits, a newline), then seizes the peer with
   `PTRACE_O_EXITKILL` and the clone, fork, vfork and exec events, confirms that the
   peer pidfd still names the seized PID, and holds a `PTRACE_INTERRUPT` stop while
   it checks the frontend from outside:
   - real GID is not the group; effective, saved and filesystem GIDs are; the group
     is not in the supplementary list;
   - one thread, `Seccomp: 2`, `Seccomp_filters: 1`, `NoNewPrivs: 1`, the monitor as
-    tracer, no ignored or blocked signals, personality 0, `AT_SECURE` 1, not
-    dumpable (read from the owner of `/proc/<pid>/environ`, which is Root only when
-    the dumpable value is not 1);
+    tracer, no ignored or blocked signals, not dumpable (read from the owner of
+    `/proc/<pid>/environ`, which is Root only when the dumpable value is not 1);
+  - `AT_SECURE` 1, read from the auxiliary vector that exec wrote on the stopped
+    frontend's stack, and personality 0, as the frontend reported it in the hello
+    (see [Implementation notes](#implementation-notes));
   - `/proc/<pid>/exe` is the same device and inode as the installed file, which is
     still `root:<group>` `2755` with one link;
   - every file-backed mapping is that inode, no mapping is writable and executable,
-    and anonymous mappings are only the heap, stack, vDSO, vvar, vsyscall or
-    unnamed regions;
+    anonymous mappings are only the heap, stack, vDSO, vvar, vsyscall or unnamed
+    regions, and only the vDSO and vsyscall pages among them are executable;
   - every namespace equals the monitor's;
-  - descriptors 0–2 and the socket at 3, and nothing else.
+  - listing `/proc/<pid>/fd` is refused, and the inventory finds descriptors 0–2 and
+    the socket at 3, and nothing else.
+
+  A procfs file that does not fit the monitor's buffer fails its check, so no check
+  passes on a partial view.
 
 ## Why set-group-ID
 
@@ -133,7 +141,8 @@ numeric kernel version with the distribution revision (for example `6.17.0-41`),
 the settings `ptrace_scope`, `suid_dumpable`,
 `protected_hardlinks`, AppArmor's status and its unprivileged user namespace
 restriction, the AppArmor label categories of the monitor and the frontend, source
-hashes and the hash of the seccomp filter that the installed frontend dumps. It
+hashes, the hash of the installed frontend image and the hash of the seccomp filter
+that it dumps. It
 holds no UIDs, GIDs, user or group names, paths, host names or boot identifiers. A
 fixture report with an unknown key or value is dropped, not published.
 
@@ -148,7 +157,9 @@ They cover the case table, the report validation and sanitizing, the setup gate,
 the refusal paths and the cleanup order, including an interrupted account creation.
 With `REMOZIO_LINUX_PROTECTED_LAUNCH_LIVE=1` on Linux x86_64 they also build the
 fixtures and check their unprivileged mechanics: the seccomp self-tests are killed,
-and the same-UID attacks work against a copy without set-ID bits. The monitor
+the dumped filter, decoded and run in the test, allows exactly the listed calls and
+arguments, the hello carries the measured personality, and the same-UID attacks
+work against a copy without set-ID bits. The monitor
 refuses to run without Root, so its refusal of a missing `SO_PEERPIDFD` is measured
 by case N13 in the supervised run, with the real monitor code. These checks do not
 replace the supervised run.
@@ -164,10 +175,10 @@ replace the supervised run.
 | `n4` | N4 | The frontend starts from a `CLONE_FS` child | No elevation; connect fails with `EACCES` |
 | `n5` | N5 | `READ_IMPLIES_EXEC` and `ADDR_NO_RANDOMIZE` before exec | Personality 0; accepted |
 | `n6` | N6 | Inherited descriptors 7 and 40, `SIGINT` ignored, `SIGTERM` blocked | Closed and reset; accepted |
-| `n7` | N7 | Self-tests: `execve`, `PROT_EXEC` `mprotect`, `MAP_SHARED`, `clone`, an x32 call | Each killed by `SIGSYS` |
+| `n7` | N7 | Self-tests: `execve`, `PROT_EXEC` `mprotect`, `PROT_EXEC` `mmap`, `MAP_SHARED`, `clone`, an x32 call | Each killed by `SIGSYS` |
 | `n9-untraced`, `n9-traced` | N9 | Control: the operator holds the group as a supplementary group, untraced and traced before exec | Elevation kept in both; the monitor refuses on the supplementary list only |
 | `n10` | N10 | Control: the monitor without `CAP_SYS_PTRACE` | Seize refused with `EPERM`; rejected |
-| `n12` | N12 | `unshare(CLONE_NEWUSER)` before exec | Namespace refused, or no elevation and connect fails with `EACCES` |
+| `n12` | N12 | `unshare(CLONE_NEWUSER)` before exec | Namespace refused with `EPERM` or `EACCES` (the report keeps the errno; any other errno fails), or no elevation and connect fails with `EACCES` |
 | `n13` | Added | Control: a clean launch against a monitor build that asks for an unknown socket option in place of `SO_PEERPIDFD` | `ENOPROTOOPT`; no seize attempt; rejected |
 | `n8` | N8 | The parent keeps an `O_PATH` descriptor, the runner replaces the installed file, the parent runs the old inode with `execveat` | The kernel elevates the old inode; the monitor refuses on the executable identity only |
 
@@ -192,9 +203,24 @@ guarantee is not weakened to fit.
   (`Pid:` shows `-1` once the task is gone). It does not use
   `pidfd_send_signal(…, 0)`: that call checks kill permission, which needs
   `CAP_KILL` across UIDs.
-- A process that is not dumpable has a root-owned, mode `0500`
-  `/proc/<pid>/fd` directory, which `CAP_SYS_PTRACE` alone cannot list. The monitor
-  reads `FDSize` and calls `pidfd_getfd` for each number below it instead.
+- A process that is not dumpable has root-owned procfs entries. `CAP_SYS_PTRACE`
+  passes the ptrace checks but grants no file access, so the monitor uses only
+  entries that the mode allows (measured on the target host): `status`, `stat` and
+  `maps` (`0444`), `ns` (`0511`), `exe`, and the `attr` labels. It does not open
+  `fd` (`0500`), `personality`, `auxv` or `environ` (`0400`):
+  - for descriptors it reads `FDSize` and calls `pidfd_getfd` for each number below
+    it;
+  - for `AT_SECURE` it takes the stack start and the start of the argument strings
+    from `stat`, reads that range with `process_vm_readv`, and walks argc, argv,
+    envp and the auxiliary vector that exec wrote there. It requires an `AT_NULL`
+    and exactly one `AT_SECURE`;
+  - for the personality no such path exists. The frontend reads its personality
+    before its filter forbids the call and sends it in the hello. The monitor uses
+    the value only together with the identity, mapping and memory checks of the
+    same stop, which tie the hello to the installed image, whose memory the
+    operator cannot change (N1);
+  - for dumpability it uses only the owner of `environ`, which `stat` reports
+    without opening the file.
 - `PTRACE_SECCOMP_GET_FILTER` needs `CAP_SYS_ADMIN`, so the monitor does not dump
   the running filter. It relies on the executable identity, `Seccomp_filters: 1`
   and the argument above. The runner records the hash of the filter that the
@@ -211,6 +237,9 @@ guarantee is not weakened to fit.
   production the monitor needs confinement to the frontend peer (for example an
   AppArmor `ptrace (trace) peer=` rule) and a review of its IPC surface. That is a
   separate experiment and a decision for the Linux host owner.
+- **An outside reading of the personality.** The monitor relies on the value that
+  the verified frontend reports. The `AT_SECURE` and dumpability results come from
+  the kernel's own records.
 - **The production frontend.** The fixture is C. The product frontend must also be
   static, with no loader and the same kind of allowlist. A Swift static executable
   is possible but unmeasured.

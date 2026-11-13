@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -83,17 +84,21 @@ static int parse_u32(const char *text, uint32_t *out) {
     return 0;
 }
 
-/* Reads a small procfs file through a directory descriptor; returns bytes or -1. */
+/* Reads a small procfs file through a directory descriptor; returns bytes or -1. A file
+ * that does not fit the buffer is an error, so no check ever passes on a partial view. */
 static ssize_t read_at(int dir, const char *name, char *buffer, size_t size) {
     int fd = openat(dir, name, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     size_t total = 0;
+    int complete = 0;
     while (total + 1 < size) {
         ssize_t n = read(fd, buffer + total, size - 1 - total);
         if (n < 0) { close(fd); return -1; }
-        if (n == 0) break;
+        if (n == 0) { complete = 1; break; }
         total += (size_t)n;
     }
+    char extra;
+    if (!complete && read(fd, &extra, 1) != 0) { close(fd); return -1; }
     close(fd);
     buffer[total] = 0;
     return (ssize_t)total;
@@ -190,9 +195,12 @@ static int maps_allowed(int dir, const struct stat *image) {
         char *name = path + strspn(path, " ");
         if (inode != 0) {
             if (inode != (unsigned long long)image->st_ino || makedev(major, minor) != image->st_dev) return 0;
-        } else if (*name && strcmp(name, "[heap]") && strcmp(name, "[stack]") && strcmp(name, "[vdso]") &&
-                   strcmp(name, "[vvar]") && strcmp(name, "[vvar_vclock]") && strcmp(name, "[vsyscall]")) {
-            return 0;
+        } else {
+            if (*name && strcmp(name, "[heap]") && strcmp(name, "[stack]") && strcmp(name, "[vdso]") &&
+                strcmp(name, "[vvar]") && strcmp(name, "[vvar_vclock]") && strcmp(name, "[vsyscall]"))
+                return 0;
+            /* Only the kernel's own pages may execute outside the image. */
+            if (strchr(perms, 'x') && strcmp(name, "[vdso]") && strcmp(name, "[vsyscall]")) return 0;
         }
     }
     return 1;
@@ -242,6 +250,45 @@ static int association(int pidfd, pid_t pid) {
     return status_u64(info, "Pid:", &recorded, 10) == 0 && recorded == (unsigned long long)pid;
 }
 
+/* AT_SECURE from the auxiliary vector that exec wrote on the stack. /proc/<pid>/auxv is
+ * root-owned mode 0400 for a task that is not dumpable, so CAP_SYS_PTRACE alone cannot open
+ * it. /proc/<pid>/stat (0444) gives the stack start (field 28, the address of argc) and
+ * arg_start (field 48, the argument strings above the tables), and process_vm_readv reads
+ * the stopped frontend. Layout: argc, argv, NULL, envp, NULL, auxv pairs up to AT_NULL.
+ * Passes only with an AT_NULL and exactly one AT_SECURE, whose value is 1. */
+static int stack_at_secure(int dir, pid_t pid) {
+    char stat_text[4096];
+    if (read_at(dir, "stat", stat_text, sizeof stat_text) <= 0) return 0;
+    char *cursor = strrchr(stat_text, ')'); /* the command name may hold spaces */
+    if (!cursor) return 0;
+    unsigned long long fields[64] = {0}; /* fields[i] is stat field i + 4 */
+    int count = 0;
+    char *save = NULL;
+    char *token = strtok_r(cursor + 1, " \n", &save); /* field 3, the state letter */
+    for (token = token ? strtok_r(NULL, " \n", &save) : NULL; token && count < 64;
+         token = strtok_r(NULL, " \n", &save))
+        fields[count++] = strtoull(token, NULL, 10);
+    if (count < 45) return 0;
+    unsigned long long start = fields[28 - 4], arg_start = fields[48 - 4];
+    static unsigned long long words[8192];
+    if (start == 0 || start % 8 || arg_start <= start || arg_start - start > sizeof words) return 0;
+    size_t span = (size_t)(arg_start - start);
+    struct iovec local = {words, span}, remote = {(void *)(uintptr_t)start, span};
+    if (process_vm_readv(pid, &local, 1, &remote, 1, 0) != (ssize_t)span) return 0;
+    size_t n = span / 8;
+    if (n == 0 || words[0] >= n) return 0;
+    size_t i = 1 + (size_t)words[0];
+    if (i >= n || words[i] != 0) return 0;
+    for (i++; i < n && words[i] != 0; i++) {}
+    if (i >= n) return 0;
+    int seen = 0, secure = 0;
+    for (i++; i + 1 < n; i += 2) {
+        if (words[i] == 0) return seen == 1 && secure;
+        if (words[i] == 23 /* AT_SECURE */) { seen++; secure = words[i + 1] == 1; }
+    }
+    return 0;
+}
+
 /* A category only; the label text never enters the report. */
 static const char *apparmor_label(int dir) {
     char label[256];
@@ -289,10 +336,18 @@ int main(int argc, char **argv) {
     length = sizeof cred;
     int cred_ok = getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &length) == 0;
     flag("peerCredEffectiveGidIsGroup", cred_ok && cred.gid == group);
-    char hello[8] = {0};
-    flag("helloReceived", read(conn, hello, sizeof hello) == 7 && memcmp(hello, "RMZPL1\n", 7) == 0);
+    /* One 16-byte message: "RMZPL1 ", the frontend's personality as 8 hex digits, "\n". */
+    char hello[32] = {0};
+    unsigned long long reported_personality = 1;
+    int hello_ok = read(conn, hello, sizeof hello) == 16 && memcmp(hello, "RMZPL1 ", 7) == 0 &&
+                   strspn(hello + 7, "0123456789abcdef") == 8 && hello[15] == '\n';
+    if (hello_ok) {
+        hello[15] = 0;
+        reported_personality = strtoull(hello + 7, NULL, 16);
+    }
+    flag("helloReceived", hello_ok);
 
-    int accepted = pidfd_ok && cred_ok && cred.gid == group;
+    int accepted = pidfd_ok && cred_ok && cred.gid == group && hello_ok;
     int seized = 0, stopped = 0;
     pid_t pid = cred_ok ? cred.pid : -1;
     if (pidfd_ok && cred_ok) {
@@ -315,7 +370,7 @@ int main(int argc, char **argv) {
 
     int roles_ok = 0, groups_exclude = 0, single_thread = 0, filter_mode = 0, one_filter = 0, nnp_set = 0;
     int tracer_ok = 0, signals_ok = 0, personality_ok = 0, at_secure = 0, not_dumpable = 0, identity = 0;
-    int maps_ok = 0, namespaces_ok = 0, descriptors = 0;
+    int maps_ok = 0, namespaces_ok = 0, descriptors = 0, listing_refused = 0;
     const char *listing_result = "not-attempted", *frontend_label = "not-attempted";
     if (stopped) {
         char path[64];
@@ -341,20 +396,15 @@ int main(int argc, char **argv) {
         tracer_ok = fields_ok && tracer == (unsigned long long)getpid();
         signals_ok = fields_ok && sigign == 0 && sigblk == 0;
 
-        char small[256];
-        unsigned long long personality = 1;
-        personality_ok = dir_ok && read_at(dir, "personality", small, sizeof small) > 0 &&
-                         !status_u64(small, "", &personality, 16) && personality == 0;
-
-        unsigned long long auxv[128] = {0};
-        ssize_t aux_bytes = dir_ok ? read_at(dir, "auxv", (char *)auxv, sizeof auxv) : -1;
-        for (ssize_t i = 0; aux_bytes > 0 && i + 1 < aux_bytes / 8; i += 2)
-            if (auxv[i] == 23 /* AT_SECURE */) at_secure = auxv[i + 1] == 1;
+        /* Self-reported in the hello: no procfs path gives it to CAP_SYS_PTRACE alone. The
+         * value counts only together with the identity and memory checks of this stop. */
+        personality_ok = hello_ok && reported_personality == 0;
+        at_secure = dir_ok && stack_at_secure(dir, pid);
 
         /* procfs gives a task's entries a root owner when it is not dumpable (dumpable is not
          * 1); the frontend's UID is never 0, so a root-owned environ means "not dumpable". */
         struct stat environ_info;
-        not_dumpable =dir_ok && fstatat(dir, "environ", &environ_info, 0) == 0 && environ_info.st_uid == 0;
+        not_dumpable = dir_ok && fstatat(dir, "environ", &environ_info, 0) == 0 && environ_info.st_uid == 0;
 
         struct stat running, installed;
         int exe = dir_ok ? openat(dir, "exe", O_RDONLY | O_CLOEXEC) : -1;
@@ -368,7 +418,9 @@ int main(int argc, char **argv) {
         if (dir_ok) frontend_label = apparmor_label(dir);
 
         int listing = dir_ok ? openat(dir, "fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-        listing_result = !dir_ok ? "not-attempted" : listing >= 0 ? "ok" : errname(errno);
+        int listing_errno = listing < 0 ? errno : 0;
+        listing_result = !dir_ok ? "not-attempted" : listing >= 0 ? "ok" : errname(listing_errno);
+        listing_refused = dir_ok && listing < 0 && (listing_errno == EACCES || listing_errno == EPERM);
         if (listing >= 0) close(listing);
         descriptors = fields_ok && descriptors_exact(pidfd, fdsize);
         if (dir >= 0) close(dir);
@@ -393,7 +445,7 @@ int main(int argc, char **argv) {
     field("frontendAppArmor", frontend_label);
     accepted = accepted && roles_ok && groups_exclude && single_thread && filter_mode && one_filter && nnp_set &&
                tracer_ok && signals_ok && personality_ok && at_secure && not_dumpable && identity && maps_ok &&
-               namespaces_ok && descriptors;
+               namespaces_ok && listing_refused && descriptors;
     flag("accepted", accepted);
     char verdict = accepted ? 'A' : 'R';
     flag("verdictSent", write(conn, &verdict, 1) == 1);

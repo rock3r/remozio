@@ -1,8 +1,9 @@
 /*
  * Protected-launch frontend fixture: a static, non-PIE image that the supervised
- * runner installs as root:<disposable group> 2755. It applies its code policy at
- * its first instructions, before it reads argv or creates a socket, and it never
- * executes another program. It is a measurement fixture, not the product frontend.
+ * runner installs as root:<disposable group> 2755. At the start of main, after the
+ * static C library startup, it reads its personality and applies its code policy,
+ * before it reads argv or creates a socket, and it never executes another program.
+ * It is a measurement fixture, not the product frontend.
  *
  * Exit codes: 0 monitor accepted, 2 monitor rejected, 3 a forbidden self-test
  * operation returned, 4 usage, 5 code policy setup failed, 10 connect refused with
@@ -26,6 +27,11 @@
 
 /* Writable data at a fixed address (non-PIE) for the same-UID memory controls. */
 volatile char rmz_marker[16] __attribute__((used)) = "RMZPL-MARKER-v1";
+
+/* The personality the kernel left after exec, read before the filter forbids the call.
+ * The monitor cannot read /proc/<pid>/personality (root-owned, mode 0400, for a task that
+ * is not dumpable) with CAP_SYS_PTRACE alone, so the hello carries this value. */
+static unsigned long start_personality = ~0UL;
 
 #define LO(i) ((uint32_t)(offsetof(struct seccomp_data, args) + 8 * (i)))
 #define HI(i) ((uint32_t)(offsetof(struct seccomp_data, args) + 8 * (i) + 4))
@@ -112,8 +118,12 @@ static int submit(const char *path) {
     if (sock < 0) return 11;
     if (connect(sock, (struct sockaddr *)&address, sizeof address) != 0)
         return errno == EACCES ? 10 : 11;
-    static const char hello[] = "RMZPL1\n";
-    if (write(sock, hello, 7) != 7) return 12;
+    /* "RMZPL1 " + the personality as 8 hex digits + "\n": one 16-byte message. */
+    char hello[16] = "RMZPL1 ";
+    for (int digit = 0; digit < 8; digit++)
+        hello[7 + digit] = "0123456789abcdef"[(start_personality >> (28 - 4 * digit)) & 0xf];
+    hello[15] = '\n';
+    if (write(sock, hello, sizeof hello) != (ssize_t)sizeof hello) return 12;
     char verdict = 0;
     if (read(sock, &verdict, 1) != 1) return 12;
     return verdict == 'A' ? 0 : verdict == 'R' ? 2 : 12;
@@ -137,6 +147,8 @@ static int forbidden(const char *test) {
         syscall(SYS_execve, "/usr/bin/true", arguments, NULL);
     } else if (strcmp(test, "selftest-mprotect") == 0) {
         mprotect((void *)((uintptr_t)rmz_marker & ~(uintptr_t)4095), 4096, PROT_READ | PROT_EXEC);
+    } else if (strcmp(test, "selftest-mmap-exec") == 0) {
+        mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     } else if (strcmp(test, "selftest-shared") == 0) {
         mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     } else if (strcmp(test, "selftest-clone") == 0) {
@@ -150,6 +162,7 @@ static int forbidden(const char *test) {
 }
 
 int main(int argc, char **argv) {
+    start_personality = (unsigned long)syscall(SYS_personality, 0xffffffffUL); /* query only */
     if (apply_code_policy() != 0) _exit(5);
     if (argc == 2 && strcmp(argv[1], "dump-filter") == 0) {
         put(1, (const char *)policy, sizeof policy);

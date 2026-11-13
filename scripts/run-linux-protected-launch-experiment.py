@@ -32,6 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "experiments/linux-protected-launch"
 FRONTEND, MONITOR, ATTACKER = (FIXTURES / name for name in ("frontend.c", "monitor.c", "attacker.c"))
 CLEANUP_SOURCE = ROOT / "scripts/run-linux-caller-experiment.py"
+# The process-group cleanup is reused from the caller runner, which is loaded (and so runs its
+# top level) at import. A change to that runner's import-time behaviour reaches this one.
 _spec = importlib.util.spec_from_file_location("remozio_owned_caller_cleanup", CLEANUP_SOURCE)
 _cleanup = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_cleanup)
@@ -51,7 +53,7 @@ EXITS = frozenset({"accepted", "rejected", "forbidden-returned", "usage", "polic
                    "socket-failure", "protocol-failure", "SIGSYS", "signaled", "unknown", "other", "wait-failed",
                    "spawn-failed"})
 LABELS = frozenset({"unconfined", "confined", "unavailable", "not-attempted"})
-ATTACKER_VALUES = YES_NO | ERRNO | EXITS | {"not-attempted", "mismatch", "short", "unreadable", "created", "refused",
+ATTACKER_VALUES = YES_NO | ERRNO | EXITS | {"not-attempted", "mismatch", "short", "unreadable", "created",
                                             "failed", "missing", "overflow"}
 MONITOR_ERRORS = frozenset({"usage", "privilege-drop", "accept", "accept-timeout", "overflow"})
 FAILURE_KEYS = frozenset({"spawn", "installed.spawn", "control.spawn", "error"})
@@ -115,13 +117,16 @@ CASES = {
     "n4": _case("n4", NO_ELEVATION),
     "n5": _case("n5", {"frontendExit": "accepted"}, ADMITTED),
     "n6": _case("n6", {"frontendExit": "accepted"}, ADMITTED),
-    "n7": _case("n7", dict.fromkeys(("exec", "mprotect", "shared", "clone", "x32"), "SIGSYS")),
+    "n7": _case("n7", dict.fromkeys(("exec", "mprotect", "mmap-exec", "shared", "clone", "x32"), "SIGSYS")),
+    # A member keeps all four GID roles: cap_bprm_creds_from_file sets the saved and filesystem
+    # GIDs to the effective GID on every exec, whatever in_group_p decides about the downgrade.
     "n9-untraced": _case("n9-untraced", MEMBER, {**ADMITTED, "groupsExcludeFrontendGroup": "no", "accepted": "no"},
                          member=True),
     "n9-traced": _case("n9-traced", {"execStop": "yes", **MEMBER},
                        {**ADMITTED, "groupsExcludeFrontendGroup": "no", "accepted": "no"}, member=True),
     "n10": _case("n10", {"frontendExit": "rejected"}, NOT_SEIZED, mode="nocap"),
-    "n12": _case("n12", [{"userNamespace": "refused"}, {"userNamespace": "created", **NO_ELEVATION}]),
+    # A policy refusal (EPERM, EACCES) or no elevation; any other unshare errno fails the case.
+    "n12": _case("n12", [{"userNamespace": ("EPERM", "EACCES")}, {"userNamespace": "created", **NO_ELEVATION}]),
     "n13": _case("p1", {"frontendExit": "rejected"}, PIDFD_MISSING, binary="monitor-nopidfd"),
     "n8": _case("n8", {"oPathOpen": "ok", "frontendExit": "rejected"},
                 {**ADMITTED, "exeIsCurrentInstalledImage": "no", "mapsAllowed": "no", "accepted": "no"}),
@@ -314,7 +319,7 @@ def host_metadata():
     # Keep the distribution's numeric ABI revision (6.17.0-41) but no flavor or build text.
     match = re.match(r"^([0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,6})?(?:-[0-9]{1,6})?)(?:[^0-9]|$)", platform.release())
     python = platform.python_version()
-    apparmor ={b"Y\n": True, b"Y": True, b"N\n": False, b"N": False}.get(
+    apparmor = {b"Y\n": True, b"Y": True, b"N\n": False, b"N": False}.get(
         _policy_bytes("/sys/module/apparmor/parameters/enabled", 64), "unavailable")
     return {"os": "Linux", "architecture": "x86_64", "runsAsRoot": True, "osRelease": _os_release(),
             "kernelVersion": match[1] if match else "unknown",
@@ -618,6 +623,7 @@ def measure(timeout=15):
             "measuredAtUTC": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "supervised": True, "trustedCode": False, "productionAdmission": False,
             "host": host, "sources": source_hashes(), "seccompPolicySha256": policy,
+            "installedImageSha256": getattr(run, "frontend_sha256", "not-measured"),
             "setup": setup, "cases": cases, "cleanup": cleanup, "passed": passed,
             "limits": ["C measurement fixture, not the production frontend",
                        "the monitor is not confined beyond its capability set",

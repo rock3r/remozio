@@ -242,8 +242,11 @@ static void attack(const char *prefix, const char *image) {
 static void launch_and_observe(enum setup setup, int share_fs, int detach_after_exec) {
     struct child child;
     int code = spawn(&child, installed, "hold", setup, 1, share_fs);
-    if (setup == USERNS) field("userNamespace", code > 0 && code < EXEC_FAILED ? "refused" : "created");
-    if (setup == USERNS && code > 0 && code < EXEC_FAILED) return;
+    if (setup == USERNS) {
+        /* The unshare errno itself; only EPERM and EACCES count as a policy refusal. */
+        if (code > 0 && code < EXEC_FAILED) { field("userNamespace", errname(code)); return; }
+        field("userNamespace", "created");
+    }
     if (code) { field("spawn", "failed"); return; }
     if (setup == TRACEME) {
         int status = 0;
@@ -267,8 +270,8 @@ static void run_plain(enum setup setup) {
 }
 
 static void selftests(void) {
-    static const char *const tests[] = {"selftest-exec", "selftest-mprotect", "selftest-shared",
-                                        "selftest-clone", "selftest-x32"};
+    static const char *const tests[] = {"selftest-exec", "selftest-mprotect", "selftest-mmap-exec",
+                                        "selftest-shared", "selftest-clone", "selftest-x32"};
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
         struct child child;
         int ok = spawn(&child, installed, tests[i], CORE_LIMIT, 0, 0) == 0;
