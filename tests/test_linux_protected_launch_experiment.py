@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import resource
 import shutil
 import socket
 import stat
@@ -501,8 +502,14 @@ class LiveFixtureTests(unittest.TestCase):
         self.assertTrue(output and len(output) % 8 == 0)
 
     def test_forbidden_operations_are_killed_by_the_filter(self):
-        self.assertEqual(self.attack("n7"), dict.fromkeys(("exec", "mprotect", "mmap-exec", "shared", "clone", "x32"),
-                                                          "SIGSYS"))
+        expected = dict.fromkeys(("exec", "mprotect", "mmap-exec", "shared", "clone", "x32"), "SIGSYS")
+        self.assertEqual(self.attack("n7"), expected)
+        # sudo gives the command a hard core limit of 0 (rlimit_core); the self-tests must still run.
+        zero_core = lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        output = subprocess.run([str(self.attacker), "n7", str(self.frontend), str(self.frontend), "/nonexistent/s",
+                                 "4294967294", "10"], stdin=subprocess.DEVNULL, capture_output=True, check=True,
+                                timeout=30, preexec_fn=zero_core).stdout
+        self.assertEqual(EXPERIMENT.parse_report(output), expected)
 
     def test_hello_carries_the_personality_read_before_the_filter(self):
         libc = ctypes.CDLL(None, use_errno=True)

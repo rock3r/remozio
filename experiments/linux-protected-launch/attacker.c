@@ -111,9 +111,13 @@ static int prepare(enum setup setup) {
         return sigprocmask(SIG_BLOCK, &set, NULL) == 0 ? 0 : errno;
     }
     case CORE_LIMIT: {
-        /* RLIMIT_CORE of 1 also disables piped core handlers for the expected SIGSYS. */
-        struct rlimit one = {1, 1};
-        return setrlimit(RLIMIT_CORE, &one) == 0 ? 0 : errno;
+        /* RLIMIT_CORE of 1 also disables piped core handlers for the expected SIGSYS. Under
+         * sudo the hard limit is already 0 (sudoers rlimit_core defaults to 0), and an ordinary
+         * user cannot raise it, so keep 0 then. The SIGSYS outcome is the same either way. */
+        struct rlimit current;
+        if (getrlimit(RLIMIT_CORE, &current) != 0) return errno;
+        struct rlimit limit = {current.rlim_max >= 1 ? 1 : 0, current.rlim_max >= 1 ? 1 : 0};
+        return setrlimit(RLIMIT_CORE, &limit) == 0 ? 0 : errno;
     }
     case USERNS: return unshare(CLONE_NEWUSER) == 0 ? 0 : errno;
     default: return 0;
