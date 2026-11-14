@@ -151,9 +151,9 @@ final class ReleaseManifestTests: XCTestCase {
             component(path: "Contents/MacOS/cafe\u{0301}")])
         XCTAssertEqual(composed.components, decomposed.components)
         XCTAssertEqual(composed, decomposed)
-        XCTAssertEqual(try composed.canonicalBytes, referenceBytes(composed))
-        XCTAssertEqual(try decomposed.canonicalBytes, referenceBytes(decomposed))
-        XCTAssertNotEqual(try composed.canonicalBytes, decomposed.canonicalBytes)
+        XCTAssertEqual(try composed.canonicalBytes, try referenceBytes(composed))
+        XCTAssertEqual(try decomposed.canonicalBytes, try referenceBytes(decomposed))
+        XCTAssertNotEqual(try composed.canonicalBytes, try decomposed.canonicalBytes)
     }
 
     private func cacheFixture(schema: UInt64) throws -> ReleaseManifest {
