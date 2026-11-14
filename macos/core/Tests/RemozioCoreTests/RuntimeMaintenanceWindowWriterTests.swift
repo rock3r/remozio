@@ -69,8 +69,9 @@ final class RuntimeMaintenanceWindowTransitionTests: XCTestCase {
         try maintenanceValue().requireReplacing(current)
     }
     func testIllegalJumpsAndOperationReplayRefuse() throws {
-        for (from, to) in [(Window.Phase.authorized, .executing), (.draining, .stopped), (.stopped, .workSettled),
-                           (.executing, .stopped), (.needsOwnerRecovery, .executing), (.restored, .draining)] {
+        let forbidden: [(Window.Phase, Window.Phase)] = [(.authorized, .executing), (.draining, .stopped), (.stopped, .workSettled),
+            (.executing, .stopped), (.needsOwnerRecovery, .executing), (.restored, .draining)]
+        for (from, to) in forbidden {
             let previous = try maintenanceValue(from)
             XCTAssertThrowsError(try maintenanceValue(to, previous: previous).requireReplacing(previous))
         }
