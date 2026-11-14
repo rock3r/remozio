@@ -256,7 +256,7 @@ Keep the existing 120-second command limit and 1800-second local allocation. Rep
 | Attended live gate | Required observation | State in this plan |
 | --- | --- | --- |
 | Native custody | Real Root caller, signed installed bundle, fixed Setup path, admission/placement leases, actual account and service identities | Not run; required for A11c and native providers |
-| Custody cost | Time per accepted frame of the native custody checks. `validateCustody` runs 5 times per frame and each run looks up the owner and the service accounts in the directory service (A11c review) | Not run; measure in the first live native gate |
+| Custody cost | Time per accepted frame of the native custody checks. `validateCustody` runs 5 times per frame and each run looks up the owner and the service accounts in the directory service (A11c review) | Not run; measure in the first live native gate. Include `SignedReleaseInspection.inspect` (verifyRelease) and `validateSelf` (verifyCode), which run on every context frame and twice around each perform (A11d review); compare with the signature inspection timings of issue 725 |
 | Material | Missing reference through real native preparation; existing material/key/activity remains exact; every custody failure refuses | Not run; required for A11f |
 | Publication | Real protected destinations, all eight modes/owners/bytes, exact-file retention and partial-publication recovery | Not run; required for A11g/A11i |
 | Completion | Correct files before the single marker update; lost acknowledgement and published damaged-file refusal without repair | Not run; required for A11h/A11i |
@@ -270,3 +270,7 @@ No unattended Root/sudo, secret access, signing identity, service restart, hardw
 The provider semantic adapters, installed approval flow, hardware and platform gates remain separate and unqualified.
 Keep the existing Setup UX, admission closure, durable manifest/floors and restart-health contract unchanged.
 The full Remozio objective remains incomplete.
+
+## Review addenda
+
+- A11d review: `withTargetPair` must run only after P04 closes its writer. In A11d this is only a comment. A11i and A11k must enforce the order and add a test that exercises it.
