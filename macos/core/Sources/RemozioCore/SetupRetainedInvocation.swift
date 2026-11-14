@@ -23,6 +23,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     static func open(owner: SetupAccountOwner, invocation: XPCInvocationGuard, externalForm: Data) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw SetupAdministratorAuthorizationError.wrongProcess }
         let peer = try invocation.verifyInvocation()
+        guard peer.userID > 0, peer.userID < UInt32.max else { throw SetupAdministratorAuthorizationError.wrongProcess }
         let reference = try SetupAdministratorNative.importCurrentRights(externalForm: externalForm)
         return try begin(owner: owner, peer: peer, incarnation: invocation.incarnation, policy: invocation.acceptedPeerPolicy, verifyRights: {
             try SetupAdministratorNative.validatePolicy()
