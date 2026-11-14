@@ -256,6 +256,7 @@ Keep the existing 120-second command limit and 1800-second local allocation. Rep
 | Attended live gate | Required observation | State in this plan |
 | --- | --- | --- |
 | Native custody | Real Root caller, signed installed bundle, fixed Setup path, admission/placement leases, actual account and service identities | Not run; required for A11c and native providers |
+| Custody cost | Time per accepted frame of the native custody checks. `validateCustody` runs 5 times per frame and each run looks up the owner and the service accounts in the directory service (A11c review) | Not run; measure in the first live native gate |
 | Material | Missing reference through real native preparation; existing material/key/activity remains exact; every custody failure refuses | Not run; required for A11f |
 | Publication | Real protected destinations, all eight modes/owners/bytes, exact-file retention and partial-publication recovery | Not run; required for A11g/A11i |
 | Completion | Correct files before the single marker update; lost acknowledgement and published damaged-file refusal without repair | Not run; required for A11h/A11i |
