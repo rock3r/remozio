@@ -150,6 +150,24 @@ final class RetainedSetupImportAcknowledgementOwnerTests: XCTestCase {
             try expected.requireSame(as: entry(s)); try body(s, files)
         }
     }
+    static func withNativeAcknowledgementFixture(_ body: (RetainedPolicyWriterFixture,
+        PreparationIntentStore.RetainedImportFrame, [RuntimePublishedArtifactValidation.Artifact]) throws -> Void) throws {
+        let suite = RetainedSetupImportAcknowledgementOwnerTests(selector: NSSelectorFromString(
+            "testRealFilesAdvanceOnceAndFreshRecoveryHasTwoObservationsWithoutRepair"))
+        try suite.withFiles { state, files in
+            let machine = state.f.machine()
+            let frame = try machine.withSharedImportJournal { journal in
+                let journal = try XCTUnwrap(journal)
+                return try machine.withSharedImportSnapshot(journal: journal) { directory, owner in
+                    let actual = try suite.entry(state)
+                    let inputs = try MachineUpdateRetainedSetupRuntimeInputs.capture(expected: actual.runtime, journal: journal,
+                        verifyCurrent: { try machine.validateStorageLease() }, readRelay: { try .read($0, directory: directory, owner: owner) })
+                    return (entry: actual, inputs: inputs)
+                }
+            }
+            try body(state.f, frame, files.artifacts)
+        }
+    }
     private func invoke(_ s: State, _ files: Files, checks: Checks = Checks(), custody: Bool = true)
         throws -> (frame: Frame, advanced: Bool) {
         let expected = try entry(s), machine = s.f.machine()

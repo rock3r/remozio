@@ -12,6 +12,8 @@ enum MachineUpdateRetainedSetupImportAcknowledgement {
         fileprivate let leave: () -> Void
         fileprivate let frame: Frame
         let artifact: Artifact?
+        let material: RuntimePreparationMaterial?
+        let bundle: RuntimeConfigurationBundle?
         var description: String { "RetainedSetupImportAcknowledgementScope(redacted)" }
         var debugDescription: String { description }
         func read() throws -> Frame { try check(false); return frame }
@@ -51,7 +53,8 @@ enum MachineUpdateRetainedSetupImportAcknowledgement {
                         let actual = try borrowed.read()
                         guard observations < 2, let snapshot = actual.entry.policy else { throw RuntimePreparationError.changedScope }
                         observations += 1
-                        func loan<Value>(artifact: Artifact? = nil, _ body: (Scope) throws -> Value) throws -> Value {
+                        func loan<Value>(artifact: Artifact? = nil, material: RuntimePreparationMaterial? = nil,
+                            bundle: RuntimeConfigurationBundle? = nil, _ body: (Scope) throws -> Value) throws -> Value {
                             var active = true, operating = false, violated = false
                             defer { active = false }
                             let scope = Scope(check: { enter in
@@ -59,7 +62,7 @@ enum MachineUpdateRetainedSetupImportAcknowledgement {
                                 guard active, !violated else { throw JournalLeaseError.invalidated }
                                 guard !enter || !operating else { violated = true; throw PreparationStoreError.transactionActive }
                                 if enter { operating = true }
-                            }, leave: { operating = false }, frame: actual, artifact: artifact)
+                            }, leave: { operating = false }, frame: actual, artifact: artifact, material: material, bundle: bundle)
                             try scope.requireActive(); let value = try body(scope); try scope.requireActive(); return value
                         }
                         try loan(verifyCurrent); try borrowed.requireActive()
@@ -78,7 +81,7 @@ enum MachineUpdateRetainedSetupImportAcknowledgement {
                         if let retainedPaths, retainedPaths != artifacts.map(\.path) { throw RuntimePreparationError.changedScope }
                         if let retainedBytes, retainedBytes != artifacts.map(\.bytes) { throw RuntimePreparationError.changedScope }
                         for artifact in artifacts {
-                            let bytes = try loan(artifact: artifact) { try readArtifact(artifact, $0) }
+                            let bytes = try loan(artifact: artifact, material: first, bundle: bundle) { try readArtifact(artifact, $0) }
                             guard bytes == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
                         }
                         let second = try loan(readMaterial)
