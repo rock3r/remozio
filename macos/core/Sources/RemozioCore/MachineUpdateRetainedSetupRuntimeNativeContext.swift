@@ -126,7 +126,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
             guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0, let release, code != nil else { throw JournalLeaseError.invalidated }
             try release(entry, candidate)
         }
-        fileprivate func verifyCode() throws {
+        func verifyCode() throws {
             guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0, release != nil, let code else { throw JournalLeaseError.invalidated }
             try code()
         }
@@ -155,6 +155,19 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
         }
         fileprivate func expire() { verify = nil }
     }
+    private static func withApprovalLoan<Value>(release: @escaping (Entry, SignedReleaseEvidence) throws -> Void,
+        code: @escaping Verify, perform: (CurrentAuthorityApproval) throws -> Value) throws -> Value {
+        let approval = CurrentAuthorityApproval(release: release, code: code)
+        defer { approval.expire() }; return try perform(approval)
+    }
+    /// Only a real held authority scope can enter this producer. Approval expires on return and throw.
+    static func withCurrentAuthorityApproval<Value>(from scope: MachineUpdateRetainedSetupRuntimeNativeAuthority.HeldScope,
+        perform: (CurrentAuthorityApproval) throws -> Value) throws -> Value {
+        try scope.requireActive()
+        return try withApprovalLoan(release: { try scope.verifyRelease($0, candidate: $1) }, code: scope.verifyCode) { approval in
+            let result = try perform(approval); try scope.requireActive(); return result
+        }
+    }
     final class NativeContext {
         let verification: Context
         private let custody: NativeCustody
@@ -163,7 +176,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
             try custody.withResources(body)
         }
     }
-    /// A11d supplies the approval capability. There is no approval producer or placeholder code verifier in A11c.
+    /// The native context accepts only the held current-authority approval capability.
     static func withNativeContext<Value>(custody: NativeCustody, approval: CurrentAuthorityApproval,
         expected: Frame, candidate: SignedReleaseEvidence, perform: (NativeContext) throws -> Value) throws -> Value {
         try custody.withResources { _, _ in
@@ -245,6 +258,16 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
         } catch { try? machine.close(); throw error }
     }
     #if DEBUG
+    /// Negative-only seam. No caller receives this approval before the shared producer loan has expired.
+    static func expiredApprovalForTesting(bodyThrows: Bool) throws -> CurrentAuthorityApproval {
+        var escaped: CurrentAuthorityApproval?
+        do {
+            try withApprovalLoan(release: { _, _ in throw JournalLeaseError.rootRequired }, code: { throw JournalLeaseError.rootRequired }) {
+                escaped = $0; if bodyThrows { throw JournalLeaseError.invalidated }
+            }
+        } catch { guard bodyThrows, error as? JournalLeaseError == .invalidated else { throw error } }
+        guard let escaped else { throw JournalLeaseError.invalidated }; return escaped
+    }
     struct TestControls {
         let validateCustody: Verify
         let validateRelease: (Entry) throws -> Void
