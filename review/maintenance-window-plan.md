@@ -212,6 +212,13 @@ M10 also joins the actual worker, native loans and cleanup owners before declari
 If any owner remains live or settlement is uncertain, keep the reservation and report recovery pending.
 The worker never releases an orphan automatically or repeats its body. It exposes the orphan to M11 and the explicit M12 action.
 
+`SetupAccountOwner.closeWhenIdle` waits while either Setup admission remains held. An orphan therefore prevents orderly shutdown from finishing.
+launchd can terminate Setup after its existing `ExitTimeOut`. A durable window must already record any native body before this boundary.
+After restart, M10 reconciles that recorded attempt and its actual outcome. It never repeats the body or treats termination as rollback.
+Before a durable window exists, C02 has no native body or mutation loan. This pre-window orphan leaves no durable trace after process termination.
+Reopening local admission after Setup restarts is acceptable only in that pre-window case. It proves no operation completion.
+The future shutdown test must distinguish these two cases and preserve every unresolved durable window across restart.
+
 ### Reboot and an authority already running
 
 `RuntimeJobStopSession` uses `launchctl bootout system/<label>`; it does not delete the plist, disable it or call `SMAppService.unregister`.
