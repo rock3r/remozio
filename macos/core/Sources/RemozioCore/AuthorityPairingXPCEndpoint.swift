@@ -144,16 +144,16 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             state.withLock { $0.busy = true; $0.operations[id] = false }
             var completion: Completion?, transferred = false
             defer {
-                busy = false
+                busy = false; budget.release()
                 if !transferred {
                     if let completion { completion.close() }
-                    else { budget.release(); _ = state.withLock { $0.operations.removeValue(forKey: id) } }
+                    else { _ = state.withLock { $0.operations.removeValue(forKey: id) } }
                 }
             }
             let activity = try access.acquireReleaseActivity()
             state.withLock { $0.operations[id] = activity != nil }
             let owned = Completion(activity: activity) { [self] in
-                budget.release(); _ = state.withLock { $0.operations.removeValue(forKey: id) }
+                _ = state.withLock { $0.operations.removeValue(forKey: id) }
             }
             completion = owned
             try access.verifyCurrent()

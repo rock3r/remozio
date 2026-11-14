@@ -691,8 +691,8 @@ extension AuthorityPairingSetupTests {
     func testMaintenancePairingOwnerSurvivesWorkReturnBeforeReplyStarts() throws {
         let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
         let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
-        let result = Box<UInt64>(0)
-        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+        let result = Box<UInt64>(0), budget = try AuthorityXPCWorkBudget(maximum: 1)
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: budget, verify: {},
             authorize: { _ in }, invalidate: {}, onHandshake: {
                 entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
             })
@@ -702,6 +702,7 @@ extension AuthorityPairingSetupTests {
         }
         XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
         XCTAssertEqual(result.value, 0)
+        XCTAssertTrue(budget.acquire()); budget.release()
         let observed = try endpoint.maintenancePairingWork()
         XCTAssertTrue(observed.ready); XCTAssertTrue(observed.operationActive)
         XCTAssertEqual(observed.stagedAttempts, 0); XCTAssertEqual(observed.activityOwners, 1)
