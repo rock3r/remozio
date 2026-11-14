@@ -19,7 +19,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     private typealias Material = Sequence.Material
     private typealias Artifact = RuntimePublishedArtifactValidation.Artifact
     private typealias Read = PreparationIntentStore.InitialRuntimeRead
-    private enum Fault: Error, Equatable { case policy, afterAcknowledgement, materialHost, unexpected }
+    private enum Fault: Error, Equatable { case policy, afterAcknowledgement, materialHost, unexpected, assemblyPair }
     private final class SharedVerification: @unchecked Sendable {
         let body: (Material) throws -> Void
         let value: Material
@@ -87,7 +87,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         var files: Files?, intent: SharedSetupImportIntent?
         var machines: [PreparationIntentStore] = [], startupWriters: [AuthorityJournal] = []
         var assemblyPairOpens = 0, assemblyPairReads = 0
-        var failAfterPolicy = false, refuseAssemblyHost = false
+        var failAfterPolicy = false, refuseAssemblyHost = false, stopAtAssemblyPair = false
         var events: [String] = [], captures: [Frame] = [], outerReads: [[Read: Int]] = []
         var reads: [Read: Int] = [:], commits = 0, startupOpens = 0, hostChecks = 0
         var advanced: [Bool] = [], lastAcknowledged: Frame?
@@ -323,6 +323,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                         let actual = try journal.captureRetainedSetupPolicyBoundary(expected: initial)
                         try XCTUnwrap(expected.intent).requireRecorded(actual); return actual
                     }
+                    if s.stopAtAssemblyPair { _ = try read(); throw Fault.assemblyPair }
                     return try body(read)
                 }, useMachine: { body in try s.withMachine(body) }, publication: publication, completion: completion)
         }, acknowledgement: { expected, verify in
@@ -525,17 +526,21 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     }
     func testAssemblyClosesP04StartupBeforeOpeningTheTargetReadOnlyPair() throws {
         try fixture { s in
-            try withAssembly(s) { _, run in
-                let actual = try run()
-                XCTAssertEqual(s.events, ["material", "policy", "publication"])
-                XCTAssertEqual(s.startupOpens, 1); XCTAssertFalse(s.startupWriters.isEmpty)
-                XCTAssertEqual(s.assemblyPairOpens, 1); XCTAssertEqual(s.assemblyPairReads, 63)
-                budget(s, captures: 5, journal: false)
-                XCTAssertTrue(actual.entry.runtime.state.configurationPublished); XCTAssertNil(actual.inputs.intent)
-                XCTAssertNil(actual.entry.activation.plan); XCTAssertFalse(actual.entry.activation.jobsRegistered)
-                for writer in s.startupWriters { XCTAssertThrowsError(try writer.read { _ in true }) }
-                for machine in s.machines { XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite()) }
+            s.stopAtAssemblyPair = true
+            XCTAssertThrowsError(try withAssembly(s) { _, run in _ = try run() }) {
+                XCTAssertEqual($0 as? Fault, .assemblyPair)
             }
+            XCTAssertEqual(s.events, ["material", "policy", "publication"])
+            XCTAssertEqual(s.startupOpens, 1); XCTAssertFalse(s.startupWriters.isEmpty)
+            XCTAssertEqual(s.assemblyPairOpens, 1); XCTAssertEqual(s.assemblyPairReads, 1)
+            budget(s, captures: 3, journal: false)
+            let actual = try assemblyFrame(s)
+            XCTAssertEqual(actual.entry.intent?.phase, .recorded)
+            XCTAssertFalse(actual.entry.runtime.state.configurationPublished); XCTAssertNil(actual.inputs.intent)
+            XCTAssertNil(actual.entry.activation.plan); XCTAssertFalse(actual.entry.activation.jobsRegistered)
+            XCTAssertEqual(s.files?.publicationCalls, 0)
+            for writer in s.startupWriters { XCTAssertThrowsError(try writer.read { _ in true }) }
+            for machine in s.machines { XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite()) }
         }
     }
     func testAssemblyCarriesActualImportChoicesThroughPublicationAndAcknowledgement() throws {
@@ -556,24 +561,24 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             }
         }
     }
-    func testAssemblyPublishedRecoverySkipsMaterialAndAbsentThenEmptyAcknowledgement() throws {
+    private func assemblyPublishedRecovery(empty: Bool) throws {
         try fixture { s in
             _ = try run(s); let files = try XCTUnwrap(s.files), stamps = try files.stamps()
+            if empty { try s.seedImport(empty: true) }
             try withAssembly(s) { _, run in
-                let actual = try run(); budget(s, captures: 4, journal: false)
-                XCTAssertFalse(actual.inputs.journalPresent); XCTAssertNil(actual.inputs.intent)
-                XCTAssertEqual(s.events, ["policy", "publication"]); XCTAssertEqual(s.commits, 0)
-                XCTAssertEqual(s.startupOpens, 0); XCTAssertTrue(s.advanced.isEmpty)
-            }
-            try s.seedImport(empty: true)
-            try withAssembly(s) { _, run in
-                let actual = try run(); budget(s, captures: 4, journal: true)
-                XCTAssertTrue(actual.inputs.journalPresent); XCTAssertNil(actual.inputs.intent)
+                let actual = try run(); budget(s, captures: 4, journal: empty)
+                XCTAssertEqual(actual.inputs.journalPresent, empty); XCTAssertNil(actual.inputs.intent)
                 XCTAssertEqual(s.events, ["policy", "publication"]); XCTAssertEqual(s.commits, 0)
                 XCTAssertEqual(s.startupOpens, 0); XCTAssertTrue(s.advanced.isEmpty)
             }
             XCTAssertEqual(files.publicationCalls, 8); XCTAssertEqual(try files.stamps(), stamps)
         }
+    }
+    func testAssemblyPublishedRecoverySkipsMaterialAndAbsentAcknowledgement() throws {
+        try assemblyPublishedRecovery(empty: false)
+    }
+    func testAssemblyPublishedRecoverySkipsMaterialAndEmptyAcknowledgement() throws {
+        try assemblyPublishedRecovery(empty: true)
     }
     func testAssemblyHostChangeAfterP04StopsBeforePublicationAndExpiresTheContext() throws {
         try fixture { s in
