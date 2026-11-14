@@ -376,8 +376,11 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M03b2 | Exact CAS phase/outcome writer and atomic first-window migration | 100–195 | One active attempt; unrelated rows exact; uncertainty retirement; no production caller |
 | M03c | Schema 29 policy, material and publication writers | Separate capped cuts | Each writer has an actual schema 29 test; no blanket version widening |
 | M04 | Derived A-only cohort and ordinary-owner stop session | 113 measured | Exact registered scope/identity, retained exit witnesses; no native factory or caller |
-| M05a | Internal coordinator, exchange, worker, native-cleanup and staged-pairing observation | 71-line command draft plus pairing; under200 or an immediate pairing cut | No mutation of user lifetimes; gap/rejected-start/cleanup/staged-pairing tests; no endpoint or permit |
-| M05b | Native authenticated Setup-to-A observation channel and in-memory shutdown binding, shared with M09 | 120–195 per complete cut | Arming blocks new pairing stages under the binding and preserves existing attempts. Test post-arm refusal, staged attempt unchanged and release on cancellation/reopen. Revalidate zero staged pairing after the block; fixed peer/scope/incarnation and no close-time record read |
+| M05a | Internal real work observation, including cross-thread pairing state through reply/activity release | 152 measured | Source6a591d02: Core/Debug and31 pairing plus10 Debug checks fresh;42 focused methods and54 Python results explicitly transferred. No native idle or stop authority. |
+| M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Exact account/attempt/revision/incarnation and minted connection identity; preserve existing stage reservations; serialize stage versus block; exact cancel/reopen/disconnect release. Late close cannot release a newer owner. Internal library only. |
+| M05b2 | Native authenticated endpoint/listener and joined accepted connection ownership | 130–195 planned | Fixed Setup peer and synchronous invocation verification; repeated observations; preserve the M05b1 binding through owned replies and cleanup. No product registration or marker. |
+| M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
+| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | One authenticated protected read boundary; exact phase/revision; real shared reservation through the staged attempt; block new stages before revalidating zero; release only the exact RAM binding. No close-time record read. |
 | M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
 | M05d | Purpose-bound native permit and stop factory, introduced together | 120–195 after support | Bounded work wait, pre-stop cancellation, exact bootout, clean marker plus original exit witness; then actual pair custody |
 | M06 | Shared bootstrap/recovery phase guard for the M05d stop lifecycle | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn |
@@ -452,3 +455,13 @@ Select a qualified signed artifact and exact commands before scheduling any atte
 Crash/logout/reboot and repair tests need prepared attended slots; a 30-minute initial session does not qualify all of them.
 Product question 2 sets how long A may remain unreachable and the acceptable end-to-end delay. Record overruns honestly; never force unsafe cleanup to meet a bound.
 Provider semantics, physical hardware, installed activation and the remaining full Remozio work remain explicit separate obligations.
+
+### M05b supporting cut order (Toni3020)
+
+Toni3018 required the M05a pairing correction first. Its source6a591d02 passed the focused gate72151.
+M05b1 follows that correction; M05b2, M05b3 and M05b4 follow in order. Toni owns publication and merges.
+The four supporting cuts keep each production diff below200 lines. Measure again before each cut's tests.
+M05b1 source5fa698f2 contains the internal owner and its tests; native validation is pending at this plan revision.
+Its stage reservations are not yet attached to real pairing endpoints. M05b4 must prove that integration.
+An observation or decoded binding grants no native authority, idle proof, clean-close marker or stop permit.
+M09 reuses this channel. The existing gateway settings channel and its contracts remain unchanged.

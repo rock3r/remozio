@@ -93,8 +93,11 @@ The readback and native permit must still enforce their current code, protected 
 
 | Cut | Complete responsibility | Planning estimate | Required tests and boundary |
 | --- | --- | --- | --- |
-| M05a | Internal observation of real request/capture/activity, exchange callbacks, queued/rejected starts, native execution custody and staged pairing | 71-line archived command draft plus a measured pairing addition; total under200 or split pairing immediately afterward | Authorization-to-enqueue gap, rejected-start/report reservation, terminal row with live cleanup, staged attempt and active pairing work. No endpoint, idle proof or permit. |
-| M05b | Authenticated Setup-to-A observation channel and connection-bound in-memory marker context, reused by M09 | 120-195 per complete cut | Arming blocks new pairing stages under the binding and preserves existing attempts. Test refusal after arming, existing attempt unchanged, and release on cancellation/reopen. Revalidate zero staged pairing after the block. Exact peer/attempt/revision/gate/incarnation; no close-time record read or native stop factory. |
+| M05a | Internal real work observation, including cross-thread pairing state through reply/activity release | 152 measured | Source6a591d02: Core/Debug and31 pairing plus10 Debug checks fresh;42 focused methods and54 Python results explicitly transferred. No native idle or stop authority. |
+| M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Exact account/attempt/revision/incarnation and minted connection identity; preserve existing stage reservations; serialize stage versus block; exact cancel/reopen/disconnect release. Late close cannot release a newer owner. Internal library only. |
+| M05b2 | Native authenticated endpoint/listener and joined accepted connection ownership | 130–195 planned | Fixed Setup peer and synchronous invocation verification; repeated observations; preserve the M05b1 binding through owned replies and cleanup. No product registration or marker. |
+| M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
+| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | One authenticated protected read boundary; exact phase/revision; real shared reservation through the staged attempt; block new stages before revalidating zero; release only the exact RAM binding. No close-time record read. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
@@ -106,3 +109,13 @@ The archived M05a draft is uncommitted and uncompiled. Its tests also remain une
 Toni2998 asks Bepi to send this plan revision, then resume that draft and add the required staged-pairing observation if it fits.
 Use the M04 base7698e3ef until its actual merge permits main reconciliation. Do not invent merge readiness.
 M03b2/M03c writers do not block these supporting observations. M15 still owns final reachability, full qualification and the attended boundary.
+
+### M05b supporting cut order (Toni3020)
+
+Toni3018 required the M05a pairing correction first. Its source6a591d02 passed the focused gate72151.
+M05b1 follows that correction; M05b2, M05b3 and M05b4 follow in order. Toni owns publication and merges.
+The four supporting cuts keep each production diff below200 lines. Measure again before each cut's tests.
+M05b1 source5fa698f2 contains the internal owner and its tests; native validation is pending at this plan revision.
+Its stage reservations are not yet attached to real pairing endpoints. M05b4 must prove that integration.
+An observation or decoded binding grants no native authority, idle proof, clean-close marker or stop permit.
+M09 reuses this channel. The existing gateway settings channel and its contracts remain unchanged.
