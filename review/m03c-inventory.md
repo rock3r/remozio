@@ -1,8 +1,10 @@
-# M03c retained writer inventory
+# M03c retained writer inventory, Toni 2870
 
 Source `54d95b8a362aed95c28fe47a76d79a0be7d1ec22`, tree `b9639e879ea8162c17bfbc7d7d2e0f47aadd3fa9`.
 Paths below are under `macos/core/Sources/RemozioCore`. This is source review only. No schema 29 writer execution is claimed.
 M03b1 changes startup reads only. M03b2 is not implemented. M03c must close before M15 permits the first native body.
+
+Toni 2870 narrows M03c to policy, material, publication and promotion. Policy/material/publication are mandatory before M15. Promotion must be ready before a migrated machine reaches promotion. Completion and readiness SQL producers are separate issue #760 work. They do not block the window itself.
 
 ## Policy, material and publication
 
@@ -29,7 +31,7 @@ Keep the native scope, paired journal, candidate formats, exact metadata, admiss
 
 Required evidence: actual schema 29 retention and phase CAS, exact other rows/catalog, native scope rejection, uncertainty retirement, and admitted material/publication transitions.
 
-## Completion
+## Issue #760: completion producer
 
 The completion read constructor accepts schema 29 after M03a. Its mutation comparison contracts still exclude 29.
 On this source, searches for the table literal and every CompletionStorage reference found declarations/readers and digest admission, but no executable SQL producer.
@@ -60,7 +62,7 @@ The metadata read constructor accepts 29. The producer declarations, catalog, na
 
 Required evidence: real schema 29 retain and phase change through the existing typed native owner, exact catalog/other rows, full reader/producer cohort, wrong-source rejection and uncertain commit retirement.
 
-## Readiness
+## Issue #760: readiness producer
 
 The source declares canonical readiness records, DDL and readers. I found no executable SQL readiness producer on this source.
 CompletionSnapshot.requireReadinessMetadataChange only permits the existing 27→28 or 28 comparison. It is not a persisted readiness writer.
