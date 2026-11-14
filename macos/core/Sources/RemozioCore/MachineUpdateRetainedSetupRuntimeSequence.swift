@@ -17,14 +17,24 @@ enum MachineUpdateRetainedSetupRuntimeSequence {
         let publication: (Policy, @escaping (Policy) throws -> Void) throws -> Policy
         let acknowledgement: (Frame, @escaping (Frame) throws -> Void) throws -> (frame: Frame, advanced: Bool)
     }
+    struct CaptureBudget {
+        private var captures = 0
+        init() {}
+        mutating func claim() throws {
+            guard captures < 6 else { throw JournalLeaseError.invalidated }
+            captures += 1
+        }
+    }
     static func prepare(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
         admission: UpdateOrdinaryAdmissionLease, fileCustodyAccepted: Bool, useMachine: @escaping UseMachine,
         providers: Providers, verifyCurrent: @escaping (Entry) throws -> Void,
+        verifyMaterialCurrent: @escaping (Material) throws -> Void,
         didCapture: @escaping (Frame) throws -> Void = { _ in }) throws -> Frame {
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
         try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
         let processID = getpid(), thread = pthread_self()
-        var active = true, providing = false, violated = false, captures = 0
+        var active = true, providing = false, violated = false
+        var budget = CaptureBudget()
         defer { active = false }
         func lifetime() throws {
             guard active, !violated, getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
@@ -39,8 +49,8 @@ enum MachineUpdateRetainedSetupRuntimeSequence {
             try .init(runtime: value.activation.runtime, activation: value.activation.state, intent: value.intent, candidate: candidate)
         }
         func capture() throws -> Frame {
-            try lifetime(); guard !providing, captures < 6 else { throw PreparationStoreError.transactionActive }
-            captures += 1
+            try lifetime(); guard !providing else { throw PreparationStoreError.transactionActive }
+            try budget.claim()
             var lent = true, invoked = false, checked: Frame?
             defer { lent = false }
             let result = try useMachine { machine in
@@ -105,6 +115,7 @@ enum MachineUpdateRetainedSetupRuntimeSequence {
                 if before.entry.runtime.state.reference != nil { try actual.requireSame(as: initial) }
                 else if let reference = actual.runtime.state.reference { try actual.requireRetained(reference, from: initial) }
                 else { try actual.requireSame(as: initial) }
+                try lifetime(); try verifyMaterialCurrent(actual); try lifetime()
             })
             current = try capture()
             guard returned == current.entry.runtime.state, let reference = returned.reference else { throw RuntimePreparationError.incomplete }
