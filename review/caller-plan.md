@@ -5,6 +5,7 @@
 This is a document-only proposal from Toni's assignment 2693. It adds no caller or native operation.
 The inspected main is `86729223e4b29780800a2959cffbef20e7785a9f`, tree `f29e57b4775309d71f312d5937c2d0ce09462b6a`.
 Toni owns the plan, implementation order, native capacity, publication and merges.
+This revision applies Saturn's review 2702 and Toni's decisions 2703, 2706 and 2708. The prior same-owner rule was contradictory.
 
 Start with [issue 725](https://github.com/rock3r/remozio/issues/725).
 Its authority selection and attended checks remain required. CI does not prove them.
@@ -19,6 +20,7 @@ The A11 source tests and the private C2 timing probe do not satisfy the attended
 ## Entry and request boundary
 
 Use the existing signed app to local Root Setup XPC boundary as the proposed first entry.
+The calling app session belongs to the owner of the current authority, not the owner of the historical target.
 Reuse `AdministrativeSetupXPCListener`, `XPCInvocationGuard` and the existing administrator authorization policy.
 Do not add a command-line authority selector, a phone RPC, a new service or a second privileged process.
 A dedicated retained operation needs an explicit negotiated capability. Do not broaden ordinary `prepareRuntime` or `activateRuntime`.
@@ -37,6 +39,7 @@ Never replace these checks with a request UID, an environment value or a later P
 Import administrator rights on that exported invocation. Retain a scoped rights owner, not the external form bytes.
 Bind cancellation and request identity to that connection. Expiry, invalidation or cancellation stops further stages.
 Keep credential and authorization checks separate: a signed peer does not establish user consent.
+The imported administrator rights authorize this privileged machine operation. They do not select the target or create its consent.
 
 ## Derive the current authority from the verified peer
 
@@ -61,9 +64,28 @@ Pass only the derived current account ID to `RuntimeNativeAuthority.withNativeSc
 Its internal `currentAuthorityAccountID` argument remains an implementation detail behind the caller capability.
 The held current authority policy supplies executing-code checks and `ReleaseGenerationPreflight` floors.
 The target's recorded startup policy supplies historical file bytes only. Neither policy can replace the other.
-Require the target to belong to the authenticated owner and the exact retained machine operation.
-Use a fresh actual target capture; compare any client observation before a mutation.
-Revalidate the peer/account binding at acquisition and before the final reply. Changed bindings refuse.
+Derive the target only from fresh protected retained machine state, including inventory and the actual journal records.
+Require exactly one retained setup operation in progress. Zero or multiple operations refuse; the request cannot choose between them.
+Require its target account ID to differ from the current authority account ID.
+The inventory must bind that target to another UID. Validate its current directory identity independently.
+That target's verified `LocalAccountIdentity` becomes `runtime.setup.owner` and the `owner` argument passed to `prepare`.
+Never pass the peer's owner identity as the target owner merely because the peer invoked Setup.
+
+Admission needs three separate proofs, as decided by Toni in message 2706:
+
+1. Administrator rights imported on the verified exported invocation authorize the privileged machine operation.
+2. The target's existing retained initialization, material, import and relay records bind its recorded choices and consent.
+3. The unique in-progress retained operation identifies a different target account and UID through protected machine state.
+
+The caller may advance only that retained operation through A10/A11's exact frame checks.
+Validate actual absent or empty material/import states through the existing phase rules; do not require fabricated consent records.
+It cannot create target consent, replace recorded choices, enroll an account or choose another target from a payload.
+The peer-derived current authority supplies code policy and release floors; it does not supply the target's consent.
+Retain those two account bindings as distinct values throughout the invocation.
+Compare any client target observation with the selected protected state before a mutation. It grants no authority.
+Revalidate both account bindings and the exact selected operation at acquisition and before the final reply.
+A successful final transition may complete the selected operation; validate that actual result instead of selecting a different pending operation.
+Changed identities, choices or unrelated retained work refuse.
 
 ## Scope construction and lifetime
 
@@ -73,9 +95,13 @@ Do not reuse an audit-upgrade scope merely because it already carries administra
 That scope owns a different operation and state transition.
 
 Capture the actual retained Entry and import Inputs through the existing owners, under the scoped reservation.
-Close the capture's machine handle before lending native providers. Do not leave a Setup pool handle to contend with A11k.
-Validate any new pool suspension/resumption contract on every exit, including cleanup failure.
-Keep admission closed if resource cleanup cannot complete; do not release the reservation on an uncertain close.
+The production storage contract is decided: no Setup pool suspension is needed or added in C03.
+`SetupAccountOwner.open` uses `Machines.scoped`; each `machines.use` opens a fresh handle and closes it before returning.
+The `.retained` form serves logical fixtures. It does not describe the production lease lifetime.
+Return successfully from the scoped capture before constructing any native loan. Never call the native factory inside `machines.use`.
+A capture-close failure prevents native entry. Keep the reservation until cleanup settles; do not silently reopen or admit another operation.
+Use the existing native factories to open their own scoped machine handles. Test their closed boundaries, not a persistent pool.
+This decision depends on production keeping scoped access. If production adopts `.retained`, revisit C03 and its estimate before implementation.
 
 The proposed native composition is exactly this nested lifetime:
 
@@ -100,6 +126,8 @@ Do not cache a `HeldScope`, approval, `NativeContext` or prepared Frame across r
 
 Seb must attend this check on Toni's selected installed artifact, with the actual authority service running normally.
 Measure `ProtectedJournalLease.acquire` for the derived current authority journal. Record the real refusal or acquisition and lease owner.
+Measure the entire acquired lease lifetime until its actual close, including material, P04, C2, D2 and ACK.
+The live authority cannot use that exclusive journal lease during this interval, even when initial acquisition succeeds.
 Also inspect current/target directory identities, including the case where their journal or continuity directories alias.
 Distinguish contention with the live service from contention caused by this invocation's own held pair or Setup machine handle.
 A free-service test alone does not prove the running-service path. Do not stop the service to obtain a green result.
@@ -116,6 +144,15 @@ An existing unresolved `writing` marker remains unavailable. Do not automaticall
 It requires an exact fresh source pair, including checkpoint and revision, and follows the busy investigation.
 Conflicting published file bytes also refuse. They do not authorize an overwrite or an automatic repair.
 
+## Open product decision: retained consent age
+
+The current proposal has no age-based expiry for the target's recorded retained consent, as Toni specified in message 2708.
+This does not relax exact frame, identity, revision, scope or authorization checks. Changed state still refuses.
+Toni will ask Seb whether an old retained setup needs an additional age limit during the attended busy session for issue 725.
+If Seb selects a limit, add its `stale` refusal at C01's protected target admission check and test its boundary before implementation.
+Do not invent an expiry duration, refresh recorded consent automatically or infer a new target confirmation from administrator rights.
+This question does not block review of this document. The attended prerequisite still precedes caller implementation.
+
 ## Proposed cuts after the attended prerequisite
 
 Each cut is a complete responsibility. Every changed production line counts, including helpers, guards and deletions.
@@ -124,12 +161,16 @@ Each ready PR merges before the next cut. No stub, permissive default or tempora
 
 | Cut | Responsibility and proposed production paths | Estimate | Required focused proof |
 | --- | --- | ---: | --- |
-| C01 | Bound peer/account capability and fresh resolver; new caller binding file, narrow Setup owner access | 110–185 | Two published accounts with different floors; forged ID/UID, recycled UID, policy mismatch and changed binding refuse |
+| C01 | Bound current-authority peer and unique protected target resolver; new caller binding file, narrow Setup owner access | 110–195 | Different UIDs; admin rights plus retained target consent; zero/multiple pending setups and changed state refuse; age-based stale seam if selected |
 | C02 | Per-invocation rights, cancellation and Setup reservation; new invocation scope, narrow existing reservation adapters | 120–190 | Rights imported before dispatch; disconnect/expiry, re-entry, cleanup failure and reply ownership |
-| C03 | Native factory composition using A11k; new retained caller operation, narrow store-pool suspension if required | 100–190 | Exact factory order, capture handle closes, one call, result comparison, all exits close; no token leakage |
+| C03 | Native factory composition using A11k after existing scoped capture closes; no pool suspension | 100–190 | No native entry inside machines.use; close failure prevents entry; exact factory order, one call, result comparison and all exits close |
 | C04 | Bounded versioned retained request/progress/result values; new local contract and existing interface declaration | 90–170 | Size, fields, versions and stale observation refusal; no authority or arbitrary path fields |
 | C05 | Authenticated exported dispatch and service wiring; endpoint and native-only operation factory | 110–195 | Hello and invocation authentication, reservation before work, cancellation, one reply and cleanup ordering |
 | C06 | App channel and existing retained maintenance flow integration; channel, driver and localized strings only | 100–190 | Unsupported capability, administrator decline/expiry, busy, stale state and explicit later recovery |
+
+C01 must include a successful admission with different authority/target UIDs and different policy floors.
+Assert that the authority policy supplies floors while the target supplies only its recorded choices.
+Keep forged-ID, recycled-UID, signing-policy mismatch and changed-binding refusals.
 
 C01 and C02 add no exported dispatch. C03 adds no new privileged process or job registration.
 C04 exposes no implementation callback or native token. C05 uses only the native factory in a Root endpoint.
@@ -150,24 +191,28 @@ The busy prerequisite runs before caller implementation; complete the remaining 
 
 | Gate | Observation to retain | Refusal or recovery case |
 | --- | --- | --- |
-| Current authority busy, issue 725 | Exact verified owner/account binding, running service, real journal lease result and current/target identities | Live service contention, self-contention, changed owner or aliased pair; no marker write |
+| Current authority busy, issue 725 | Peer-derived authority, distinct protected target, running service, actual lease acquisition and full held duration | Live contention, self-contention, lease duration over the bound, changed identity or aliased pair; no marker write on admission refusal |
 | Native custody, A11c | Real Root Setup, signed installed bundle, fixed executable, admission/placement, account and service identities | Changed signature, placement, generation, identity or lease refuses |
 | Material, A11f | Missing material prepared once; existing key/material/activity remains exact | Custody failure, existing conflicting material or service activity refuses |
 | Publication, A11g/A11i | All eight actual protected paths, modes, owners and bytes; exact existing inodes retained | Partial publication resumes only from fresh state; conflicting bytes or missing ancestors refuse |
 | Completion, A11h/A11i | Correct files precede the single marker UPDATE; actual published result | Lost marker acknowledgement recaptures; published missing or damaged files refuse without repair |
 | ACK, A11j | Actual held machine writer and shared journal; one conditional advance; no machine-row mutation | Real contention; committed and unchanged uncertain outcomes; no automatic repeated advance |
 | Installed sequence, A11k | Material, recorded policy, files, marker and ACK under the same native loans | Fresh recovery between stages, absent/empty import skip, host changes and cleanup failure |
-| Authenticated caller | Actual signed app XPC invocation, verified peer-derived authority, imported rights and correct target owner | Foreign user/account, unsupported capability, decline, expiry, disconnect and stale observation |
+| Authenticated caller | Current-authority owner calls signed app XPC; imported admin rights; unique different target and retained consent from protected state | Wrong policy, same account/UID, zero/multiple pending setups, changed target consent, decline, expiry, disconnect and stale observation |
 | First end-to-end policy commit, issue 725 | Real installed request through P04 and final reply, with exact resulting policy pair and retained stage | Busy before writing; unresolved writing is unavailable; explicit later invocation recaptures |
 
 Record monotonic end-to-end time from exported invocation receipt through the settled reply and cleanup.
 Separate peer/rights checks, reservation wait, fresh capture, current authority acquisition and native context creation.
+Record current authority journal lease acquisition and actual release separately. Include all native stages in its held duration.
 Measure material, P04, C2 publication, D2 marker completion and ACK separately.
 Count repeated `SignedReleaseInspection.inspect` calls, code checks, metadata reads and pair reads by phase.
 Retain journal/machine transaction intervals separately from the enclosing method time.
 Include cold and subsequent invocations, refusal latency and the service's ability to continue normal work.
 Do not describe an invocation duration as BEGIN/COMMIT time, or one fixture benchmark as installed end-to-end performance.
 Toni and Seb set the acceptance bound from the attended measurements before enabling this caller.
+The same bound must cover both end-to-end response time and the full current authority journal lease duration.
+Initial acquisition success alone cannot pass this acceptance gate.
+An overrun fails attended acceptance and blocks enabling the caller. It never authorizes forced lease release or replay of a committed stage.
 Keep existing timeout, capture and lease limits during measurement; no quiet timeout extension or relaxed verification.
 
 Evidence contains artifact/source identifiers, environment, commands, actual outcomes, durations and redacted state comparisons.
