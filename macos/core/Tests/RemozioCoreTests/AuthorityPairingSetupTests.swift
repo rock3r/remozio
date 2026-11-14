@@ -633,3 +633,47 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         }
     }
 }
+
+extension AuthorityPairingSetupTests {
+    func testMaintenancePairingObservationRetainsStagedWorkWithoutClockOrJournalMutation() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
+        let endpoint = try f.endpoint(); defer { endpoint.close() }
+        XCTAssertFalse(try endpoint.maintenancePairingWork().ready)
+        try hello(endpoint)
+        let value = try staged(endpoint, proposal: f.proposal()), records = try f.records(), time = f.environment.time.value
+        let observed = try endpoint.maintenancePairingWork()
+        XCTAssertTrue(observed.ready); XCTAssertEqual(observed.stagedAttempts, 1)
+        XCTAssertEqual(observed.activityOwners, 1); XCTAssertFalse(observed.operationActive)
+        XCTAssertEqual(try endpoint.maintenancePairingWork(), observed)
+        XCTAssertEqual(try f.journal.maintenanceJournalWork().requests.liveRequests, 0)
+        XCTAssertEqual(try f.records(), records); XCTAssertEqual(f.environment.time.value, time)
+        XCTAssertThrowsError(try activity.open().acquireExclusive())
+        XCTAssertEqual(value.setupID.count, 16)
+        endpoint.cancelPairing { XCTAssertTrue($0) }
+        XCTAssertEqual(try endpoint.maintenancePairingWork().stagedAttempts, 0)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().activityOwners, 0)
+        XCTAssertEqual(observed.stagedAttempts, 1)
+        let replacement = try activity.open().acquireExclusive(); replacement.close()
+    }
+    func testMaintenancePairingObservationIncludesAnActiveCommitAfterStagingIsCleared() throws {
+        let f = try Fixture(), selected = Box<AuthorityPairingXPCEndpoint?>(nil)
+        let during = Box<AuthorityMaintenancePairingWork?>(nil)
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+            authorize: { _ in during.value = try selected.value?.maintenancePairingWork() }, invalidate: {})
+        selected.value = endpoint
+        defer { selected.value = nil; endpoint.close() }
+        try hello(endpoint)
+        let value = try staged(endpoint, proposal: f.proposal())
+        XCTAssertEqual(try endpoint.maintenancePairingWork().stagedAttempts, 1)
+        XCTAssertNotNil(try commit(endpoint, transcript: value, fixture: f))
+        let committing = try XCTUnwrap(during.value)
+        XCTAssertTrue(committing.operationActive); XCTAssertEqual(committing.stagedAttempts, 0)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().stagedAttempts, 0)
+        XCTAssertFalse(try endpoint.maintenancePairingWork().operationActive)
+        XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
+        endpoint.close()
+        XCTAssertThrowsError(try endpoint.maintenancePairingWork()) {
+            XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+        }
+    }
+}

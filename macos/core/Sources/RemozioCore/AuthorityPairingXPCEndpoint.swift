@@ -47,6 +47,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     deinit { expiryTimer?.cancel(); attemptActivity?.close() }
+    /// Read under this endpoint's actual lock. Closed ownership is unavailable, never a zero-work result.
+    func maintenancePairingWork() throws -> AuthorityMaintenancePairingWork {
+        try lock.withLock {
+            guard !closed else { throw AuthorityPairingSetupError.unavailable }
+            return .init(ready: ready, stagedAttempts: attempt == nil ? 0 : 1,
+                activityOwners: attemptActivity == nil ? 0 : 1, operationActive: busy)
+        }
+    }
     func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
