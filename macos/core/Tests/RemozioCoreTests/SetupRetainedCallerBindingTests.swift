@@ -53,9 +53,10 @@ final class SetupRetainedCallerBindingTests: XCTestCase {
             let (_, host) = try MachineUpdateRetainedSetupPolicyNativeEntry.publishedAuthority(
                 runtime: entry.runtime, accountID: binding.authorityAccountID)
             XCTAssertEqual(binding.publishedAuthorityPolicy, host.codePolicy)
-            XCTAssertNotEqual(binding.publishedAuthorityPolicy, entry.runtime.preparation.initialAuthority.codePolicy)
+            let historical = try entry.runtime.preparation.initialAuthority.codePolicy
+            XCTAssertNotEqual(binding.publishedAuthorityPolicy, historical)
             XCTAssertNotEqual(binding.publishedAuthorityPolicy.entries.map(\.minimumGeneration),
-                entry.runtime.preparation.initialAuthority.codePolicy.entries.map(\.minimumGeneration))
+                historical.entries.map(\.minimumGeneration))
             try binding.requireSame(as: resolve(state, entry, peer, accepted, incarnation: incarnation))
             XCTAssertEqual(binding.description, "SetupRetainedCallerBinding(redacted)")
             XCTAssertEqual(binding.debugDescription, binding.description)
