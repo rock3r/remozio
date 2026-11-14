@@ -181,7 +181,7 @@ enum MachineUpdateRetainedSetupPolicyNativeContext {
               let activity = material.serviceActivity else { throw RuntimePreparationError.conflictingMaterial }
         return activity
     }
-    private static func requireExpected(_ expected: Snapshot, candidate: SignedReleaseEvidence) throws -> AuthorityInitializationIntent {
+    static func requireExpected(_ expected: Snapshot, candidate: SignedReleaseEvidence) throws -> AuthorityInitializationIntent {
         try expected.requireSame(as: .init(activation: expected.activation, intent: expected.intent, candidate: candidate))
         let runtime = expected.activation.runtime
         guard MachineUpdateRetainedSetupPolicyStorage.stableSchemaVersions.contains(runtime.setup.source.actual.schemaVersion),

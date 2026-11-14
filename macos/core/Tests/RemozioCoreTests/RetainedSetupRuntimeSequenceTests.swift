@@ -9,6 +9,9 @@ import XCTest
 /// Owned owners and files prove sequencing. Synthetic callbacks grant no native provider, caller or installed custody evidence.
 final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     private typealias Sequence = MachineUpdateRetainedSetupRuntimeSequence
+    private typealias Assembly = MachineUpdateRetainedSetupRuntimeNativeEntry
+    private typealias Native = MachineUpdateRetainedSetupRuntimeNativeContext
+    private typealias Facade = MachineUpdateRetainedSetupInitialRuntimeNative
     private typealias Entry = Sequence.Entry
     private typealias Frame = Sequence.Frame
     private typealias Inputs = Sequence.Inputs
@@ -82,6 +85,9 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         let initialRuntime: MachineUpdateStableRuntimePreparationSnapshot
         let openPolicy: ((MachineUpdateRetainedSetupPolicyOwner.JournalAccess) throws -> AuthorityJournal)?
         var files: Files?, intent: SharedSetupImportIntent?
+        var machines: [PreparationIntentStore] = [], startupWriters: [AuthorityJournal] = []
+        var assemblyPairOpens = 0, assemblyPairReads = 0
+        var failAfterPolicy = false, refuseAssemblyHost = false
         var events: [String] = [], captures: [Frame] = [], outerReads: [[Read: Int]] = []
         var reads: [Read: Int] = [:], commits = 0, startupOpens = 0, hostChecks = 0
         var advanced: [Bool] = [], lastAcknowledged: Frame?
@@ -102,6 +108,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         func reset() { events = []; captures = []; outerReads = []; reads = [:]; commits = 0; startupOpens = 0; hostChecks = 0; advanced = []; materialHostStates = [] }
         func withMachine<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
             try reopen { self.commits += 1 }; let actual = try machine()
+            machines.append(actual)
             actual.observeStoreRead = { self.reads[$0, default: 0] += 1 }
             defer { actual.observeStoreRead = nil; try? actual.close() }
             return try body(actual)
@@ -216,7 +223,14 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             guard let open = s.openPolicy else { throw Fault.unexpected }
             let result = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: expected, candidate: s.candidate,
                 directory: s.directory, admission: s.admission, useMachine: { body in try s.withMachine(body) },
-                openJournal: { mode in if mode == .startup { s.startupOpens += 1 }; return try open(mode) },
+                openJournal: { mode in
+                    let journal = try open(mode)
+                    if mode == .startup {
+                        s.startupOpens += 1
+                        XCTAssertTrue(try journal.read { _ in true }); s.startupWriters.append(journal)
+                    }
+                    return journal
+                },
                 verifySnapshot: { try self.verify(s, $0, callback) })
             return s.stalePolicy ? expected : result
         }, publication: { expected, callback in
@@ -262,6 +276,102 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                 s.materialHostStates.append(actual.runtime.state)
                 if s.refuseMaterialHost { throw Fault.materialHost }
             }, didCapture: { s.captures.append($0) })
+    }
+    private func assemblyProviders(_ s: State, _ context: Native.Context) -> Sequence.Providers {
+        let owned = providers(s)
+        return .init(material: { expected, verify in
+            try owned.material(expected) { actual in
+                try context.verifyMaterial(actual); try verify(actual)
+            }
+        }, policy: { expected, verify in
+            let actual = try owned.policy(expected) { actual in
+                try context.verifyPolicy(actual); try verify(actual)
+            }
+            if s.failAfterPolicy { s.refuseAssemblyHost = true }
+            return actual
+        }, publication: { expected, verify in
+            s.events.append("publication"); try s.prepareFiles(expected)
+            let files = try XCTUnwrap(s.files)
+            let host: (Policy) throws -> Void = { actual in
+                try context.verifyPublication(actual); try self.verify(s, actual, verify)
+            }
+            let publication = MachineUpdateRetainedSetupInitialPublicationNative.Callbacks(verifyCurrent: host,
+                verifyServices: { XCTAssertEqual($0, s.material.services) },
+                readMaterial: { scope in try scope.withActive { s.material } },
+                verifyActivity: { activity, scope in try scope.withActive { XCTAssertEqual(activity, s.material.serviceActivity) } },
+                readArtifact: { artifact, scope in try scope.withActive { try files.read(artifact) } },
+                publish: { scope in try scope.withActive {
+                    try files.publish(XCTUnwrap(scope.artifact), verify: scope.requireActive)
+                } })
+            let completion = MachineUpdateRetainedSetupInitialCompletionNative.Callbacks(verifyCurrent: host,
+                verifyServices: { XCTAssertEqual($0, s.material.services) },
+                readMaterial: { scope in try scope.withActive { s.material } },
+                verifyActivity: { activity, scope in try scope.withActive { XCTAssertEqual(activity, s.material.serviceActivity) } },
+                readArtifact: { artifact, scope in try scope.withActive { try files.read(artifact) } },
+                didStorageStage: { _, scope in
+                    try scope.requireActive(); try host(scope.read().snapshot); try scope.requireActive()
+                })
+            return try Facade.withA10d(expected: expected, candidate: s.candidate, directory: s.directory,
+                admission: s.admission, withTargetPair: { body in
+                    s.assemblyPairOpens += 1
+                    for machine in s.machines { XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite()) }
+                    for writer in s.startupWriters { XCTAssertThrowsError(try writer.read { _ in true }) }
+                    let journal = try XCTUnwrap(s.openPolicy)(.readOnly); defer { try? journal.close() }
+                    let initial = try XCTUnwrap(expected.activation.runtime.setup.account?.initialization)
+                    func read() throws -> Facade.Boundary {
+                        s.assemblyPairReads += 1
+                        let actual = try journal.captureRetainedSetupPolicyBoundary(expected: initial)
+                        try XCTUnwrap(expected.intent).requireRecorded(actual); return actual
+                    }
+                    return try body(read)
+                }, useMachine: { body in try s.withMachine(body) }, publication: publication, completion: completion)
+        }, acknowledgement: { expected, verify in
+            try owned.acknowledgement(expected) { actual in
+                try context.verifyAcknowledgement(actual); try verify(actual)
+            }
+        })
+    }
+    private func assemblyFrame(_ s: State) throws -> Frame {
+        try s.withMachine { machine in
+            let actual = try machine.retainedSetupInitialRuntimeEntry(owner: s.owner, candidate: s.candidate)
+            let inputs = try machine.withSharedImportJournal { journal in
+                if let journal { return try machine.withSharedImportSnapshot(journal: journal) { path, owner in
+                    try Inputs.capture(expected: actual.runtime, journal: journal,
+                        verifyCurrent: { try machine.validateStorageLease() }, readRelay: { try .read($0, directory: path, owner: owner) })
+                } }
+                return try Inputs.capture(expected: actual.runtime, journal: nil,
+                    verifyCurrent: { try machine.validateStorageLease() }, readRelay: { _ in throw SharedSetupImportError.wrongScope })
+            }
+            return (actual, inputs)
+        }
+    }
+    private func withAssembly(_ s: State, _ body: (Native.Context, () throws -> Frame) throws -> Void) throws {
+        let expected = try assemblyFrame(s); s.reset()
+        let controls = Native.TestControls(validateCustody: {
+            try s.admission.validateMachineBoundary(directory: s.directory,
+                expected: expected.entry.runtime.setup.source.actual.admission.machine)
+        }, validateRelease: { actual in
+            s.hostChecks += 1
+            XCTAssertEqual(actual.runtime.preparation.accountID, expected.entry.runtime.preparation.accountID)
+            try actual.runtime.setup.source.actual.inventory.compareRelease(s.candidate)
+        }, validateExecutingCode: {
+            if s.refuseAssemblyHost { throw Fault.materialHost }
+        }, lookupOwner: { uid in XCTAssertEqual(uid, s.owner.uid); return s.owner },
+        validateServices: { XCTAssertEqual($0, s.material.services) })
+        try Native.withTestContext(expected: expected, candidate: s.candidate, controls: controls) { context in
+            try body(context, {
+                try Assembly.withSequence(context: context, owner: s.owner, candidate: s.candidate,
+                    directory: s.directory, admission: s.admission, useMachine: { callback in
+                        try s.withMachine { machine in
+                            let before = s.reads, result = try callback(machine)
+                            let keys = Set(s.reads.keys).union(before.keys)
+                            s.outerReads.append(Dictionary(uniqueKeysWithValues: keys.map { ($0, s.reads[$0, default: 0] - before[$0, default: 0]) }))
+                            s.captures.append(result)
+                            try machine.requireClosedForRetainedSetupPolicyWrite(); return result
+                        }
+                    }, providers: self.assemblyProviders(s, context))
+            })
+        }
     }
     private func budget(_ s: State, captures: Int, journal: Bool) {
         XCTAssertEqual(s.captures.count, captures); XCTAssertEqual(s.outerReads.count, captures)
@@ -407,6 +517,77 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             try actual.entry.requireSame(as: committed.entry); try actual.inputs.requireSame(as: committed.inputs)
             XCTAssertEqual(s.advanced, [false]); XCTAssertEqual(s.commits, 0)
             XCTAssertEqual(files.publicationCalls, publications); XCTAssertEqual(try files.stamps(), stamps)
+        }
+    }
+    func testAssemblyClosesP04StartupBeforeOpeningTheTargetReadOnlyPair() throws {
+        try fixture { s in
+            try withAssembly(s) { _, run in
+                let actual = try run()
+                XCTAssertEqual(s.events, ["material", "policy", "publication"])
+                XCTAssertEqual(s.startupOpens, 1); XCTAssertFalse(s.startupWriters.isEmpty)
+                XCTAssertEqual(s.assemblyPairOpens, 1); XCTAssertEqual(s.assemblyPairReads, 63)
+                budget(s, captures: 5, journal: false)
+                XCTAssertTrue(actual.entry.runtime.state.configurationPublished); XCTAssertNil(actual.inputs.intent)
+                XCTAssertNil(actual.entry.activation.plan); XCTAssertFalse(actual.entry.activation.jobsRegistered)
+                for writer in s.startupWriters { XCTAssertThrowsError(try writer.read { _ in true }) }
+                for machine in s.machines { XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite()) }
+            }
+        }
+    }
+    func testAssemblyCarriesActualImportChoicesThroughPublicationAndAcknowledgement() throws {
+        try fixture { s in
+            try s.seedImport(); let before = try XCTUnwrap(s.intent)
+            var escaped: Native.Context?, final: Frame?
+            try withAssembly(s) { context, run in
+                escaped = context; let actual = try run(); final = actual
+                budget(s, captures: 6, journal: true)
+                XCTAssertEqual(s.events, ["material", "policy", "publication", "acknowledgement"])
+                XCTAssertEqual(s.advanced, [true]); XCTAssertEqual(actual.inputs.intent?.phase, .runtimePublished)
+                XCTAssertNotEqual(actual.inputs.intent?.revision, before.revision)
+                XCTAssertEqual(s.assemblyPairOpens, 1); XCTAssertEqual(s.assemblyPairReads, 63)
+                XCTAssertEqual(s.files?.publicationCalls, 8)
+            }
+            XCTAssertThrowsError(try XCTUnwrap(escaped).verifyFrame(XCTUnwrap(final))) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+        }
+    }
+    func testAssemblyPublishedRecoverySkipsMaterialAndAbsentThenEmptyAcknowledgement() throws {
+        try fixture { s in
+            _ = try run(s); let files = try XCTUnwrap(s.files), stamps = try files.stamps()
+            try withAssembly(s) { _, run in
+                let actual = try run(); budget(s, captures: 4, journal: false)
+                XCTAssertFalse(actual.inputs.journalPresent); XCTAssertNil(actual.inputs.intent)
+                XCTAssertEqual(s.events, ["policy", "publication"]); XCTAssertEqual(s.commits, 0)
+                XCTAssertEqual(s.startupOpens, 0); XCTAssertTrue(s.advanced.isEmpty)
+            }
+            try s.seedImport(empty: true)
+            try withAssembly(s) { _, run in
+                let actual = try run(); budget(s, captures: 4, journal: true)
+                XCTAssertTrue(actual.inputs.journalPresent); XCTAssertNil(actual.inputs.intent)
+                XCTAssertEqual(s.events, ["policy", "publication"]); XCTAssertEqual(s.commits, 0)
+                XCTAssertEqual(s.startupOpens, 0); XCTAssertTrue(s.advanced.isEmpty)
+            }
+            XCTAssertEqual(files.publicationCalls, 8); XCTAssertEqual(try files.stamps(), stamps)
+        }
+    }
+    func testAssemblyHostChangeAfterP04StopsBeforePublicationAndExpiresTheContext() throws {
+        try fixture { s in
+            s.failAfterPolicy = true
+            var escaped: Native.Context?
+            XCTAssertThrowsError(try withAssembly(s) { context, run in escaped = context; _ = try run() }) {
+                XCTAssertEqual($0 as? Fault, .materialHost)
+            }
+            XCTAssertEqual(s.events, ["material", "policy"]); XCTAssertEqual(s.assemblyPairOpens, 0)
+            XCTAssertNil(s.files); XCTAssertTrue(s.advanced.isEmpty)
+            for writer in s.startupWriters { XCTAssertThrowsError(try writer.read { _ in true }) }
+            for machine in s.machines { XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite()) }
+            let actual = try assemblyFrame(s)
+            XCTAssertEqual(actual.entry.intent?.phase, .recorded)
+            XCTAssertFalse(actual.entry.runtime.state.configurationPublished)
+            XCTAssertThrowsError(try XCTUnwrap(escaped).verifyFrame(actual)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
         }
     }
 }
