@@ -22,6 +22,34 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
     let updateID: Data
     let startupPolicyDigest: Data
     let completionPolicyDigest: Data
+    private var storedEncoded: Data? = nil
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion, activationAttempt, macID, installationID
+        case accountID, candidateDigest, sourceInventoryDigest, admissionDigest
+        case sourceAccountDigest, runtimeReferenceDigest, sourcePolicyRevision, sourcePolicyDigest
+        case previousInstalledReleaseDigest, installedReleaseDigest, updateID, startupPolicyDigest
+        case completionPolicyDigest
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.formatVersion == rhs.formatVersion
+            && lhs.activationAttempt == rhs.activationAttempt
+            && lhs.macID == rhs.macID
+            && lhs.installationID == rhs.installationID
+            && lhs.accountID == rhs.accountID
+            && lhs.candidateDigest == rhs.candidateDigest
+            && lhs.sourceInventoryDigest == rhs.sourceInventoryDigest
+            && lhs.admissionDigest == rhs.admissionDigest
+            && lhs.sourceAccountDigest == rhs.sourceAccountDigest
+            && lhs.runtimeReferenceDigest == rhs.runtimeReferenceDigest
+            && lhs.sourcePolicyRevision == rhs.sourcePolicyRevision
+            && lhs.sourcePolicyDigest == rhs.sourcePolicyDigest
+            && lhs.previousInstalledReleaseDigest == rhs.previousInstalledReleaseDigest
+            && lhs.installedReleaseDigest == rhs.installedReleaseDigest
+            && lhs.updateID == rhs.updateID
+            && lhs.startupPolicyDigest == rhs.startupPolicyDigest
+            && lhs.completionPolicyDigest == rhs.completionPolicyDigest
+    }
     var description: String { "RuntimeReleaseBinding(redacted)" }
     var debugDescription: String { description }
 
@@ -56,6 +84,7 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
         updateID = activation.updateID; startupPolicyDigest = try MachineUpdateActivationRecord.digest(policy.startupPolicy.bytes)
         completionPolicyDigest = try MachineUpdateActivationRecord.digest(policy.completionPolicy.bytes)
         try validate()
+        storedEncoded = try encode()
     }
 
     /// Use inside fresh scoped machine and account reads. Other accounts and publication phases need the enclosing machine owner.
@@ -97,17 +126,20 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
                previousInstalledReleaseDigest, installedReleaseDigest, updateID, startupPolicyDigest,
                completionPolicyDigest].allSatisfy({ $0.count == 32 }) else { throw RuntimePreparationError.invalidRecord }
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try storedEncoded ?? encode() } }
+    private func encode() throws -> Data {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw RuntimePreparationError.invalidRecord }
         return bytes
-    } }
+    }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw RuntimePreparationError.invalidRecord }
-            let value = try JSONDecoder().decode(Self.self, from: bytes); try value.validate()
-            guard try value.encoded == bytes else { throw RuntimePreparationError.invalidRecord }; return value
+            var value = try JSONDecoder().decode(Self.self, from: bytes); try value.validate()
+            let canonical = try value.encoded
+            guard canonical == bytes else { throw RuntimePreparationError.invalidRecord }
+            value.storedEncoded = canonical; return value
         } catch { throw RuntimePreparationError.invalidRecord }
     }
 }

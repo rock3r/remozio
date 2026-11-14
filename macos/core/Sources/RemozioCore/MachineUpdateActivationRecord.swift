@@ -23,6 +23,29 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
     let machineAdmission: PreparationFileIdentity
     let phase: Phase
     let policyPreflightDigest: Data?
+    private var storedEncoded: Data? = nil
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion, attemptID, revision, macID
+        case installationID, updateID, generation, candidateDigest
+        case inventoryDigest, admissionDigest, machineAdmission, phase
+        case policyPreflightDigest
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.formatVersion == rhs.formatVersion
+            && lhs.attemptID == rhs.attemptID
+            && lhs.revision == rhs.revision
+            && lhs.macID == rhs.macID
+            && lhs.installationID == rhs.installationID
+            && lhs.updateID == rhs.updateID
+            && lhs.generation == rhs.generation
+            && lhs.candidateDigest == rhs.candidateDigest
+            && lhs.inventoryDigest == rhs.inventoryDigest
+            && lhs.admissionDigest == rhs.admissionDigest
+            && lhs.machineAdmission == rhs.machineAdmission
+            && lhs.phase == rhs.phase
+            && lhs.policyPreflightDigest == rhs.policyPreflightDigest
+    }
     var description: String { "MachineUpdateActivationRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -36,6 +59,7 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
         candidateDigest = try Self.digest(candidate.encoded); inventoryDigest = Self.digest(inventory.canonicalBytes)
         admissionDigest = try Self.digest(admission.encoded); machineAdmission = admission.machine; phase = .draining; policyPreflightDigest = nil
         try validate()
+        storedEncoded = try encode()
     }
     private init(_ previous: Self, phase: Phase, policyPreflightDigest: Data? = nil) {
         formatVersion = phase == .completed ? 4 : (phase == .finishing ? 3 : (policyPreflightDigest == nil ? previous.formatVersion : 2))
@@ -44,6 +68,7 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
         generation = previous.generation; candidateDigest = previous.candidateDigest; inventoryDigest = previous.inventoryDigest
         admissionDigest = previous.admissionDigest; machineAdmission = previous.machineAdmission; self.phase = phase
         self.policyPreflightDigest = policyPreflightDigest ?? previous.policyPreflightDigest
+        storedEncoded = try? encode()
     }
     func starting(policyPreflightDigest: Data) throws -> Self {
         guard phase == .draining, policyPreflightDigest.count == 32 else { throw PreparationStoreError.invalidTransition }
@@ -122,17 +147,20 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
               [updateID, candidateDigest, inventoryDigest, admissionDigest].allSatisfy({ $0.count == 32 }),
               machineAdmission.inode > 0 else { throw PreparationStoreError.corruptRecord }
     }
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try storedEncoded ?? encode() } }
+    private func encode() throws -> Data {
         try validate(); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw PreparationStoreError.corruptRecord }
         return bytes
-    } }
+    }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw PreparationStoreError.corruptRecord }
-            let value = try JSONDecoder().decode(Self.self, from: bytes); try value.validate()
-            guard try value.encoded == bytes else { throw PreparationStoreError.corruptRecord }; return value
+            var value = try JSONDecoder().decode(Self.self, from: bytes); try value.validate()
+            let canonical = try value.encoded
+            guard canonical == bytes else { throw PreparationStoreError.corruptRecord }
+            value.storedEncoded = canonical; return value
         } catch { throw PreparationStoreError.corruptRecord }
     }
     static func digest(_ bytes: Data) -> Data { Data(SHA256.hash(data: bytes)) }
