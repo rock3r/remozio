@@ -164,7 +164,8 @@ final class SetupRetainedInvocationTests: XCTestCase {
     func testLateRightsChangesPreserveTheValueAndNeverPermitReplay() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
-            for changes in [(cancelled: false, expired: true), (true, true), (false, false)] {
+            let changesToCheck: [(cancelled: Bool, expired: Bool)] = [(false, true), (true, true), (false, false)]
+            for changes in changesToCheck {
                 var valid = true, replies = 0, works = 0
                 let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
                     verifyRights: { if !valid { throw Failure.rights } })
