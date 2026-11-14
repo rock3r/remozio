@@ -347,13 +347,15 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     }
     private func withAssembly(_ s: State, _ body: (Native.Context, () throws -> Frame) throws -> Void) throws {
         let expected = try assemblyFrame(s); s.reset()
+        try expected.entry.runtime.setup.source.actual.inventory.compareRelease(s.candidate)
+        let releaseDigest = try InstallationInventory.digest(s.candidate)
         let controls = Native.TestControls(validateCustody: {
             try s.admission.validateMachineBoundary(directory: s.directory,
                 expected: expected.entry.runtime.setup.source.actual.admission.machine)
         }, validateRelease: { actual in
             s.hostChecks += 1
             XCTAssertEqual(actual.runtime.preparation.accountID, expected.entry.runtime.preparation.accountID)
-            try actual.runtime.setup.source.actual.inventory.compareRelease(s.candidate)
+            XCTAssertEqual(actual.runtime.setup.source.actual.inventory.releaseDigest, releaseDigest)
         }, validateExecutingCode: {
             if s.refuseAssemblyHost { throw Fault.materialHost }
         }, lookupOwner: { uid in XCTAssertEqual(uid, s.owner.uid); return s.owner },
