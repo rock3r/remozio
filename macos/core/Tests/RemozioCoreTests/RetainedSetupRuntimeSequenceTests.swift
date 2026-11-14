@@ -16,7 +16,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     private typealias Material = Sequence.Material
     private typealias Artifact = RuntimePublishedArtifactValidation.Artifact
     private typealias Read = PreparationIntentStore.InitialRuntimeRead
-    private enum Fault: Error { case policy, afterAcknowledgement, unexpected }
+    private enum Fault: Error, Equatable { case policy, afterAcknowledgement, materialHost, unexpected }
     private final class SharedVerification: @unchecked Sendable {
         let body: (Material) throws -> Void
         let value: Material
@@ -87,6 +87,8 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         var advanced: [Bool] = [], lastAcknowledged: Frame?
         var stopPolicy = false, staleMaterial = false, stalePolicy = false, stalePublication = false, loseAcknowledgement = false
         var poisonMaterial = false, foreignMaterial = false
+        var refuseMaterialHost = false, swallowMaterialHostFailure = false
+        var materialHostStates: [RuntimePreparationState] = []
         var escapedMaterial: ((Material) throws -> Void)?
         init(_ f: RetainedPolicyWriterFixture) {
             owner = f.source.runtime.setup.owner; candidate = f.candidate; directory = f.directory; admission = f.admission
@@ -97,7 +99,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             owner = f.owner; candidate = f.candidate; directory = f.directory; admission = f.admission
             material = f.material; machine = f.machine; reopen = f.reopen; initialRuntime = runtime; openPolicy = nil
         }
-        func reset() { events = []; captures = []; outerReads = []; reads = [:]; commits = 0; startupOpens = 0; hostChecks = 0; advanced = [] }
+        func reset() { events = []; captures = []; outerReads = []; reads = [:]; commits = 0; startupOpens = 0; hostChecks = 0; advanced = []; materialHostStates = [] }
         func withMachine<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
             try reopen { self.commits += 1 }; let actual = try machine()
             actual.observeStoreRead = { self.reads[$0, default: 0] += 1 }
@@ -163,11 +165,18 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         }
     }
     private func verify<Loan>(_ s: State, _ actual: Loan, _ callback: (Loan) throws -> Void) throws {
-        let before = s.reads; try callback(actual); XCTAssertEqual(s.reads, before, "A borrowed verifier queried the machine")
+        let before = s.reads
+        defer { XCTAssertEqual(s.reads, before, "A borrowed verifier queried the machine") }
+        try callback(actual)
     }
     private func providers(_ s: State) -> Sequence.Providers {
         .init(material: { expected, callback in
             s.events.append("material"); s.escapedMaterial = callback
+            if s.swallowMaterialHostFailure {
+                XCTAssertThrowsError(try self.verify(s, expected, callback)) { XCTAssertEqual($0 as? Fault, .materialHost) }
+                XCTAssertThrowsError(try self.verify(s, expected, callback)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+                return expected.runtime.state
+            }
             if s.foreignMaterial {
                 let shared = SharedVerification(callback, expected), done = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async { shared.invoke(); done.signal() }
@@ -237,7 +246,10 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                     s.outerReads.append(Dictionary(uniqueKeysWithValues: keys.map { ($0, s.reads[$0, default: 0] - before[$0, default: 0]) }))
                     return result
                 }
-            }, providers: providers(s), verifyCurrent: { _ in s.hostChecks += 1 }, didCapture: { s.captures.append($0) })
+            }, providers: providers(s), verifyCurrent: { _ in s.hostChecks += 1 }, verifyMaterialCurrent: { actual in
+                s.materialHostStates.append(actual.runtime.state)
+                if s.refuseMaterialHost { throw Fault.materialHost }
+            }, didCapture: { s.captures.append($0) })
     }
     private func budget(_ s: State, captures: Int, journal: Bool) {
         XCTAssertEqual(s.captures.count, captures); XCTAssertEqual(s.outerReads.count, captures)
@@ -248,11 +260,21 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             XCTAssertEqual(counts[.writeTransaction, default: 0], 0)
         }
     }
+    func testCaptureBudgetRefusesSeventhCaptureAndStaysExhausted() throws {
+        var budget = Sequence.CaptureBudget()
+        for _ in 0..<6 { XCTAssertNoThrow(try budget.claim()) }
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try budget.claim()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        }
+        var fresh = Sequence.CaptureBudget()
+        XCTAssertNoThrow(try fresh.claim())
+    }
     func testOwnedFullChainAndFreshPublishedRecoveryPreserveEveryFileWithoutReplay() throws {
         try fixture { s in
             try s.seedImport(); let original = try XCTUnwrap(s.intent)
             let first = try run(s)
             XCTAssertEqual(s.events, ["material", "policy", "publication", "acknowledgement"])
+            XCTAssertFalse(s.materialHostStates.isEmpty)
             budget(s, captures: 6, journal: true)
             XCTAssertTrue(first.entry.runtime.state.configurationPublished); XCTAssertEqual(first.inputs.intent?.phase, .runtimePublished)
             XCTAssertNotEqual(first.inputs.intent?.revision, original.revision); XCTAssertEqual(s.advanced, [true])
@@ -261,6 +283,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             XCTAssertEqual(publications, 8); s.reset()
             let second = try run(s); budget(s, captures: 5, journal: true)
             XCTAssertEqual(s.events, ["policy", "publication", "acknowledgement"])
+            XCTAssertTrue(s.materialHostStates.isEmpty)
             XCTAssertEqual(s.advanced, [false]); XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0)
             try second.entry.requireSame(as: first.entry); try second.inputs.requireSame(as: first.inputs)
             XCTAssertEqual(files.publicationCalls, publications); XCTAssertEqual(try files.stamps(), stamps)
@@ -279,7 +302,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     func testCustodyRefusesBeforeReadsAndAbsentThenEmptyStorageSkipAcknowledgement() throws {
         try fixture { s in
             XCTAssertThrowsError(try run(s, custody: false)) { XCTAssertEqual($0 as? RuntimePreparationError, .custodyNotAccepted) }
-            XCTAssertTrue(s.events.isEmpty); XCTAssertTrue(s.reads.isEmpty); XCTAssertTrue(s.captures.isEmpty); XCTAssertEqual(s.hostChecks, 0)
+            XCTAssertTrue(s.events.isEmpty); XCTAssertTrue(s.reads.isEmpty); XCTAssertTrue(s.captures.isEmpty); XCTAssertEqual(s.hostChecks, 0); XCTAssertTrue(s.materialHostStates.isEmpty)
             let absent = try run(s); budget(s, captures: 5, journal: false)
             XCTAssertFalse(absent.inputs.journalPresent); XCTAssertNil(absent.inputs.intent)
             XCTAssertEqual(s.events, ["material", "policy", "publication"]); XCTAssertTrue(s.advanced.isEmpty)
@@ -300,6 +323,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             let before = try s.pair(); s.reset()
             XCTAssertThrowsError(try run(s)) { XCTAssertEqual($0 as? RuntimeActivationError, .unavailable) }
             XCTAssertEqual(s.events, ["policy"]); budget(s, captures: 1, journal: false)
+            XCTAssertTrue(s.materialHostStates.isEmpty)
             XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0); XCTAssertNil(s.files)
             XCTAssertEqual(try s.pair(), before)
         }
@@ -309,9 +333,29 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             let runtime = try f.machine().stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.candidate)
             let s = State(f, runtime: runtime); s.stopPolicy = true
             XCTAssertNil(runtime.state.reference)
+            s.refuseMaterialHost = true
+            XCTAssertThrowsError(try run(s)) { XCTAssertEqual($0 as? Fault, .materialHost) }
+            XCTAssertEqual(s.events, ["material"]); budget(s, captures: 1, journal: false)
+            XCTAssertEqual(s.materialHostStates.count, 1); XCTAssertNil(s.materialHostStates.first?.reference)
+            XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0); XCTAssertNil(s.files)
+            let refused = try XCTUnwrap(s.captures.last)
+            let refusedMaterial = try Material(runtime: refused.entry.runtime, activation: refused.entry.activation)
+            XCTAssertThrowsError(try XCTUnwrap(s.escapedMaterial)(refusedMaterial)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            s.reset(); s.swallowMaterialHostFailure = true
+            XCTAssertThrowsError(try run(s)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertEqual(s.events, ["material"]); budget(s, captures: 1, journal: false)
+            XCTAssertEqual(s.materialHostStates.count, 1); XCTAssertEqual(s.commits, 0)
+            XCTAssertEqual(s.startupOpens, 0); XCTAssertNil(s.files)
+            try f.reopen(nil)
+            try f.machine().stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.candidate).requireSame(as: runtime)
+            try f.machine().close()
+            s.reset(); s.refuseMaterialHost = false; s.swallowMaterialHostFailure = false
             XCTAssertThrowsError(try run(s)) { XCTAssertTrue($0 is Fault) }
             XCTAssertEqual(s.events, ["material", "policy"]); budget(s, captures: 2, journal: false)
-            XCTAssertEqual(s.captures.last?.entry.runtime.state.reference, try f.material.reference)
+            let retainedReference = try f.material.reference
+            XCTAssertEqual(s.captures.last?.entry.runtime.state.reference, retainedReference)
+            XCTAssertTrue(s.materialHostStates.contains { $0.reference == nil })
+            XCTAssertTrue(s.materialHostStates.contains { $0.reference == retainedReference })
             let material = try Material(runtime: XCTUnwrap(s.captures.last).entry.runtime, activation: XCTUnwrap(s.captures.last).entry.activation)
             XCTAssertThrowsError(try XCTUnwrap(s.escapedMaterial)(material)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             s.reset(); s.poisonMaterial = true
