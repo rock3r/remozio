@@ -2,7 +2,8 @@
 
 ## Chosen prerequisite and evidence goals
 
-Toni selected stopped-service maintenance in message 2740 and requested these revisions in 2742/2754.
+Toni selected maintenance in 2740 and narrowed retained work to a per-account window in 2763/2767.
+This revision keeps machine admission open and ordinary P04/A11 leases unchanged.
 Fetched main is `b899e1ad34836b37745f9099db8d2594ea384150`, tree `3117e2d9c6460a2c52bea8a55c25dd80f8328f3a`; A11k #753 is merged.
 This is a plan only. No runner, installed operation, build or service action ran for this revision.
 Toni selects artifacts, implementation order, native slots, publication and merges.
@@ -15,7 +16,7 @@ Then validate its actual installed composition. P05 remains a separate action un
 [Issue 725](https://github.com/rock3r/remozio/issues/725) still requires three distinct installed observations:
 
 1. The current authority lock is busy while its service is healthy, then obtainable after the exact stop and proven exit.
-2. One actual native P04 policy commit from the fixed installed Setup executable under the typed closed-maintenance loan.
+2. One actual native P04 policy commit from the fixed installed Setup executable under existing shared machine admission and the real A account-drain owner.
 3. Measured end-to-end cost, signature inspections, transaction intervals, full pair-loan duration and actual approver outage.
 
 Source analysis and owned fixtures cannot mark these live gates passed. A failed or skipped gate remains explicit.
@@ -24,18 +25,19 @@ No temporary unauthenticated Root endpoint, new account resolver or relaxed nati
 
 ## Existing harnesses and remaining gaps
 
-Reuse the [experiment index](../docs/experiments/README.md) and existing procedures where their contracts fit.
+Reuse the [experiment index](https://github.com/rock3r/remozio/blob/b899e1ad34836b37745f9099db8d2594ea384150/docs/experiments/README.md) and existing procedures where their contracts fit.
 
 | Existing harness | Reuse | Limit |
 | --- | --- | --- |
-| [Service lifecycle](../docs/experiments/service-lifecycle.md), `scripts/check-service-lifecycle.py` | Manifest/placement inspection, explicit intent, actual job/process observation and owned cleanup | Disposable SMAppService register/unregister is not the production exact-job launchctl stop or installed recovery proof |
-| [Authority journal](../docs/experiments/macos-authority-journal.md), `experiments/authority-journal` | Separate journal/checkpoint evidence, exclusion, bounded children and crash classification | Ordinary-user disposable stores; the executable refuses Root and cannot substitute for the installed path |
-| [Portable import XPC](../docs/experiments/macos-portable-import-xpc.md) | Peer/channel identity, cancellation and reply settlement | Synthetic ordinary-user fixture services and injected administrator checks do not prove real Root/rights |
-| [Release signing](../docs/experiments/macos-release-signing.md) | Actual signed bytes, `SignedReleaseInspection.inspect`, deadlines and sanitized evidence | Inspection results do not measure the native retained operation or approver outage |
+| [Service lifecycle](https://github.com/rock3r/remozio/blob/b899e1ad34836b37745f9099db8d2594ea384150/docs/experiments/service-lifecycle.md), `scripts/check-service-lifecycle.py` | Manifest/placement inspection, explicit intent, actual job/process observation and owned cleanup | Disposable SMAppService register/unregister is not the production exact-job launchctl stop or installed recovery proof |
+| [Authority journal](https://github.com/rock3r/remozio/blob/b899e1ad34836b37745f9099db8d2594ea384150/docs/experiments/macos-authority-journal.md), `experiments/authority-journal` | Separate journal/checkpoint evidence, exclusion, bounded children and crash classification | Ordinary-user disposable stores; the executable refuses Root and cannot substitute for the installed path |
+| [Portable import XPC](https://github.com/rock3r/remozio/blob/b899e1ad34836b37745f9099db8d2594ea384150/docs/experiments/macos-portable-import-xpc.md) | Peer/channel identity, cancellation and reply settlement | Synthetic ordinary-user fixture services and injected administrator checks do not prove real Root/rights |
+| [Release signing](https://github.com/rock3r/remozio/blob/b899e1ad34836b37745f9099db8d2594ea384150/docs/experiments/macos-release-signing.md) | Actual signed bytes, `SignedReleaseInspection.inspect`, deadlines and sanitized evidence | Inspection results do not measure the native retained operation or approver outage |
 | P04/A11 owned tests | Scope, frame, phase, refusal and conservation contracts | No installed caller, real administrator approval or launchd recovery proof |
 
 `SetupMain` has no attended policy command on this source. P04 is an internal API, not an operator command.
-The current ordinary-admission native facade cannot run unchanged inside a closed exclusive drain.
+P04/A11 keep ordinary shared machine admission. Their current interfaces need no general quiescence-loan rewrite.
+The missing composition is A account drain, real live-work proof, a separate stop facade, bootstrap guards and durable recovery.
 The new runner and maintenance-aware installed adapter are proposals. Their exact invocation and recovery procedure do not exist today.
 The runbook remains **NO-GO** until those dependencies, signed artifact and exact command receipts qualify.
 No guessed flags, generic `sudo`, test filter or moved experiment binary can clear that gate.
@@ -51,10 +53,12 @@ Keep at most one bounded healthy-service busy control, using the real primitive 
 It opens no SQL store, initializes no file and mutates no marker. An unexpected acquisition requires investigation of exact identity/continuity.
 This is a control within the prepared maintenance validation, not a standalone discovery implementation or permission to chase transient gaps.
 
-Enter the explicit reviewed window through its actual owner. Persist intent/drain before stopping only AuthorityA.
-Wait for actual command/child settlement, exact registration removal, process exit and required lock exclusion.
-Acquire and pin the full read-only current A policy/checkpoint pair through the real typed maintenance context.
-Keep unchanged transport/gateway jobs registered. No dynamic cohort expansion, forced lock takeover or kill-to-idle is allowed.
+Enter the explicit reviewed window through its actual owner. Persist intent and hold only A's account drain under shared machine admission.
+Require the new authenticated live A work/child-settlement proof before stop. A timer, empty table or busy error cannot substitute.
+If the pre-stop wait expires, close the window and reopen A without stopping it. Existing work must never be killed to force idle.
+Then use the separate maintenance stop facade, exact registration removal, process/child exit and required lock exclusion.
+Acquire and pin the full read-only current A policy/checkpoint pair through the existing ordinary-admission native context.
+Keep unchanged transport/gateway jobs registered and other account approval admission open. No dynamic cohort expansion, forced lock takeover or kill-to-idle is allowed.
 Verify the stopped pair can be acquired; record busy, refusal, pending and timeout honestly if it cannot.
 
 Import real administrator rights at the authenticated invocation and retain the owner reservation until operation, reply and cleanup settle.
@@ -64,7 +68,7 @@ Do not automatically run material preparation, C2, D2, ACK, P05 or the full A11 
 An unresolved unchanged `writing` source still refuses. No catch block resets it or retries the body.
 
 After the body, retain separate operation and restoration outcomes. Join all work and close every borrowed frame, pair and store.
-The maintenance owner restores/adopts A, verifies live readiness and applicable floors, then releases the original closed gate.
+The maintenance owner restores/adopts A, verifies live readiness and applicable floors, then releases A's account drain and finally its shared machine lease.
 Registration success alone is not service health. B's unknown result does not require withholding A if independent restoration is proved safe.
 Recovery never repeats the policy action. A lost reply requires fresh observation, not a second commit.
 
@@ -72,7 +76,7 @@ Recovery never repeats the policy action. A lost reply requires fresh observatio
 
 Use a bounded internal recorder, not caller-injected verification callbacks.
 Record native entry, each actual signature inspection, transaction/storage stages, current pair acquisition and its actual release.
-Also record drain start, actual approver loss, stop/exit, restart/adoption, verified readiness, admission reopen and final response.
+Also record drain start, actual approver loss, stop/exit, restart/adoption, verified readiness, A admission reopen and final response.
 Approver outage is not the same interval as the journal loan or the P04 owner phase.
 Retain monotonic clocks and units, reported event sources, counts and incomplete/overflow status.
 Instrumentation cannot alter transaction order, query protected machine state from a borrowed callback or record payload bytes.
@@ -98,7 +102,7 @@ Keep each complete PR at or below 200 lines, measure before tests and replan if 
 | Cut | Responsibility | Estimate | Required proof |
 | --- | --- | ---: | --- |
 | E01 | Private installed experiment request/authentication integration using the approved caller owners | 90–180 | Real peer/rights, distinct protected target, decline/expiry; no dispatch until the complete adapter qualifies |
-| E02 | One P04 dispatch under the actual maintenance loan, with a bounded busy control and final readback | 100–190 | Fixed Setup/native guards, stop/exit ownership, one body, exact pair and separate restoration result |
+| E02 | One P04 dispatch under the actual A window with ordinary shared machine admission, bounded busy control and readback | 100–190 | Fixed Setup/native guards, stop/exit ownership, one body, exact pair and separate restoration result |
 | E03 | Internal timing recorder and narrow native inspection/storage events | 100–190 | Complete intervals/counts without payloads, injected verification or extra callback queries |
 | E04 | Bounded coordinator, evidence validation and exact attended procedure | 110–195 | Real terminal/cleanup/recovery, sanitized source-bound command receipts and explicit incomplete results |
 
@@ -113,7 +117,8 @@ Source qualification runs no signing, installed service, GUI or Root operation.
 - Complete the required maintenance recovery/status/attended-exit cuts and E01–E04; retain source-bound qualification.
 - Select the exact compatible signed artifact and verified installation path. No builds, signing, installation or provisioning wait for Seb.
 - Verify protected machine compatibility and genuine retained state. Never reset initialized state, restore a database or regenerate keys to fit a test.
-- Verify the exact Root Setup daemon, enabled autonomous recovery, fixed A-only cohort and current authority health.
+- Verify Root Setup recovery, the fixed A-only cohort, registered A gate, real live-idle proof and concurrent-bootstrap guard.
+- Confirm other account approvals continue. Test A waiting/disconnect/reconnect without synthetic denial, loss or automatic replay.
 - Prepare exact invocation/cleanup/status/restoration-only/repair procedures and unused evidence paths. Missing recovery is NO-GO.
 - Complete the installed real administrator approve/decline/expiry gate before any policy write; fixtures cannot substitute.
 - Confirm source, artifact and actual UI operation match. Record consent-age and outage bounds without inventing values.
@@ -140,10 +145,10 @@ Do not start with incomplete readiness. Crash, reboot and repair exercises need 
 
 | Time | Operator and prepared owner | Evidence/stop rule |
 | --- | --- | --- |
-| 0–4 min | Confirm source/artifact, distinct A/B, outage bound, exact command and recovery exit | Any mismatch: `notRun`; no stop |
+| 0–4 min | Confirm source/artifact, distinct A/B, A-unreachable bound, exact command and recovery exit | Any mismatch: `notRun`; no stop |
 | 4–8 min | Run the single healthy-service control, then explicitly approve the maintenance window | Record control and actual rights; refusal/expiry causes no policy write |
-| 8–17 min | Drain, stop exact A, prove exit, pin pair and run one native P04 action | Actual commit/refusal/unknown and all timing intervals; no body replay |
-| 17–23 min | Observe protected readback and restoration/adoption of A | Separate operation outcome from readiness/floors/admission restoration |
+| 8–17 min | Drain only A, prove idle, stop A, prove exit, pin pair and run one native P04 action | Actual commit/refusal/unknown and all timing intervals; no body replay |
+| 17–23 min | Observe protected readback and restoration/adoption of A | Separate operation outcome from readiness/floors/A admission restoration |
 | 23–28 min | Review outcomes and product answers; confirm no owned live work remains | Report failed acceptance/unfinished recovery explicitly; use the prepared attended exit |
 
 Committed plus restart failure stays committed plus restart failure. Never present it as an operation failure that the operator should repeat.
@@ -159,8 +164,8 @@ Installed approve/decline/expiry comes first; the provider and later lock/logout
 
 1. May valid retained setup consent remain usable indefinitely, or should C01 enforce an explicit age limit?
    Current planning assumes no age-based expiry. Do not invent a limit or refresh consent automatically.
-2. What maximum approver outage and end-to-end delay is acceptable for this explicit maintenance action?
-   Include stop, all native work and cleanup, restart/readiness and admission restoration. No existing fixture sets that product bound.
+2. How long may A remain unreachable, and what end-to-end delay is acceptable for this explicit maintenance action?
+   Include stop, all native work and cleanup, restart/readiness and A admission restoration. Other account approvals remain available. No existing fixture sets that product bound.
 
 Record the answers for Toni's implementation decisions. A timing limit never authorizes unsafe forced cleanup.
 The full Remozio objective remains incomplete.

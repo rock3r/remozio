@@ -3,19 +3,16 @@
 ## Status and prerequisites
 
 This is a document-only proposal from Toni's assignment 2693. It adds no caller or native operation.
-The inspected main is `86729223e4b29780800a2959cffbef20e7785a9f`, tree `f29e57b4775309d71f312d5937c2d0ce09462b6a`.
+The inspected main is `b899e1ad34836b37745f9099db8d2594ea384150`, tree `3117e2d9c6460a2c52bea8a55c25dd80f8328f3a`.
 Toni owns the plan, implementation order, native capacity, publication and merges.
 This revision applies Saturn's review 2702 and Toni's decisions 2703, 2706 and 2708. The prior same-owner rule was contradictory.
 
-Start with [issue 725](https://github.com/rock3r/remozio/issues/725).
-Its authority selection and attended checks remain required. CI does not prove them.
-Use the A11 live matrix in `review/a11-plan.md` at commit `65ef55fbd97f7d0e31eb6b4cc4eece404f98958e`.
-That plan explicitly requires the live authority busy check before the first caller is written.
-Run that attended check before implementing the cuts below. If it blocks, fix the lease ownership design first.
-
-A11k's assembly is absent from the inspected main. Its reviewed contract is at `a81e38559d68aea18c79b35985c22f5e8294edc0`.
-Implementation must wait for A11k and its actual predecessors to merge. Reconcile the final APIs with main before each cut.
-The A11 source tests and the private C2 timing probe do not satisfy the attended gates in this plan.
+Toni's 2757/2763/2767 decisions supersede the old busy-first implementation prerequisite.
+The [source analysis](725-busy-analysis.md) established the lock conflict; retained work uses the [per-account maintenance window](maintenance-window-plan.md).
+C01/C02/C04 may proceed as library/contract work without dispatch. C03/C05 wait for M05–M07 and the retained M15 closure.
+The [725 plan](725-experiment-plan.md) retains installed commit and timing validation before enabling a real caller.
+A11k is merged on inspected main `b899e1ad34836b37745f9099db8d2594ea384150`.
+Reconcile the actual merged APIs and preceding ready PR before each cut. No installed live gate is passed by this document.
 
 ## Entry and request boundary
 
@@ -67,7 +64,8 @@ The target's recorded startup policy supplies historical file bytes only. Neithe
 Derive the target only from fresh protected retained machine state, including inventory and the actual journal records.
 Require exactly one retained setup operation in progress. Zero or multiple operations refuse; the request cannot choose between them.
 Require its target account ID to differ from the current authority account ID.
-The inventory must bind that target to another UID. Validate its current directory identity independently.
+The target can be outside the current inventory. `MachineUpdateStableRuntimeSource` requires unique owner UIDs across all source accounts.
+Its protected retained account therefore binds a different UID from every installed account. Validate its current directory identity independently.
 That target's verified `LocalAccountIdentity` becomes `runtime.setup.owner` and the `owner` argument passed to `prepare`.
 Never pass the peer's owner identity as the target owner merely because the peer invoked Setup.
 
@@ -103,7 +101,11 @@ A capture-close failure prevents native entry. Keep the reservation until cleanu
 Use the existing native factories to open their own scoped machine handles. Test their closed boundaries, not a persistent pool.
 This decision depends on production keeping scoped access. If production adopts `.retained`, revisit C03 and its estimate before implementation.
 
-The proposed native composition is exactly this nested lifetime:
+Enter the qualified per-account maintenance owner before constructing native loans: shared machine admission, A account drain, live idle proof, stop and process/child exit.
+C03 must prove each authorized window-record transition, then recapture the same A/B source and choices under the actual invocation owner.
+Do not ignore a full-source mismatch or reselect another target. Persist the executing phase before borrowing body frames.
+No window-row writer runs inside those callbacks.
+The existing native composition then uses this nested lifetime:
 
 1. Call `MachineUpdateRetainedSetupRuntimeNativeAuthority.withNativeScope` with the fresh Frame and derived current authority account ID.
 2. That factory creates the actual `HeldScope` and `NativeCustody`. The caller does not construct either token.
@@ -122,38 +124,38 @@ Preserve the capture caps, exact comparisons, poison guards and close-before-pol
 Do not hold the historical target read-only pair across P04's startup write.
 Do not cache a `HeldScope`, approval, `NativeContext` or prepared Frame across requests.
 
-## The live busy decision comes first
+## Maintenance ownership and installed validation
 
-Seb must attend this check on Toni's selected installed artifact, with the actual authority service running normally.
-Measure `ProtectedJournalLease.acquire` for the derived current authority journal. Record the real refusal or acquisition and lease owner.
-Measure the entire acquired lease lifetime until its actual close, including material, P04, C2, D2 and ACK.
-The live authority cannot use that exclusive journal lease during this interval, even when initial acquisition succeeds.
-Also inspect current/target directory identities, including the case where their journal or continuity directories alias.
-Distinguish contention with the live service from contention caused by this invocation's own held pair or Setup machine handle.
-A free-service test alone does not prove the running-service path. Do not stop the service to obtain a green result.
+The current service retains its exclusive journal; an idle queue cannot make the local native pair available.
+Do not add busy polling, a weaker lock, a second journal owner or a synthetic approval.
+The retained owner keeps shared machine admission and drains only A's account through its registered barrier.
+It obtains the real live idle/child-settlement proof before stop. A pre-stop timeout cancels and reopens A without stopping it.
+After the separate maintenance stop facade and exit witnesses, the existing native factory pins A's full read-only pair.
+Other accounts continue approval work; no machine-wide quiescence loan or P04/A11 admission rewrite is required.
+Conflicting bootstrap/recovery must respect the durable window. A's account closure restores before new requests after restart.
+The outer owner restores/adopts A and verifies readiness/floors before releasing its account drain and shared machine activity.
 
-If the live service keeps the exclusive lease, the current `withNativeScope` cannot yet provide this caller's normal path.
-If the held current pair conflicts with the target startup writer, the same limitation applies even without another process.
-Return a bounded busy/unavailable result before the policy writer can retain a new `writing` marker.
-Do not add a retry loop, a second journal owner, a weaker lock or a synthetic approval.
-Replan an explicit operation through the existing journal owner, or another reviewed lease handoff, before implementing the caller.
-Preserve idle-only activation and the signed drain contract. This plan grants no service suspension or shared-update deferral.
+Seb attends installed native commit and timing validation on the selected qualified artifact after these mechanisms exist.
+Measure A's full unreachable interval separately from current-pair hold time and end-to-end invocation time.
+Validate current/target directory identities and aliased journal/continuity paths. Busy or uncertainty refuses; no automatic body replay.
+The [maintenance plan](maintenance-window-plan.md) defines actual idle proof, bootstrap guards, visible recovery and the attended restoration-only exit.
+It does not claim those installed mechanisms already exist. No service stop is reachable before the retained M15 gate qualifies.
 
-An existing unresolved `writing` marker remains unavailable. Do not automatically replay or clear it.
-[Issue 722's decision](https://github.com/rock3r/remozio/issues/722#issuecomment-6856960221) assigns an explicit attended owner action to P05.
-It requires an exact fresh source pair, including checkpoint and revision, and follows the busy investigation.
-Conflicting published file bytes also refuse. They do not authorize an overwrite or an automatic repair.
+An unresolved `writing` marker remains unavailable. [Issue 722](https://github.com/rock3r/remozio/issues/722#issuecomment-6856960221) assigns its explicit owner action to P05.
+P05 still requires exact fresh source equality, including checkpoint/revision; normal resume never resets it.
+P05a–d may follow M03 as library work. Its native facade/reachability require the same M05–M07/M15 closure.
+Conflicting published file bytes refuse; they authorize no overwrite or automatic repair.
 
 ## Open product decision: retained consent age
 
 The current proposal has no age-based expiry for the target's recorded retained consent, as Toni specified in message 2708.
 This does not relax exact frame, identity, revision, scope or authorization checks. Changed state still refuses.
-Toni will ask Seb whether an old retained setup needs an additional age limit during the attended busy session for issue 725.
+Toni will ask Seb whether an old retained setup needs an additional age limit during the attended installed session for issue 725.
 If Seb selects a limit, add its `stale` refusal at C01's protected target admission check and test its boundary before implementation.
 Do not invent an expiry duration, refresh recorded consent automatically or infer a new target confirmation from administrator rights.
-This question does not block review of this document. The attended prerequisite still precedes caller implementation.
+This question does not block review of this document. The installed prerequisites still precede enabling real caller dispatch; C01/C02/C04 can proceed without it.
 
-## Proposed cuts after the attended prerequisite
+## Proposed cuts and maintenance prerequisites
 
 Each cut is a complete responsibility. Every changed production line counts, including helpers, guards and deletions.
 The hard cap is 200 lines per cut. Measure before tests. Replan with Toni if the complete responsibility does not fit.
@@ -187,11 +189,11 @@ Do not rerun unchanged passed suites to repair records. No test bypasses a manda
 
 Every row below requires Seb at the Mac. No row is passed by this document or by source tests.
 Toni selects the final qualified artifact and exact installed configuration before preparing the interactive handoff.
-The busy prerequisite runs before caller implementation; complete the remaining rows before enabling the first real caller.
+Source ownership decisions precede dispatch implementation; complete the required installed rows before enabling the first real caller.
 
 | Gate | Observation to retain | Refusal or recovery case |
 | --- | --- | --- |
-| Current authority busy, issue 725 | Peer-derived authority, distinct protected target, running service, actual lease acquisition and full held duration | Live contention, self-contention, lease duration over the bound, changed identity or aliased pair; no marker write on admission refusal |
+| Current authority maintenance, issue 725 | Peer-derived authority, distinct protected target, healthy-service busy control, A account drain/idle/exit, acquired pair and full held duration | Live contention, self-contention, lease duration over the bound, changed identity or aliased pair; no marker write on admission refusal |
 | Native custody, A11c | Real Root Setup, signed installed bundle, fixed executable, admission/placement, account and service identities | Changed signature, placement, generation, identity or lease refuses |
 | Material, A11f | Missing material prepared once; existing key/material/activity remains exact | Custody failure, existing conflicting material or service activity refuses |
 | Publication, A11g/A11i | All eight actual protected paths, modes, owners and bytes; exact existing inodes retained | Partial publication resumes only from fresh state; conflicting bytes or missing ancestors refuse |
@@ -207,10 +209,10 @@ Record current authority journal lease acquisition and actual release separately
 Measure material, P04, C2 publication, D2 marker completion and ACK separately.
 Count repeated `SignedReleaseInspection.inspect` calls, code checks, metadata reads and pair reads by phase.
 Retain journal/machine transaction intervals separately from the enclosing method time.
-Include cold and subsequent invocations, refusal latency and the service's ability to continue normal work.
+Include cold and subsequent invocations, refusal latency and A's unreachable interval. Verify that other accounts continue normal approval work.
 Do not describe an invocation duration as BEGIN/COMMIT time, or one fixture benchmark as installed end-to-end performance.
 Toni and Seb set the acceptance bound from the attended measurements before enabling this caller.
-The same bound must cover both end-to-end response time and the full current authority journal lease duration.
+The acceptance bounds cover end-to-end delay, A's full unreachable interval and the current journal lease duration separately.
 Initial acquisition success alone cannot pass this acceptance gate.
 An overrun fails attended acceptance and blocks enabling the caller. It never authorizes forced lease release or replay of a committed stage.
 Keep existing timeout, capture and lease limits during measurement; no quiet timeout extension or relaxed verification.

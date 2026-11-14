@@ -2,7 +2,7 @@
 
 ## Authority and prerequisites
 
-This document-only revision follows Toni's maintenance decision 2740 and recovery requirements 2742/2754. No code, build or native action ran.
+This document-only revision follows Toni's maintenance decision 2740 and recovery requirements 2742/2754 and per-account decision 2763/2767. No code, build or native action ran.
 Fetched main is `b899e1ad34836b37745f9099db8d2594ea384150`, tree `3117e2d9c6460a2c52bea8a55c25dd80f8328f3a`; A11k #753 is merged.
 Use [issue 722's decision](https://github.com/rock3r/remozio/issues/722#issuecomment-6856960221), not an inferred retry policy.
 P05 is an explicit attended owner action. It discards an unresolved `writing` marker and prepares a new marker with a fresh revision.
@@ -13,8 +13,9 @@ P05 never writes the journal. Normal `resume` keeps refusing the unresolved sour
 The [source analysis](725-busy-analysis.md) established structural busy; no discovery experiment is needed to choose the design.
 P05 depends on the [explicit maintenance owner](maintenance-window-plan.md), including durable recovery, visible status and its attended restoration-only exit.
 Use the revised [725 validation plan](725-experiment-plan.md) to prove the chosen installed composition before enabling attended P05.
-P05 runs under the real closed-quiescence loan after exact AuthorityA stop/exit. It must not acquire ordinary admission inside that drain.
-Do not use marker replacement to hide contention, reopen ordinary admission or create another independent drain.
+P05 runs under ordinary shared machine admission while the outer owner drains only A, proves live work settled and stops A.
+It keeps the existing ordinary-admission APIs. No machine-wide closed-quiescence loan is needed.
+Do not use marker replacement to hide contention, close machine admission or create a second A drain.
 Toni owns the cut order, native capacity, publication, review and merges. Each ready cut merges before the next one starts.
 Authenticated reachability waits for the maintenance gates, approved caller prerequisites and required installed validation. No temporary Root endpoint is planned.
 The current authority A and retained target B remain distinct. Stop only A; B has no registered jobs. Root Setup stays running for recovery.
@@ -38,7 +39,7 @@ P05 itself changes no table, codec, completion floor, activation, enrollment or 
 Require all of these inside the new action:
 
 1. The attended administrator action and current peer/account binding are valid for this machine and retained target.
-   The actual maintenance owner holds the same closed drain, proves exact A exit and issues the purpose-bound scoped loan.
+   The actual maintenance owner holds A's actual account drain and shared machine lease, proves live A idle and exact process/child exit, and retains the body scope.
 2. The actual selected target is still retained, unpublished and unactivated, with the same owner/directory identity and recorded choices.
 3. Exactly one eligible retained operation is selected through the concrete protected-state predicate, not a test-only count.
 4. Its actual canonical marker equals the expected account, ID, revision and bytes; its phase is unresolved `writing`.
@@ -67,7 +68,7 @@ Do not implement two independently committed DELETE/INSERT calls or drop the tab
 
 Add a dedicated scoped authorization/comparison for this replacement. Preserve all ordinary mutation restrictions.
 Reuse the writer's schema checks, 131072-byte record limit and protected digest covering every unrelated row/table.
-Its admission proof must wrap the actual maintenance loan at every frame/store boundary; keep the ordinary-admission case strict.
+Keep the existing ordinary-admission proof at every frame/store boundary; no caller Boolean or alternate weak proof is added.
 The marker CAS preserves the maintenance record exactly. Only the outer window owner may advance its separate lifecycle state.
 The only permitted metadata delta is this target marker replacement. The schema, inventory, runtime material, activation and other accounts remain exact.
 Recheck native custody, target/source equality and borrowed frames at the existing before/in/after transaction boundaries.
@@ -93,9 +94,9 @@ The P05 owner receives read-only pair capability, not a general `AuthorityJourna
 ## Outcome, uncertainty and later resume
 
 The P05 body ends after the new prepared marker is durably observed and its read-only pair still matches the original source.
-It does not call `resume`, commit startup policy, publish files, advance ACK, register jobs or reopen ordinary admission.
+It does not call `resume`, commit startup policy, publish files, advance ACK, register jobs or release A's account drain.
 The outer maintenance owner must then join cleanup, close all pair/store loans and restore or adopt the exact existing AuthorityA.
-It verifies readiness and applicable unchanged floors before reopening the same admission gate. Registration alone is insufficient.
+It verifies readiness and applicable unchanged floors before releasing A's account drain; shared machine admission remains held through restoration. Registration alone is insufficient.
 Transport/gateway stay registered. Target B stays unactivated; restoring A cannot advance B's completion or activation floors.
 On reboot, an already-running exact A is verified and adopted without a second stop. No retained fence blocks A's journal startup.
 A later normal resume is a separate explicitly authorized invocation with fresh state and a newly issued first-writing-use capability.
@@ -134,10 +135,10 @@ The paths below are proposed new files under `macos/core/Sources/RemozioCore` un
 | P05b | Scoped machine CAS writer; `PreparationIntentStore` and private authorization adapter | 130–195 | One atomic marker delta; old bytes/revision match; every unrelated row and table exact; no journal permit |
 | P05c | Borrowed replacement frames and expiry; dedicated P05 frame adapter reusing existing lifetime machinery | 90–175 | No public callback queries, actual transaction frames, poisoned/expired/foreign-thread refusal and closed handles |
 | P05d | Owner orchestration and read-only pair loan; new owner file and narrow typed reader adapter | 120–195 | Fresh exact pair held through mutation; journal/startup writer calls zero; all failures close without body retry |
-| P05e | Native custody facade under the actual maintenance loan; reuse verified caller/current authority scopes | 110–190 | Real peer/rights and stopped A custody; no ordinary reopen, arbitrary IDs/paths or synthetic native token |
+| P05e | Native custody facade inside the actual per-account maintenance owner; reuse verified caller/current authority scopes | 110–190 | Real peer/rights and stopped A custody; ordinary shared lease intact; no arbitrary IDs/paths or synthetic native token |
 | P05f | Explicit attended reachability and separate operation/restoration display on the approved Setup boundary | 100–190 | Clear intent, decline/expiry, stale/lost reply and recovery; no automatic P05 call from resume |
 
-P05e/P05f depend on the qualified maintenance composition and must reconcile with actual C01–C06 code.
+P05a–d may follow M03 as library work. P05e/P05f wait for M05–M07 and M15, then the qualified maintenance composition and must reconcile with actual C01–C06 code.
 Reuse its identity/rights owners and maintenance recovery endpoint; do not build a second resolver or restoration action.
 If the caller scope is not yet available, stop at the library cuts; do not add a temporary unauthenticated native endpoint.
 P05c must remain specific to replacement. Do not add a general changed-source switch to P04's policy-only context.
@@ -165,8 +166,8 @@ Share expensive setup only where each test still owns its state and proves its o
 | Old writing-use receipt after reset | It cannot write the journal or validate the new marker |
 | Committed marker, failed A restart | Marker remains exact new prepared; visible restoration failure; recovery never replaces or resumes it |
 | Setup restart or reboot | Read old/new/foreign state without body replay; adopt healthy A after readiness/floors; no second stop |
-| Unknown B, independently safe A | A restored and safe admission reopened; B remains blocked with its actual unknown outcome |
-| Maintenance loan expired, foreign or ordinary admission requested inside drain | Refuse; same real gate remains closed until joined restoration |
+| Unknown B, independently safe A | A restored and its account admission reopened; B remains blocked with its actual unknown outcome |
+| Foreign/expired native scope, missing A drain or machine update race | Refuse; A gate stays closed through restoration; other account admission remains open |
 | Ordinary resume regression | Unresolved old writing still unavailable; committed result still reconciles; later prepared resume uses fresh authorization |
 | Durable conservation | Journal/checkpoint bytes and logical pair unchanged; all unrelated machine records, phases, schema and catalog exact |
 
@@ -186,7 +187,7 @@ Prepare exact status, restoration-only and repair procedures before stopping A. 
 It must observe an actual eligible writing marker; never create one on production just to exercise this action.
 
 Record the old unresolved state, full fresh pair equality, explicit intent, actual replacement outcome and unchanged journal.
-Record final marker observation separately from A stop/exit, restoration/adoption, readiness, floors, admission reopening and measured approver outage.
+Record final marker observation separately from A stop/exit, restoration/adoption, readiness, floors, A admission reopening, other account continuity and measured A outage.
 Record decline, busy and stale refusals separately. No age-based expiry is assumed beyond the approved caller plan's open product decision.
 The [conflicting published-file case](https://github.com/rock3r/remozio/issues/722#issuecomment-6857268710) remains outside P05.
 Do not overwrite or delete a mismatching runtime file, regenerate material, repair another account or change the signed drain/admission contracts.
