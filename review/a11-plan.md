@@ -3,12 +3,16 @@
 ## Status and authority
 
 This is a source-based plan, not an implementation or a live validation result.
-Toni requested this document in message 2413 and added the review requirements in message 2416.
+Toni requested this document in message 2413 and added the review requirements in messages 2416 and 2422.
+Message 2422 accepts the five plan-review points from message 2421.
 The base is `74a5cecdfc954f3a7774853cdbc5a95e6043803e`, tree `a1f697ad1858d67e0912703e813900ea41c3e83d`.
 This branch adds only this document. It starts no build, test, native provider or service.
 Toni owns plan publication, implementation order, native capacity, wider qualification, PR readiness and merges.
-Implementation must wait for the actual A10e merge and reconciliation with main.
-Each implementation cut must merge before the next cut starts.
+A11 preparation may start above the reviewed A10e source.
+Toni reconciles actual main and preceding merge receipts before publication and preserves the merge order.
+The next cut may be prepared above its reviewed predecessor before that predecessor merges.
+PRs must merge in order. Toni owns review acceptance, base reconciliation and publication of each prepared cut.
+Do not reuse validation by retargeting a receipt after a rebase or source change.
 
 A11 supplies native material, publication and import-acknowledgement providers for A10e.
 It also supplies the native publication and completion facades deferred from A09.
@@ -51,8 +55,8 @@ The names below are proposed source files under `macos/core/Sources/RemozioCore/
 | --- | --- | --- | --- |
 | A11a | Material-host callback and capture-cap classification: `MachineUpdateRetainedSetupRuntimeSequence.swift` | 35–80 | Actual installed host changes during the material loan |
 | A11b | Borrowed host-verification contract: new `MachineUpdateRetainedSetupRuntimeNativeContext.swift` | 110–180 | Native custody, code identity, account and service checks |
-| A11c | Real native custody factory: additions to `MachineUpdateRetainedSetupRuntimeNativeContext.swift` | 140–195 | Root, signatures, installed placement, admission and lease lifetime |
-| A11d | Current-authority and target-pair scopes: new `MachineUpdateRetainedSetupRuntimeNativeAuthority.swift`; narrow reuse adapters only in the existing policy native entry | 90–175 | Real authority busy state and active-service contention |
+| A11c | Native custody factory: additions to `MachineUpdateRetainedSetupRuntimeNativeContext.swift` | 140–195 | Root, installed placement, admission and lease lifetime |
+| A11d | Executing-code checks within current-authority and target-pair scopes: new `MachineUpdateRetainedSetupRuntimeNativeAuthority.swift`; narrow reuse adapters only in the existing policy native entry | 90–175 | Real authority busy state and active-service contention |
 | A11e | Protected material/artifact readers: new `MachineUpdateRetainedSetupRuntimeNativeFiles.swift`; narrow typed additions to `ProtectedServiceConfiguration.swift` | 90–175 | Root/private/service ownership and protected installed paths |
 | A11f | Native material provider: new `MachineUpdateRetainedSetupRuntimeNativeMaterial.swift`; reuse the existing material entry | 75–145 | Native material/key custody, service identities and activity |
 | A11g | Deferred A09c native facade: new `MachineUpdateRetainedSetupInitialPublicationNative.swift` | 80–165 | Real eight-file publication, modes and partial publication |
@@ -63,6 +67,10 @@ The names below are proposed source files under `macos/core/Sources/RemozioCore/
 
 The deferred facades are complete library entries. They do not expose authenticated Setup dispatch.
 A11g and A11h reuse the same context, pair and file adapters as A11i; they must not duplicate those checks.
+A11b remains separate. Its PR must state that the production constructor arrives in A11c.
+A11b has no production caller; its owned tests cover the complete verification contract.
+Do not combine A11b and A11c by omitting checks to meet the cap.
+The test-infrastructure step for issue 737 must finish before A11f; its scope is specified below.
 If typed access across files requires a helper, charge every changed line to its owning cut.
 A public or broadly constructible native token is not an acceptable way to fit the cap.
 
@@ -99,9 +107,11 @@ Owned controls prove comparison, ordering and expiry. They cannot construct the 
 A11c alone constructs the native token from actual Root resources.
 Require real/effective UID 0, the fixed machine directory, protected installed placement and stable copy identity.
 Open actual admission and placement leases. Close them on every return and error.
-Inspect the signed release, candidate, inventory, installed epoch and seal.
-Validate the executing Setup code and fixed executable path against the current authority's approved policy.
-Check the app and Setup identities, generations and code hashes. Reuse existing leaf validators where their contracts match.
+Pin the installed release identity, candidate, inventory, installed epoch and seal.
+A11c checks Root, placement, admission and resource identities. It accepts no free code-policy argument.
+It does not yet prove that the executing Setup code is approved. A11d owns that check within the actual current-authority scope.
+This custody context alone cannot authorize a provider operation. No native provider caller is added in A11c.
+Reuse existing leaf validators where their contracts match.
 Check the actual account and service directory identities. Never accept a synthetic success Boolean as native custody.
 Absent material is valid only for the unpublished material stage; it does not permit skipping host or admission checks.
 Established material and service activity remain exact. A material change never authorizes a new authority identity.
@@ -110,9 +120,14 @@ The native token remains nonconstructible from owned controls. No GUI or Root ex
 
 ## A11d: two distinct policy roles
 
+A11d completes the code-policy obligation before any native provider uses A11c's custody context.
 Select the current authority through `PolicyNativeEntry.publishedAuthority` and the published command-host bytes.
 Reuse `withCurrentPolicy`, typed read-only journal access and the existing protected journal/continuity leases.
 Hold and revalidate the actual current authority pair while checking app and Setup code custody.
+Inside that scope, validate the executing Setup code and fixed executable path against the pair's approved policy.
+Inspect the signed release, candidate and app/Setup identities, generations and code hashes there.
+Do not obtain that policy from a free argument, a fixture control or the historical target.
+Bracket external checks with custody and pair verification. A failed code check expires the invocation.
 Refuse a changed published host, policy, checkpoint, account or lease. Close the pair on every exit.
 An account selected from inventory is not an authenticated peer; the later caller must prove that identity separately.
 
@@ -188,8 +203,9 @@ Do not reopen the held import journal, query the machine inside a callback or ac
 Only A10b performs the conditional retained-to-runtimePublished advance. No machine row or catalog changes.
 The outer sequence skips actual absent or empty journals. Direct ACK entry still refuses incomplete inputs.
 Already-acknowledged input verifies the same files and pair, returning `advanced = false` without writing.
-An uncertain commit ends the invocation and closes affected handles. Recover only through a new actual capture.
-The exact unchanged retained record can support one fresh conditional attempt; an exact committed result recovers without another advance.
+After an uncertain commit, shut down the invocation and close its affected handles. Never retry within that invocation.
+Only a new invocation may attempt the conditional advance, after a fresh capture proves the exact unchanged retained record.
+An exact committed result recovers in the new invocation without another advance.
 Every other phase, revision, scope, proposal or relay change refuses.
 Measure ACK invocation and contention separately. Do not label an invocation upper bound as BEGIN/COMMIT timing.
 
@@ -202,6 +218,20 @@ Keep all existing exact result comparisons, capture caps, read counters and clos
 Lend current authority custody only for the active invocation. Do not cache a pair or native token across requests.
 Return the internal actual frame and inputs. It grants no enrollment, activation, ordinary-ready, consent or request authority.
 No authenticated dispatch, command registration, request decoding or caller-selected authority ID enters this cut.
+
+## Required test-infrastructure step before A11f
+
+Bepi owns the issue 737 fixture profiling slice, under Toni's native-slot handoff and review.
+Complete it before A11f begins its expensive provider tests. A11a–e may follow the preparation rule above.
+The slice changes test infrastructure only. It adds no product behavior, native authority or authenticated caller.
+Profile the actual C2 fixture before optimizing it. Retain construction, owner-operation and cleanup timings separately.
+Identify repeated work before proposing shared fixtures. Preserve fresh machine connections, isolation and all functional assertions.
+Do not reset SQL rows, copy databases, disable guards or weaken recovery checks to obtain a lower time.
+Measure the exact resulting source with the same command limits and retained actual terminals.
+Include the measured CI weights and `methods` when a class exceeds 60 seconds.
+Report the margin below the 120-second timeout for the slowest command. Do not silently increase that budget.
+If the remaining cost cannot fit the planned gates, revise the test grouping and capacity with Toni before A11f.
+This plan neither runs the profile nor claims a speed improvement. The native slot still requires an explicit lead handoff.
 
 ## Tests, source qualification and attended evidence
 
@@ -217,7 +247,10 @@ Add refusal tests for host changes during a material loan, an exhausted capture 
 Keep actual absent/empty, partial publication, published missing/conflicting files, lost marker acknowledgement and lost ACK recovery cases.
 Use shared owned fixtures where isolation permits. Do not reset SQL rows or copy databases to conceal fixture cost.
 A10e measured 353.936 XCTest seconds for six new methods; the maximum case was 80.317 seconds and command 89.067 seconds.
-Issue 737 owns profiling and the remaining timing margin. Toni owns its scheduling and CI weights.
+Issue 737 owns profiling and the remaining timing margin. Its required infrastructure step precedes A11f.
+Each implementation PR must include its measured CI class weight. Include `methods` when the class exceeds 60 seconds.
+Retain the exact source, measured names, case durations and class sum behind each weight.
+Toni owns CI-weight publication and reconciliation; weights are not substitutes for executed evidence.
 Keep the existing 120-second command limit and 1800-second local allocation. Replan with Toni if the measured scope cannot fit.
 
 | Attended live gate | Required observation | State in this plan |
