@@ -114,6 +114,7 @@ final class RuntimeMaintenanceWindowTransitionTests: XCTestCase {
         let restored = try maintenanceValue(.restored, previous: pending, service: .notStopped)
         try restored.requireReplacing(pending)
         XCTAssertEqual(restored.operation, .notStarted); XCTAssertEqual(restored.service, .notStopped)
+        XCTAssertThrowsError(try maintenanceValue(.restored, previous: pending, service: .healthy).requireReplacing(pending))
         XCTAssertThrowsError(try maintenanceValue(.restored, previous: pending, service: .notStopped,
             requestRevision: maintenanceData(99)).requireReplacing(pending))
     }
@@ -122,6 +123,17 @@ final class RuntimeMaintenanceWindowTransitionTests: XCTestCase {
     }
     func testDrainingCancellationReopensWithoutStartingWorkOrStoppingServices() throws {
         try requireCancellation(draining: true)
+    }
+    func testCancellationContinuityDoesNotPreventTheNormalServiceStop() throws {
+        let draining = try maintenanceValue(.draining)
+        let stopping = try maintenanceValue(.stopping, previous: draining)
+        try stopping.requireReplacing(draining)
+        let stopped = try maintenanceValue(.stopped, previous: stopping)
+        try stopped.requireReplacing(stopping)
+        XCTAssertEqual(stopped.service, .stopped)
+        let pending = try maintenanceValue(.reopenPending, operation: .notStarted, service: .notStopped)
+        try maintenanceValue(.needsOwnerRecovery, previous: pending, service: .notStopped).requireReplacing(pending)
+        XCTAssertThrowsError(try maintenanceValue(.needsOwnerRecovery, previous: pending, service: .unknown).requireReplacing(pending))
     }
     func testAuthorityWriterDeclarationsCannotReplaceSetupDeclarations() throws {
         let required = try RuntimeMaintenanceWindowStorage.readerRequirements + MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements

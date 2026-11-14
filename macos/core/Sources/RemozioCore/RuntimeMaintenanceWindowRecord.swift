@@ -155,6 +155,7 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
         guard edges[previous.phase]?.contains(phase) == true, outcome,
               phase != .reopenPending || ![Phase.authorized, .draining].contains(previous.phase)
                 || (service == .notStopped && operation == .notStarted),
+              previous.phase != .reopenPending || previous.service != .notStopped || service == .notStopped,
               phase != .restored || gate?.requestRevision == previous.revision else { throw PreparationStoreError.invalidTransition }
     }
     var encoded: Data { get throws {
