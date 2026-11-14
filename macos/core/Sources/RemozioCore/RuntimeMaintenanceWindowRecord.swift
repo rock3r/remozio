@@ -117,7 +117,7 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
               ![Phase.authorized, .draining, .stopping, .stopped].contains(phase) || operation == .notStarted,
               phase != .executing || operation == .unknown,
               phase != .needsOwnerRecovery || failure != nil,
-              phase != .reopenPending || service == .healthy,
+              phase != .reopenPending || service == .healthy || (service == .notStopped && operation == .notStarted),
               phase != .restored || (failure == nil && (service == .healthy || (service == .notStopped && operation == .notStarted))
                 && gate?.hold == .released && gate?.admission == .available) else {
             throw RuntimePreparationError.invalidRecord
@@ -141,7 +141,7 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
         }
         try requireSameScope(as: previous)
         let edges: [Phase: Set<Phase>] = [
-            .authorized: [.draining, .needsOwnerRecovery], .draining: [.stopping, .reopenPending, .needsOwnerRecovery],
+            .authorized: [.draining, .reopenPending, .needsOwnerRecovery], .draining: [.stopping, .reopenPending, .needsOwnerRecovery],
             .stopping: [.stopped, .needsOwnerRecovery], .stopped: [.executing, .restoring, .needsOwnerRecovery],
             .executing: [.workSettled, .needsOwnerRecovery], .workSettled: [.restoring, .needsOwnerRecovery],
             .restoring: [.reopenPending, .needsOwnerRecovery], .reopenPending: [.restored, .needsOwnerRecovery],
@@ -153,6 +153,8 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
         case .notStarted: outcome = operation == .notStarted || previous.phase == .stopped && phase == .executing && operation == .unknown
         }
         guard edges[previous.phase]?.contains(phase) == true, outcome,
+              phase != .reopenPending || ![Phase.authorized, .draining].contains(previous.phase)
+                || (service == .notStopped && operation == .notStarted),
               phase != .restored || gate?.requestRevision == previous.revision else { throw PreparationStoreError.invalidTransition }
     }
     var encoded: Data { get throws {

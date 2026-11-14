@@ -30,18 +30,18 @@ private func maintenanceScope(mac: Data = maintenanceData(1), installation: Data
         authorityGrantDigest: maintenanceData(15, 32), targetConsentDigest: maintenanceData(16, 32), administratorIntentDigest: maintenanceData(17, 32))
 }
 private func maintenanceValue(_ phase: Window.Phase = .authorized, previous: Window? = nil,
-    operation: Window.OperationOutcome? = nil, scope: Window.Scope? = nil,
+    operation: Window.OperationOutcome? = nil, service: Window.ServiceOutcome? = nil, scope: Window.Scope? = nil,
     id: Data? = nil, revision: Data? = nil, gateIdentity: PreparationFileIdentity = .init(device: 1, inode: 1),
     requestRevision: Data? = nil) throws -> Window {
     let early = [Window.Phase.authorized, .draining, .stopping, .stopped].contains(phase)
     let outcome = operation ?? (phase == .executing ? .unknown : early ? .notStarted : previous?.operation ?? .unknown)
-    let service: Window.ServiceOutcome
+    let observedService: Window.ServiceOutcome
     switch phase {
-    case .authorized, .draining, .stopping: service = .notStopped
-    case .stopped, .executing, .workSettled: service = .stopped
-    case .restoring: service = .restartPending
-    case .reopenPending, .restored: service = .healthy
-    case .needsOwnerRecovery: service = .unknown
+    case .authorized, .draining, .stopping: observedService = .notStopped
+    case .stopped, .executing, .workSettled: observedService = .stopped
+    case .restoring: observedService = .restartPending
+    case .reopenPending, .restored: observedService = .healthy
+    case .needsOwnerRecovery: observedService = .unknown
     }
     let attempt = id ?? previous?.id ?? AccountPreparationIntent.randomID()
     let gate: Window.GateReadback? = try phase == .restored ? .init(attemptID: attempt,
@@ -49,7 +49,7 @@ private func maintenanceValue(_ phase: Window.Phase = .authorized, previous: Win
         authorityIncarnation: maintenanceData(19), challenge: maintenanceData(20), responseDigest: maintenanceData(21, 32),
         hold: .released, admission: .available) : nil
     return try .init(id: attempt, revision: revision ?? AccountPreparationIntent.randomID(), purpose: .retainedRuntime,
-        scope: scope ?? previous?.scope ?? maintenanceScope(), phase: phase, operation: outcome, service: service,
+        scope: scope ?? previous?.scope ?? maintenanceScope(), phase: phase, operation: outcome, service: service ?? observedService,
         failure: phase == .needsOwnerRecovery ? .healthFailed : nil, gate: gate)
 }
 
@@ -99,6 +99,29 @@ final class RuntimeMaintenanceWindowTransitionTests: XCTestCase {
         try maintenanceValue(.restored, previous: pending).requireReplacing(pending)
         XCTAssertThrowsError(try maintenanceValue(.restored, previous: pending,
             requestRevision: maintenanceData(99)).requireReplacing(pending))
+    }
+    private func requireCancellation(draining: Bool) throws {
+        let authorized = try maintenanceValue()
+        var current = authorized
+        if draining {
+            let next = try maintenanceValue(.draining, previous: current)
+            try next.requireReplacing(current); current = next
+        }
+        let pending = try maintenanceValue(.reopenPending, previous: current, service: .notStopped)
+        try pending.requireReplacing(current)
+        XCTAssertEqual(try Window.decode(pending.encoded), pending)
+        XCTAssertThrowsError(try maintenanceValue(.reopenPending, previous: current, service: .healthy).requireReplacing(current))
+        let restored = try maintenanceValue(.restored, previous: pending, service: .notStopped)
+        try restored.requireReplacing(pending)
+        XCTAssertEqual(restored.operation, .notStarted); XCTAssertEqual(restored.service, .notStopped)
+        XCTAssertThrowsError(try maintenanceValue(.restored, previous: pending, service: .notStopped,
+            requestRevision: maintenanceData(99)).requireReplacing(pending))
+    }
+    func testAuthorizedCancellationReopensWithoutStartingWorkOrStoppingServices() throws {
+        try requireCancellation(draining: false)
+    }
+    func testDrainingCancellationReopensWithoutStartingWorkOrStoppingServices() throws {
+        try requireCancellation(draining: true)
     }
     func testAuthorityWriterDeclarationsCannotReplaceSetupDeclarations() throws {
         let required = try RuntimeMaintenanceWindowStorage.readerRequirements + MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements
@@ -218,6 +241,36 @@ final class RuntimeMaintenanceWindowWriterTests: XCTestCase {
             XCTAssertThrowsError(try write(maintenanceValue(.executing, previous: restored), f, previous: restored))
             try write(initial(f), f, previous: restored)
         }
+    }
+    private func cancelWithoutStopping(_ f: RuntimeMaintenanceWriterFixture, draining: Bool) throws {
+        let otherRows = try runtimeMaintenanceFixtureRows(f.databasePath, omitMaintenance: true)
+        var current = try initial(f); try write(current, f)
+        if draining {
+            let next = try maintenanceValue(.draining, previous: current)
+            try write(next, f, previous: current); current = next
+        }
+        let pending = try maintenanceValue(.reopenPending, previous: current, service: .notStopped)
+        try write(pending, f, previous: current)
+        try f.reopen(nil)
+        XCTAssertTrue(f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate).requiresLocalHold)
+        let source = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+        let gate = try XCTUnwrap(source.admission.accounts.first { $0.accountID == f.authority.accountID }).identity
+        let beforeRejectedRestore = try runtimeMaintenanceFixtureRows(f.databasePath)
+        XCTAssertThrowsError(try write(maintenanceValue(.restored, previous: pending, service: .notStopped,
+            gateIdentity: gate, requestRevision: maintenanceData(99)), f, previous: pending))
+        XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), beforeRejectedRestore)
+        let restored = try maintenanceValue(.restored, previous: pending, service: .notStopped, gateIdentity: gate)
+        XCTAssertEqual(try write(restored, f, previous: pending), restored)
+        XCTAssertEqual(restored.operation, .notStarted); XCTAssertEqual(restored.service, .notStopped)
+        try f.reopen(nil)
+        XCTAssertFalse(f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate).requiresLocalHold)
+        XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath, omitMaintenance: true), otherRows)
+    }
+    func testAuthorizedSQLCancellationRequiresGateReadbackWithoutStoppingServices() throws {
+        try fixture { try cancelWithoutStopping($0, draining: false) }
+    }
+    func testDrainingSQLCancellationRequiresGateReadbackWithoutStoppingServices() throws {
+        try fixture { try cancelWithoutStopping($0, draining: true) }
     }
     func testScopeProducerAndClosedAdmissionCannotCreateAWindow() throws {
         try fixture { f in
