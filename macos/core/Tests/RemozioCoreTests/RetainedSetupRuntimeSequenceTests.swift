@@ -564,6 +564,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     private enum SeedFault { case bytes, mode }
     /// P04 and D2 write the policy and marker. The test seeds owned files directly.
     /// Owned callbacks use production retention readers. They do not execute the Root-only native callback.
+    /// D2 compares actual bytes with its derived artifacts. The owned reader checks each file's owner and mode.
     private func seedPublishedAssembly(_ s: State, fault: SeedFault? = nil, beforeMarker: (() throws -> Void)? = nil) throws {
         try withAssembly(s) { context, _ in
             let before = try XCTUnwrap(assemblyFrame(s).entry.policy)
