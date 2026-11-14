@@ -88,6 +88,11 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
                 return actual
             }
         }
+        fileprivate func currentEntry() throws -> Entry {
+            try requireActive()
+            guard !executing, let approved else { expire(); throw JournalLeaseError.invalidated }
+            return approved.entry
+        }
         fileprivate func verifyLast() throws {
             try requireActive(); guard let approved else { throw JournalLeaseError.invalidated }; try verifyFrame(approved)
         }
@@ -174,6 +179,10 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
         fileprivate init(_ context: Context, custody: NativeCustody) { verification = context; self.custody = custody }
         func withResources<Value>(_ body: (ReleaseDestinationLease, UpdateOrdinaryAdmissionLease) throws -> Value) throws -> Value {
             try custody.withResources(body)
+        }
+        func withMachine<Value>(opening: PreparationIntentStore.Opening, closing: MachineClosing = .provider,
+            perform: (PreparationIntentStore) throws -> Value) throws -> Value {
+            try withMachine(expected: verification.currentEntry(), opening: opening, closing: closing, perform: perform)
         }
         func withMachine<Value>(expected: Entry, opening: PreparationIntentStore.Opening, closing: MachineClosing = .provider,
             perform: (PreparationIntentStore) throws -> Value) throws -> Value {
