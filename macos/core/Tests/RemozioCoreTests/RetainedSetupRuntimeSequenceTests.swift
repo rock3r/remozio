@@ -561,9 +561,27 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             }
         }
     }
+    private func seedPublishedAssembly(_ s: State) throws {
+        try withAssembly(s) { context, _ in
+            let before = try XCTUnwrap(assemblyFrame(s).entry.policy)
+            let recorded = try providers(s).policy(before, context.verifyPolicy)
+            s.captures = [try assemblyFrame(s)]; try s.prepareFiles(recorded)
+            let files = try XCTUnwrap(s.files)
+            for artifact in files.artifacts { try files.put(artifact, bytes: artifact.bytes) }
+            _ = try s.withMachine { machine in
+                try MachineUpdateRetainedSetupInitialCompletion.complete(machine: machine, expected: recorded,
+                    candidate: s.candidate, directory: s.directory, admission: s.admission, fileCustodyAccepted: true,
+                    readPolicyBoundary: s.pair, verifyCurrent: context.verifyPublication,
+                    verifyServices: { XCTAssertEqual($0, s.material.services) },
+                    readMaterial: { scope in try scope.withActive { s.material } },
+                    verifyActivity: { actual, scope in try scope.withActive { XCTAssertEqual(actual, s.material.serviceActivity) } },
+                    readArtifact: { artifact, scope in try scope.withActive { try files.read(artifact) } })
+            }
+        }
+    }
     private func assemblyPublishedRecovery(empty: Bool) throws {
         try fixture { s in
-            _ = try run(s); let files = try XCTUnwrap(s.files), stamps = try files.stamps()
+            try seedPublishedAssembly(s); let files = try XCTUnwrap(s.files), stamps = try files.stamps()
             if empty { try s.seedImport(empty: true) }
             try withAssembly(s) { _, run in
                 let actual = try run(); budget(s, captures: 4, journal: empty)
@@ -571,7 +589,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                 XCTAssertEqual(s.events, ["policy", "publication"]); XCTAssertEqual(s.commits, 0)
                 XCTAssertEqual(s.startupOpens, 0); XCTAssertTrue(s.advanced.isEmpty)
             }
-            XCTAssertEqual(files.publicationCalls, 8); XCTAssertEqual(try files.stamps(), stamps)
+            XCTAssertEqual(files.publicationCalls, 0); XCTAssertEqual(try files.stamps(), stamps)
         }
     }
     func testAssemblyPublishedRecoverySkipsMaterialAndAbsentAcknowledgement() throws {
