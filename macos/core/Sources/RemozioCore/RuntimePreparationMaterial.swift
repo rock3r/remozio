@@ -239,15 +239,19 @@ enum RuntimeMaterialPreparation {
             if let expected { guard try value.reference == expected else { throw RuntimePreparationError.conflictingMaterial } }
             try verifyMaterial(value); try verifyCurrent(); try directory.validate()
         }
+        var recordIdentity: PreparationFileIdentity?
         func read() throws -> RuntimePreparationMaterial? {
-            try directory.withPrivateDirectory { parent in
+            try verifyCurrent()
+            return try directory.withPrivateDirectory { parent in
                 var info = stat()
                 if fstatat(parent, file.name, &info, AT_SYMLINK_NOFOLLOW) != 0 {
                     if errno == ENOENT { return nil }
                     throw JournalLeaseError.system(errno)
                 }
-                return try RuntimePreparationMaterial.decode(ProtectedServiceConfiguration.read(anchor: directory.path,
-                    relativePath: file.name, owner: owner))
+                let record = try ProtectedServiceConfiguration.readIdentity(anchor: directory.path, relativePath: file.name, owner: owner)
+                if let recordIdentity, recordIdentity != record.identity { throw JournalLeaseError.identityChanged }
+                recordIdentity = record.identity
+                return try RuntimePreparationMaterial.decode(record.bytes)
             }
         }
         try verifyCurrent()
@@ -255,6 +259,7 @@ enum RuntimeMaterialPreparation {
             try verify(retained)
             _ = try AdministrativeSetupPublication.publish(retained.encoded, file: file, directory: directory,
                 owner: owner, verify: verifyCurrent)
+            guard let checked = try read(), try checked.encoded == retained.encoded else { throw RuntimePreparationError.conflictingMaterial }
             try verify(retained); return retained
         }
         guard expected == nil else { throw RuntimePreparationError.missingMaterial }
