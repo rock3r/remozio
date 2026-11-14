@@ -1,14 +1,14 @@
 import Darwin
 import Foundation
 
-/// Owned controls prove verification and loan lifetime. A11c supplies the production constructor; no native caller exists here.
+/// Native custody and owned verification have separate scopes. A11d supplies executing-code approval before any provider can use them.
 enum MachineUpdateRetainedSetupRuntimeNativeContext {
     typealias Entry = MachineUpdateRetainedSetupInitialRuntimeEntry
     typealias Frame = PreparationIntentStore.RetainedImportFrame
     typealias Material = MachineUpdateRetainedSetupMaterialSnapshot
     typealias Policy = MachineUpdateRetainedSetupPolicySnapshot
     typealias Verify = () throws -> Void
-    struct Controls {
+    fileprivate struct Controls {
         let validateCustody: Verify
         let validateRelease: (Entry) throws -> Void
         let validateExecutingCode: Verify
@@ -94,7 +94,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
         fileprivate func expire() { body = nil; approved = nil }
     }
     /// Performs no machine, policy, import or relay query. The owner lends actual frames, including transaction frames.
-    static func withOwnedContext<Value>(expected: Frame, candidate: SignedReleaseEvidence, controls: Controls,
+    fileprivate static func withOwnedContext<Value>(expected: Frame, candidate: SignedReleaseEvidence, controls: Controls,
         perform: (Context) throws -> Value) throws -> Value {
         try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
         try Entry(runtime: expected.entry.runtime, activation: expected.entry.activation,
@@ -114,4 +114,151 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
         defer { context.expire() }
         try context.verifyLast(); let result = try perform(context); try context.verifyLast(); return result
     }
+    /// Only A11d's held current-authority scope will construct this approval. Custody alone cannot supply it.
+    final class CurrentAuthorityApproval {
+        private let processID = getpid(), thread = pthread_self()
+        private var release: ((Entry, SignedReleaseEvidence) throws -> Void)?
+        private var code: Verify?
+        fileprivate init(release: @escaping (Entry, SignedReleaseEvidence) throws -> Void, code: @escaping Verify) {
+            self.release = release; self.code = code
+        }
+        fileprivate func verifyRelease(_ entry: Entry, candidate: SignedReleaseEvidence) throws {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0, let release, code != nil else { throw JournalLeaseError.invalidated }
+            try release(entry, candidate)
+        }
+        fileprivate func verifyCode() throws {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0, release != nil, let code else { throw JournalLeaseError.invalidated }
+            try code()
+        }
+        fileprivate func expire() { release = nil; code = nil }
+    }
+    /// Root resource custody only. It proves no executing-code approval or provider authority.
+    final class NativeCustody {
+        private let processID = getpid(), thread = pthread_self()
+        private let directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease
+        private var verify: Verify?
+        private var checking = false
+        fileprivate init(directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, verify: @escaping Verify) {
+            self.directory = directory; self.admission = admission; self.verify = verify
+        }
+        func requireActive() throws {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
+            guard !checking, let verify else { expire(); throw JournalLeaseError.invalidated }
+            checking = true; defer { checking = false }
+            do { try verify(); guard self.verify != nil else { throw JournalLeaseError.invalidated } }
+            catch { expire(); throw error }
+        }
+        func withResources<Value>(_ body: (ReleaseDestinationLease, UpdateOrdinaryAdmissionLease) throws -> Value) throws -> Value {
+            try requireActive()
+            do { let result = try body(directory, admission); try requireActive(); return result }
+            catch { expire(); throw error }
+        }
+        fileprivate func expire() { verify = nil }
+    }
+    final class NativeContext {
+        let verification: Context
+        private let custody: NativeCustody
+        fileprivate init(_ context: Context, custody: NativeCustody) { verification = context; self.custody = custody }
+        func withResources<Value>(_ body: (ReleaseDestinationLease, UpdateOrdinaryAdmissionLease) throws -> Value) throws -> Value {
+            try custody.withResources(body)
+        }
+    }
+    /// A11d supplies the approval capability. There is no approval producer or placeholder code verifier in A11c.
+    static func withNativeContext<Value>(custody: NativeCustody, approval: CurrentAuthorityApproval,
+        expected: Frame, candidate: SignedReleaseEvidence, perform: (NativeContext) throws -> Value) throws -> Value {
+        try custody.withResources { _, _ in
+            let controls = Controls(validateCustody: custody.requireActive,
+                validateRelease: { try approval.verifyRelease($0, candidate: candidate) }, validateExecutingCode: approval.verifyCode,
+                lookupOwner: LocalAccountDirectory.lookup, validateServices: { plan in
+                    let services = try NativeServiceAccountDirectory(accountID: plan.accountID, ownerUID: plan.ownerUID)
+                    for claim in plan.claims { try services.validateGroup(claim); try services.validateUser(claim, ownerUID: plan.ownerUID) }
+                })
+            return try withOwnedContext(expected: expected, candidate: candidate, controls: controls) {
+                try perform(NativeContext($0, custody: custody))
+            }
+        }
+    }
+    /// Opens only real fixed Root resources. It cannot construct a verification context without A11d approval.
+    static func withNativeCustody<Value>(machineDirectory: String, expected: Frame, candidate: SignedReleaseEvidence,
+        perform: (NativeCustody) throws -> Value) throws -> Value {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let runtime = expected.entry.runtime, original = runtime.setup.source.actual
+        guard machineDirectory == MachineBootstrap.machineDirectory, original.inventory.bundlePath == MachineBootstrap.bundlePath,
+              !original.candidate.selected, let initial = runtime.setup.account?.initialization, initial.complete,
+              initial.macID == runtime.preparation.macID, initial.installationID == runtime.preparation.installationID,
+              initial.accountID == runtime.preparation.accountID, initial.initializationBytes == runtime.preparation.initializationBytes else {
+            throw MachineUpdateActivationError.wrongBoundary
+        }
+        try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
+        func fresh() throws {
+            _ = try readCustodyFrame(expected: expected, candidate: candidate, openMachine: {
+                let machine = try PreparationIntentStore(lease: InstallationStorageLease.acquire(directoryPath: machineDirectory),
+                    macID: initial.macID, maximumRecords: 64, initialize: false, opening: .retainedPolicyVerification)
+                do { try machine.validateStorageLease(nativeDirectory: machineDirectory); return machine }
+                catch { try? machine.close(); throw error }
+            }, lookupOwner: LocalAccountDirectory.lookup)
+        }
+        try fresh()
+        let directory = try ReleaseDestinationLease.acquire(path: machineDirectory); defer { directory.close() }
+        let admission = try UpdateOrdinaryAdmissionLease.open(machineDirectory: machineDirectory, expected: original.admission.machine)
+        defer { admission.close() }
+        let bundle = URL(fileURLWithPath: original.inventory.bundlePath)
+        let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path); defer { placement.close() }
+        _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
+        let identity = try placement.preparationCopyIdentity(name: bundle.lastPathComponent)
+        try fresh()
+        let custody = NativeCustody(directory: directory, admission: admission) {
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            try admission.validateMachineBoundary(directory: directory, expected: original.admission.machine)
+            try placement.validate()
+            guard try placement.preparationCopyIdentity(name: bundle.lastPathComponent) == identity else { throw JournalLeaseError.identityChanged }
+            try runtime.setup.requireOwner(LocalAccountDirectory.lookup(uid: runtime.setup.owner.uid))
+            let services = try NativeServiceAccountDirectory(accountID: runtime.plan.accountID, ownerUID: runtime.plan.ownerUID)
+            for claim in runtime.plan.claims { try services.validateGroup(claim); try services.validateUser(claim, ownerUID: runtime.plan.ownerUID) }
+        }
+        defer { custody.expire() }
+        try custody.requireActive(); let result = try perform(custody); try custody.requireActive(); return result
+    }
+    /// Actual read-only frames only. The opener cannot supply a fabricated snapshot, and every exit closes its connection.
+    static func readCustodyFrame(expected: Frame, candidate: SignedReleaseEvidence,
+        openMachine: () throws -> PreparationIntentStore, lookupOwner: (UInt32) throws -> LocalAccountIdentity) throws -> Frame {
+        let machine = try openMachine()
+        do {
+            try machine.validateStorageLease()
+            let actual = try machine.retainedSetupInitialRuntimeEntry(owner: expected.entry.runtime.setup.owner, candidate: candidate)
+            try actual.requireSame(as: expected.entry)
+            try actual.runtime.setup.requireOwner(lookupOwner(actual.runtime.setup.owner.uid))
+            for claim in try machine.retainedSetupCompatibilityOwners(expected: actual.runtime.setup.source, candidate: candidate) {
+                try LocalAccountDirectory.validateOwnership(lookupOwner(claim.ownerUID), uid: claim.ownerUID, directoryID: claim.directoryID)
+            }
+            let inputs = try machine.withSharedImportJournal { journal in
+                if let journal { return try machine.withSharedImportSnapshot(journal: journal) { path, owner in
+                    try MachineUpdateRetainedSetupRuntimeInputs.capture(expected: actual.runtime, journal: journal,
+                        verifyCurrent: { try machine.validateStorageLease() }, readRelay: { try .read($0, directory: path, owner: owner) })
+                } }
+                return try MachineUpdateRetainedSetupRuntimeInputs.capture(expected: actual.runtime, journal: nil,
+                    verifyCurrent: { try machine.validateStorageLease() }, readRelay: { _ in throw SharedSetupImportError.wrongScope })
+            }
+            try inputs.requireSame(as: expected.inputs)
+            try machine.retainedSetupInitialRuntimeEntry(owner: actual.runtime.setup.owner, candidate: candidate).requireSame(as: actual)
+            try machine.close(); return (actual, inputs)
+        } catch { try? machine.close(); throw error }
+    }
+    #if DEBUG
+    struct TestControls {
+        let validateCustody: Verify
+        let validateRelease: (Entry) throws -> Void
+        let validateExecutingCode: Verify
+        let lookupOwner: (UInt32) throws -> LocalAccountIdentity
+        let validateServices: (ServiceAccountPlan) throws -> Void
+    }
+    /// Test controls cannot construct NativeCustody, CurrentAuthorityApproval or NativeContext.
+    static func withTestContext<Value>(expected: Frame, candidate: SignedReleaseEvidence, controls: TestControls,
+        perform: (Context) throws -> Value) throws -> Value {
+        try withOwnedContext(expected: expected, candidate: candidate,
+            controls: Controls(validateCustody: controls.validateCustody, validateRelease: controls.validateRelease,
+                validateExecutingCode: controls.validateExecutingCode, lookupOwner: controls.lookupOwner,
+                validateServices: controls.validateServices), perform: perform)
+    }
+    #endif
 }

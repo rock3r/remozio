@@ -27,7 +27,7 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
         init(_ context: Native.Context, _ entry: Entry) { self.context = context; self.entry = entry }
     }
     private let metadata = ["custody", "release", "custody", "code", "custody", "owner", "custody", "services", "custody"]
-    private func controls(_ owner: LocalAccountIdentity, _ trace: Trace) -> Native.Controls {
+    private func controls(_ owner: LocalAccountIdentity, _ trace: Trace) -> Native.TestControls {
         .init(validateCustody: { try trace.event("custody") }, validateRelease: { actual in
             try trace.event("release"); trace.phases.append(actual.intent?.phase)
         }, validateExecutingCode: { try trace.event("code") }, lookupOwner: { uid in
@@ -69,25 +69,74 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
             installationID: account.installationID, initialize: true)
         defer { XCTAssertNoThrow(try journal.close()) }; try journal.begin(intent); try body(journal, intent)
     }
+    func testCustodyReaderClosesActualConnectionsOnSuccessAndEveryFailure() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = f.owner, candidate = f.candidate
+            let before = try f.machine().retainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate)
+            let expected: Frame = (before, try inputs(before))
+            let claims = try f.machine().retainedSetupCompatibilityOwners(expected: before.runtime.setup.source, candidate: candidate)
+            let owners = Dictionary(uniqueKeysWithValues: claims.map { ($0.ownerUID,
+                LocalAccountIdentity(uid: $0.ownerUID, primaryGroupID: getgid(), directoryID: $0.directoryID)) })
+            func lookup(_ uid: UInt32) throws -> LocalAccountIdentity {
+                if uid == owner.uid { return owner }; return try XCTUnwrap(owners[uid])
+            }
+            var held: PreparationIntentStore?
+            func open() throws -> PreparationIntentStore {
+                try f.reopen(nil); let machine = try f.machine(); held = machine; return machine
+            }
+            let actual = try Native.readCustodyFrame(expected: expected, candidate: candidate, openMachine: open, lookupOwner: lookup)
+            try actual.entry.requireSame(as: before); try actual.inputs.requireSame(as: expected.inputs)
+            XCTAssertThrowsError(try XCTUnwrap(held).validateStorageLease()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
+            var calls = 0
+            XCTAssertThrowsError(try Native.readCustodyFrame(expected: expected, candidate: candidate, openMachine: open,
+                lookupOwner: { _ in calls += 1; throw Fault.injected })) { XCTAssertTrue($0 is Fault) }
+            XCTAssertEqual(calls, 1)
+            XCTAssertThrowsError(try XCTUnwrap(held).validateStorageLease()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
+            let wrong = LocalAccountIdentity(uid: owner.uid, primaryGroupID: owner.primaryGroupID, directoryID: UUID())
+            XCTAssertThrowsError(try Native.readCustodyFrame(expected: expected, candidate: candidate, openMachine: open,
+                lookupOwner: { _ in wrong }))
+            XCTAssertThrowsError(try XCTUnwrap(held).validateStorageLease()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
+            try f.reopen(nil); let machine = try f.machine()
+            _ = try machine.retainRetainedSetupRuntimeMaterial(f.material.reference,
+                expected: Material(runtime: before.runtime, activation: before.activation), candidate: candidate,
+                directory: f.directory, admission: f.admission, fileCustodyAccepted: true, verifyScoped: { _, _ in })
+            let changed = try machine.retainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate)
+            XCTAssertNotNil(changed.runtime.state.reference); try machine.close()
+            calls = 0
+            XCTAssertThrowsError(try Native.readCustodyFrame(expected: expected, candidate: candidate, openMachine: open,
+                lookupOwner: { uid in calls += 1; return try lookup(uid) }))
+            XCTAssertEqual(calls, 0)
+            XCTAssertThrowsError(try XCTUnwrap(held).validateStorageLease()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
+            try f.reopen(nil)
+            try f.machine().retainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate).requireSame(as: changed)
+            try f.machine().close()
+        }
+    }
     func testOwnedMaterialFramesEnforceMetadataOrderFailurePoisoningAndLoanLifetimeWithoutQueries() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let machine = try f.machine()
             let before = try machine.retainedSetupInitialRuntimeEntry(owner: f.owner, candidate: f.candidate)
             let frame: Frame = (before, try inputs(before)), material = try Material(runtime: before.runtime, activation: before.activation)
             var reads = 0; machine.observeStoreRead = { _ in reads += 1 }; defer { machine.observeStoreRead = nil }
+            XCTAssertNotEqual(getuid(), 0)
+            XCTAssertThrowsError(try Native.withNativeCustody(machineDirectory: "/does-not-exist", expected: frame,
+                candidate: f.candidate) { _ in XCTFail("An ordinary user acquired native custody") }) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+            XCTAssertEqual(reads, 0)
             for failed in ["custody", "release", "code", "owner", "services"] {
                 let trace = Trace(); trace.fail = failed
-                XCTAssertThrowsError(try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, trace)) { _ in
+                XCTAssertThrowsError(try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, trace)) { _ in
                     XCTFail("A failed host check entered the body")
                 }) { XCTAssertTrue($0 is Fault) }
                 let end = try XCTUnwrap(metadata.firstIndex(of: failed)); XCTAssertEqual(trace.events, Array(metadata[...end]))
             }
             XCTAssertEqual(reads, 0)
             let wrong = Trace(); wrong.owner = .init(uid: f.owner.uid, primaryGroupID: f.owner.primaryGroupID, directoryID: UUID())
-            XCTAssertThrowsError(try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, wrong)) { _ in XCTFail("Wrong owner") })
+            XCTAssertThrowsError(try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, wrong)) { _ in XCTFail("Wrong owner") })
             var escaped: Native.Context?
             let trace = Trace()
-            try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, trace)) { context in
+            try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, trace)) { context in
                 escaped = context
                 try checked({ reads }) { try context.verifyEntry(before); try context.verifyFrame(frame); try context.verifyMaterial(material) }
                 let count = trace.events.count, use = ThreadUse(context, before), done = DispatchSemaphore(value: 0)
@@ -99,19 +148,19 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
             ordered(trace); XCTAssertEqual(reads, 0)
             XCTAssertThrowsError(try XCTUnwrap(escaped).verifyFrame(frame)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             XCTAssertThrowsError(try XCTUnwrap(escaped).verifyMaterial(material)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
-            XCTAssertThrowsError(try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, Trace())) { context in
+            XCTAssertThrowsError(try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, Trace())) { context in
                 escaped = context; throw Fault.injected
             }) { XCTAssertTrue($0 is Fault) }
             XCTAssertThrowsError(try XCTUnwrap(escaped).verifyEntry(before)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             let failed = Trace()
-            XCTAssertThrowsError(try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, failed)) { context in
+            XCTAssertThrowsError(try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, failed)) { context in
                 failed.fail = "code"
                 XCTAssertThrowsError(try context.verifyMaterial(material)) { XCTAssertTrue($0 is Fault) }
                 failed.fail = nil
                 XCTAssertThrowsError(try context.verifyEntry(before)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             let recursive = Trace()
-            XCTAssertThrowsError(try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, recursive)) { context in
+            XCTAssertThrowsError(try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, recursive)) { context in
                 recursive.services = {
                     XCTAssertThrowsError(try context.verifyEntry(before)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
                 }
@@ -119,7 +168,7 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
             }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             XCTAssertEqual(reads, 0)
             let retaining = Trace(); var stages: [PreparationIntentStore.CompletionIntentStorageStage] = []
-            try Native.withOwnedContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, retaining)) { context in
+            try Native.withTestContext(expected: frame, candidate: f.candidate, controls: controls(f.owner, retaining)) { context in
                 _ = try machine.retainRetainedSetupRuntimeMaterial(f.material.reference, expected: material, candidate: f.candidate,
                     directory: f.directory, admission: f.admission, fileCustodyAccepted: true, verifyScoped: { stage, actual in
                         stages.append(stage); try self.checked({ reads }) { try context.verifyMaterial(actual) }
@@ -142,7 +191,7 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
                 defer { machine.observeStoreRead = nil; try? machine.close() }; return try body(machine)
             }
             var recorded: Native.Policy?, published: Native.Policy?
-            try Native.withOwnedContext(expected: initial, candidate: f.candidate, controls: controls(owner, trace)) { context in
+            try Native.withTestContext(expected: initial, candidate: f.candidate, controls: controls(owner, trace)) { context in
                 recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: XCTUnwrap(before.policy), candidate: f.candidate,
                     directory: f.directory, admission: f.admission, useMachine: { body in try useMachine(body) },
                     openJournal: { try f.openPolicyJournal($0 == .readOnly ? .readOnly : .startup) },
@@ -163,7 +212,7 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
             let recordedEntry = try entry(XCTUnwrap(recorded), f.candidate), publishedEntry = try entry(XCTUnwrap(published), f.candidate)
             for skip in [false, true] {
                 let refused = Trace()
-                XCTAssertThrowsError(try Native.withOwnedContext(expected: initial, candidate: f.candidate, controls: controls(owner, refused)) { context in
+                XCTAssertThrowsError(try Native.withTestContext(expected: initial, candidate: f.candidate, controls: controls(owner, refused)) { context in
                     let count = refused.events.count
                     if skip { XCTAssertThrowsError(try context.verifyEntry(publishedEntry)) }
                     else { XCTAssertThrowsError(try context.verifyPolicy(XCTUnwrap(recorded))) }
@@ -172,7 +221,7 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
                 }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             }
             let recordedFrame: Frame = (recordedEntry, initial.inputs), wrongAdapter = Trace()
-            XCTAssertThrowsError(try Native.withOwnedContext(expected: recordedFrame, candidate: f.candidate, controls: controls(owner, wrongAdapter)) { context in
+            XCTAssertThrowsError(try Native.withTestContext(expected: recordedFrame, candidate: f.candidate, controls: controls(owner, wrongAdapter)) { context in
                 let count = wrongAdapter.events.count
                 XCTAssertThrowsError(try context.verifyPolicy(XCTUnwrap(published)))
                 XCTAssertEqual(wrongAdapter.events.count, count)
@@ -184,19 +233,19 @@ final class RetainedSetupRuntimeNativeContextTests: XCTestCase {
                 let after: Frame = (publishedEntry, try inputs(publishedEntry, journal: journal))
                 XCTAssertEqual(after.inputs.intent, committed)
                 let ack = Trace()
-                try Native.withOwnedContext(expected: previous, candidate: f.candidate, controls: controls(owner, ack)) { context in
+                try Native.withTestContext(expected: previous, candidate: f.candidate, controls: controls(owner, ack)) { context in
                     try checked({ reads }) { try context.verifyAcknowledgement(previous); try context.verifyAcknowledgement(after) }
                     try checked({ reads }) { try context.verifyAcknowledgement(after); try context.verifyFrame(after); try context.verifyEntry(after.entry) }
                 }
                 ordered(ack)
                 let replay = Trace()
-                XCTAssertThrowsError(try Native.withOwnedContext(expected: after, candidate: f.candidate, controls: controls(owner, replay)) { context in
+                XCTAssertThrowsError(try Native.withTestContext(expected: after, candidate: f.candidate, controls: controls(owner, replay)) { context in
                     let count = replay.events.count
                     XCTAssertThrowsError(try context.verifyAcknowledgement(previous))
                     XCTAssertEqual(replay.events.count, count)
                 }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
                 let strict = Trace()
-                XCTAssertThrowsError(try Native.withOwnedContext(expected: previous, candidate: f.candidate, controls: controls(owner, strict)) { context in
+                XCTAssertThrowsError(try Native.withTestContext(expected: previous, candidate: f.candidate, controls: controls(owner, strict)) { context in
                     let count = strict.events.count
                     XCTAssertThrowsError(try context.verifyFrame(after))
                     XCTAssertEqual(strict.events.count, count)
