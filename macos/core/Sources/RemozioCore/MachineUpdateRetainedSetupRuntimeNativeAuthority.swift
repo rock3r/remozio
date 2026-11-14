@@ -53,6 +53,11 @@ enum MachineUpdateRetainedSetupRuntimeNativeAuthority {
                 try requireActive()
             } catch { expire(); throw error }
         }
+        func withCurrentCodePolicy<Value>(_ body: (AuthorityCodePolicy) throws -> Value) throws -> Value {
+            try requireActive()
+            do { let result = try body(policy); try requireActive(); return result }
+            catch { expire(); throw error }
+        }
         fileprivate func expire() { current = nil }
     }
     static func withNativeScope<Value>(expected: Frame, candidate: SignedReleaseEvidence, currentAuthorityAccountID: Data,

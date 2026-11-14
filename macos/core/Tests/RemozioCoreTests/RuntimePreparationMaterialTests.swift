@@ -185,4 +185,32 @@ final class RuntimePreparationMaterialTests: XCTestCase {
             }
         }
     }
+    func testReplacingRetainedRuntimeFileWithIdenticalBytesRefusesWithoutRepair() throws {
+        try fixture { _, account, services, directory in
+            let original = try restore(directory, account, services, make: { try self.material(services) })
+            let bytes = try original.encoded, reference = try original.reference
+            let first = try ProtectedServiceConfiguration.readIdentity(anchor: directory.path,
+                relativePath: AdministrativeSetupPublication.File.runtimeRecord.name, owner: getuid())
+            let file = path(directory), backup = file + ".old"
+            var replaced = false, makes = 0, custody = 0
+            XCTAssertThrowsError(try RuntimeMaterialPreparation.restoreOrCreate(directory: directory, owner: getuid(),
+                account: account, services: services, expected: reference, verifyCurrent: {
+                    custody += 1; try directory.validate()
+                }, verifyMaterial: { actual in
+                    XCTAssertEqual(try actual.reference, reference)
+                    if !replaced {
+                        replaced = true; XCTAssertEqual(rename(file, backup), 0)
+                        try bytes.write(to: URL(fileURLWithPath: file)); XCTAssertEqual(chmod(file, 0o600), 0)
+                    }
+                }, make: { makes += 1; return original })) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .identityChanged)
+                }
+            XCTAssertTrue(replaced); XCTAssertEqual(makes, 0); XCTAssertGreaterThan(custody, 1)
+            let after = try ProtectedServiceConfiguration.readIdentity(anchor: directory.path,
+                relativePath: AdministrativeSetupPublication.File.runtimeRecord.name, owner: getuid())
+            XCTAssertNotEqual(first.identity, after.identity); XCTAssertEqual(after.bytes, bytes)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: backup))
+            XCTAssertEqual(try RuntimePreparationMaterial.decode(after.bytes).reference, reference)
+        }
+    }
 }

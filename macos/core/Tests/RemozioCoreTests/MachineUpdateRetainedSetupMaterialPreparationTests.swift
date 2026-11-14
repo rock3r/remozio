@@ -116,7 +116,8 @@ final class MachineUpdateRetainedSetupMaterialPreparationTests: XCTestCase {
             let before = try snapshot(f); var called = false
             XCTAssertThrowsError(try Preparation.prepareNative(machine: f.machine(), expected: before, candidate: f.candidate,
                 currentCodePolicy: before.runtime.preparation.initialAuthority.codePolicy, directory: f.directory,
-                admission: f.admission, fileCustodyAccepted: false, verifyCurrent: { _ in called = true })) {
+                admission: f.admission, fileCustodyAccepted: false, verifyCurrent: { _ in called = true },
+                verifyFileCustody: { called = true })) {
                 XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
             }
             XCTAssertFalse(called); try snapshot(f).requireSame(as: before)

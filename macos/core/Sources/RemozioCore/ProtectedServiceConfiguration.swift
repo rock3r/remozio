@@ -90,8 +90,29 @@ public enum ProtectedServiceConfiguration {
         return try readRecord(anchor: anchor, relativePath: relativeDirectory + "/" + RuntimeAuditUpgradeStartupFence.fileName,
             owner: owner, privateFile: false, ancestorOwner: owner, allowMissingLeaf: true, allowMissingAncestors: true)
     }
+    struct IdentityRead {
+        let bytes: Data
+        let identity: PreparationFileIdentity
+        func requireSame(as other: Self) throws {
+            guard identity == other.identity, bytes == other.bytes else { throw JournalLeaseError.identityChanged }
+        }
+    }
+    static func readIdentity(path: String) throws -> IdentityRead {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try readIdentity(anchor: "/", relativePath: String(path.dropFirst()), owner: 0)
+    }
+    /// Owned reads use the same protected descriptor checks. They do not establish native custody.
+    static func readIdentity(anchor: String, relativePath: String, owner: uid_t) throws -> IdentityRead {
+        var identity: PreparationFileIdentity?
+        let bytes = try readRecord(anchor: anchor, relativePath: relativePath, owner: owner,
+            privateFile: true, ancestorOwner: nil, allowMissingLeaf: false, reportIdentity: { identity = $0 })
+        guard let bytes, let identity else { throw JournalLeaseError.identityChanged }
+        return IdentityRead(bytes: bytes, identity: identity)
+    }
     private static func readRecord(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool,
-                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool, byteLimit: Int = maximumBytes, allowMissingAncestors: Bool = false) throws -> Data? {
+                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool, byteLimit: Int = maximumBytes, allowMissingAncestors: Bool = false,
+                                   reportIdentity: ((PreparationFileIdentity) -> Void)? = nil) throws -> Data? {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !anchor.utf8.contains(0),
               anchor.utf8.count + relativePath.utf8.count + 1 < Int(PATH_MAX),
@@ -156,6 +177,7 @@ public enum ProtectedServiceConfiguration {
             offset += count
         }
         try validateNodes()
+        reportIdentity?(.init(device: UInt32(bitPattern: file.info.st_dev), inode: file.info.st_ino))
         return result
     }
 }
