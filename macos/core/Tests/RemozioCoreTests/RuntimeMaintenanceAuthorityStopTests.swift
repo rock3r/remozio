@@ -223,16 +223,33 @@ final class RuntimeMaintenanceAuthorityStopTests: XCTestCase {
     func testForkedSessionCannotInspectRemoveOrReleaseTheParentDrain() throws {
         let h = try Harness()
         try h.run { session in
-            let child = fork(); XCTAssertGreaterThanOrEqual(child, 0)
+            let child = Self.forkProcess(); XCTAssertGreaterThanOrEqual(child, 0)
             if child == 0 {
                 do { _ = try session.poll(); _exit(11) } catch { session.close(); _exit(0) }
             }
             guard child > 0 else { throw Failure.expected }
             var status: Int32 = 0
-            XCTAssertEqual(waitpid(child, &status, 0), child); XCTAssertEqual(status, 0)
+            let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+            var reaped = false
+            while DispatchTime.now().uptimeNanoseconds < deadline {
+                if waitpid(child, &status, WNOHANG) == child { reaped = true; break }
+                usleep(10_000)
+            }
+            if !reaped {
+                _ = kill(child, SIGKILL)
+                while waitpid(child, &status, 0) < 0 && errno == EINTR {}
+            }
+            XCTAssertTrue(reaped); XCTAssertEqual(status, 0)
             XCTAssertEqual(h.inspections, 0); XCTAssertEqual(h.removals, 0)
             try h.drain.validate(); h.observation = .absent; try session.requireRemoved()
         }
     }
+
+    private static let forkProcess: @convention(c) () -> pid_t = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fork") else {
+            preconditionFailure("fork is not available")
+        }
+        return unsafeBitCast(symbol, to: (@convention(c) () -> pid_t).self)
+    }()
 
 }
