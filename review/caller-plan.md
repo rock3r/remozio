@@ -29,6 +29,15 @@ Any target identifier or revision is a stale-state comparison, never a source of
 The service derives the installed candidate and current machine state through existing protected readers.
 The result describes the actual retained stage. It grants no consent, enrollment, activation or ordinary-ready state.
 
+C05 applies C01's peer binding to `retainedRuntimeProgress` before returning or encoding any target observation.
+Only the verified owner of the current authority, using its approved app peer, may receive target ID, revision or digest.
+This binding is required even though the progress selector carries no administrator authorization form.
+A different local user with a correctly signed app receives nil or a refusal without any target observation.
+The listener's accepted local UID and a valid app signature alone do not establish the current authority binding.
+Derive the peer from the actual invocation and protected C01 state. A request UID or target identifier cannot replace that derivation.
+C05 tests must include the current authority owner and another local user with the signed app.
+The first receives scoped progress. The second receives nil or refusal, with no target ID, revision, digest or target-existence disclosure.
+
 Authenticate each exported invocation synchronously before task dispatch.
 `XPCInvocationGuard.verifyInvocation()` supplies the kernel UID, process ID and audit session for the accepted connection.
 The listener and connection signing requirements must already be configured before activation.
@@ -167,7 +176,7 @@ Each ready PR merges before the next cut. No stub, permissive default or tempora
 | C02 | Per-invocation rights, cancellation and Setup reservation; new invocation scope, narrow existing reservation adapters | 120–190 | Rights imported before dispatch; disconnect/expiry, re-entry, cleanup failure and reply ownership |
 | C03 | Native factory composition using A11k after existing scoped capture closes; no pool suspension | 100–190 | No native entry inside machines.use; close failure prevents entry; exact factory order, one call, result comparison and all exits close |
 | C04 | Bounded versioned retained request/progress/result values; new local contract and existing interface declaration | 90–170 | Size, fields, versions and stale observation refusal; no authority or arbitrary path fields |
-| C05 | Authenticated exported dispatch and service wiring; endpoint and native-only operation factory | 110–195 | Hello and invocation authentication, reservation before work, cancellation, one reply and cleanup ordering |
+| C05 | Authenticated exported dispatch, peer-bound progress and service wiring | 110–195 | C01 binding on progress; another signed local user receives no target data; reservation, cancellation, reply and cleanup ordering |
 | C06 | App channel and existing retained maintenance flow integration; channel, driver and localized strings only | 100–190 | Unsupported capability, administrator decline/expiry, busy, stale state and explicit later recovery |
 
 C01 must include a successful admission with different authority/target UIDs and different policy floors.
