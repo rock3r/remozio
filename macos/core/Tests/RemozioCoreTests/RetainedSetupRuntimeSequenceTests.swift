@@ -158,6 +158,18 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             } }
         }
     }
+    static func withImportedPublicationFixture(_ body: (RetainedPolicyWriterFixture, MachineUpdateRetainedSetupPolicySnapshot,
+        AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(sharedImportFormats: true) { f in
+            let state = State(f); try state.seedImport()
+            let before = try f.machine().retainedSetupPolicySnapshot(owner: f.source.runtime.setup.owner, candidate: f.candidate)
+            let recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: before, candidate: f.candidate,
+                directory: f.directory, admission: f.admission, useMachine: { callback in
+                    try f.reopen(nil); let machine = try f.machine(); defer { try? machine.close() }; return try callback(machine)
+                }, openJournal: { try f.openPolicyJournal($0 == .readOnly ? .readOnly : .startup) }, verifySnapshot: { _ in })
+            try f.reopen(nil); defer { try? f.machine().close() }; try body(f, recorded, state.pair())
+        }
+    }
     private func fixture(_ body: (State) throws -> Void) throws {
         try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(sharedImportFormats: true) { f in
             let state = State(f); defer { if let files = state.files { XCTAssertNoThrow(try files.close()) }; try? f.machine().close() }

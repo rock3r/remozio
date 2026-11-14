@@ -174,6 +174,36 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
         XCTAssertEqual(state.stages, published ? [.publicationCompleted] : [.filesPublished, .publicationCompleted])
         for scope in state.scopes { XCTAssertThrowsError(try scope.requireActive()) }
     }
+    func testOriginalOwnerBridgeRejectsForeignAndRecursiveUseAndExpiresWithItsCallback() throws {
+        try fixture { f, before, current in
+            let files = try files(f, before, current, seed: false); defer { XCTAssertNoThrow(try files.close()) }
+            let state = State(); var parents: [MachineUpdateRetainedSetupInitialPublication.Scope] = []
+            state.onScope = { scope in
+                let original = state.counts, shared = SharedScope(scope), done = DispatchSemaphore(value: 0), rejected = Mutex(false)
+                defer { XCTAssertEqual(state.counts, original) }
+                DispatchQueue.global().async {
+                    defer { done.signal() }
+                    do { try shared.scope.withOwner(publication: { _ in }, observation: { _ in }) }
+                    catch { rejected.withLock { $0 = error as? JournalLeaseError == .invalidated } }
+                }
+                XCTAssertEqual(done.wait(timeout: .now() + 2), .success); XCTAssertTrue(rejected.withLock { $0 })
+                try scope.withOwner(publication: { parent in
+                    parents.append(parent); try parent.requireActive()
+                    XCTAssertThrowsError(try scope.withOwner(publication: { _ in }, observation: { _ in })) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+                    }
+                }, observation: { _ in XCTFail("An observation replaced the original publication scope") })
+            }
+            XCTAssertThrowsError(try prepare(f, before, files, state: state))
+            XCTAssertEqual(state.commits, 0); XCTAssertEqual(files.publicationCalls, 0)
+            XCTAssertEqual(parents.count, 1); let stopped = state.counts
+            for parent in parents { XCTAssertThrowsError(try parent.requireActive()) }
+            for scope in state.scopes {
+                XCTAssertThrowsError(try scope.withOwner(publication: { _ in }, observation: { _ in }))
+            }
+            XCTAssertEqual(state.counts, stopped)
+        }
+    }
     func testRealPublicationClosesSelectionBeforeCompletionAndAssertsTheReadBudget() throws {
         try fixture { f, before, current in
             let files = try files(f, before, current, seed: false); defer { XCTAssertNoThrow(try files.close()) }

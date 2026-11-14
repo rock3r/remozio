@@ -13,12 +13,24 @@ enum MachineUpdateRetainedSetupInitialRuntime {
     struct Scope: CustomStringConvertible, CustomDebugStringConvertible {
         fileprivate let check: (Bool) throws -> Void
         fileprivate let leave: () -> Void
+        fileprivate enum Owner { case publication(Publication.Scope), observation(Observer.Scope) }
+        fileprivate let owner: Owner
         let snapshot: Snapshot
         let material: RuntimePreparationMaterial?
         let artifact: Observer.Artifact?
         var description: String { "RetainedSetupInitialRuntimeScope(redacted)" }
         var debugDescription: String { description }
         func requireActive() throws { try check(false) }
+        /// Lends the original owner scope. Escaping it does not extend its process, thread or callback lifetime.
+        func withOwner<Value>(publication: (Publication.Scope) throws -> Value,
+            observation: (Observer.Scope) throws -> Value) throws -> Value {
+            try withActive {
+                switch owner {
+                case .publication(let scope): return try publication(scope)
+                case .observation(let scope): return try observation(scope)
+                }
+            }
+        }
         func withActive<Value>(_ body: () throws -> Value) throws -> Value {
             try check(true); defer { leave() }
             let result = try body(); try requireActive(); return result
@@ -33,7 +45,8 @@ enum MachineUpdateRetainedSetupInitialRuntime {
         verifyActivity: @escaping (ServiceReleaseActivityReference, Scope) throws -> Void,
         readArtifact: @escaping (Observer.Artifact, Scope) throws -> Data?, publish: @escaping (Scope) throws -> Void,
         didReadSnapshot: @escaping (Snapshot) throws -> Void = { _ in },
-        didStage: @escaping (Stage) throws -> Void = { _ in }) throws -> Snapshot {
+        didStage: @escaping (Stage) throws -> Void = { _ in },
+        didCompletionStorageStage: @escaping (PreparationIntentStore.CompletionIntentStorageStage, Completion.Scope) throws -> Void = { _, _ in }) throws -> Snapshot {
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
         guard let record = expected.intent, record.phase == .recorded,
               let reference = expected.activation.runtime.state.reference, reference.serviceActivity != nil else {
@@ -68,7 +81,7 @@ enum MachineUpdateRetainedSetupInitialRuntime {
                 try actual.requireSame(as: previous); try host(actual); try didReadSnapshot(actual); try lifetime(); return actual
             }
         }
-        func loan<Value>(snapshot: Snapshot, material: RuntimePreparationMaterial? = nil, artifact: Observer.Artifact? = nil,
+        func loan<Value>(owner: Scope.Owner, snapshot: Snapshot, material: RuntimePreparationMaterial? = nil, artifact: Observer.Artifact? = nil,
             validate: @escaping () throws -> Void, _ body: (Scope) throws -> Value) throws -> Value {
             var lent = true, operating = false, violated = false
             defer { lent = false }
@@ -77,7 +90,7 @@ enum MachineUpdateRetainedSetupInitialRuntime {
                 guard lent, !violated else { throw JournalLeaseError.invalidated }
                 guard !enter || !operating else { violated = true; throw PreparationStoreError.transactionActive }
                 if enter { operating = true }
-            }, leave: { operating = false }, snapshot: snapshot, material: material, artifact: artifact)
+            }, leave: { operating = false }, owner: owner, snapshot: snapshot, material: material, artifact: artifact)
             try scope.requireActive(); let value = try body(scope); try scope.requireActive(); return value
         }
         current = try capture(expected)
@@ -90,12 +103,12 @@ enum MachineUpdateRetainedSetupInitialRuntime {
                         readPolicyBoundary: readPolicyBoundary, verifyCurrent: host, body: body)
                 }, machine: machine, expected: before, candidate: candidate, directory: directory, admission: admission,
                     fileCustodyAccepted: fileCustodyAccepted, verifyCurrent: host, verifyServices: verifyServices,
-                    readMaterial: { parent in try loan(snapshot: before, validate: parent.requireActive, readMaterial) },
-                    verifyActivity: { activity, parent in try loan(snapshot: before, material: parent.material,
+                    readMaterial: { parent in try loan(owner: .publication(parent), snapshot: before, validate: parent.requireActive, readMaterial) },
+                    verifyActivity: { activity, parent in try loan(owner: .publication(parent), snapshot: before, material: parent.material,
                         validate: parent.requireActive) { try verifyActivity(activity, $0) } },
-                    readArtifact: { artifact, parent in try loan(snapshot: before, material: parent.material, artifact: artifact,
+                    readArtifact: { artifact, parent in try loan(owner: .publication(parent), snapshot: before, material: parent.material, artifact: artifact,
                         validate: parent.requireActive) { try readArtifact(artifact, $0) } },
-                    publish: { parent in try loan(snapshot: before, material: parent.material, artifact: parent.artifact,
+                    publish: { parent in try loan(owner: .publication(parent), snapshot: before, material: parent.material, artifact: parent.artifact,
                         validate: parent.requireActive, publish) })
                 return before
             }
@@ -107,11 +120,12 @@ enum MachineUpdateRetainedSetupInitialRuntime {
             try Completion.complete(machine: machine, expected: beforeCompletion, candidate: candidate, directory: directory,
                 admission: admission, fileCustodyAccepted: fileCustodyAccepted, readPolicyBoundary: readPolicyBoundary,
                 verifyCurrent: host, verifyServices: verifyServices,
-                readMaterial: { parent in try loan(snapshot: parent.snapshot, validate: parent.requireActive, readMaterial) },
-                verifyActivity: { activity, parent in try loan(snapshot: parent.snapshot, validate: parent.requireActive) {
+                readMaterial: { parent in try loan(owner: .observation(parent), snapshot: parent.snapshot, validate: parent.requireActive, readMaterial) },
+                verifyActivity: { activity, parent in try loan(owner: .observation(parent), snapshot: parent.snapshot, validate: parent.requireActive) {
                     try verifyActivity(activity, $0)
-                } }, readArtifact: { artifact, parent in try loan(snapshot: parent.snapshot, artifact: artifact,
-                    validate: parent.requireActive) { try readArtifact(artifact, $0) } })
+                } }, readArtifact: { artifact, parent in try loan(owner: .observation(parent), snapshot: parent.snapshot, artifact: artifact,
+                    validate: parent.requireActive) { try readArtifact(artifact, $0) } },
+                didStorageStage: didCompletionStorageStage)
         }
         if beforeCompletion.activation.runtime.state.configurationPublished { try completed.requireSame(as: beforeCompletion) }
         else { try completed.requirePublication(from: beforeCompletion, reference: reference) }

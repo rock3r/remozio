@@ -58,7 +58,7 @@ enum MachineUpdateRetainedSetupInitialPublicationNative {
             try verify(scope, context: context, expected: expected)
         })
     }
-    private static func callbacks(context: Native.NativeContext, expected: Snapshot,
+    static func callbacks(context: Native.NativeContext, expected: Snapshot,
         verifyCurrent: @escaping (Snapshot) throws -> Void) -> Callbacks {
         let runtime = expected.activation.runtime
         return Callbacks(verifyCurrent: { actual in

@@ -48,7 +48,7 @@ enum MachineUpdateRetainedSetupInitialCompletionNative {
         try scope.requireActive(); try context.verification.verifyPublication(scope.snapshot)
         try context.withResources { _, _ in }; try scope.requireActive()
     }
-    private static func callbacks(context: Native.NativeContext, expected: Snapshot,
+    static func callbacks(context: Native.NativeContext, expected: Snapshot,
         verifyCurrent: @escaping (Snapshot) throws -> Void) -> Callbacks {
         Callbacks(verifyCurrent: { actual in
             try context.verification.verifyPublication(actual); try verifyCurrent(actual)
