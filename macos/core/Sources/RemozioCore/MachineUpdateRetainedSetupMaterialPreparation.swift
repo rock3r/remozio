@@ -8,10 +8,11 @@ enum MachineUpdateRetainedSetupMaterialPreparation {
 
     static func prepareNative(machine: PreparationIntentStore, expected: Snapshot, candidate: SignedReleaseEvidence,
         currentCodePolicy: AuthorityCodePolicy, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
-        fileCustodyAccepted: Bool, verifyCurrent: @escaping (Snapshot) throws -> Void) throws -> RuntimePreparationState {
+        fileCustodyAccepted: Bool, verifyCurrent: @escaping (Snapshot) throws -> Void,
+        verifyFileCustody: @escaping () throws -> Void) throws -> RuntimePreparationState {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
-        try expected.requireCurrent(machine: machine, candidate: candidate)
+        try verifyFileCustody(); try expected.requireCurrent(machine: machine, candidate: candidate)
         try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
         let inventory = expected.runtime.setup.source.actual.inventory
         guard inventory.bundlePath == MachineBootstrap.bundlePath,
@@ -25,7 +26,7 @@ enum MachineUpdateRetainedSetupMaterialPreparation {
         _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         let identity = try placement.preparationCopyIdentity(name: bundle.lastPathComponent)
         func verifyNative(_ actual: Snapshot) throws {
-            try placement.validate()
+            try verifyFileCustody(); try placement.validate()
             guard try placement.preparationCopyIdentity(name: bundle.lastPathComponent) == identity else { throw JournalLeaseError.identityChanged }
             let source = actual.runtime.setup.source.actual
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
@@ -54,22 +55,26 @@ enum MachineUpdateRetainedSetupMaterialPreparation {
         let services = try NativeServiceAccountDirectory(accountID: expected.runtime.preparation.accountID, ownerUID: expected.runtime.preparation.ownerUID)
         let mode = try GatewaySettingsNativeSupport.mode(release: candidate, policy: currentCodePolicy)
         let enabled = try GatewaySettingsNativeSupport.serviceActivityEnabled(reference: expected.runtime.state.reference, mode: mode)
+        var runtimeRecordIdentity: PreparationFileIdentity?
         return try prepare(machine: machine, expected: expected, candidate: candidate, directory: directory, admission: admission,
             fileCustodyAccepted: fileCustodyAccepted, verifyCurrent: verifyNative, verifyServices: { plan in
                 for claim in plan.claims { try services.validateGroup(claim); try services.validateUser(claim, ownerUID: plan.ownerUID) }
             }, verifyAuthority: { plan in
                 let authority = try AccountPreparationController.authorityDirectory(accountID: plan.accountID)
                 let directory = authority + "/Key", path = directory + "/" + AuthorityKeyProvisioning.recordFileName
+                try verifyFileCustody()
                 guard try ProtectedServiceConfiguration.readOptional(anchor: "/",
                     relativePath: String((directory + "/" + AuthorityKeyProvisioningStorage.pendingName).dropFirst()), owner: 0) == nil else {
                     throw AuthorityKeyProvisioningError.conflictingState
                 }
-                let bytes = try ProtectedServiceConfiguration.read(path: path)
+                try verifyFileCustody()
+                let first = try ProtectedServiceConfiguration.readIdentity(path: path), bytes = first.bytes
                 let retained = try AuthoritySigningKeyRecord.decode(bytes)
                 guard retained.macID == plan.macID, retained.accountID == plan.accountID,
                       retained.publicKey == plan.authorityPublicKey else { throw AuthorityRequestSignerError.wrongIdentity }
                 try retained.verifyProvisioningHardware()
-                guard try ProtectedServiceConfiguration.read(path: path) == bytes else { throw JournalLeaseError.identityChanged }
+                try verifyFileCustody()
+                try ProtectedServiceConfiguration.readIdentity(path: path).requireSame(as: first)
             }, restoreMaterial: { plan, reference, scope in
                 try RuntimeMaterialPreparation.prepareFileIdentity(account: expected.runtime.preparation, services: plan, expected: reference,
                     fileCustodyAccepted: fileCustodyAccepted, serviceActivityEnabled: enabled,
@@ -78,11 +83,17 @@ enum MachineUpdateRetainedSetupMaterialPreparation {
             }, validateMaterial: { material, scope in
                 try scope.verify()
                 let paths = try RuntimePreparationPaths(accountID: expected.runtime.preparation.accountID)
-                let bytes = try ProtectedServiceConfiguration.read(path: paths.privateDirectory + "/" + AdministrativeSetupPublication.File.runtimeRecord.name)
-                guard try bytes == material.encoded else { throw RuntimePreparationError.conflictingMaterial }
+                let path = paths.privateDirectory + "/" + AdministrativeSetupPublication.File.runtimeRecord.name
+                try verifyFileCustody()
+                let first = try ProtectedServiceConfiguration.readIdentity(path: path)
+                if let runtimeRecordIdentity, runtimeRecordIdentity != first.identity { throw JournalLeaseError.identityChanged }
+                runtimeRecordIdentity = first.identity
+                guard try first.bytes == material.encoded else { throw RuntimePreparationError.conflictingMaterial }
                 if let activity = material.serviceActivity {
                     try RuntimeMaterialPreparation.validateServiceActivity(account: expected.runtime.preparation, activity: activity, verifyCurrent: scope.verify)
                 }
+                try verifyFileCustody()
+                try ProtectedServiceConfiguration.readIdentity(path: path).requireSame(as: first)
                 try scope.verify()
             })
     }
