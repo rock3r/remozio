@@ -363,7 +363,7 @@
   "RetainedSetupPromotionGateExclusionTests": 15.71,
   "RetainedSetupPromotionTransitionTests": 1.55,
   "RetainedSetupReadinessArchiveTests": 2.19,
-  "RetainedSetupRuntimeSequenceTests": 353.94,
+  "RetainedSetupRuntimeSequenceTests": 354.42,
   "ReviewedSetupFileTests": 0.52,
   "RootUpdateSchedulingFrameTests": 2.83,
   "RootUpdateSchedulingOwnerTests": 8.97,
@@ -772,12 +772,13 @@
    "testStaleProviderResultCannotMasqueradeAsTheActualCompletedFrame": 54.92
   },
   "RetainedSetupRuntimeSequenceTests": {
-   "testCustodyRefusesBeforeReadsAndAbsentThenEmptyStorageSkipAcknowledgement": 67.59,
-   "testMissingMaterialIsRetainedBeforePolicyAndEscapedOrPoisonedLoansRefuse": 27.32,
-   "testOwnedFullChainAndFreshPublishedRecoveryPreserveEveryFileWithoutReplay": 80.32,
-   "testStaleMaterialAndPolicyResultsStopBeforePublicationThenFreshStateRecovers": 74.24,
-   "testStalePublicationAndLostAcknowledgementRequireFreshReadOnlyRecovery": 79.31,
-   "testUnresolvedWritingRefusesBeforeMaterialPublicationOrAcknowledgement": 25.16
+   "testCaptureBudgetRefusesSeventhCaptureAndStaysExhausted": 0.0,
+   "testCustodyRefusesBeforeReadsAndAbsentThenEmptyStorageSkipAcknowledgement": 68.49,
+   "testMissingMaterialIsRetainedBeforePolicyAndEscapedOrPoisonedLoansRefuse": 27.4,
+   "testOwnedFullChainAndFreshPublishedRecoveryPreserveEveryFileWithoutReplay": 79.74,
+   "testStaleMaterialAndPolicyResultsStopBeforePublicationThenFreshStateRecovers": 76.61,
+   "testStalePublicationAndLostAcknowledgementRequireFreshReadOnlyRecovery": 77.49,
+   "testUnresolvedWritingRefusesBeforeMaterialPublicationOrAcknowledgement": 24.69
   }
  }
 }
