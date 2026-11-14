@@ -441,7 +441,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role in (1, 8):
             self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), (list(range(1, 12)), list(range(1, 12))))
         self.assertEqual(by_role[8]['authority.installation-preparation'][1], list(range(1, 30)))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][3], {24: 25})
+        self.assertEqual(by_role[8]['authority.installation-preparation'][3], {24: 25, 28: 29})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])
             self.assertNotIn('setup.local-ipc', by_role[role])
