@@ -16,7 +16,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeMaterial {
                 func custody() throws { try context.withResources { _, _ in } }
                 return try withMachine(expected: expected, candidate: candidate, verifyCustody: custody, openMachine: {
                     let machine = try PreparationIntentStore(lease: InstallationStorageLease.acquire(directoryPath: MachineBootstrap.machineDirectory),
-                        macID: expected.runtime.preparation.macID, maximumRecords: 64, initialize: false, opening: .retainedPolicyVerification)
+                        macID: expected.runtime.preparation.macID, maximumRecords: 64, initialize: false, opening: .mutable)
                     do { try machine.validateStorageLease(nativeDirectory: MachineBootstrap.machineDirectory); return machine }
                     catch { try? machine.close(); throw error }
                 }) { machine in
