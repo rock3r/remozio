@@ -9,6 +9,7 @@ struct RuntimeMaintenanceReaderFixture {
     let machine: () -> PreparationIntentStore
     let candidate: SignedReleaseEvidence
     let account: AccountPreparationIntent
+    let authority: RuntimeMaintenanceWindowRecord.Account
     let databasePath: String
     let reopen: () throws -> Void
     let edit: ([String]) throws -> Void
@@ -24,9 +25,8 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
     private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
     private func data(_ byte: UInt8, _ count: Int = 16) -> Data { Data(repeating: byte, count: count) }
     private func account(_ f: RuntimeMaintenanceReaderFixture, changed: Bool = false) throws -> Record.Account {
-        var id = f.account.directoryID.uuid
-        return try .init(accountID: f.account.accountID, ownerUID: f.account.ownerUID + (changed ? 1 : 0),
-            directoryID: withUnsafeBytes(of: &id) { Data($0) })
+        try .init(accountID: f.authority.accountID, ownerUID: f.authority.ownerUID + (changed ? 1 : 0),
+            directoryID: f.authority.directoryID)
     }
     private func owner(_ f: RuntimeMaintenanceReaderFixture) -> LocalAccountIdentity {
         .init(uid: f.account.ownerUID, primaryGroupID: getgid(), directoryID: f.account.directoryID)
@@ -111,21 +111,27 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
             XCTAssertEqual(stable.schemaVersion, 29)
             let current = try f.machine().stableRuntimeSource(candidate: f.candidate)
             XCTAssertEqual(current.actual.schemaVersion, 29)
-            let retained = try f.machine().retainedSetupActivationSnapshot(owner: owner(f), candidate: f.candidate)
-            XCTAssertNotNil(try f.machine().retainedSetupCompletionSnapshot(owner: owner(f), candidate: f.candidate).intent)
-            XCTAssertNotNil(try f.machine().retainedSetupPromotionSnapshot(owner: owner(f), candidate: f.candidate).intent)
+            XCTAssertNotNil(try f.machine().retainedSetupCompletionIntent(accountID: f.account.accountID,
+                ownerUID: f.account.ownerUID, candidate: f.candidate))
+            XCTAssertNotNil(try f.machine().retainedSetupPromotionIntent(accountID: f.account.accountID,
+                ownerUID: f.account.ownerUID, candidate: f.candidate))
             XCTAssertNotNil(try f.machine().retainedSetupPromotionReady(accountID: f.account.accountID,
                 ownerUID: f.account.ownerUID, candidate: f.candidate))
-            let compatibility = try f.machine().stableRuntimeCompatibilitySnapshot(expected: current, retained: [retained], candidate: f.candidate)
+            try f.reopen()
+            try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: stable)
+            XCTAssertEqual(try rows(f, omitMaintenance: true), before)
+        }
+    }
+    func testSchema29CompatibilityUsesAnActualRetainedActivationPlan() throws {
+        try MachineUpdateReplacementTests.withMaintenanceRuntimeCompatibilityFixture { f in
+            let retained = try f.capture(), compatibility = try f.read(retained)
             XCTAssertEqual(compatibility.inputs.schemaVersion, 29)
+            XCTAssertEqual(retained.runtime.setup.source.actual.schemaVersion, 29)
             for role in [AuthorityCodeRole.authority, .setupController] {
                 XCTAssertTrue(compatibility.requirements.formats.contains {
                     $0.role == role && $0.name == Record.formatName && $0.readVersions.contains(1)
                 })
             }
-            try f.reopen()
-            try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: stable)
-            XCTAssertEqual(try rows(f, omitMaintenance: true), before)
         }
     }
     func testWindowRowsParticipateInTheStableDigestAndHoldOnlyTheirAccount() throws {
@@ -173,6 +179,7 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
             XCTAssertThrowsError(try f.machine().stableMachineUpdateSnapshot(candidate: old)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
             }
+            try f.reopen()
             XCTAssertFalse(MachineUpdateRetainedSetupPolicyStorage.stableSchemaVersions.contains(29))
             XCTAssertFalse(MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(29))
             XCTAssertThrowsError(try MachineUpdateRetainedSetupPolicyStorage.requireSchema(29, candidate: f.candidate))

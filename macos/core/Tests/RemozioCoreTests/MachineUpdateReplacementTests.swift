@@ -3506,7 +3506,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+    private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         unchangedCodeGenerations: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -3514,7 +3514,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: policySourceFormats,
             completionReaderFormats: completionReaderFormats, promotionReaderFormats: completionReaderFormats,
-            readinessReaderFormats: completionReaderFormats, retainedPolicySourceFormats: policySourceFormats, promotionProposalFormats: promotionProposalFormats,
+            readinessReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, retainedPolicySourceFormats: policySourceFormats, promotionProposalFormats: promotionProposalFormats,
             unchangedCodeGenerations: unchangedCodeGenerations, beforeActivation: {
                 retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account
                 try additionalBeforeActivation($0)
@@ -3839,12 +3839,12 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+    private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupActivationSource,
             MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
-        try withUnpublishedActivationReadFixture(policySourceFormats: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: didPrepareMaterial, additionalBeforeActivation: additionalBeforeActivation) { fixture, owner, material in
+        try withUnpublishedActivationReadFixture(policySourceFormats: true, completionReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: didPrepareMaterial, additionalBeforeActivation: additionalBeforeActivation) { fixture, owner, material in
             try withRetainedPolicyAfterStable(fixture: fixture, owner: owner, material: material,
                 recorded: recorded, body)
         }
@@ -4521,11 +4521,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedSelectionFixture(completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+    private func withRetainedSelectionFixture(completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (RetainedSelectionFixture) throws -> Void) throws {
         var material: RuntimePreparationMaterial?
-        try withRetainedPolicySourceFixture(recorded: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: { material = $0 }, additionalBeforeActivation: additionalBeforeActivation) {
+        try withRetainedPolicySourceFixture(recorded: true, completionReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: { material = $0 }, additionalBeforeActivation: additionalBeforeActivation) {
             fixture, owner, _, unpublished, current in
             try withRetainedSelectionAfterPolicy(fixture: fixture, owner: owner, unpublished: unpublished,
                 current: current, retainedMaterial: XCTUnwrap(material), body)
@@ -4951,9 +4951,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedActivationValueFixture(completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false, _ body: (RetainedSelectionFixture,
+    private func withRetainedActivationValueFixture(completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false, _ body: (RetainedSelectionFixture,
         MachineUpdateRetainedSetupActivationSnapshot, RuntimeRetainedSetupActivationPlan) throws -> Void) throws {
-        try withRetainedSelectionFixture(completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats) { f in
+        try withRetainedSelectionFixture(completionReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, promotionProposalFormats: promotionProposalFormats) { f in
             let selected = try f.capture()
             let plan = try RuntimeRetainedSetupActivationPlan.retainingRetainedSetup(snapshot: f.snapshot,
                 selection: selected, current: f.current, candidate: f.fixture.candidate)
@@ -6278,11 +6278,32 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    static func withMaintenanceRuntimeCompatibilityFixture(_ body: (RetainedRuntimeCompatibilityFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedActivationSQLReadsV6AndTheOrdinaryStateReaderStillRejectsIt"))
+        try suite.withRetainedActivationValueFixture(completionReaderFormats: true, maintenanceReaderFormats: true) { f, _, plan in
+            try suite.injectRetainedActivationRow(f, bytes: plan.encoded, materialID: plan.reference.materialID)
+            try f.fixture.machine.close()
+            for sql in [MachineUpdateRetainedSetupCompletionStorage.createSQL,
+                MachineUpdateRetainedSetupPromotionStorage.createSQL, MachineUpdateRetainedSetupPromotionReadyStorage.createSQL,
+                RuntimeMaintenanceWindowStorage.createSQL, "PRAGMA user_version=29"] { try f.fixture.files.sql(sql) }
+            try f.fixture.files.reopen()
+            try body(suite.compatibilityFixture(f, plan: plan))
+        }
+    }
+
     static func withMaintenanceReaderFixture(_ body: (RuntimeMaintenanceReaderFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupReadinessReadsSchema28AndRejectsOrdinaryWrites"))
         try suite.withReadinessReaderFixture(maintenanceReaderFormats: true) { f, account, _, _, _ in
-            try body(.init(machine: { f.machine }, candidate: f.candidate, account: account,
+            let source = try f.machine.stableRuntimeSource(candidate: f.candidate)
+            let authority = try XCTUnwrap(source.preparations.first { preparation in
+                source.actual.admission.accounts.contains { $0.accountID == preparation.accountID }
+            })
+            var directory = authority.directoryID.uuid
+            let current = try RuntimeMaintenanceWindowRecord.Account(accountID: authority.accountID, ownerUID: authority.ownerUID,
+                directoryID: withUnsafeBytes(of: &directory) { Data($0) })
+            try body(.init(machine: { f.machine }, candidate: f.candidate, account: account, authority: current,
                 databasePath: f.files.f.f.root.path + "/machine/installation.sqlite",
                 reopen: { try f.files.reopen() }, edit: { commands in
                     try f.machine.close()
