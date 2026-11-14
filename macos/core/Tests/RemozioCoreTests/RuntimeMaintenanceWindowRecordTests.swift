@@ -55,7 +55,7 @@ final class RuntimeMaintenanceWindowRecordTests: XCTestCase {
                 XCTAssertEqual(value.debugDescription, value.description)
             }
         }
-        XCTAssertEqual(Record.supportedVersions, [1])
+        XCTAssertEqual(try fields(record())[1], .text(Record.formatName))
     }
 
     func testCommittedOperationAndFailedRestorationRemainIndependent() throws {
@@ -93,6 +93,29 @@ final class RuntimeMaintenanceWindowRecordTests: XCTestCase {
         var f = try fields(record(phase: .restored, operation: .committed, service: .healthy, gate: gate()))
         f[10] = .unsigned(1); XCTAssertThrowsError(try decode(f))
         f[10] = .null; XCTAssertThrowsError(try decode(f))
+    }
+
+    func testPreStopCancellationAndRestartRemainDistinctWithNoRestoredFailure() throws {
+        let cancelled = try record(phase: .restored, service: .notStopped, gate: gate())
+        let restarted = try record(phase: .restored, operation: .committed, service: .healthy, gate: gate())
+        XCTAssertEqual(try Record.decode(cancelled.encoded), cancelled)
+        XCTAssertEqual(try Record.decode(restarted.encoded), restarted)
+        XCTAssertNotEqual(cancelled.service, restarted.service)
+        XCTAssertNotEqual(cancelled.operation, restarted.operation)
+        XCTAssertThrowsError(try record(phase: .restored, service: .notStopped))
+        for operation in Record.OperationOutcome.allCases where operation != .notStarted {
+            XCTAssertThrowsError(try record(phase: .restored, operation: operation, service: .notStopped, gate: gate()))
+            var changed = try fields(cancelled); changed[7] = .unsigned(operation.rawValue)
+            XCTAssertThrowsError(try decode(changed))
+        }
+        for failure in Record.Failure.allCases {
+            for value in [cancelled, restarted] {
+                XCTAssertThrowsError(try record(phase: .restored, operation: value.operation,
+                    service: value.service, failure: failure, gate: gate()))
+                var changed = try fields(value); changed[9] = .unsigned(failure.rawValue)
+                XCTAssertThrowsError(try decode(changed))
+            }
+        }
     }
 
     func testUnknownFieldsTagsVersionsEnumsAndWrongTypesRefuse() throws {
@@ -137,6 +160,8 @@ final class RuntimeMaintenanceWindowRecordTests: XCTestCase {
         var a = scopeFields, target = try array(a[3]), authority = try array(a[2])
         target[0] = authority[0]; a[3] = .array(target); var f = original; f[5] = .array(a); XCTAssertThrowsError(try decode(f))
         a = scopeFields; target = try array(a[3]); target[1] = authority[1]; a[3] = .array(target)
+        f = original; f[5] = .array(a); XCTAssertThrowsError(try decode(f))
+        a = scopeFields; target = try array(a[3]); target[2] = authority[2]; a[3] = .array(target)
         f = original; f[5] = .array(a); XCTAssertThrowsError(try decode(f))
         let restored = try fields(record(phase: .restored, operation: .committed, service: .healthy, gate: gate()))
         let readback = try array(restored[10])

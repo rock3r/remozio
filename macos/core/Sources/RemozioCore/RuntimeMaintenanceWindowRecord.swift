@@ -4,7 +4,6 @@ import RemozioProtocol
 /// Retained window metadata only. Decoding grants no admission, service operation or native custody.
 struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     static let formatName = "runtime.maintenance-window-record"
-    static let supportedVersions: Set<UInt64> = [1]
     enum Purpose: UInt64, CaseIterable, Sendable { case retainedPolicy = 1, retainedRuntime = 2, markerReplacement = 3 }
     enum Phase: UInt64, CaseIterable, Sendable {
         case authorized = 1, draining = 2, stopping = 3, stopped = 4, executing = 5
@@ -47,6 +46,7 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
             targetConsentDigest: Data, administratorIntentDigest: Data) throws {
             guard macID.count == 16, installationID.count == 16,
                   authority.accountID != target.accountID, authority.ownerUID != target.ownerUID,
+                  authority.directoryID != target.directoryID,
                   [releaseDigest, candidateDigest, authorityPolicyDigest, operationDigest, restorationDigest,
                    mutationFootprintDigest, authorityGrantDigest, targetConsentDigest, administratorIntentDigest].allSatisfy({ $0.count == 32 }) else {
                 throw RuntimePreparationError.invalidRecord
@@ -118,7 +118,8 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
               phase != .executing || operation == .unknown,
               phase != .needsOwnerRecovery || failure != nil,
               phase != .reopenPending || service == .healthy,
-              phase != .restored || (service == .healthy && gate?.hold == .released && gate?.admission == .available) else {
+              phase != .restored || (failure == nil && (service == .healthy || (service == .notStopped && operation == .notStarted))
+                && gate?.hold == .released && gate?.admission == .available) else {
             throw RuntimePreparationError.invalidRecord
         }
         self.id = id; self.revision = revision; self.purpose = purpose; self.scope = scope; self.phase = phase
@@ -130,14 +131,14 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
         }
     }
     var encoded: Data { get throws {
-        try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("remozio-maintenance-window"),
+        try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
             2: .bytes(id), 3: .bytes(revision), 4: .unsigned(purpose.rawValue), 5: scope.value,
             6: .unsigned(phase.rawValue), 7: .unsigned(operation.rawValue), 8: .unsigned(service.rawValue),
             9: failure.map { .unsigned($0.rawValue) } ?? .null, 10: gate?.value ?? .null]), limits: Self.limits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...10),
-              f[0] == .unsigned(1), f[1] == .text("remozio-maintenance-window"),
+              f[0] == .unsigned(1), f[1] == .text(Self.formatName),
               let purpose = Purpose(rawValue: try maintenanceUInt(f[4]!)), let phase = Phase(rawValue: try maintenanceUInt(f[6]!)),
               let operation = OperationOutcome(rawValue: try maintenanceUInt(f[7]!)),
               let service = ServiceOutcome(rawValue: try maintenanceUInt(f[8]!)) else { throw RuntimePreparationError.invalidRecord }
