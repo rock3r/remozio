@@ -74,7 +74,10 @@ public enum SetupRetainedRuntimeContract {
         public init(requestID: Data, progress: Progress?, operation: Operation, restoration: Restoration,
                     failure: Failure? = nil, cancelled: Bool = false, expired: Bool = false) throws {
             guard requestID.count == 16,
-                  ![Operation.failed, .unknown].contains(operation) || failure != nil,
+                  (failure == .operationFailed) == (operation == .failed),
+                  (failure == .outcomeUnknown) == (operation == .unknown),
+                  (failure != .stale && failure != .busy) || operation == .notStarted,
+                  restoration != .restored || operation != .committed || failure == nil,
                   restoration != .needsOwnerRecovery || failure != nil else { throw AdministrativeSetupChannelError.invalidMessage }
             self.requestID = requestID; self.progress = progress; self.operation = operation; self.restoration = restoration
             self.failure = failure; self.cancelled = cancelled; self.expired = expired

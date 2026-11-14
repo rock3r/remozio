@@ -28,9 +28,16 @@ final class SetupRetainedRuntimeContractTests: XCTestCase {
         let request = try Request(requestID: data(6), expected: progress())
         for operation in Reply.Operation.allCases {
             for restoration in Reply.Restoration.allCases {
+                let failure: Reply.Failure?
+                switch operation {
+                case .failed: failure = .operationFailed
+                case .unknown: failure = .outcomeUnknown
+                case .notStarted: failure = .busy
+                case .committed: failure = restoration == .restored ? nil : .restorationFailed
+                }
                 for flags in [(false, false), (false, true), (true, false), (true, true)] {
                     let value = try Reply(requestID: request.requestID, progress: progress(.retainedComplete), operation: operation,
-                        restoration: restoration, failure: .restorationFailed, cancelled: flags.0, expired: flags.1)
+                        restoration: restoration, failure: failure, cancelled: flags.0, expired: flags.1)
                     let decoded = try Reply.decode(value.bytes); XCTAssertEqual(decoded, value)
                     XCTAssertEqual(decoded.operation, operation); try decoded.requireReply(to: request)
                     XCTAssertLessThan(try value.bytes.count, Contract.maximumBytes)
@@ -44,6 +51,40 @@ final class SetupRetainedRuntimeContractTests: XCTestCase {
         XCTAssertThrowsError(try Reply(requestID: data(6), progress: nil, operation: .failed, restoration: .notNeeded))
         XCTAssertThrowsError(try Reply(requestID: data(6), progress: nil, operation: .unknown, restoration: .pending))
         XCTAssertThrowsError(try Reply(requestID: data(6), progress: nil, operation: .committed, restoration: .needsOwnerRecovery))
+    }
+    func testEveryFailureOperationAndRestorationCombinationIsExact() throws {
+        let failures: [Reply.Failure?] = [nil] + Reply.Failure.allCases.map { Optional($0) }
+        let initial = try Reply(requestID: data(6), progress: nil, operation: .notStarted, restoration: .notNeeded)
+        let base = try fields(initial.bytes)
+        var accepted = 0, refused = 0
+        for operation in Reply.Operation.allCases {
+            for restoration in Reply.Restoration.allCases {
+                let allowed: [Reply.Failure?]
+                switch operation {
+                case .failed: allowed = [.operationFailed]
+                case .unknown: allowed = [.outcomeUnknown]
+                case .notStarted: allowed = [nil, .busy, .stale, .unavailable, .restorationFailed, .repairRequired]
+                case .committed: allowed = restoration == .restored ? [nil] : [nil, .unavailable, .restorationFailed, .repairRequired]
+                }
+                for failure in failures {
+                    let valid = allowed.contains(failure) && (restoration != .needsOwnerRecovery || failure != nil)
+                    var f = base; f[4] = .unsigned(operation.rawValue); f[5] = .unsigned(restoration.rawValue)
+                    f[6] = failure.map { .unsigned($0.rawValue) } ?? .null
+                    let raw = try encoded(f)
+                    if valid {
+                        let value = try Reply(requestID: data(6), progress: nil, operation: operation,
+                            restoration: restoration, failure: failure)
+                        XCTAssertEqual(try Reply.decode(raw), value); XCTAssertEqual(try value.bytes, raw); accepted += 1
+                    } else {
+                        XCTAssertThrowsError(try Reply(requestID: data(6), progress: nil, operation: operation,
+                            restoration: restoration, failure: failure))
+                        XCTAssertThrowsError(try Reply.decode(raw)); refused += 1
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(accepted + refused, 128)
+        XCTAssertGreaterThan(accepted, 0); XCTAssertGreaterThan(refused, accepted)
     }
     func testEveryStaleObservationAndForeignReplyScopeRefuses() throws {
         let current = try progress(), request = try Request(requestID: data(6), expected: current)
