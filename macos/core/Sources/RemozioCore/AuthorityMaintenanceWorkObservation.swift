@@ -20,6 +20,7 @@ struct AuthorityMaintenanceExecutionWork: Equatable, Sendable {
     let started: Bool
     let stopping: Bool
     let failed: Bool
+    /// Includes the turn that is currently executing, until its report callback returns.
     let queuedTurns: Int
     let rejectedTurns: Int
 }

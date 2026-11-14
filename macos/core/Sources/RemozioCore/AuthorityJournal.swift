@@ -328,7 +328,7 @@ public final class AuthorityJournal: @unchecked Sendable {
             guard !updateHealthOnly, !updateCompletionOnly, !retainedSetupPolicyOnly, let requests else {
                 throw ApprovalCoordinatorError.unavailable
             }
-            try database.read { _ in () }
+            try database.read { _ in () } // Health check: reject closed storage and transaction-callback entry.
             return try .init(requests: requests.maintenanceRequestWork(), exchanges: commandExchanges.maintenanceWork,
                 nativeExecutions: commandExecutions.count, executionActivityOwners: commandActivity.count)
         }
