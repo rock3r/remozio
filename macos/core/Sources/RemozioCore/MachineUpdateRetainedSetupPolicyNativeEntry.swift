@@ -61,7 +61,11 @@ enum MachineUpdateRetainedSetupPolicyNativeEntry {
 
     /// Selects a published authority host, not an arbitrary inventory member or the historical target.
     static func publishedAuthority(expected: Snapshot, accountID: Data) throws -> (AuthorityInitializationIntent, InstalledAuthorityCommandConfiguration) {
-        let runtime = expected.activation.runtime, source = runtime.setup.source
+        try publishedAuthority(runtime: expected.activation.runtime, accountID: accountID)
+    }
+    static func publishedAuthority(runtime: MachineUpdateStableRuntimePreparationSnapshot, accountID: Data)
+        throws -> (AuthorityInitializationIntent, InstalledAuthorityCommandConfiguration) {
+        let source = runtime.setup.source
         guard accountID != runtime.preparation.accountID,
               let member = source.actual.inventory.accounts.first(where: { $0.accountID == accountID }),
               let configuration = try source.actual.installed.configuration().configuration(accountID: accountID),
