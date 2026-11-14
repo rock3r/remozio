@@ -51,7 +51,7 @@ Toni3002 accepts this precise contract. Do not claim the marker supplies an exit
 1. Persist the exact window intent and draining phase. Hold ordinary shared machine admission and A's exact registered account drain.
 2. Use the authenticated Setup-to-A channel to observe actual request, decision, execution, handoff and staged-pairing work.
 3. Preserve those lifetimes while waiting within the configured bound. If busy persists, cancel before bootout and explicitly reopen A.
-4. Revalidate account, protected gate, attempt/revision, Setup identity and the same live Authority incarnation before arming removal.
+4. Block new pairing stages under the authenticated maintenance binding, preserving existing attempts. Then revalidate zero staged pairing, account, gate, attempt/revision, Setup identity and the same incarnation before arming removal.
 5. Boot out only the derived Authority A job. This invokes the existing ordered shutdown. Other roles and accounts stay outside the stop cohort.
 6. A publishes the exact durable close marker only after runner.close succeeds under its retained authenticated shutdown binding.
 7. Setup requires the original process exit witness and exact marker readback. Missing, stale, foreign or mismatching evidence means needsOwnerRecovery.
@@ -94,7 +94,7 @@ The readback and native permit must still enforce their current code, protected 
 | Cut | Complete responsibility | Planning estimate | Required tests and boundary |
 | --- | --- | --- | --- |
 | M05a | Internal observation of real request/capture/activity, exchange callbacks, queued/rejected starts, native execution custody and staged pairing | 71-line archived command draft plus a measured pairing addition; total under200 or split pairing immediately afterward | Authorization-to-enqueue gap, rejected-start/report reservation, terminal row with live cleanup, staged attempt and active pairing work. No endpoint, idle proof or permit. |
-| M05b | Authenticated Setup-to-A observation channel and connection-bound in-memory marker context, reused by M09 | 120-195 per complete cut | Exact Setup peer, account/attempt/revision/gate/incarnation; disconnect/restart invalidation; no close-time record read. Split supporting validation first if necessary. No native stop factory. |
+| M05b | Authenticated Setup-to-A observation channel and connection-bound in-memory marker context, reused by M09 | 120-195 per complete cut | Arming blocks new pairing stages under the binding and preserves existing attempts. Test refusal after arming, existing attempt unchanged, and release on cancellation/reopen. Revalidate zero staged pairing after the block. Exact peer/attempt/revision/gate/incarnation; no close-time record read or native stop factory. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 

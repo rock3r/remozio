@@ -62,7 +62,7 @@ Use this exact order, as Toni revised in2996/2998/3002:
 1. Persist the window intent and A-drain phase, then hold A's real account drain under ordinary shared machine admission.
 2. Through the authenticated Setup-to-A channel, observe actual pending decisions, requests, exchange/worker reservations, native cleanup and staged pairing.
 3. Wait within the configured pre-stop bound without cutting that user work. On timeout, cancel and explicitly reopen A without stopping it.
-4. Revalidate the exact live incarnation and arm its authenticated shutdown binding. Boot out only A's derived Authority job.
+4. Under the authenticated binding, block new pairing stages and preserve existing attempts. Revalidate zero staged pairing after the block, then the exact incarnation and shutdown binding. Boot out only A's derived Authority job.
 5. Use the existing ordered runtime shutdown. A writes its exact durable marker only after runner.close succeeds under that binding.
 6. Setup requires the original incarnation's exit witness and exact marker readback, then acquires A's real exclusive journal/continuity pair.
 7. Only after every check passes may the purpose-bound body loan begin. Missing or mismatching evidence leaves needsOwnerRecovery and no body execution.
@@ -377,7 +377,7 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M03c | Schema 29 policy, material and publication writers | Separate capped cuts | Each writer has an actual schema 29 test; no blanket version widening |
 | M04 | Derived A-only cohort and ordinary-owner stop session | 113 measured | Exact registered scope/identity, retained exit witnesses; no native factory or caller |
 | M05a | Internal coordinator, exchange, worker, native-cleanup and staged-pairing observation | 71-line command draft plus pairing; under200 or an immediate pairing cut | No mutation of user lifetimes; gap/rejected-start/cleanup/staged-pairing tests; no endpoint or permit |
-| M05b | Native authenticated Setup-to-A observation channel and in-memory shutdown binding, shared with M09 | 120–195 per complete cut | Fixed Setup peer and exact account/attempt/revision/gate/incarnation; disconnect/restart invalidation; no close-time record read |
+| M05b | Native authenticated Setup-to-A observation channel and in-memory shutdown binding, shared with M09 | 120–195 per complete cut | Arming blocks new pairing stages under the binding and preserves existing attempts. Test post-arm refusal, staged attempt unchanged and release on cancellation/reopen. Revalidate zero staged pairing after the block; fixed peer/scope/incarnation and no close-time record read |
 | M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
 | M05d | Purpose-bound native permit and stop factory, introduced together | 120–195 after support | Bounded work wait, pre-stop cancellation, exact bootout, clean marker plus original exit witness; then actual pair custody |
 | M06 | Shared bootstrap/recovery phase guard for the M05d stop lifecycle | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn |
