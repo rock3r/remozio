@@ -9,6 +9,7 @@ Saturn's 2747 and 2752 clarify recovery when launchd already restarted the curre
 This revision follows the source checks requested in 2760/2763 and the drain order decided in 2767.
 C01 proceeds independently without dispatch. This plan precedes the revised [725 experiment](725-experiment-plan.md), [P05](p05-plan.md) and authenticated caller work.
 Toni owns implementation order, native slots, publication and merges. This document adds no code or live procedure.
+Toni2996/2998/3002 supersede the live-idle design with bounded user-work observation, ordered shutdown and a durable close marker.
 
 Fetched main is `b899e1ad34836b37745f9099db8d2594ea384150`, tree `3117e2d9c6460a2c52bea8a55c25dd80f8328f3a`.
 Its merge of #753 includes all A11 cuts. The planning branch remains based on preceding main `987ea4ee`.
@@ -37,7 +38,7 @@ Source paths below are under `macos/core/Sources/RemozioCore` unless stated othe
 | `RuntimeAuditUpgradeRestart`, `MachineUpdateRestartHealthCoordinator`, `MachineUpdateInstalledActivationFinalizer` | Exact restoration, live readiness, joined cleanup and release ordering | Purpose-specific maintenance outcomes; no invented update completion |
 
 No generic maintenance worker, durable maintenance record or restoration-only app action exists on this main.
-P04/A11 already require `UpdateOrdinaryAdmissionLease`; retain those interfaces. Stop, idle proof and recovery composition are still missing.
+P04/A11 already require `UpdateOrdinaryAdmissionLease`; retain those interfaces. The authenticated observation channel, close marker, native permit and recovery composition remain required.
 
 ## Per-account scope and actual drain order
 
@@ -56,41 +57,50 @@ Keep a real shared `UpdateOrdinaryAdmissionLease` from window acquisition throug
 Open A's already registered account barrier by its protected identity and `.account(A)` scope; absent registration is NO-GO.
 Do not use a fake update scheduling action to close it. Other account barriers and machine admission stay open.
 
-Use this exact order, as Toni decided in 2767:
+Use this exact order, as Toni revised in2996/2998/3002:
 
-1. Persist the window intent and A-drain phase, then hold the real A account drain. New A request creation reports waiting.
-2. Wait within the configured pre-stop bound for actual A work settlement through the live proof below.
-   If the bound expires, record cancellation, close the window and reopen A without stopping it. Never kill or expire work to force idle.
-3. Use the separate maintenance stop facade, preserving audit's existing exclusive-machine guard.
-4. Prove the observed A process and every relevant child have exited or settled. Registration absence alone is insufficient.
-5. Acquire A's real exclusive journal/continuity leases through the existing native factory; hold the full read-only pair through the body.
+1. Persist the window intent and A-drain phase, then hold A's real account drain under ordinary shared machine admission.
+2. Through the authenticated Setup-to-A channel, observe actual pending decisions, requests, exchange/worker reservations, native cleanup and staged pairing.
+3. Wait within the configured pre-stop bound without cutting that user work. On timeout, cancel and explicitly reopen A without stopping it.
+4. Revalidate the exact live incarnation and arm its authenticated shutdown binding. Boot out only A's derived Authority job.
+5. Use the existing ordered runtime shutdown. A writes its exact durable marker only after runner.close succeeds under that binding.
+6. Setup requires the original incarnation's exit witness and exact marker readback, then acquires A's real exclusive journal/continuity pair.
+7. Only after every check passes may the purpose-bound body loan begin. Missing or mismatching evidence leaves needsOwnerRecovery and no body execution.
 
 No phase widens the cohort after busy. An artifact with another necessary dependency refuses before stop and needs a reviewed cohort.
-If retained work later changes A's files, policy or floors, replan both scope and recovery isolation before enabling it.
+Cancellation is reversible without a stop before bootout. After bootout, cancellation means restoration through M09, never body replay.
 
-### Proof that A has no live work
+### User work observation and ordered shutdown
 
-The account gate closes request creation only; `ApprovalRequestCoordinator.swift:181–185` explicitly preserves existing decisions, expiry and execution.
-`UpdateAdmissionLease` ends after creation. Neither that token, an empty machine queue nor elapsed time proves A is idle.
-Root `ReleaseActivityBarrier` covers work across accounts. Taking it EX to check A would restore the rejected machine-wide outage.
+The account gate closes request creation only. Existing decisions, genuine expiry and execution keep their ordinary lifetimes.
+A queued authorization callback, a rejected-start report and terminal native cleanup are work even when a request queue appears empty.
+A staged pairing attempt also remains user work. Never clear or force-expire it to obtain permission to stop A.
+M05a observes these real owners; it grants no idle proof or stop permit.
 
-Add a narrow authenticated maintenance-idle handshake to A's existing native control boundary; there is no such installed proof today.
-The live authority must verify the exact Setup peer, account/installation, active durable attempt and protected account-gate identity.
-Compose its serialized request owner, receive/execution workers and native resource/child owners under the same closed A gate.
-Report idle only after all pre-drain admissions settle, live request/decision work ends, queued starts finish and actual child cleanup joins.
-An empty journal query alone is insufficient: it can miss a queued worker or a surviving process descriptor.
-The proof must observe zero live request activity owners, zero queued/starting execution turns and no unsettled native child/resource owner.
-Join work admitted before the drain, including the gap between journal authorization and execution enqueue.
-Use the actual coordinator/worker ownership state and joined cleanup, with a rechecked incarnation/attempt boundary around capture.
-An injected count, process-list absence or terminal journal row without resource settlement cannot pass.
-The proof is bound to the live connection/incarnation, exact attempt and held account drain. No caller Boolean or cached signed status suffices.
-Any lost connection, changed owner/gate, new work, timeout or incomplete cleanup invalidates it before the stop facade can proceed.
-Keep the account gate held after proof so no new A admission can invalidate idle between observation and stop.
-If a complete proof needs more than one capped cut, split it before implementation; no partial idle endpoint may enable stop.
+The existing shutdown joins receiver, producer callbacks, worker turns, publisher and settings/recovery tasks before request/storage closure.
+It does not replace the pre-stop wait: ApprovalRequestCoordinator.close retires pending requests with unknown outcomes.
+AuthorityJournal.close does not wait for released command executions. Their actual cleanup must already have settled before removal.
+Other hosted app/transport/background owners use the existing ordered close path instead of a new full-runtime live-idle fence matrix.
+The detailed historical audit remains in the history of review/m05-recon.md; the current document defines the hybrid contract.
 
-`AuthorityWakeService.close:481–506` joins producers/workers before `closeRequests`, but bootout may exhaust the OS shutdown allowance.
-`ApprovalRequestCoordinator.close:279–289` retires live resources with an unknown outcome; it does not prove successful completion.
-Therefore ordinary shutdown is a final cleanup check after idle, not the mechanism for draining existing commands.
+M05b provides the authenticated native Setup-to-A channel, also used by M09 reopen/readback.
+Setup supplies the account, attempt and revision. A validates the protected scope and stores a connection/incarnation-bound context in memory.
+A restart or disconnect before bootout retires that binding. No marker for that attempt may then be written.
+The armed shutdown transition must preserve the exact binding through its expected listener teardown.
+An unrelated retirement, startup failure, deinit or unbound close cannot create the marker.
+A reads the window record at protected startup and authenticated commands only. It never rereads that record inside close.
+
+M05c writes the bounded canonical marker to fixed protected storage only after successful runner.close under the exact binding.
+The marker binds account, attempt/revision, installation, incarnation and current code/release scope; Setup compares its exact retained expectation.
+Require crash-safe durable publication and strict protected readback. Missing, stale, foreign or uncertain evidence cannot authorize the body.
+The marker proves completed close followed by exit of the same incarnation. It does not reveal the numeric exit status.
+A SIGKILL after durable marker publication occurs after close has already finished; do not claim the Boolean witness distinguishes it.
+
+Neither A's generated plist nor its bundled plist sets ExitTimeOut. The local launchd.plist manual defines the default as system-defined.
+This plan does not promise20 seconds or change the installed timeout. A timeout before successful marker publication fails closed.
+An explicit timeout would require a separate scoped plist change and qualification.
+M05d introduces the native permit and stop factory together, using the actual bounded observation, bootout, marker and witness contracts.
+Audit keeps its exclusive-machine guard. Retained work keeps ordinary shared machine admission and A's exact account drain.
 
 ### Concurrent bootstrap and KeepAlive
 
@@ -109,7 +119,7 @@ Reboot is different: old owners have died, A may already be running, and recover
 
 `ApprovalRequestCoordinator:356,393` maps account-admission busy to the command-admission waiting/retry result.
 Do not assume that result is itself a phone UI message. It is not a signed decision or denial.
-Before stop, existing phone decisions retain their normal lifecycle until the live idle proof succeeds.
+Before stop, existing phone decisions and commands retain their normal lifecycle until their actual owners settle. Staged pairing also remains in the bounded wait.
 While A is stopped, Android `CommandConnection:108–115` reports unavailable/disconnected; `CommandInboxScreen:50–56` displays disconnected with reconnect.
 `CommandRequestSession:66–76` changes terminal status only through validated status observations, not from a transport exception.
 These source paths do not prove the full outage UX. Test waiting, disconnect, stale cards and reconnection on the selected phone artifact.
@@ -138,9 +148,9 @@ Existing update activation keeps its own identity, irreversible phases and sched
 | Phase | Required boundary |
 | --- | --- |
 | Authorized | Persist intent and mutation restrictions before any stop |
-| Draining A | Persist A closure; hold its real account drain; wait for the live idle proof within the pre-stop bound |
-| Stopping | Stop only the fixed cohort; retain command outcomes, witnesses and exclusion checks |
-| Stopped and excluded | Prove A/child exit and acquire its actual pair leases; busy never grants lock takeover |
+| Draining A | Persist A closure; hold its real account drain; observe user-work settlement through the authenticated channel within the pre-stop bound |
+| Stopping | Boot out only the fixed Authority cohort; retain the authenticated shutdown binding and await the clean-close marker and original exit witness |
+| Stopped and excluded | Require exact close-marker and same-incarnation exit evidence, then acquire the actual pair leases; busy never grants lock takeover |
 | Executing | Issue one scoped body loan for this attempt; no automatic body retry |
 | Work settled | Close every borrowed writer/store, join children and persist the known or uncertain operation outcome |
 | Restoring A | Keep A admission closed and machine admission shared; restore/adopt A and run readiness checks |
@@ -160,7 +170,8 @@ P04/A11 retain their existing `UpdateOrdinaryAdmissionLease` APIs and native cod
 Do not add a general sealed ordinary/maintenance proof, alter every frame/store signature or reopen a global gate temporarily.
 The outer maintenance owner holds shared machine admission/activity and A's independent account-drain token through actual cleanup and restoration.
 Existing nested ordinary leases remain shared. No compatibility Boolean, copied token or replacement drain is needed.
-The stop facade receives actual purpose-bound maintenance ownership and the live idle proof, not a forged audit graph or machine-EX token.
+The stop facade receives actual purpose-bound maintenance ownership and the M05d permit. It verifies bounded work observation and exact shutdown evidence.
+No forged audit graph, copied observation or machine-EX token can substitute.
 Existing audit/update native factories keep their machine-exclusive requirement intact.
 
 Keep process, thread, re-entry, expiry and poison guards in every native loan. A cancelled owner cannot release resources before work settles.
@@ -313,11 +324,12 @@ A stop/outage acceptance limit never grants forced cleanup, fake success or body
 
 M02 restores A's maintenance admission hold before request creation at startup. The hold is bound to the protected account, attempt and revision.
 It is a local admission restriction, not a second exclusive token competing with Setup's actual account-drain token.
-The live idle handshake must also establish this hold before stop/body entry; unknown handshake outcomes cannot authorize either.
-A reads the maintenance record at protected startup and on the authenticated reopen command only.
+The authenticated M05b command must also establish the exact local hold and in-memory shutdown binding before removal. Unknown command outcomes authorize no stop or body.
+A reads the maintenance record at protected startup and on authenticated maintenance commands only. M05b observation/arming and M09 reopen use that same boundary.
+It does not reread the record inside close to discover a marker binding.
 Do not add per-request rereads, event-driven reconciliation or a polling fallback for this maintenance record. Existing update admission checks stay unchanged.
 
-M09 uses one reopen mechanism on the same proposed native channel as the idle handshake:
+M09 uses one reopen mechanism on the same native channel as the M05b authenticated observation and shutdown binding:
 
 1. Settle the body and cleanup; verify A's actual identity, recovery health and applicable durable floors.
 2. Persist reopenPending with the exact attempt/revision and release intent. This phase does not mean ordinary admission is open.
@@ -363,9 +375,12 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M03b1 | Complete startup recovery boundary | 23 | Store open/read failures retain A's hold and expose owner recovery |
 | M03b2 | Exact CAS phase/outcome writer and atomic first-window migration | 100–195 | One active attempt; unrelated rows exact; uncertainty retirement; no production caller |
 | M03c | Schema 29 policy, material and publication writers | Separate capped cuts | Each writer has an actual schema 29 test; no blanket version widening |
-| M04 | Existing A account gate, shared machine lease and bounded pre-stop owner | 100–185 | Registered scope/identity; no new machine drain; timeout cancels without stop |
-| M05 | Authenticated live A idle/child-settlement proof under its held account drain | 110–195 | Real serialized work/queue/resource owners; no timer, cached state or false idle |
-| M06 | Separate native stop facade and shared bootstrap/recovery phase guard | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn; exact exit witnesses |
+| M04 | Derived A-only cohort and ordinary-owner stop session | 113 measured | Exact registered scope/identity, retained exit witnesses; no native factory or caller |
+| M05a | Internal coordinator, exchange, worker, native-cleanup and staged-pairing observation | 71-line command draft plus pairing; under200 or an immediate pairing cut | No mutation of user lifetimes; gap/rejected-start/cleanup/staged-pairing tests; no endpoint or permit |
+| M05b | Native authenticated Setup-to-A observation channel and in-memory shutdown binding, shared with M09 | 120–195 per complete cut | Fixed Setup peer and exact account/attempt/revision/gate/incarnation; disconnect/restart invalidation; no close-time record read |
+| M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
+| M05d | Purpose-bound native permit and stop factory, introduced together | 120–195 after support | Bounded work wait, pre-stop cancellation, exact bootout, clean marker plus original exit witness; then actual pair custody |
+| M06 | Shared bootstrap/recovery phase guard for the M05d stop lifecycle | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn |
 | M07 | Existing ordinary-admission composition, record-only source transition and fresh body capture | 80–160 | Same A/B bindings and pair; prove every opaque digest and define candidateDigest; window writes outside borrowed transactions; native frame/provider contracts unchanged |
 | M08 | Purpose-specific observation after interruption | 90–180 | Old/new/partial/unknown stay distinct; zero replay |
 | M09 | Exact A restoration/adoption, health/floors and explicit admission reopen | 110–195 | Actual gate readback recorded before Restored; timeout needsOwnerRecovery; fresh request without restart |
@@ -374,7 +389,7 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M12 | Explicit restoration-only native action | 100–190 | Fresh rights/binding/revision; no arbitrary job, reset, force or replay |
 | M13 | App restoration UI and phone waiting/unavailable integration | 100–190 | Clear A outage, genuine expiry distinguished from denial, safe reconnect/readback |
 | M14 | Separate Setup-native normal-update preflight facade | 110–195 | Actual update authority/candidate and closed machine drain; Authority guard preserved |
-| M15 | Final retained authenticated composition/reachability gate | 90–180 | M01–M13 complete before stop; real idle, restart, status and attended exit qualified |
+| M15 | Final retained authenticated composition/reachability gate | 90–180 | M01–M13 complete before stop; bounded work observation, clean-close marker, restart, status and attended exit qualified |
 
 M14 belongs to normal update and does not block the retained M15 closure.
 
@@ -388,8 +403,8 @@ M03b2 migrates only inside the window writer's first transaction. That writer ha
 M03b2 preserves the candidate, policy, grant, operation and footprint digests as opaque immutable references. M07's native owner must prove their meanings, including candidateDigest; an historical epoch digest is not an assumed equivalent.
 Both Authority and Setup must read schemas 28/29 and window record 1. Only Setup declares window writes on schema 29, record 1 writes and migration 28→29. Authority writer declarations cannot substitute for Setup's declarations.
 The old M05–M07 general closed-quiescence adaptation is removed; P04/A11 production interfaces remain unchanged.
-Existing account gate and ordinary leases reduce that work. Live idle proof and the distinct stop/registration guards remain real responsibilities.
-Measure each complete change before tests. Split M05/M06 further if needed; an incomplete proof/guard never enables stop.
+Existing account gate and ordinary leases remain. Toni2996/2998/3002 replace the full live-idle model with bounded user-work observation and clean shutdown evidence.
+Measure each complete change before tests. Split M05a–d/M06 further if needed; incomplete observation, marker, permit or guard never enables the body.
 C01/C02/C04 can proceed without dispatch. C03/C05 wait for the actual M05–M07/M15 closure.
 P05a–d may follow M03 as library work. Its native facade/reachability wait for the same maintenance closure.
 Reuse the approved caller identity/rights owners. No second resolver or temporary privileged endpoint is acceptable.
