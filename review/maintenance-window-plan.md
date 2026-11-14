@@ -378,6 +378,8 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 
 M14 belongs to normal update and does not block the retained M15 closure.
 
+M10 must open A's actual store inside `RuntimeMaintenanceAdmissionProjection.startup {}`. Its integration test must prove that an unopenable store leaves A held and visibly awaiting recovery, without a startup crash.
+
 M03c must complete before M15 permits retained work. Policy, material and publication execute inside the window. Promotion must support schema 29 before a migrated machine reaches it.
 Completion and readiness SQL producers are missing separately. Issue #760 owns them, including schema 29 compatibility and their own activation/promotion tests. They do not block the window itself.
 M03b2 migrates only inside the window writer's first transaction. That writer has no production caller before M03c, so these library cuts migrate no real machine.
