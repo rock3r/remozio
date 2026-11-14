@@ -165,7 +165,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             let before = try f.machine().retainedSetupPolicySnapshot(owner: f.source.runtime.setup.owner, candidate: f.candidate)
             let recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: before, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, useMachine: { callback in
-                    try f.reopen(nil); let machine = try f.machine(); defer { try? machine.close() }; return try callback(machine)
+                    try f.reopen(nil); let machine = f.machine(); defer { try? machine.close() }; return try callback(machine)
                 }, openJournal: { try f.openPolicyJournal($0 == .readOnly ? .readOnly : .startup) }, verifySnapshot: { _ in })
             try f.reopen(nil); defer { try? f.machine().close() }; try body(f, recorded, state.pair())
         }

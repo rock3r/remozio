@@ -112,7 +112,7 @@ final class RetainedSetupInitialRuntimeNativeTests: XCTestCase {
             }, useMachine: { body in
                 try Context.withOpenedMachine(open: {
                     try f.reopen { counts.commits += 1; if counts.loseAcknowledgement { throw Fault.acknowledgement } }
-                    let machine = try f.machine(); counts.opens += 1; counts.machines.append(machine)
+                    let machine = f.machine(); counts.opens += 1; counts.machines.append(machine)
                     machine.observeStoreRead = { _ in if counts.callbackDepth > 0 { counts.callbackQueries += 1 } }
                     return machine
                 }, closing: .owner, perform: body)
@@ -189,10 +189,13 @@ final class RetainedSetupInitialRuntimeNativeTests: XCTestCase {
             let refused = Counts(), accepted = Counts(); var writing: Snapshot?, writers: [AuthorityJournal] = [], attempts = 0
             let recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: before, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, useMachine: { body in
-                    try f.reopen(nil); let machine = try f.machine(); defer { try? machine.close() }; return try body(machine)
+                    try f.reopen(nil); let machine = f.machine(); defer { try? machine.close() }; return try body(machine)
                 }, openJournal: { mode in
                     let journal = try f.openPolicyJournal(mode == .readOnly ? .readOnly : .startup)
-                    if case .startup = mode { writers.append(journal) }; return journal
+                    if case .startup = mode {
+                        XCTAssertTrue(try journal.read { _ in true }); writers.append(journal)
+                    }
+                    return journal
                 }, verifySnapshot: { _ in }, didStorageStage: { step, stage, scope in
                     if case .writing = step, stage == .afterMutation { writing = try scope.read() }
                 }, didJournalStage: { _, active in
@@ -206,8 +209,7 @@ final class RetainedSetupInitialRuntimeNativeTests: XCTestCase {
             accepted.atPairOpen = {
                 XCTAssertNoThrow(try f.machine().requireClosedForRetainedSetupPolicyWrite())
                 for writer in writers {
-                    XCTAssertThrowsError(try writer.captureRetainedSetupPolicyBoundary(
-                        expected: XCTUnwrap(recorded.activation.runtime.setup.account?.initialization)))
+                    XCTAssertThrowsError(try writer.read { _ in true })
                 }
             }
             accepted.stopAtPair = true
@@ -218,13 +220,13 @@ final class RetainedSetupInitialRuntimeNativeTests: XCTestCase {
     }
     func testOwnerClosingContractRejectsAnOpenStoreAndClosesItOnFailure() throws {
         try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture { f in
-            let machine = try f.machine()
+            let machine = f.machine()
             XCTAssertThrowsError(try Context.withOpenedMachine(open: { machine }, closing: .owner, perform: { _ in true })) {
                 XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
             }
             XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite())
             try f.reopen(nil)
-            XCTAssertTrue(try Context.withOpenedMachine(open: { try f.machine() }, closing: .owner, perform: { actual in
+            XCTAssertTrue(try Context.withOpenedMachine(open: { f.machine() }, closing: .owner, perform: { actual in
                 try actual.close(); return true
             }))
         }
