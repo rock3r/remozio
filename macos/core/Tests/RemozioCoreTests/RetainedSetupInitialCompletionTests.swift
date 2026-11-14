@@ -135,6 +135,14 @@ final class RetainedSetupInitialCompletionTests: XCTestCase {
         XCTAssertLessThanOrEqual(observations, 10)
     }
 
+    /// Shares the owned recorded fixture. It cannot construct native custody, approval or a caller.
+    static func withRecordedCompletionFixture(_ body: (RetainedPolicyWriterFixture, MachineUpdateRetainedSetupPolicySnapshot,
+        AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
+        let suite = RetainedSetupInitialCompletionTests(selector: NSSelectorFromString(
+            "testExactFilesCompleteOnceAndPublishedRecoveryKeepsEveryInitialByte"))
+        try suite.fixture(body)
+    }
+
     func testExactFilesCompleteOnceAndPublishedRecoveryKeepsEveryInitialByte() throws {
         try fixture { f, before, current in
             let files = try files(f, before, current); defer { XCTAssertNoThrow(try files.close()) }

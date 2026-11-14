@@ -21,6 +21,8 @@ enum MachineUpdateRetainedSetupInitialObservation {
         fileprivate let leave: () -> Void
         let snapshot: Snapshot
         let artifact: Artifact?
+        let material: RuntimePreparationMaterial?
+        let bundle: RuntimeConfigurationBundle?
         var description: String { "RetainedSetupInitialObservationScope(redacted)" }
         var debugDescription: String { description }
         func requireActive() throws { try check(false) }
@@ -66,7 +68,8 @@ enum MachineUpdateRetainedSetupInitialObservation {
                 verifyCurrent: lifetime, readRelay: readRelay)
             try lifetime(); try inspectInputs(inputs); try lifetime()
             var retainedMaterial: Data?
-            func loan<Value>(_ actual: Snapshot, artifact: Artifact? = nil, _ callback: (Scope) throws -> Value) throws -> Value {
+            func loan<Value>(_ actual: Snapshot, artifact: Artifact? = nil, material: RuntimePreparationMaterial? = nil,
+                bundle: RuntimeConfigurationBundle? = nil, _ callback: (Scope) throws -> Value) throws -> Value {
                 var lent = true, checking = false, operating = false
                 defer { lent = false }
                 let scope = Scope(check: { enter in
@@ -75,7 +78,7 @@ enum MachineUpdateRetainedSetupInitialObservation {
                     checking = true; defer { checking = false }
                     if enter { operating = true }
                     try lifetime()
-                }, leave: { operating = false }, snapshot: actual, artifact: artifact)
+                }, leave: { operating = false }, snapshot: actual, artifact: artifact, material: material, bundle: bundle)
                 try scope.requireActive(); let value = try callback(scope); try scope.requireActive(); return value
             }
             let observation = Observation(checked: { actual in
@@ -100,7 +103,7 @@ enum MachineUpdateRetainedSetupInitialObservation {
                     let artifacts = try RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: first)
                     guard artifacts.count == 8, Set(artifacts.map(\.path)).count == 8 else { throw RuntimePreparationError.incomplete }
                     for artifact in artifacts {
-                        let bytes = try loan(actual, artifact: artifact) { try readArtifact(artifact, $0) }
+                        let bytes = try loan(actual, artifact: artifact, material: first, bundle: bundle) { try readArtifact(artifact, $0) }
                         guard bytes == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
                     }
                     let second = try loan(actual, readMaterial)
