@@ -106,6 +106,7 @@ public struct ReleaseManifest: Equatable, Sendable {
     public let components: [ReleaseComponent]
     public let schemaVersion: UInt64
     public let dependencies: [ReleaseDependency]
+    private let storedCanonicalBytes: Data
     public var absentRoles: Set<AuthorityCodeRole> { Set(AuthorityCodeRole.allCases).subtracting(components.map(\.role)) }
 
     public init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency] = []) throws {
@@ -138,20 +139,31 @@ public struct ReleaseManifest: Equatable, Sendable {
         guard Set(identifiers).count == identifiers.count, paths.count <= 256, Set(paths).count == paths.count else {
             throw ReleaseManifestError.invalidDeclaration
         }
+        let dependencies = dependencies.sorted { $0.executablePath < $1.executablePath }
+        let components = components.sorted { $0.role.rawValue < $1.role.rawValue }
         self.schemaVersion = schemaVersion
-        self.dependencies = dependencies.sorted { $0.executablePath < $1.executablePath }
+        self.dependencies = dependencies
         self.release = release; self.build = build
-        self.components = components.sorted { $0.role.rawValue < $1.role.rawValue }
-        _ = try canonicalBytes
+        self.components = components
+        storedCanonicalBytes = try Self.encode(release: release, build: build, components: components,
+                                               dependencies: dependencies, schemaVersion: schemaVersion)
     }
 
     public var canonicalBytes: Data {
-        get throws {
-            var fields: [UInt64: CBORValue] = [0: .unsigned(schemaVersion), 1: .text(release), 2: .text(build),
-                3: .text("arm64"), 4: .text("26.0"), 5: .array(components.map { $0.value(manifestSchema: schemaVersion) })]
-            if schemaVersion >= 2 { fields[6] = .array(dependencies.map(\.value)) }
-            return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
-        }
+        get throws { storedCanonicalBytes }
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.release == rhs.release && lhs.build == rhs.build && lhs.components == rhs.components
+            && lhs.schemaVersion == rhs.schemaVersion && lhs.dependencies == rhs.dependencies
+    }
+
+    private static func encode(release: String, build: String, components: [ReleaseComponent],
+                               dependencies: [ReleaseDependency], schemaVersion: UInt64) throws -> Data {
+        var fields: [UInt64: CBORValue] = [0: .unsigned(schemaVersion), 1: .text(release), 2: .text(build),
+            3: .text("arm64"), 4: .text("26.0"), 5: .array(components.map { $0.value(manifestSchema: schemaVersion) })]
+        if schemaVersion >= 2 { fields[6] = .array(dependencies.map(\.value)) }
+        return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
     static var limits: CBORLimits { get throws { try .init(maxBytes: maximumBytes, maxDepth: 8, maxItems: 8192) } }
     static func validToken(_ text: String) -> Bool {
