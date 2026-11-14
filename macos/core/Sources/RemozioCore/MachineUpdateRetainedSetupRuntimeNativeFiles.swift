@@ -22,7 +22,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeFiles {
         guard let reference = runtime.state.reference, reference.serviceActivity != nil else { throw RuntimePreparationError.incomplete }
         try reference.validate(account: runtime.preparation, services: runtime.plan)
         try material.services.validate(account: runtime.preparation)
-        guard try material.reference == reference, material.services.encoded == runtime.plan.encoded else {
+        guard try material.reference == reference, try material.services.encoded == runtime.plan.encoded else {
             throw RuntimePreparationError.conflictingMaterial
         }
     }
