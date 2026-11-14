@@ -348,14 +348,16 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
     private func withAssembly(_ s: State, _ body: (Native.Context, () throws -> Frame) throws -> Void) throws {
         let expected = try assemblyFrame(s); s.reset()
         try expected.entry.runtime.setup.source.actual.inventory.compareRelease(s.candidate)
-        let releaseDigest = try InstallationInventory.digest(s.candidate)
+        let inventoryDigest = MachineUpdateActivationRecord.digest(expected.entry.runtime.setup.source.actual.inventory.canonicalBytes)
         let controls = Native.TestControls(validateCustody: {
             try s.admission.validateMachineBoundary(directory: s.directory,
                 expected: expected.entry.runtime.setup.source.actual.admission.machine)
         }, validateRelease: { actual in
             s.hostChecks += 1
             XCTAssertEqual(actual.runtime.preparation.accountID, expected.entry.runtime.preparation.accountID)
-            XCTAssertEqual(actual.runtime.setup.source.actual.inventory.releaseDigest, releaseDigest)
+            guard MachineUpdateActivationRecord.digest(actual.runtime.setup.source.actual.inventory.canonicalBytes) == inventoryDigest else {
+                throw Fault.materialHost
+            }
         }, validateExecutingCode: {
             if s.refuseAssemblyHost { throw Fault.materialHost }
         }, lookupOwner: { uid in XCTAssertEqual(uid, s.owner.uid); return s.owner },
@@ -589,6 +591,26 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             XCTAssertFalse(actual.entry.runtime.state.configurationPublished)
             XCTAssertThrowsError(try XCTUnwrap(escaped).verifyFrame(actual)) {
                 XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+        }
+    }
+    func testAssemblyRejectsAnotherActualInventoryBetweenLoansAndPoisonsTheContext() throws {
+        try fixture { first in
+            try fixture { second in
+                let original = try assemblyFrame(first), changed = try assemblyFrame(second)
+                XCTAssertNotEqual(original.entry.runtime.setup.source.actual.inventory.canonicalBytes,
+                    changed.entry.runtime.setup.source.actual.inventory.canonicalBytes)
+                XCTAssertThrowsError(try withAssembly(first) { context, _ in
+                    try context.verifyFrame(original)
+                    let checks = first.hostChecks
+                    XCTAssertThrowsError(try context.verifyFrame(changed))
+                    XCTAssertEqual(first.hostChecks, checks)
+                    XCTAssertThrowsError(try context.verifyFrame(original)) {
+                        XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                    }
+                }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+                XCTAssertEqual(first.commits, 0); XCTAssertTrue(first.events.isEmpty)
+                XCTAssertEqual(second.commits, 0); XCTAssertTrue(second.events.isEmpty)
             }
         }
     }
