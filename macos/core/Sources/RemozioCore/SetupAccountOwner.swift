@@ -314,10 +314,34 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return result
         }
     }
+    /// Reserves operation and reply admission. Shared release activity remains held until explicit close.
+    func reserveRetainedInvocation() throws -> (admission: SetupOwnerAsyncWork.Token,
+                                               verify: () throws -> Void, close: () -> Void) {
+        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        return try lock.withLock {
+            guard !closed, !closing else { throw AdministrativeSetupError.unavailable }
+            let reply = try setupReplyWork.admit()
+            let admission: SetupOwnerAsyncWork.Token
+            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            do {
+                let activity = try releaseActivity?.acquireShared()
+                return (admission, {
+                    try self.lock.withLock {
+                        guard !self.closed, !self.closing, getpid() == self.processID,
+                              self.asynchronousWork.permits(admission), self.setupReplyWork.permits(reply) else {
+                            throw AdministrativeSetupError.unavailable
+                        }
+                        try activity?.validate()
+                    }
+                }, { activity?.close(); admission.close(); reply.close() })
+            } catch { admission.close(); reply.close(); throw error }
+        }
+    }
     /// Call synchronously on the accepted invocation. This captures metadata and does not dispatch retained work.
-    func retainedCallerBinding(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence) throws -> SetupRetainedCallerBinding {
+    func retainedCallerBinding(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence,
+                               admission: SetupOwnerAsyncWork.Token? = nil) throws -> SetupRetainedCallerBinding {
         let peer = try invocation.verifyInvocation()
-        return try withMachine { machine in
+        return try withMachine(admission: admission) { machine in
             _ = try currentInventory(machine)
             let state = try machine.retainedSetupCallerState(candidate: candidate)
             let selected = try state.target(peerUID: peer.userID)

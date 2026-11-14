@@ -75,10 +75,17 @@ final class SetupRetainedCallerBindingTests: XCTestCase {
             XCTAssertThrowsError(try resolve(state, entry, peer, wrongHash, incarnation: incarnation)) {
                 if case XPCPeerPolicyError.wrongPeer = $0 {} else { XCTFail("Unexpected failure: \($0)") }
             }
-            let wrongSession = try XPCPeerPolicy(teamID: app.teamID, componentIdentifier: app.identifier,
-                approvedCodeDirectoryHashes: [Data(repeating: 219, count: 20)], expectedUserID: peer.userID,
+            let member = try XCTUnwrap(state.source.actual.inventory.accounts.first { $0.ownerUID == peer.userID })
+            let (_, currentHost) = try MachineUpdateRetainedSetupPolicyNativeEntry.publishedAuthority(
+                runtime: entry.runtime, accountID: member.accountID)
+            let currentApp = try XCTUnwrap(currentHost.codePolicy.entries.first { $0.role == .app && $0.active })
+            let wrongSession = try XPCPeerPolicy(teamID: currentApp.teamID, componentIdentifier: currentApp.identifier,
+                approvedCodeDirectoryHashes: [currentApp.codeDirectoryHash], expectedUserID: peer.userID,
                 expectedAuditSessionID: peer.auditSessionID &+ 1)
-            XCTAssertThrowsError(try resolve(state, entry, peer, wrongSession, incarnation: incarnation))
+            XCTAssertEqual(wrongSession.requirement, accepted.requirement)
+            XCTAssertThrowsError(try resolve(state, entry, peer, wrongSession, incarnation: incarnation)) {
+                XCTAssertEqual($0 as? AdministrativeSetupError, .wrongAccount)
+            }
             let invalidPID = XPCPeerCredentials(processID: 0, userID: peer.userID, auditSessionID: peer.auditSessionID)
             XCTAssertThrowsError(try resolve(state, entry, invalidPID, accepted, incarnation: incarnation))
         }
