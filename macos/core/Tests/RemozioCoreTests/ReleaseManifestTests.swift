@@ -104,4 +104,99 @@ final class ReleaseManifestTests: XCTestCase {
         XCTAssertThrowsError(try ReleaseComponent(role: .app, identifier: "id", generation: 1, relativePath: "Contents/MacOS/app",
             codeDirectoryHash: nil, build: "1", teamID: nil, formats: [], requests: [request, request]))
     }
+
+    func testStoredBytesMatchReferenceEncodingForEverySchema() throws {
+        for schema: UInt64 in 1...5 {
+            let value = try cacheFixture(schema: schema)
+            XCTAssertEqual(value.schemaVersion, schema)
+            let expected = try referenceBytes(value)
+            XCTAssertEqual(try value.canonicalBytes, expected)
+            XCTAssertEqual(try value.canonicalBytes, expected)
+            let decoded = try ReleaseManifest.decode(expected)
+            XCTAssertEqual(decoded, value)
+            XCTAssertEqual(try decoded.canonicalBytes, expected)
+        }
+    }
+
+    func testNonminimalSchemaEncodingIsRejected() throws {
+        let value = try cacheFixture(schema: 1)
+        let canonical = try value.canonicalBytes
+        XCTAssertEqual(Array(canonical.prefix(3)), [0xa6, 0x00, 0x01])
+        var nonminimal = Data(canonical.prefix(2))
+        nonminimal.append(contentsOf: [0x18, 0x01])
+        nonminimal.append(canonical.dropFirst(3))
+        XCTAssertThrowsError(try ReleaseManifest.decode(nonminimal)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .corruptData)
+        }
+        XCTAssertEqual(try ReleaseManifest.decode(canonical), value)
+    }
+
+    func testReturnedBytesAndCopiedManifestRemainIndependent() throws {
+        let value = try cacheFixture(schema: 5)
+        let copy = value
+        let expected = try referenceBytes(value)
+        var returned = try value.canonicalBytes
+        returned[returned.startIndex] ^= 0xff
+        returned.append(0)
+        XCTAssertNotEqual(returned, expected)
+        XCTAssertEqual(copy, value)
+        XCTAssertEqual(try value.canonicalBytes, expected)
+        XCTAssertEqual(try copy.canonicalBytes, expected)
+    }
+
+    func testEqualityPreservesEquivalentUnicodePaths() throws {
+        let composed = try ReleaseManifest(release: "1", build: "1", components: [
+            component(path: "Contents/MacOS/caf\u{00e9}")])
+        let decomposed = try ReleaseManifest(release: "1", build: "1", components: [
+            component(path: "Contents/MacOS/cafe\u{0301}")])
+        XCTAssertEqual(composed.components, decomposed.components)
+        XCTAssertEqual(composed, decomposed)
+        XCTAssertEqual(try composed.canonicalBytes, try referenceBytes(composed))
+        XCTAssertEqual(try decomposed.canonicalBytes, try referenceBytes(decomposed))
+        XCTAssertNotEqual(try composed.canonicalBytes, try decomposed.canonicalBytes)
+    }
+
+    private func cacheFixture(schema: UInt64) throws -> ReleaseManifest {
+        let count = schema == 5 ? 65 : schema == 4 ? 33 : 2
+        let formats = try (0..<count).reversed().map {
+            try ReleaseFormat(name: "format.\($0)", readers: [1, 2], writers: [2], migrations: [1: 2])
+        }
+        let request = try ReleaseRequestContract(kind: 0, wireVersion: 1, schemaVersion: 1,
+            actions: [0, 2], purposes: [.status, .cancellation], features: schema == 3 ? [1, 3] : [])
+        let app = try ReleaseComponent(role: .app, identifier: "app", generation: 1,
+            relativePath: "Contents/MacOS/app", codeDirectoryHash: nil, build: "1", teamID: nil,
+            formats: formats, requests: [request])
+        let dependency = try ReleaseDependency(owner: .app, kind: .tool,
+            signaturePath: "Contents/Helpers/tool", executablePath: "Contents/Helpers/tool", identifier: "tool",
+            codeDirectoryHash: Data(repeating: 9, count: 20), teamID: nil, build: "2",
+            executableAliases: ["Contents/Helpers/alias"])
+        return try ReleaseManifest(release: "1", build: "2", components: [
+            component(role: .authority, path: "Contents/Helpers/authority"), app],
+            dependencies: schema >= 2 ? [dependency] : [])
+    }
+
+    private func referenceBytes(_ value: ReleaseManifest) throws -> Data {
+        let components: [CBORValue] = value.components.map { component in
+            let formats: [CBORValue] = component.formats.map {
+                .map([0: .text($0.name), 1: .array($0.readers.sorted().map(CBORValue.unsigned)),
+                      2: .array($0.writers.sorted().map(CBORValue.unsigned)),
+                      3: .map($0.migrations.mapValues(CBORValue.unsigned))])
+            }
+            let requests: [CBORValue] = component.requests.map {
+                var fields: [UInt64: CBORValue] = [0: .unsigned($0.kind), 1: .unsigned($0.wireVersion),
+                    2: .unsigned($0.schemaVersion), 3: .array($0.actions.sorted().map(CBORValue.unsigned)),
+                    4: .array($0.purposes.map(\.rawValue).sorted().map(CBORValue.unsigned))]
+                if value.schemaVersion >= 3 { fields[5] = .array($0.features.sorted().map(CBORValue.unsigned)) }
+                return .map(fields)
+            }
+            return .map([0: .unsigned(component.role.rawValue), 1: .text(component.identifier),
+                2: .unsigned(component.generation), 3: .text(component.relativePath),
+                4: component.codeDirectoryHash.map(CBORValue.bytes) ?? .null, 5: .text(component.build),
+                6: component.teamID.map(CBORValue.text) ?? .null, 7: .array(formats), 8: .array(requests), 9: .unsigned(0)])
+        }
+        var fields: [UInt64: CBORValue] = [0: .unsigned(value.schemaVersion), 1: .text(value.release),
+            2: .text(value.build), 3: .text("arm64"), 4: .text("26.0"), 5: .array(components)]
+        if value.schemaVersion >= 2 { fields[6] = .array(value.dependencies.map(\.value)) }
+        return try DeterministicCBOR.encode(.map(fields), limits: ReleaseManifest.limits)
+    }
 }
