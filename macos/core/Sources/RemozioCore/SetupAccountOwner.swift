@@ -61,6 +61,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let activationOperations: RuntimeActivationOperations
     private let asynchronousWork = SetupOwnerAsyncWork()
     private let setupReplyWork = SetupOwnerAsyncWork()
+    private var retainedInvocationReservation: (admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token, activity: ReleaseActivityToken?)?
     private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
@@ -319,12 +320,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
                                                verify: () throws -> Void, close: () -> Void) {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
-            guard !closed, !closing else { throw AdministrativeSetupError.unavailable }
+            guard !closed, !closing, retainedInvocationReservation == nil else { throw AdministrativeSetupError.unavailable }
             let reply = try setupReplyWork.admit()
             let admission: SetupOwnerAsyncWork.Token
             do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
             do {
                 let activity = try releaseActivity?.acquireShared()
+                retainedInvocationReservation = (admission, reply, activity)
                 return (admission, {
                     try self.lock.withLock {
                         guard !self.closed, !self.closing, getpid() == self.processID,
@@ -333,7 +335,12 @@ public final class SetupAccountOwner: @unchecked Sendable {
                         }
                         try activity?.validate()
                     }
-                }, { activity?.close(); admission.close(); reply.close() })
+                }, {
+                    self.lock.withLock {
+                        guard self.retainedInvocationReservation?.admission === admission else { return }
+                        activity?.close(); admission.close(); reply.close(); self.retainedInvocationReservation = nil
+                    }
+                })
             } catch { admission.close(); reply.close(); throw error }
         }
     }

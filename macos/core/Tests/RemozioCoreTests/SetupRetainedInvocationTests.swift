@@ -41,16 +41,16 @@ final class SetupRetainedInvocationTests: XCTestCase {
             XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
             XCTAssertThrowsError(try installer.acquireExclusive())
             try invocation.run(work: {
-                XCTAssertThrowsError(try invocation.run(work: {}, reply: { _ in XCTFail("Reentry") }))
+                XCTAssertThrowsError(try invocation.run(work: {}, reply: { _, _ in XCTFail("Reentry") }))
                 XCTAssertThrowsError(try invocation.close())
                 return 17
-            }, reply: { value in
-                XCTAssertEqual(value, 17); replies += 1
+            }, reply: { value, state in
+                XCTAssertEqual(value, 17); XCTAssertEqual(state, .init(cancelled: false, expired: false)); replies += 1
                 XCTAssertThrowsError(try invocation.close()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
                 XCTAssertThrowsError(try installer.acquireExclusive())
             })
             XCTAssertEqual(replies, 1); XCTAssertGreaterThan(checks, 2); XCTAssertEqual(closes, 0)
-            XCTAssertThrowsError(try invocation.run(work: {}, reply: { _ in XCTFail("Replay") }))
+            XCTAssertThrowsError(try invocation.run(work: {}, reply: { _, _ in XCTFail("Replay") }))
             XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try installer.acquireExclusive())
             try invocation.close(); try invocation.close(); XCTAssertEqual(closes, 1)
             let update = try installer.acquireExclusive(); update.close()
@@ -65,13 +65,18 @@ final class SetupRetainedInvocationTests: XCTestCase {
             let expired = try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
                 verifyRights: { if !valid { throw Failure.rights } }, closeRights: { closes += 1 })
             valid = false
-            XCTAssertThrowsError(try expired.run(work: { XCTFail("Expired work") }, reply: { _ in XCTFail("Expired reply") }))
+            XCTAssertThrowsError(try expired.run(work: { XCTFail("Expired work") }, reply: { _, _ in XCTFail("Expired reply") }))
             XCTAssertThrowsError(try owner.verifyCurrent()); try expired.close(); XCTAssertEqual(closes, 1)
             let cancelled = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
             cancelled.cancel(incarnation: UUID()); try cancelled.validateLifetime()
-            XCTAssertThrowsError(try cancelled.run(work: {
-                cancelled.cancel(incarnation: binding.incarnation)
-            }, reply: { _ in XCTFail("Cancelled reply") })) { XCTAssertTrue($0 is CancellationError) }
+            var replies = 0
+            try cancelled.run(work: {
+                cancelled.cancel(incarnation: binding.incarnation); return "committed"
+            }, reply: { value, state in
+                XCTAssertEqual(value, "committed"); XCTAssertEqual(state, .init(cancelled: true, expired: false)); replies += 1
+            })
+            XCTAssertEqual(replies, 1)
+            XCTAssertThrowsError(try cancelled.run(work: {}, reply: { _, _ in XCTFail("Cancelled replay") }))
             XCTAssertThrowsError(try owner.acquireSetupReplyAdmission()); try cancelled.close(); try owner.verifyCurrent()
         }
     }
@@ -101,11 +106,11 @@ final class SetupRetainedInvocationTests: XCTestCase {
                     verifyRights: {}, closeRights: { closes += 1 })
                 XCTAssertThrowsError(try invocation.run(work: {
                     if !failReply { throw Failure.work }; return 1
-                }, reply: { _ in throw Failure.reply }))
+                }, reply: { _, _ in throw Failure.reply }))
                 func cleanup(_ fail: Bool) throws { if fail { throw Failure.cleanup }; try invocation.close() }
                 XCTAssertThrowsError(try cleanup(true)); XCTAssertEqual(closes, 0)
                 XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
-                XCTAssertThrowsError(try invocation.run(work: {}, reply: { _ in XCTFail("Failed work replay") }))
+                XCTAssertThrowsError(try invocation.run(work: {}, reply: { _, _ in XCTFail("Failed work replay") }))
                 try cleanup(false); XCTAssertEqual(closes, 1); try owner.verifyCurrent()
             }
             let shutdown = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
@@ -113,7 +118,7 @@ final class SetupRetainedInvocationTests: XCTestCase {
             try shutdown.close(); try owner.close()
         }
     }
-    func testNativeFactoryRefusesOrdinaryIdentityAndOwnedDeinitReleasesOnce() throws {
+    func testNativeFactoryRefusesOrdinaryIdentityAndExplicitCloseReleasesOnce() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
             let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
@@ -126,13 +131,64 @@ final class SetupRetainedInvocationTests: XCTestCase {
                 let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
                     verifyRights: {}, closeRights: { closes += 1 })
                 XCTAssertThrowsError(try value.callerBinding(invocation: guardValue, candidate: f.candidate)) {
-                if case XPCPeerPolicyError.wrongConnection = $0 {} else { XCTFail("Unexpected failure: \($0)") }
-            }
-            XCTAssertThrowsError(try owner.verifyCurrent())
-            XCTAssertEqual(value.description, "SetupRetainedInvocation(redacted)")
+                    if case XPCPeerPolicyError.wrongConnection = $0 {} else { XCTFail("Unexpected failure: \($0)") }
+                }
+                XCTAssertThrowsError(try owner.verifyCurrent())
+                XCTAssertEqual(value.description, "SetupRetainedInvocation(redacted)")
                 XCTAssertTrue(value.customMirror.children.isEmpty)
+                try value.close(); try value.close(); XCTAssertEqual(closes, 1)
             }
             XCTAssertEqual(closes, 1); try owner.verifyCurrent()
+        }
+    }
+    func testLostInvocationClosesRightsButKeepsAdmissionsAndSharedActivity() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open()
+            var setup: SetupAccountOwner? = try owner(f, activity: activity.open())
+            let (binding, policy) = try values(f); var closes = 0
+            var dropped: Invocation? = try Invocation.openOwned(owner: XCTUnwrap(setup), binding: binding, policy: policy,
+                verifyRights: {}, closeRights: { closes += 1 })
+            weak var weakInvocation = dropped; weak var weakOwner = setup
+            XCTAssertNotNil(weakInvocation); dropped = nil
+            XCTAssertNil(weakInvocation); XCTAssertEqual(closes, 1)
+            XCTAssertThrowsError(try XCTUnwrap(setup).verifyCurrent())
+            XCTAssertThrowsError(try XCTUnwrap(setup).acquireSetupReplyAdmission())
+            XCTAssertThrowsError(try installer.acquireExclusive())
+            XCTAssertThrowsError(try Invocation.openOwned(owner: XCTUnwrap(setup), binding: binding, policy: policy,
+                verifyRights: {}, closeRights: { closes += 1 }))
+            XCTAssertEqual(closes, 2); XCTAssertThrowsError(try XCTUnwrap(setup).close())
+            setup = nil; XCTAssertNil(weakOwner)
+            let released = try installer.acquireExclusive(); released.close()
+        }
+    }
+    func testLateRightsChangesPreserveTheValueAndNeverPermitReplay() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            for changes in [(cancelled: false, expired: true), (true, true), (false, false)] {
+                var valid = true, replies = 0, works = 0
+                let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
+                    verifyRights: { if !valid { throw Failure.rights } })
+                try invocation.run(work: {
+                    works += 1
+                    if changes.cancelled { invocation.cancel(incarnation: binding.incarnation) }
+                    valid = !changes.expired
+                    return "committed"
+                }, reply: { value, state in
+                    XCTAssertEqual(value, "committed")
+                    XCTAssertEqual(state, .init(cancelled: changes.cancelled, expired: changes.expired)); replies += 1
+                    XCTAssertThrowsError(try invocation.close())
+                    XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+                })
+                XCTAssertEqual(works, 1); XCTAssertEqual(replies, 1)
+                XCTAssertThrowsError(try invocation.run(work: { works += 1 }, reply: { _, _ in XCTFail("Replay") }))
+                XCTAssertEqual(works, 1); try invocation.close(); try owner.verifyCurrent()
+            }
+            let shutdown = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            var replies = 0
+            try shutdown.run(work: { XCTAssertThrowsError(try owner.close()); return "committed" }, reply: { value, state in
+                XCTAssertEqual(value, "committed"); XCTAssertEqual(state, .init(cancelled: false, expired: false)); replies += 1
+            })
+            XCTAssertEqual(replies, 1); try shutdown.close(); try owner.close()
         }
     }
 }

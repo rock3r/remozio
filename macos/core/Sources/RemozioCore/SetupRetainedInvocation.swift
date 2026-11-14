@@ -4,6 +4,7 @@ import Security
 
 /// Owns one retained invocation through work, reply and explicit cleanup. It cannot create native loans.
 final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
+    struct RightsState: Equatable, Sendable { let cancelled: Bool, expired: Bool }
     let peer: XPCPeerCredentials
     private let capture: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding
     let acceptedPolicy: XPCPeerPolicy
@@ -80,20 +81,30 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     func validateLifetime() throws {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         try lock.withLock {
-            guard !closed, getuid() == processOwner, geteuid() == processOwner else {
-                throw SetupAdministratorAuthorizationError.closed
-            }
+            try validateOwner()
             try cancellation.check(); try verifyRights(); try verifyReservation(); try cancellation.check()
         }
     }
+    private func validateOwner() throws {
+        guard getpid() == processID, !closed, getuid() == processOwner, geteuid() == processOwner else {
+            throw SetupAdministratorAuthorizationError.closed
+        }
+    }
+    private func rightsState() -> RightsState {
+        var cancelled = false, expired = false
+        do { try cancellation.check() } catch { cancelled = true }
+        do { try verifyRights() } catch { expired = true }
+        return .init(cancelled: cancelled, expired: expired)
+    }
     /// A single synchronous worker owns all work and its reply. A failure never permits body replay.
-    func run<Value>(work: () throws -> Value, reply: (Value) throws -> Void) throws {
+    func run<Value>(work: () throws -> Value, reply: (Value, RightsState) throws -> Void) throws {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         try lock.withLock {
             guard !active, !invoked, !closed else { throw AdministrativeSetupError.unavailable }
             active = true; invoked = true; defer { active = false }
-            try validateLifetime(); let value = try work(); try validateLifetime()
-            try reply(value)
+            try validateLifetime(); let value = try work(); try validateOwner()
+            let state = rightsState(); try validateOwner()
+            try reply(value, state)
         }
     }
     /// Call only after the outer operation has settled its resources. Expired rights cannot prevent cleanup.
@@ -106,5 +117,5 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         }
     }
     deinit { if getpid() == processID { closeRightsIfNeeded() } }
-    private func closeRightsIfNeeded() { if !closed { closed = true; closeRights(); closeReservation() } }
+    private func closeRightsIfNeeded() { if !closed { closed = true; closeRights() } }
 }
