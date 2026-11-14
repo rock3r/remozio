@@ -54,7 +54,12 @@ public struct ContinuityCheckpoint: Equatable, Sendable {
             return try DeterministicCBOR.encode(.map(fields), limits: Self.limits())
         }
     }
+    private static let decodings = ExactByteDecodeMemo<Self>()
     public static func decode(_ bytes: Data) throws -> Self {
+        guard try bytes.count <= limits().maxBytes else { throw CBORError.limitExceeded(.bytes) }
+        return try decodings.value(for: bytes) { try decodeUncached(bytes) }
+    }
+    private static func decodeUncached(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
               case .unsigned(let version) = fields[0], version == 1 || version == 2,
               Set(fields.keys) == Set((0...(version == 1 ? 5 : 6)).map(UInt64.init)),

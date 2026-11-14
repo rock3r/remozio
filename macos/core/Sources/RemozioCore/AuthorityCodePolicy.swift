@@ -120,26 +120,38 @@ public struct AuthorityCodePolicySnapshot: Equatable, Sendable {
     /// Retained change tokens. Only the journal generates them; callers cannot choose a successor token.
     public let roleRevisions: [AuthorityCodeRole: UUID]
 
+    private struct StoredPayload: Sendable {
+        let policy: AuthorityCodePolicy
+        let roleRevisions: [AuthorityCodeRole: UUID]?
+    }
+    private static let decodings = PureResultMemo<Data, StoredPayload>()
+
     var storedBytes: Data {
-        get throws {
-            guard Set(roleRevisions.keys) == Set(policy.entries.map(\.role)) else { throw AuthorityCodePolicyError.corruptData }
-            let roles = Dictionary(uniqueKeysWithValues: roleRevisions.map { role, revision in
-                var value = revision.uuid
-                return (role.rawValue, CBORValue.bytes(withUnsafeBytes(of: &value) { Data($0) }))
-            })
-            return try DeterministicCBOR.encode(.map([0: .unsigned(2), 1: .bytes(policy.bytes), 2: .map(roles)]), limits: Self.limits())
-        }
+        get throws { try Self.encodeStored(policy: policy, roleRevisions: roleRevisions) }
+    }
+    private static func encodeStored(policy: AuthorityCodePolicy, roleRevisions: [AuthorityCodeRole: UUID]) throws -> Data {
+        guard Set(roleRevisions.keys) == Set(policy.entries.map(\.role)) else { throw AuthorityCodePolicyError.corruptData }
+        let roles = Dictionary(uniqueKeysWithValues: roleRevisions.map { role, revision in
+            var value = revision.uuid
+            return (role.rawValue, CBORValue.bytes(withUnsafeBytes(of: &value) { Data($0) }))
+        })
+        return try DeterministicCBOR.encode(.map([0: .unsigned(2), 1: .bytes(policy.bytes), 2: .map(roles)]), limits: Self.limits())
     }
 
     static func decodeStored(_ bytes: Data, revision: UUID) throws -> Self {
+        guard bytes.count <= AuthorityCodePolicy.maximumBytes else { throw AuthorityCodePolicyError.corruptData }
+        let payload = try decodings.value(for: bytes) { try decodeStoredPayload(bytes) }
+        return Self(revision: revision, policy: payload.policy,
+            roleRevisions: payload.roleRevisions ?? Dictionary(uniqueKeysWithValues: payload.policy.entries.map { ($0.role, revision) }))
+    }
+    private static func decodeStoredPayload(_ bytes: Data) throws -> StoredPayload {
         do {
             guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
                   case .unsigned(let version) = fields[0] else { throw AuthorityCodePolicyError.corruptData }
             if version == 1 {
                 let policy = try AuthorityCodePolicy.decode(bytes)
-                // Legacy rows use their protected global revision until the first changed write retains role tokens.
-                return Self(revision: revision, policy: policy,
-                    roleRevisions: Dictionary(uniqueKeysWithValues: policy.entries.map { ($0.role, revision) }))
+                // The caller supplies the legacy global revision on every decode, including memo hits.
+                return StoredPayload(policy: policy, roleRevisions: nil)
             }
             guard version == 2, Set(fields.keys) == [0, 1, 2], case .bytes(let policyBytes) = fields[1],
                   case .map(let roles) = fields[2] else { throw AuthorityCodePolicyError.corruptData }
@@ -151,9 +163,8 @@ public struct AuthorityCodePolicySnapshot: Equatable, Sendable {
                 }
                 revisions[role] = bytes.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
             }
-            let result = Self(revision: revision, policy: policy, roleRevisions: revisions)
-            guard try result.storedBytes == bytes else { throw AuthorityCodePolicyError.corruptData }
-            return result
+            guard try encodeStored(policy: policy, roleRevisions: revisions) == bytes else { throw AuthorityCodePolicyError.corruptData }
+            return StoredPayload(policy: policy, roleRevisions: revisions)
         } catch { throw AuthorityCodePolicyError.corruptData }
     }
     private static func limits() throws -> CBORLimits {

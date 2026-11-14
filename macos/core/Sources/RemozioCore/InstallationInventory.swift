@@ -151,8 +151,17 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
         return try decode(ProtectedServiceConfiguration.read(path: path), expectedMacID: expectedMacID)
     }
 
+    private static let decodings = PureResultMemo<Data, Self>(capacity: 8)
+
     public static func decode(_ bytes: Data, expectedMacID: Data) throws -> Self {
         guard expectedMacID.count == 16 else { throw InstallationInventoryError.invalidRecord }
+        guard try bytes.count <= limits.maxBytes else { throw InstallationInventoryError.corruptRecord }
+        let value = try decodings.value(for: bytes) { try decodeUncached(bytes, expectedMacID: expectedMacID) }
+        guard value.macID == expectedMacID else { throw InstallationInventoryError.wrongMac }
+        return value
+    }
+
+    private static func decodeUncached(_ bytes: Data, expectedMacID: Data) throws -> Self {
         let decoded: CBORValue
         do { decoded = try DeterministicCBOR.decode(bytes, limits: limits) }
         catch { throw InstallationInventoryError.corruptRecord }

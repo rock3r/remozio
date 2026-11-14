@@ -295,4 +295,51 @@ final class InstallationInventoryTests: XCTestCase {
         XCTAssertThrowsError(try value.compareRelease(base))
     }
 
+    func testDecodeMemoUsesExactBytesAndRechecksEveryCallerMac() throws {
+        let first = try inventory(), second = try inventory(digest: Data(repeating: 4, count: 32))
+        XCTAssertNotEqual(first.canonicalBytes, second.canonicalBytes)
+        for _ in 0..<3 {
+            for value in [first, second] {
+                let decoded = try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1))
+                XCTAssertEqual(decoded.canonicalBytes, value.canonicalBytes)
+                XCTAssertEqual(decoded.releaseDigest, value.releaseDigest)
+                XCTAssertThrowsError(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(9))) {
+                    XCTAssertEqual($0 as? InstallationInventoryError, .wrongMac)
+                }
+                XCTAssertThrowsError(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: Data(repeating: 1, count: 15))) {
+                    XCTAssertEqual($0 as? InstallationInventoryError, .invalidRecord)
+                }
+            }
+        }
+        var copy = try InstallationInventory.decode(first.canonicalBytes, expectedMacID: id(1)).canonicalBytes
+        copy.append(0)
+        XCTAssertThrowsError(try InstallationInventory.decode(copy, expectedMacID: id(1))) {
+            XCTAssertEqual($0 as? InstallationInventoryError, .corruptRecord)
+        }
+        XCTAssertEqual(try InstallationInventory.decode(first.canonicalBytes, expectedMacID: id(1)).canonicalBytes, first.canonicalBytes)
+    }
+    func testDecodeMemoPreservesColdMacErrorOrderAndRefusedInputs() throws {
+        let original = try inventory()
+        guard case .map(let fields) = try DeterministicCBOR.decode(original.canonicalBytes, limits: InstallationInventory.limits) else {
+            return XCTFail("Bad fixture")
+        }
+        var malformed = fields
+        malformed[6] = .array([.map([0: .bytes(id(1)), 1: .unsigned(UInt64.max)])])
+        let refused = try DeterministicCBOR.encode(.map(malformed), limits: InstallationInventory.limits)
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try InstallationInventory.decode(refused, expectedMacID: id(9))) {
+                XCTAssertEqual($0 as? InstallationInventoryError, .wrongMac)
+            }
+            XCTAssertThrowsError(try InstallationInventory.decode(refused, expectedMacID: id(1))) {
+                XCTAssertEqual($0 as? InstallationInventoryError, .corruptRecord)
+            }
+        }
+        let oversized = Data(repeating: 0, count: 65_537)
+        XCTAssertThrowsError(try InstallationInventory.decode(oversized, expectedMacID: Data())) {
+            XCTAssertEqual($0 as? InstallationInventoryError, .invalidRecord)
+        }
+        XCTAssertThrowsError(try InstallationInventory.decode(oversized, expectedMacID: id(1))) {
+            XCTAssertEqual($0 as? InstallationInventoryError, .corruptRecord)
+        }
+    }
 }

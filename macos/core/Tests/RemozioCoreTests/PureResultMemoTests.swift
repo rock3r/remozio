@@ -79,4 +79,20 @@ final class PureResultMemoTests: XCTestCase {
         }
         for _ in 0..<2 { XCTAssertThrowsError(try ServiceAccountPlan.decode(firstBytes + Data([0]))) }
     }
+    func testBoundedMemoRecomputesAnEvictedInputAndDoesNotRetainFailures() throws {
+        let memo = PureResultMemo<Data, UInt8>(capacity: 2)
+        var counts: [Data: Int] = [:]
+        func value(_ bytes: Data) throws -> UInt8 {
+            try memo.value(for: bytes) {
+                counts[bytes, default: 0] += 1
+                guard let value = bytes.first else { throw Refused() }; return value
+            }
+        }
+        for byte in UInt8(1)...3 { XCTAssertEqual(try value(Data([byte])), byte) }
+        XCTAssertEqual(try value(Data([1])), 1); XCTAssertEqual(counts[Data([1])], 2)
+        XCTAssertEqual(try value(Data([1])), 1); XCTAssertEqual(counts[Data([1])], 2)
+        for _ in 0..<2 { XCTAssertThrowsError(try value(Data())) }
+        XCTAssertEqual(counts[Data()], 2)
+        XCTAssertEqual(try value(Data([1])), 1); XCTAssertEqual(counts[Data([1])], 2)
+    }
 }
