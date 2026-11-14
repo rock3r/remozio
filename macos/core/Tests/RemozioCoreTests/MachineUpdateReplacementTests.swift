@@ -3459,13 +3459,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    static func withRetainedMaterialWriterFixture(hasReference: Bool = false,
+    static func withRetainedMaterialWriterFixture(hasReference: Bool = false, additionalRetainedAccount: Bool = false,
         _ body: (RetainedMaterialWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testStableActivationSnapshotSeparatesUnpublishedMaterialFromPublishedFacts"))
         var account: AccountPreparationIntent?, material: RuntimePreparationMaterial?
         try suite.withFinishingFixture(stableFormats: true, retainedPolicySourceFormats: true, beforeActivation: { files in
             account = try suite.prepareSecondForeground(files, retainMaterial: hasReference, didPrepareMaterial: { material = $0 }).account
+            if additionalRetainedAccount { _ = try suite.prepareSecondForeground(files, offset: 2000, firstServiceUID: 30002, retainMaterial: false) }
         }) { fixture, finishing, _ in
             let selected = try XCTUnwrap(account), held = try XCTUnwrap(material)
             let loan = try suite.stableFixtureLoan(fixture, finishing: finishing)

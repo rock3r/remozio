@@ -3646,6 +3646,28 @@ public final class PreparationIntentStore {
         try transaction(write: false) { try loadStableRuntimeSource(candidate: candidate) }
     }
 
+    /// Captures selection facts together. Directory lookup and invocation verification run outside this transaction.
+    func retainedSetupCallerState(candidate: SignedReleaseEvidence) throws -> SetupRetainedCallerBinding.State {
+        try transaction(write: false) {
+            let source = try loadStableRuntimeSource(candidate: candidate)
+            let runtimes = try source.accounts.map { account in
+                let state = try loadRuntimePreparation(accountID: account.accountID)
+                let activation = try loadCompatibilityActivation(accountID: account.accountID)
+                guard activation.plan == nil || activation.plan?.reference == state.reference else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                return try SetupRetainedCallerBinding.Runtime(accountID: account.accountID, state: state,
+                    activationRecord: activation.plan?.encoded, jobsRegistered: activation.registered)
+            }
+            let shared = try sharedImportCompatibilitySnapshot(installationID: source.actual.inventory.installationID)
+            try loadStableRuntimeSource(candidate: candidate).requireSame(as: source)
+            guard try sharedImportCompatibilitySnapshot(installationID: source.actual.inventory.installationID) == shared else {
+                throw PreparationStoreError.staleRevision
+            }
+            return .init(source: source, runtimes: runtimes, sharedImport: shared)
+        }
+    }
+
     private func loadStableRuntimeSource(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimeSource {
         let actual = try loadStableMachineUpdate(candidate: candidate)
         let preparations = try loadAccountPreparations()
