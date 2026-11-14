@@ -58,7 +58,10 @@ final class RetainedSetupInitialPublicationNativeTests: XCTestCase {
         try f.machine().close()
         return try Context.withOpenedMachine(open: {
             counts.opens += 1
-            let machine = try PreparationIntentStore(lease: InstallationStorageLease.acquire(directoryPath: f.directory.path),
+            let directory = URL(fileURLWithPath: f.directory.path)
+            let lease = try InstallationStorageLease(anchor: directory.deletingLastPathComponent().path,
+                relativeDirectory: directory.lastPathComponent, owner: getuid())
+            let machine = try PreparationIntentStore(lease: lease,
                 macID: expected.activation.runtime.preparation.macID, maximumRecords: 64, initialize: false, opening: .retainedPolicyVerification)
             machine.observeStoreRead = { [weak counts] _ in if let counts, counts.depth > 0 { counts.callbackQueries += 1 } }
             counts.machine = machine
