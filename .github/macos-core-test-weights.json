@@ -363,7 +363,7 @@
   "RetainedSetupPromotionGateExclusionTests": 15.71,
   "RetainedSetupPromotionTransitionTests": 1.55,
   "RetainedSetupReadinessArchiveTests": 2.19,
-  "RetainedSetupRuntimeNativeContextTests": 57.19,
+  "RetainedSetupRuntimeNativeContextTests": 76.13,
   "RetainedSetupRuntimeSequenceTests": 354.42,
   "ReviewedSetupFileTests": 0.52,
   "RootUpdateSchedulingFrameTests": 2.83,
@@ -771,6 +771,11 @@
    "testPublishedRecoveryAndAllMissingOrConflictingFilesDoNotWrite": 49.66,
    "testRealPublicationClosesSelectionBeforeCompletionAndAssertsTheReadBudget": 50.7,
    "testStaleProviderResultCannotMasqueradeAsTheActualCompletedFrame": 54.92
+  },
+  "RetainedSetupRuntimeNativeContextTests": {
+   "testCustodyReaderClosesActualConnectionsOnSuccessAndEveryFailure": 16.99,
+   "testOwnedMaterialFramesEnforceMetadataOrderFailurePoisoningAndLoanLifetimeWithoutQueries": 15.99,
+   "testOwnedPolicyPublicationAndAcknowledgementAdaptersKeepExactFramesAndNeverQueryTransactions": 43.15
   },
   "RetainedSetupRuntimeSequenceTests": {
    "testCaptureBudgetRefusesSeventhCaptureAndStaysExhausted": 0.0,
