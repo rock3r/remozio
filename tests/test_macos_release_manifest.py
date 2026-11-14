@@ -527,7 +527,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         pairing = 'transport.pairing-config'
         gateway = 'gateway.service-config'
         for role in (2, 4, 6, 8):
-            self.assertEqual(by_role[role][host], {0: host, 1: [1, 2, 3, 4], 2: [1] if role == 8 else [], 3: {}})
+            self.assertEqual(by_role[role][host], {0: host, 1: [1, 2, 3, 4], 2: [1, 3] if role == 8 else [], 3: {}})
             self.assertEqual(by_role[role][pairing], {0: pairing, 1: [1, 2], 2: [1, 2] if role in (4, 8) else [], 3: {}})
             self.assertEqual(by_role[role][gateway], {0: gateway, 1: [1, 2], 2: [1, 2] if role in (6, 8) else [], 3: {}})
         for role in (1, 5, 11, 12):
