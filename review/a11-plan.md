@@ -274,3 +274,4 @@ The full Remozio objective remains incomplete.
 ## Review addenda
 
 - A11d review: `withTargetPair` must run only after P04 closes its writer. In A11d this is only a comment. A11i and A11k must enforce the order and add a test that exercises it.
+- A11g review: one owned initial publication runs about 60 host checks. Natively each passes through the context's `verifyPolicy`, so 5 custody checks, `verifyRelease` (`SignedReleaseInspection`) and `validateSelf`. That is about 60 signature inspections per publication. Measure this first in the live custody cost check; if it is too slow, reduce the number of full checks per publication before A11k.
