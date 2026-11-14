@@ -155,7 +155,11 @@ enum MachineUpdateRetainedSetupPolicyNativeContext {
     }
     static func requireRelease(_ release: SignedReleaseEvidence, approved: Snapshot, candidate: SignedReleaseEvidence,
         currentCodePolicy: AuthorityCodePolicy) throws {
-        let actual = approved.activation.runtime.setup.source.actual
+        try requireRelease(release, approvedRuntime: approved.activation.runtime, candidate: candidate, currentCodePolicy: currentCodePolicy)
+    }
+    static func requireRelease(_ release: SignedReleaseEvidence, approvedRuntime: MachineUpdateStableRuntimePreparationSnapshot,
+        candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy) throws {
+        let actual = approvedRuntime.setup.source.actual
         try actual.inventory.compareRelease(release)
         guard try InstallationInventory.digest(release) == InstallationInventory.digest(candidate) else { throw RuntimeActivationError.changedScope }
         try actual.seal.requireCurrentInventory(actual.inventory, epoch: actual.installed, candidate: release)
