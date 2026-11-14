@@ -6047,6 +6047,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             }
             _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
                 directory: fixture.directory, loan: loan) { _, _ in }
+            if maintenanceWriterFormats { loan.close() }
             XCTAssertNil(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID, ownerUID: owner.uid, candidate: candidate))
             let reader = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
             defer { try? reader.close() }
