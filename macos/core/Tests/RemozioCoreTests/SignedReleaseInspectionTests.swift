@@ -90,8 +90,6 @@ final class SignedReleaseInspectionTests: XCTestCase {
             try RuntimeMaintenanceWindowStorage.requireReaderFormats(evidence)
             try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 28)
             try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 29)
-            try MachineUpdateRetainedSetupPolicyStorage.requireSchema(29, candidate: evidence)
-            try RuntimeRetainedSetupReleaseBinding.requireFormats(evidence)
             for component in evidence.manifest.components where ![AuthorityCodeRole.authority, .setupController].contains(component.role) {
                 XCTAssertNil(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
             }
@@ -144,7 +142,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
                 let contracts: [(String, Set<UInt64>, Set<UInt64>)] = [
                     (GatewaySettingsConsumerHostConfiguration.formatName, GatewaySettingsConsumerHostConfiguration.archiveReadVersions,
-                     role == .setupController ? GatewaySettingsConsumerHostConfiguration.supportedVersions.union([GatewaySettingsConsumerHostConfiguration.retainedSetupVersion]) : []),
+                     role == .setupController ? GatewaySettingsConsumerHostConfiguration.supportedVersions : []),
                     (TransportPairingStartupConfiguration.formatName, TransportPairingStartupConfiguration.supportedVersions,
                      role == .transport || role == .setupController ? TransportPairingStartupConfiguration.supportedVersions : []),
                     (GatewayServiceConfiguration.formatName, GatewayServiceConfiguration.supportedVersions,
@@ -173,11 +171,6 @@ final class SignedReleaseInspectionTests: XCTestCase {
                     XCTAssertEqual(declaration.readers, versions)
                     XCTAssertEqual(declaration.writers, role == .setupController ? versions : [])
                     XCTAssertTrue(declaration.migrations.isEmpty)
-                }
-            }
-            for component in evidence.manifest.components {
-                if let declaration = component.formats.first(where: { $0.name == RuntimeRetainedSetupReleaseBinding.formatName }) {
-                    XCTAssertEqual(declaration.writers, component.role == .setupController ? [1] : [])
                 }
             }
             for item in try CommandMonitorActivityContract.requirements {

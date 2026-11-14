@@ -140,7 +140,7 @@ def declarations(role):
             ('gateway.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [])],
         8: [('runtime.activation-plan', [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5]),
-            ('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], [1, 3]),
+            ('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], [1]),
             ('runtime.gateway-settings-fence', [1, 2], [1]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
     }
@@ -159,8 +159,7 @@ def declarations(role):
     for name in retained_readers:
         if name in by_name:
             raise ValueError('duplicate retained runtime format declaration')
-        writers = [1] if role == 8 and name == 'runtime.retained-setup-release' else []
-        by_name[name] = {0: name, 1: [1], 2: writers, 3: {}}
+        by_name[name] = {0: name, 1: [1], 2: [], 3: {}}
     if role in (2, 4):
         for name in ('authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
                      'routing.away-control', 'routing.status-response'):
