@@ -6,7 +6,6 @@ import XCTest
 final class SetupRetainedCallerBindingTests: XCTestCase {
     private typealias Binding = SetupRetainedCallerBinding
     private typealias Fixture = RetainedMaterialWriterFixture
-    private typealias Inputs = RuntimeReleaseCompatibilitySnapshot.Inputs
 
     private func values(_ f: Fixture) throws -> (Binding.State, MachineUpdateRetainedSetupInitialRuntimeEntry, XPCPeerCredentials, XPCPeerPolicy) {
         let machine = try f.machine(), state = try machine.retainedSetupCallerState(candidate: f.candidate)
@@ -29,15 +28,8 @@ final class SetupRetainedCallerBindingTests: XCTestCase {
         try .resolve(state: state, peer: peer, incarnation: incarnation, accepted: accepted, entry: entry,
             lookup: lookup ?? { try self.identity(state, $0) })
     }
-    private func replacing(_ state: Binding.State, runtimes: [RuntimeReleaseCompatibilitySnapshot.Runtime]) -> Binding.State {
-        let p = state.inputs
-        let inputs = Inputs(schemaVersion: p.schemaVersion, macID: p.macID, inventory: p.inventory, runtimes: runtimes,
-            gateways: p.gateways, sharedImport: p.sharedImport, auditUpgrades: p.auditUpgrades, auditGraphs: p.auditGraphs,
-            auditCutovers: p.auditCutovers, updateAdmissionRegistration: p.updateAdmissionRegistration,
-            machineUpdateActivation: p.machineUpdateActivation, machineUpdateReplacement: p.machineUpdateReplacement,
-            machineUpdateConfigurationEpoch: p.machineUpdateConfigurationEpoch, machineUpdateBackendEpoch: p.machineUpdateBackendEpoch,
-            completionIntent: p.completionIntent, completionPublication: p.completionPublication, installedRelease: p.installedRelease)
-        return .init(source: state.source, inputs: inputs)
+    private func replacing(_ state: Binding.State, runtimes: [Binding.Runtime]) -> Binding.State {
+        .init(source: state.source, runtimes: runtimes, sharedImport: state.sharedImport)
     }
 
     func testProtectedStateSelectsDistinctAuthorityAndRetainedTargetWithoutWrites() throws {
@@ -113,12 +105,13 @@ final class SetupRetainedCallerBindingTests: XCTestCase {
             let original = try resolve(state, entry, peer, accepted, incarnation: incarnation)
             XCTAssertEqual(try state.target(peerUID: peer.userID).accountID, entry.runtime.preparation.accountID)
             let targetID = entry.runtime.preparation.accountID
-            let completed = replacing(state, runtimes: state.inputs.runtimes.map {
-                .init(reference: $0.reference,
-                    configurationPublished: $0.reference.services.accountID == targetID ? true : $0.configurationPublished,
+            let completed = replacing(state, runtimes: state.runtimes.map {
+                .init(accountID: $0.accountID,
+                    state: .init(reference: $0.state.reference,
+                        configurationPublished: $0.accountID == targetID ? true : $0.state.configurationPublished),
                     activationRecord: $0.activationRecord, jobsRegistered: $0.jobsRegistered)
             })
-            XCTAssertFalse(completed.inputs.sharedImport?.records.contains {
+            XCTAssertFalse(completed.sharedImport?.records.contains {
                 $0.accountID == targetID && $0.phase == SharedSetupImportIntent.Phase.retained.rawValue
             } == true)
             XCTAssertThrowsError(try completed.target(peerUID: peer.userID))

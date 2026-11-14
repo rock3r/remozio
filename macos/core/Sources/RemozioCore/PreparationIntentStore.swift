@@ -3650,9 +3650,21 @@ public final class PreparationIntentStore {
     func retainedSetupCallerState(candidate: SignedReleaseEvidence) throws -> SetupRetainedCallerBinding.State {
         try transaction(write: false) {
             let source = try loadStableRuntimeSource(candidate: candidate)
-            let inputs = try loadRetainedRuntimeCompatibilityInputs()
+            let runtimes = try source.accounts.map { account in
+                let state = try loadRuntimePreparation(accountID: account.accountID)
+                let activation = try loadCompatibilityActivation(accountID: account.accountID)
+                guard activation.plan == nil || activation.plan?.reference == state.reference else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                return try SetupRetainedCallerBinding.Runtime(accountID: account.accountID, state: state,
+                    activationRecord: activation.plan?.encoded, jobsRegistered: activation.registered)
+            }
+            let shared = try sharedImportCompatibilitySnapshot(installationID: source.actual.inventory.installationID)
             try loadStableRuntimeSource(candidate: candidate).requireSame(as: source)
-            return .init(source: source, inputs: inputs)
+            guard try sharedImportCompatibilitySnapshot(installationID: source.actual.inventory.installationID) == shared else {
+                throw PreparationStoreError.staleRevision
+            }
+            return .init(source: source, runtimes: runtimes, sharedImport: shared)
         }
     }
 

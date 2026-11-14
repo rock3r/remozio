@@ -3,25 +3,31 @@ import Foundation
 /// Protected selection metadata only. Dispatch still needs invocation rights, reservation and native custody.
 struct SetupRetainedCallerBinding: CustomStringConvertible, CustomDebugStringConvertible {
     typealias Source = MachineUpdateStableRuntimeSource
+    struct Runtime: Equatable {
+        let accountID: Data
+        let state: RuntimePreparationState
+        let activationRecord: Data?
+        let jobsRegistered: Bool
+    }
     struct State {
         let source: Source
-        let inputs: RuntimeReleaseCompatibilitySnapshot.Inputs
+        let runtimes: [Runtime]
+        let sharedImport: SharedSetupImportCompatibilitySnapshot?
 
         func target(peerUID: UInt32) throws -> Source.Account {
             guard peerUID > 0, peerUID < UInt32.max,
                   source.actual.inventory.accounts.filter({ $0.ownerUID == peerUID }).count == 1,
-                  inputs.macID == source.actual.inventory.macID,
-                  inputs.schemaVersion == source.actual.schemaVersion,
-                  inputs.inventory == source.actual.inventory.canonicalBytes else {
+                  runtimes.count == source.accounts.count,
+                  Set(runtimes.map(\.accountID)) == Set(source.accounts.map(\.accountID)) else {
                 throw AdministrativeSetupError.wrongAccount
             }
             let pending = source.accounts.filter { account in
                 guard account.origin == .retained, !account.inInventory else { return false }
-                let runtime = inputs.runtimes.first { $0.reference.services.accountID == account.accountID }
-                let pendingImport = inputs.sharedImport?.records.contains {
+                let runtime = runtimes.first { $0.accountID == account.accountID }
+                let pendingImport = sharedImport?.records.contains {
                     $0.accountID == account.accountID && $0.phase == SharedSetupImportIntent.Phase.retained.rawValue
                 } == true
-                return runtime?.configurationPublished != true || pendingImport
+                return runtime?.state.configurationPublished != true || pendingImport
             }
             guard pending.count == 1, let target = pending.first, target.ownerUID != peerUID,
                   let current = source.actual.inventory.accounts.first(where: { $0.ownerUID == peerUID }),
@@ -30,7 +36,7 @@ struct SetupRetainedCallerBinding: CustomStringConvertible, CustomDebugStringCon
         }
         func requireSame(as other: Self) throws {
             try source.requireSame(as: other.source)
-            guard inputs == other.inputs else { throw PreparationStoreError.staleRevision }
+            guard runtimes == other.runtimes, sharedImport == other.sharedImport else { throw PreparationStoreError.staleRevision }
         }
     }
     let peer: XPCPeerCredentials
