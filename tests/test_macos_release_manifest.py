@@ -52,6 +52,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     value[3].pop(28, None)
                 if value[0] == 'runtime.gateway-settings-consumer-host':
                     value[1] = [1]
+                    value[2] = [1] if role == 8 else []
                 if value[0] == 'runtime.activation-plan':
                     value[1] = [1, 2]
                     value[2] = [1, 2] if role == 8 else []
@@ -660,11 +661,11 @@ class RetainedRuntimeManifestReaderTests(unittest.TestCase):
         return {role: {item[0]: item for item in MANIFEST.declarations(role)}
                 for role, *_ in MANIFEST.COMPONENTS}
 
-    def test_startup_and_completion_bindings_have_only_the_four_readers(self):
+    def test_startup_binding_has_only_the_setup_writer_and_completion_remains_read_only(self):
         for role, declarations in self.by_role().items():
             for name in ('runtime.retained-setup-release', 'runtime.retained-setup-completion'):
                 if role in (2, 4, 6, 8):
-                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [], 3: {}})
+                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1] if role == 8 and name == 'runtime.retained-setup-release' else [], 3: {}})
                 else:
                     self.assertNotIn(name, declarations)
 
@@ -691,7 +692,7 @@ class RetainedRuntimeManifestReaderTests(unittest.TestCase):
         for role, declarations in self.by_role().items():
             name = 'runtime.gateway-settings-consumer-host'
             if role in (2, 4, 6, 8):
-                self.assertEqual(declarations[name], {0: name, 1: versions, 2: [1] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[name], {0: name, 1: versions, 2: [1, 3] if role == 8 else [], 3: {}})
             else:
                 self.assertNotIn(name, declarations)
 
@@ -720,11 +721,11 @@ class RetainedRuntimeManifestReaderTests(unittest.TestCase):
                                   ('authority.retained-setup-promotion-intent', 1),
                                   ('authority.retained-setup-promotion-ready', 1)):
                 self.assertEqual(by_role[role][name], {0: name, 1: [version], 2: [], 3: {}})
-        for declarations in by_role.values():
+        for role, declarations in by_role.items():
             self.assertNotIn('authority.installed-readiness', declarations)
             for name, declaration in declarations.items():
                 if name.startswith('runtime.retained-setup-'):
-                    self.assertEqual(declaration[2], [], name)
+                    self.assertEqual(declaration[2], [1] if role == 8 and name == 'runtime.retained-setup-release' else [], name)
 
     def test_reader_declarations_stay_sorted_unique_and_reject_an_existing_name(self):
         for role, *_ in MANIFEST.COMPONENTS:
