@@ -32,7 +32,10 @@ final class RetainedSetupInitialCompletionNativeTests: XCTestCase {
         try f.machine().close()
         return try Context.withOpenedMachine(open: {
             counts.opens += 1
-            let machine = try PreparationIntentStore(lease: InstallationStorageLease.acquire(directoryPath: f.directory.path),
+            let directory = URL(fileURLWithPath: f.directory.path)
+            let lease = try InstallationStorageLease(anchor: directory.deletingLastPathComponent().path,
+                relativeDirectory: directory.lastPathComponent, owner: getuid())
+            let machine = try PreparationIntentStore(lease: lease,
                 macID: expected.activation.runtime.preparation.macID, maximumRecords: 64, initialize: false,
                 didCommit: { counts.commits += 1; if failAcknowledgement { throw Fault.acknowledgement } }, opening: .mutable)
             machine.observeStoreRead = { [weak counts] _ in
