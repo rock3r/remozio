@@ -561,13 +561,25 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             }
         }
     }
-    private func seedPublishedAssembly(_ s: State) throws {
+    private enum SeedFault { case bytes, mode }
+    /// P04 and D2 write the policy and marker. The test seeds owned files directly.
+    /// Owned callbacks use production retention readers. They do not execute the Root-only native callback.
+    private func seedPublishedAssembly(_ s: State, fault: SeedFault? = nil, beforeMarker: (() throws -> Void)? = nil) throws {
         try withAssembly(s) { context, _ in
             let before = try XCTUnwrap(assemblyFrame(s).entry.policy)
             let recorded = try providers(s).policy(before, context.verifyPolicy)
             s.captures = [try assemblyFrame(s)]; try s.prepareFiles(recorded)
             let files = try XCTUnwrap(s.files)
             for artifact in files.artifacts { try files.put(artifact, bytes: artifact.bytes) }
+            if let fault {
+                let artifact = try XCTUnwrap(files.artifacts.first)
+                switch fault {
+                case .bytes: try files.put(artifact, bytes: Data([0]))
+                case .mode: guard chmod(files.url(artifact).path, 0o666) == 0 else { throw JournalLeaseError.system(errno) }
+                }
+            }
+            try beforeMarker?()
+            var checkedPaths = Set<String>()
             _ = try s.withMachine { machine in
                 try MachineUpdateRetainedSetupInitialCompletion.complete(machine: machine, expected: recorded,
                     candidate: s.candidate, directory: s.directory, admission: s.admission, fileCustodyAccepted: true,
@@ -575,8 +587,14 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                     verifyServices: { XCTAssertEqual($0, s.material.services) },
                     readMaterial: { scope in try scope.withActive { s.material } },
                     verifyActivity: { actual, scope in try scope.withActive { XCTAssertEqual(actual, s.material.serviceActivity) } },
-                    readArtifact: { artifact, scope in try scope.withActive { try files.read(artifact) } })
+                    readArtifact: { artifact, scope in try scope.withActive {
+                        guard let bytes = try files.read(artifact) else { return nil }
+                        try AdministrativeSetupPublication.validateRetained(bytes, file: files.file(artifact),
+                            directory: files.directory, owner: getuid(), verify: scope.requireActive)
+                        checkedPaths.insert(artifact.path); return bytes
+                    } })
             }
+            XCTAssertEqual(checkedPaths, Set(files.artifacts.map(\.path)))
         }
     }
     private func assemblyPublishedRecovery(empty: Bool) throws {
@@ -634,6 +652,31 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                 }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
                 XCTAssertEqual(first.commits, 0); XCTAssertTrue(first.events.isEmpty)
                 XCTAssertEqual(second.commits, 0); XCTAssertTrue(second.events.isEmpty)
+            }
+        }
+    }
+    func testAssemblyRecoveryFixtureRejectsBadSeedBytesAndModeBeforeItsMarker() throws {
+        try fixture { s in
+            for fault in [SeedFault.bytes, .mode] {
+                var beforeMarkerCommits: Int?
+                XCTAssertThrowsError(try seedPublishedAssembly(s, fault: fault, beforeMarker: { beforeMarkerCommits = s.commits })) { error in
+                    switch fault {
+                    case .bytes: XCTAssertEqual(error as? AdministrativeSetupPublicationError, .conflictingConfiguration)
+                    case .mode: XCTAssertEqual(error as? JournalLeaseError, .unsafeMetadata)
+                    }
+                }
+                XCTAssertEqual(s.commits, try XCTUnwrap(beforeMarkerCommits))
+                let actual = try assemblyFrame(s), files = try XCTUnwrap(s.files), artifact = try XCTUnwrap(files.artifacts.first)
+                XCTAssertEqual(actual.entry.intent?.phase, .recorded)
+                XCTAssertFalse(actual.entry.runtime.state.configurationPublished)
+                XCTAssertEqual(files.publicationCalls, 0)
+                switch fault {
+                case .bytes: XCTAssertEqual(try Data(contentsOf: files.url(artifact)), Data([0]))
+                case .mode:
+                    var info = stat(); XCTAssertEqual(lstat(files.url(artifact).path, &info), 0)
+                    XCTAssertEqual(info.st_mode & 0o777, 0o666)
+                }
+                for machine in s.machines { XCTAssertNoThrow(try machine.requireClosedForRetainedSetupPolicyWrite()) }
             }
         }
     }
