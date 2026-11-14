@@ -27,6 +27,25 @@ public enum ProtectedServiceConfiguration {
         try readRecord(anchor: anchor, relativePath: relativePath, owner: owner,
             privateFile: false, ancestorOwner: nil, allowMissingLeaf: true)
     }
+    enum OptionalPrivateOwner { case root, service(uid_t) }
+    /// Only a missing private leaf is optional. Root-owned ancestors must already exist.
+    static func readOptionalPrivate(path: String, kind: OptionalPrivateOwner) throws -> Data? {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let owner: uid_t
+        switch kind {
+        case .root: owner = 0
+        case .service(let serviceUID):
+            guard serviceUID > 0, serviceUID < UInt32.max else { throw ApprovalTransportStartupError.wrongAccount }
+            owner = serviceUID
+        }
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try readOptionalPrivate(anchor: "/", relativePath: String(path.dropFirst()), owner: owner, ancestorOwner: 0)
+    }
+    /// Owned fixtures exercise the same checked private reader, without granting native file authority.
+    static func readOptionalPrivate(anchor: String, relativePath: String, owner: uid_t, ancestorOwner: uid_t? = nil) throws -> Data? {
+        try readRecord(anchor: anchor, relativePath: relativePath, owner: owner,
+            privateFile: true, ancestorOwner: ancestorOwner, allowMissingLeaf: true)
+    }
     /// Reads a service-owned private file under Root-owned ancestors. The interactive account cannot select an anchor.
     static func readServicePrivate(path: String, serviceUID: uid_t) throws -> Data {
         guard serviceUID > 0, serviceUID < UInt32.max, getuid() == serviceUID, geteuid() == serviceUID else {
