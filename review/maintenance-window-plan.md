@@ -143,7 +143,8 @@ Existing update activation keeps its own identity, irreversible phases and sched
 | Executing | Issue one scoped body loan for this attempt; no automatic body retry |
 | Work settled | Close every borrowed writer/store, join children and persist the known or uncertain operation outcome |
 | Restoring A | Keep A admission closed and machine admission shared; restore/adopt A and run readiness checks |
-| Restored | Persist applicable floor/readiness facts and terminal recovery state before reopening A admission |
+| Reopen pending | Persist readiness/floors and explicit release intent; confirm the actual A gate state through the authenticated command |
+| Restored | Persist the confirmed open A gate state and terminal recovery outcome; release shared activity after cleanup joins |
 | Needs owner recovery | Keep a visible bounded failure; allow authenticated status and the reviewed attended exit |
 
 These are proposed semantic phases, not an implemented enum or a promised schema number.
@@ -260,12 +261,41 @@ Keep the same shared machine lease and A account-drain ownership through restart
 No retained `releaseActivityForRestart` transfer is needed: retained work held no machine-EX token.
 Authorize the exact restoration owner to register A; reject conflicting bootstrap through the shared maintenance phase check.
 `RuntimeJobRegistration.ensure` proves registration only. Require actual serving identity, readiness and unchanged applicable A floors.
-Persist restoration/terminal state durably before releasing A's account drain, then release shared machine activity after cleanup joins.
+Persist reopenPending and the actual health/floor facts before releasing Setup's matching drain token.
+Persist Restored only after the explicit command and the gate readback below succeed; release shared activity after cleanup joins.
 Do not invent floor writes or require B's completion merely to restore A.
 Normal update still requires the actual selected artifact, durable manifest, floor/epoch commits and closed machine admission through restart health.
 Only an explicitly designated update owner may defer shared updates. Idle-only automatic update activation stays unchanged.
 An explicit signed machine update drain remains indefinite; the bounded retained pre-stop wait does not change that contract.
 A stop/outage acceptance limit never grants forced cleanup, fake success or body replay.
+
+## Addendum: explicit admission reopen (Toni 2778; M02/M09)
+
+M02 restores A's maintenance admission hold before request creation at startup. The hold is bound to the protected account, attempt and revision.
+It is a local admission restriction, not a second exclusive token competing with Setup's actual account-drain token.
+The live idle handshake must also establish this hold before stop/body entry; unknown handshake outcomes cannot authorize either.
+A reads the maintenance record at protected startup and on the authenticated reopen command only.
+Do not add per-request rereads, event-driven reconciliation or a polling fallback for this maintenance record. Existing update admission checks stay unchanged.
+
+M09 uses one reopen mechanism on the same proposed native channel as the idle handshake:
+
+1. Settle the body and cleanup; verify A's actual identity, recovery health and applicable durable floors.
+2. Persist reopenPending with the exact attempt/revision and release intent. This phase does not mean ordinary admission is open.
+3. Release only Setup's matching account-drain token; A's local maintenance hold still prevents new requests.
+4. Send the explicit authenticated reopen command. A verifies the Setup peer and freshly reads the protected phase/account/attempt before releasing that hold.
+5. Read A's actual admission gate state, including its local hold and ability to acquire the registered account gate. Record that observation, not just an ACK.
+6. Only after confirmed open admission, persist Restored and finish the window. A must accept a fresh request without another restart.
+
+The command is idempotent and bound to the exact active window. It cannot release another attempt's hold or an update scheduling drain.
+On a lost signal/reply, Setup retries only this explicit reconciliation and gate readback. A does not reopen itself from another event.
+A timeout without confirmed gate state leaves needsOwnerRecovery visible, with separate actual operation and service outcomes.
+The owner's restoration-only action includes this command/readback. It never repeats P04, A11 or P05, even if the body already committed.
+Pre-stop cancellation uses the same explicit reopen/readback path without stopping or restarting A.
+
+M02/M09 tests must prove a fresh request is admitted after Restored without an A restart.
+Also cover lost/duplicate/stale commands, lost ACK with an already-open gate, confirmation timeout, pre-stop cancellation and a foreign drain that stays closed.
+Health plus an ACK alone cannot pass. Gate state must be read back and durably recorded before Restored.
+These native control operations and live results remain unimplemented/unqualified by this document.
 
 ## Normal update policy preflight
 
@@ -289,14 +319,14 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | Cut | Complete responsibility | Estimated lines | Required proof |
 | --- | --- | ---: | --- |
 | M01 | Canonical purpose-bound record with separate operation/restoration outcomes | 80–160 | Exact decode; no capability from bytes |
-| M02 | Protected reader/format requirements and A-only startup drain restoration | 100–190 | A closure survives restart; other account admission stays open; reader precedes producer |
+| M02 | Protected reader/format requirements and A-only startup admission hold | 100–190 | Hold survives restart and releases only by the authenticated M09 command; other account admission stays open |
 | M03 | Exact CAS phase/outcome writer and mutation footprint | 100–195 | One active attempt; unrelated rows exact; uncertainty retirement |
 | M04 | Existing A account gate, shared machine lease and bounded pre-stop owner | 100–185 | Registered scope/identity; no new machine drain; timeout cancels without stop |
 | M05 | Authenticated live A idle/child-settlement proof under its held account drain | 110–195 | Real serialized work/queue/resource owners; no timer, cached state or false idle |
 | M06 | Separate native stop facade and shared bootstrap/recovery phase guard | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn; exact exit witnesses |
 | M07 | Existing ordinary-admission composition, record-only source transition and fresh body capture | 80–160 | Same A/B bindings and pair; window writes outside borrowed transactions; no weakened native frame/provider contract |
 | M08 | Purpose-specific observation after interruption | 90–180 | Old/new/partial/unknown stay distinct; zero replay |
-| M09 | Exact A restoration/adoption, health and floor finalization | 110–195 | A gate held through checks; no global closure or fake completion |
+| M09 | Exact A restoration/adoption, health/floors and explicit admission reopen | 110–195 | Actual gate readback recorded before Restored; timeout needsOwnerRecovery; fresh request without restart |
 | M10 | Root Setup startup/interruption recovery worker | 110–195 | No GUI dependency; old owner settlement; bounded restoration retry |
 | M11 | Authenticated status and durable visible failure | 80–170 | Available during recovery; separate A/B outcomes; sensitive values stay private |
 | M12 | Explicit restoration-only native action | 100–190 | Fresh rights/binding/revision; no arbitrary job, reset, force or replay |
