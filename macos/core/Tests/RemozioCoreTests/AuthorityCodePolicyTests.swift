@@ -156,4 +156,52 @@ final class AuthorityCodePolicyTests: XCTestCase {
         try AuthorityCodeEntry(role: role, teamID: team, identifier: identifier, installedGeneration: installed,
             minimumGeneration: minimum, codeDirectoryHash: Data(repeating: 7, count: 20), active: active)
     }
+    func testStoredDecodeMemoKeepsCallerRevisionsAndLegacyRoleTokensFresh() throws {
+        let policy = try AuthorityCodePolicy(entries: AuthorityCodeRole.allCases.map { try entry(role: $0) })
+        let oldPolicy = try AuthorityCodePolicy(entries: policy.entries.filter { $0.role.rawValue <= 10 })
+        let legacy = try legacyBytes(oldPolicy), firstRevision = UUID(), nextRevision = UUID()
+        for revision in [firstRevision, nextRevision, firstRevision] {
+            let decoded = try AuthorityCodePolicySnapshot.decodeStored(legacy, revision: revision)
+            XCTAssertEqual(decoded.revision, revision)
+            XCTAssertTrue(decoded.roleRevisions.values.allSatisfy { $0 == revision })
+            XCTAssertEqual(decoded.policy, try AuthorityCodePolicy.decode(legacy))
+        }
+        let tokens = Dictionary(uniqueKeysWithValues: policy.entries.map { ($0.role, UUID()) })
+        let stored = AuthorityCodePolicySnapshot(revision: firstRevision, policy: policy, roleRevisions: tokens)
+        let bytes = try stored.storedBytes
+        for revision in [firstRevision, nextRevision, firstRevision] {
+            let decoded = try AuthorityCodePolicySnapshot.decodeStored(bytes, revision: revision)
+            XCTAssertEqual(decoded.revision, revision); XCTAssertEqual(decoded.roleRevisions, tokens)
+            XCTAssertEqual(try decoded.storedBytes, bytes)
+        }
+        var copy = try AuthorityCodePolicySnapshot.decodeStored(bytes, revision: firstRevision).roleRevisions
+        copy[.app] = UUID()
+        XCTAssertNotEqual(copy, tokens)
+        XCTAssertEqual(try AuthorityCodePolicySnapshot.decodeStored(bytes, revision: nextRevision).roleRevisions, tokens)
+    }
+    func testStoredDecodeMemoSeparatesChangedBytesAndKeepsRefusals() throws {
+        let policy = try AuthorityCodePolicy(entries: AuthorityCodeRole.allCases.map { try entry(role: $0) })
+        let revision = UUID()
+        let first = AuthorityCodePolicySnapshot(revision: revision, policy: policy,
+            roleRevisions: Dictionary(uniqueKeysWithValues: policy.entries.map { ($0.role, UUID()) }))
+        let second = AuthorityCodePolicySnapshot(revision: revision, policy: policy,
+            roleRevisions: Dictionary(uniqueKeysWithValues: policy.entries.map { ($0.role, UUID()) }))
+        let firstBytes = try first.storedBytes, secondBytes = try second.storedBytes
+        XCTAssertNotEqual(firstBytes, secondBytes)
+        for _ in 0..<3 {
+            for value in [first, second] {
+                let bytes = try value.storedBytes
+                let actual = try AuthorityCodePolicySnapshot.decodeStored(bytes, revision: UUID())
+                XCTAssertEqual(actual.roleRevisions, value.roleRevisions); XCTAssertEqual(try actual.storedBytes, bytes)
+            }
+        }
+        for refused in [firstBytes + Data([0]), Data(repeating: 0, count: AuthorityCodePolicy.maximumBytes + 1)] {
+            for _ in 0..<2 {
+                XCTAssertThrowsError(try AuthorityCodePolicySnapshot.decodeStored(refused, revision: UUID())) {
+                    XCTAssertEqual($0 as? AuthorityCodePolicyError, .corruptData)
+                }
+            }
+        }
+        XCTAssertEqual(try AuthorityCodePolicySnapshot.decodeStored(firstBytes, revision: revision).roleRevisions, first.roleRevisions)
+    }
 }

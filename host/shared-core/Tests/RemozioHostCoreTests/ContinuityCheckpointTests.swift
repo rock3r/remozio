@@ -179,4 +179,32 @@ final class ContinuityCheckpointTests: XCTestCase {
                 ledgerDigest: self.ledger, journalEpoch: Data(repeating: 0, count: count), journalHead: 0) }
         }
     }
+    func testDecodeMemoSeparatesExactBytesAndReturnedDataCopies() throws {
+        let first = try checkpoint(), second = try checkpoint(generation: 6, authorityGeneration: 3)
+        let firstBytes = try first.bytes, secondBytes = try second.bytes
+        XCTAssertNotEqual(firstBytes, secondBytes)
+        for _ in 0..<3 {
+            XCTAssertEqual(try ContinuityCheckpoint.decode(firstBytes), first)
+            XCTAssertEqual(try ContinuityCheckpoint.decode(secondBytes), second)
+            XCTAssertEqual(try ContinuityCheckpoint.decode(firstBytes).bytes, firstBytes)
+            XCTAssertEqual(try ContinuityCheckpoint.decode(secondBytes).bytes, secondBytes)
+        }
+        var copy = try ContinuityCheckpoint.decode(firstBytes).authorityDigest
+        copy[0] ^= 1
+        XCTAssertNotEqual(copy, first.authorityDigest)
+        XCTAssertEqual(try ContinuityCheckpoint.decode(firstBytes).authorityDigest, first.authorityDigest)
+    }
+    func testDecodeMemoKeepsAlteredAndOversizedBytesRefusedAfterHits() throws {
+        let known = try checkpoint(authorityGeneration: 3), encoded = try known.bytes
+        XCTAssertEqual(try ContinuityCheckpoint.decode(encoded), known)
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try ContinuityCheckpoint.decode(encoded + Data([0]))) {
+                XCTAssertEqual($0 as? CBORError, .trailingBytes)
+            }
+            XCTAssertThrowsError(try ContinuityCheckpoint.decode(Data(repeating: 0, count: 257))) {
+                XCTAssertEqual($0 as? CBORError, .limitExceeded(.bytes))
+            }
+        }
+        XCTAssertEqual(try ContinuityCheckpoint.decode(encoded), known)
+    }
 }
