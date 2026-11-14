@@ -362,7 +362,7 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M02 | Protected reader/format requirements and A-only startup admission hold | 100–190 | Hold survives restart and releases only by the authenticated M09 command; other account admission stays open |
 | M03b1 | Complete startup recovery boundary | 23 | Store open/read failures retain A's hold and expose owner recovery |
 | M03b2 | Exact CAS phase/outcome writer and atomic first-window migration | 100–195 | One active attempt; unrelated rows exact; uncertainty retirement; no production caller |
-| M03c | Schema 29 policy, material, publication and promotion writers | Separate capped cuts | Each writer has an actual schema 29 test; no blanket version widening |
+| M03c | Schema 29 policy, material and publication writers | Separate capped cuts | Each writer has an actual schema 29 test; no blanket version widening |
 | M04 | Existing A account gate, shared machine lease and bounded pre-stop owner | 100–185 | Registered scope/identity; no new machine drain; timeout cancels without stop |
 | M05 | Authenticated live A idle/child-settlement proof under its held account drain | 110–195 | Real serialized work/queue/resource owners; no timer, cached state or false idle |
 | M06 | Separate native stop facade and shared bootstrap/recovery phase guard | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn; exact exit witnesses |
@@ -382,8 +382,8 @@ M10 must open A's actual store inside `RuntimeMaintenanceAdmissionProjection.sta
 
 The first native cut that calls the window writer must require a private token from a factory that checks the fixed Setup selfPath and code. No DEBUG seam usable by Root may create that token. This runtime boundary must qualify before M15. Metadata format tests do not prove the calling process identity.
 
-M03c must complete before M15 permits retained work. Policy, material and publication execute inside the window. Promotion must support schema 29 before a migrated machine reaches it.
-Completion and readiness SQL producers are missing separately. Issue #760 owns them, including schema 29 compatibility and their own activation/promotion tests. They do not block the window itself.
+M03c must complete before M15 permits retained work. Policy, material and publication execute inside the window.
+Issue #760 owns the missing completion and readiness SQL producers and schema 29 promotion support. A schema 29 machine cannot reach promotion before retained completion exists. These producers do not block the window itself.
 M03b2 migrates only inside the window writer's first transaction. That writer has no production caller before M03c, so these library cuts migrate no real machine.
 M03b2 preserves the candidate, policy, grant, operation and footprint digests as opaque immutable references. M07's native owner must prove their meanings, including candidateDigest; an historical epoch digest is not an assumed equivalent.
 Both Authority and Setup must read schemas 28/29 and window record 1. Only Setup declares window writes on schema 29, record 1 writes and migration 28→29. Authority writer declarations cannot substitute for Setup's declarations.
@@ -393,6 +393,23 @@ Measure each complete change before tests. Split M05/M06 further if needed; an i
 C01/C02/C04 can proceed without dispatch. C03/C05 wait for the actual M05–M07/M15 closure.
 P05a–d may follow M03 as library work. Its native facade/reachability wait for the same maintenance closure.
 Reuse the approved caller identity/rights owners. No second resolver or temporary privileged endpoint is acceptable.
+
+## Writer declarations
+
+Declare a writer in the real release manifest only in the cut that makes its producer reachable in production. That cut must test the real app manifest against the compiled producer contract.
+
+The following writers remain deliberately undeclared today:
+
+- `runtime.retained-setup-release` writer 1 and `runtime.gateway-settings-consumer-host` writer 3 belong to the retained reachability cut, no later than M15.
+- `runtime.gateway-settings-consumer-host` writer 2 belongs to the cut that connects machine update to a production entry.
+
+M03c uses owned fixture declarations. It does not enable these writers in the real manifest. Current v1 and v2 declaration checks remain unchanged; the generated Setup host writer set contains only v1.
+
+M15 must carry the retained producer consumer audit and the real Debug bundle regression. Before its declaration change, that regression fails with `incompatibleStore`. The reachability cut must make it pass and verify the remaining identity, admission, generation, policy and service checks. A declaration alone grants no native custody.
+
+When M15 opens, copy this rule into `docs/macos-release-manifest.md`. Keep that documentation update in the reachability cut.
+
+The accepted M03b2 storage 29 declarations remain unchanged. Their metadata audit does not qualify a native caller or runtime reachability.
 
 ## Tests and unexecuted live gates
 
