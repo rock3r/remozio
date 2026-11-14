@@ -144,7 +144,7 @@ final class SetupRetainedRuntimeContractTests: XCTestCase {
                 codeDirectoryHashes: [.app: hash, .setupController: hash])
         }
         let good = try release(), policy = try AuthorityCodePolicy(entries: good.manifest.components.map {
-            try AuthorityCodeEntry(role: $0.role, teamID: $0.teamID, identifier: $0.identifier,
+            try AuthorityCodeEntry(role: $0.role, teamID: XCTUnwrap($0.teamID), identifier: $0.identifier,
                 installedGeneration: 4, minimumGeneration: 2, codeDirectoryHash: hash, active: true)
         })
         try Contract.validate(good, policy: policy)
