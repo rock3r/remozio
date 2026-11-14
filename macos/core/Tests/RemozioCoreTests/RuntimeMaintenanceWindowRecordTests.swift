@@ -212,7 +212,7 @@ final class RuntimeMaintenanceWindowRecordTests: XCTestCase {
         XCTAssertThrowsError(try Record.decode(encoded + bytes(0, 4096)))
         XCTAssertThrowsError(try Record.decode(Data([0xab, 0, 0x18, 1]) + Data(encoded.dropFirst(3))))
         XCTAssertThrowsError(try Record.decode(Data([0xac, 0, 1]) + Data(encoded.dropFirst())))
-        let a = Data([0, 1]), b = Data([1]) + (try DeterministicCBOR.encode(.text("remozio-maintenance-window"), limits: wide))
+        let a = Data([0, 1]), b = Data([1]) + (try DeterministicCBOR.encode(.text(Record.formatName), limits: wide))
         XCTAssertTrue(encoded.dropFirst().starts(with: a + b))
         XCTAssertThrowsError(try Record.decode(Data([0xab]) + b + a + Data(encoded.dropFirst(1 + a.count + b.count))))
         var deep: CBORValue = .null
