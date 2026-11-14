@@ -121,6 +121,7 @@ Question 2 for Seb is how long A may remain unreachable, including the full body
 
 Create a distinct, canonical maintenance record through protected machine storage and exact compare-and-swap writers.
 Its format readers and release requirements must ship before a producer can make the window reachable.
+The store stays at schema 28 until the first retained window commits its row and migration together; only these machines raise the rollback floor.
 Bind these fields to actual protected state:
 
 - Machine/installation, unique attempt and revision, purpose, selected release and exact restoration declarations.
