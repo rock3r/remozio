@@ -87,7 +87,12 @@ Absence and an empty journal are distinct actual observations. Neither creates a
 
 Hold a private process/thread/store authorization across the two machine reads and the journal advance.
 Mutually exclude other writers across that interval. An external-journal commit must not permit a reentrant machine writer.
+Keep the machine store open and retain its `writer.lock` across the complete read → journal advance → read interval.
+This lease excludes other processes. Unlike P03, this operation must not close the machine before the journal write.
+The private authorization also excludes writers that re-enter the same store.
 Hash all machine rows and the catalog before and after the advance. Exclude no account or runtime row.
+Test a second `PreparationIntentStore` open from the advance callback: it must fail with `JournalLeaseError.busy`.
+Assert identical machine-row and catalog digests before and after the attempted second open and the actual advance.
 Lend actual pre/post machine frames and actual input evidence. Callback verifiers must not open a public machine transaction.
 Call the existing journal phase advance once, from the exact retained record to runtimePublished.
 Keep its conditional revision, operation, canonical record and commit semantics.
@@ -102,7 +107,13 @@ A read-only frame or a caller-supplied Boolean is not acknowledgement authority.
 Already-runtimePublished inputs take a read-only recovery path after the same file and pair checks.
 Any missing or conflicting file refuses without repair or another acknowledgement.
 An error ends the invocation. An uncertain commit closes the affected handles and requires fresh state resolution.
-A new invocation may observe the exact committed phase. It must not replay the old advance or reuse an advanced callback frame.
+A new invocation captures the actual journal and all required evidence again. It never reuses the old callback frame.
+If the exact intent is runtimePublished with a revision different from the previous revision, recover without writing.
+If the exact previous intent remains retained, a new invocation may attempt its conditional revision advance once.
+The compare-and-swap rejects a changed revision. This permits a fresh attempt after a proved unchanged intent, without duplicate committed advancement.
+Any other phase, revision or operand change refuses. There is no automatic retry in the failed invocation.
+Test both uncertain outcomes separately: a committed advance with a lost acknowledgement, and an unchanged retained record after no commit.
+Keep P03's unresolved writing intervention unchanged; this conditional import advance is a different operation.
 
 ## A10d: initial runtime owner
 
@@ -133,6 +144,14 @@ A provider's borrowed writer frame is compared directly; it must not trigger ano
 Host and admission callbacks remain mandatory. A11 supplies their real native dependencies.
 Do not let the word resume authorize policy replay, arbitrary recovery or a second commit attempt.
 
+## Publication and acknowledgement recovery
+
+The reviewer checked that initial file selection uses recipe, scope and relay, without phase or revision.
+The input capture accepts runtimePublished only with published configuration. Preserve both constraints.
+C1 and C2 run before acknowledgement. Their selection digest must not be reused after the intent bytes change.
+Test publication → acknowledgement → D2 recovery against actual files and fresh inputs.
+The acknowledgement owner keeps all earlier file, pair, material and scope checks on both fresh outcomes.
+
 ## Proposed read budgets
 
 These are review targets, not measured implementation claims. Assert them in the owned tests before publication.
@@ -156,6 +175,8 @@ Do not compose a full source verifier recursively around every file or borrowed 
 - Entry: missing material, existing material, absent/prepared/writing/recorded policy, published state and unsupported contradictions.
 - Transitions: exact allowed change, wrong account/owner/reference, changed source or pair, changed reservations and ordinary-entry refusal.
 - Acknowledgement: one actual advance, no machine-row or catalog change, writer exclusion, changed inputs/relay, and closed or escaped loans.
+- Lock ownership: a second store open during the advance callback reports busy; both protected digests stay identical.
+- Uncertain advance: committed runtimePublished recovers without writing; the exact unchanged retained record permits one fresh conditional attempt.
 - Recovery: absent/empty/already-acknowledged storage, missing files, changed material, lost commit acknowledgement, fresh reopen and no second advance.
 - Initial owner: C2→D2 order, complete=0 with exact files, partial publication, conflicting bytes, and complete=1 without repair.
 - Sequence: actual stage order, each failure boundary, provider rejection, stale returned state, import change and unresolved writing intervention.
