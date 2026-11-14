@@ -3646,6 +3646,16 @@ public final class PreparationIntentStore {
         try transaction(write: false) { try loadStableRuntimeSource(candidate: candidate) }
     }
 
+    /// Captures selection facts together. Directory lookup and invocation verification run outside this transaction.
+    func retainedSetupCallerState(candidate: SignedReleaseEvidence) throws -> SetupRetainedCallerBinding.State {
+        try transaction(write: false) {
+            let source = try loadStableRuntimeSource(candidate: candidate)
+            let inputs = try loadRetainedRuntimeCompatibilityInputs()
+            try loadStableRuntimeSource(candidate: candidate).requireSame(as: source)
+            return .init(source: source, inputs: inputs)
+        }
+    }
+
     private func loadStableRuntimeSource(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimeSource {
         let actual = try loadStableMachineUpdate(candidate: candidate)
         let preparations = try loadAccountPreparations()

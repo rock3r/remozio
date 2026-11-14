@@ -314,6 +314,28 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return result
         }
     }
+    /// Call synchronously on the accepted invocation. This captures metadata and does not dispatch retained work.
+    func retainedCallerBinding(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence) throws -> SetupRetainedCallerBinding {
+        let peer = try invocation.verifyInvocation()
+        return try withMachine { machine in
+            _ = try currentInventory(machine)
+            let state = try machine.retainedSetupCallerState(candidate: candidate)
+            let selected = try state.target(peerUID: peer.userID)
+            let entry = try machine.retainedSetupInitialRuntimeEntry(owner: lookupAccount(selected.ownerUID), candidate: candidate)
+            let result = try SetupRetainedCallerBinding.resolve(state: state, peer: peer, incarnation: invocation.incarnation,
+                accepted: invocation.acceptedPeerPolicy, entry: entry, lookup: lookupAccount)
+            let path = try RuntimePreparationPaths(accountID: result.authorityAccountID).privateDirectory
+                + "/" + AdministrativeSetupPublication.File.commandHost.name
+            let (_, host) = try MachineUpdateRetainedSetupPolicyNativeEntry.publishedAuthority(runtime: entry.runtime,
+                accountID: result.authorityAccountID)
+            guard try ProtectedServiceConfiguration.read(path: path) == host.canonicalBytes,
+                  try invocation.verifyInvocation() == peer else { throw AdministrativeSetupError.wrongAccount }
+            try machine.retainedSetupCallerState(candidate: candidate).requireSame(as: state)
+            try machine.retainedSetupInitialRuntimeEntry(owner: result.targetOwner, candidate: candidate).requireSame(as: entry)
+            return result
+        }
+    }
+
     func requirePortableImportSupport() throws {
         try lock.withLock {
             guard !closed, !closing, importedGatewayOperation != nil else { throw AdministrativeSetupError.unavailable }

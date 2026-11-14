@@ -75,6 +75,7 @@ public final class XPCInvocationGuard {
     private weak var connection: NSXPCConnection?
     private let policy: XPCPeerPolicy
     public let incarnation = UUID()
+    var acceptedPeerPolicy: XPCPeerPolicy { policy }
     public init(connection: NSXPCConnection, policy: XPCPeerPolicy) {
         self.connection = connection; self.policy = policy
     }
