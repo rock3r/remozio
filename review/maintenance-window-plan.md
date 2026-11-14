@@ -199,6 +199,19 @@ After Setup crashes or is killed, launchd is expected to restart it. The new ins
 Acquire actual recovery ownership and prove the previous operation has settled before inspecting or restoring affected resources.
 A competing live owner remains busy. A stale PID or missing launchd registration is not sufficient exit proof.
 
+### M10: retain an orphan reservation until explicit recovery
+
+C02 review 2809 requires an explicit close to release its reservation. A lost invocation closes rights but leaves both Setup admissions closed.
+The Setup owner retains the admission and shared activity tokens independently of the invocation. Their deinitializers cannot reopen admission when that invocation disappears.
+Source inspection: `SetupAccountOwner.reserveRetainedInvocation` and `SetupRetainedInvocation.deinit`, C02 source `04ac6511`, base `683a67b5`.
+This source supplies retention only. Orphan detection, status and recovery below remain future M10/M11/M12 work.
+
+Associate each retained reservation with its exact incarnation and a weak reference to the invocation owner.
+A nil weak reference proves that object ended. A missing process ID, old timestamp or cancelled flag cannot substitute for this proof.
+M10 also joins the actual worker, native loans and cleanup owners before declaring the old operation settled.
+If any owner remains live or settlement is uncertain, keep the reservation and report recovery pending.
+The worker never releases an orphan automatically or repeats its body. It exposes the orphan to M11 and the explicit M12 action.
+
 ### Reboot and an authority already running
 
 `RuntimeJobStopSession` uses `launchctl bootout system/<label>`; it does not delete the plist, disable it or call `SMAppService.unregister`.
@@ -243,6 +256,25 @@ Persist attempt/revision, last safe phase, separate operation/restoration outcom
 Expose authenticated read-only Setup status before conflicting Setup dispatch. The app shows approver availability and the blocked operation separately.
 Emit bounded diagnostic logs without authorization data, policy payloads, private paths or credentials.
 Apply bounded retry/backoff to restoration only. Permanent mismatches stop retries and remain visible.
+
+### M11: show and resolve an orphan reservation
+
+Authenticated read-only status reports **orphan reservation** when the retained incarnation has no live invocation owner.
+Status remains available without acquiring the blocked mutation or reply reservation. It reveals no authorization data or private paths.
+Show the separate operation, restoration and cleanup outcomes. An orphan does not mean the body failed or rolled back.
+
+Use M12's explicit restoration-only action to release the orphan in the same Setup process. No Setup restart is required.
+The source already retains the tokens in the Setup owner. An exact release therefore needs no new service-control authority.
+M12 uses a dedicated recovery entry bound to the stored reservation, not a second operation admission.
+Require fresh administrator rights, the current peer binding and the exact reservation incarnation plus durable attempt/revision when present.
+Under the Setup owner lock, recheck the nil weak owner and the actual joined worker, loan and cleanup owners.
+Complete applicable restoration, health, floors and gate readback before releasing the matching reservation and shared activity tokens.
+A request without a durable window must prove that no body or cleanup resource remains before releasing those tokens.
+A live owner, changed incarnation, new attempt or uncertain cleanup refuses. Never release another reservation or replay a committed operation.
+This is a proposed recovery path, not an existing endpoint, automatic unlock or qualified installed action.
+
+The M11/M12 test must prove: lose the invocation owner, observe authenticated orphan status, perform the explicit action, then admit fresh work.
+Also prove that foreign or live incarnations and unsettled cleanup remain closed. The action preserves the actual operation outcome.
 
 Provide an explicit owner action: **Restore the service without repeating the operation**.
 Require the approved current peer/owner binding, fresh administrator rights, the exact attempt/revision and fixed installed-artifact checks.
@@ -327,8 +359,8 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M07 | Existing ordinary-admission composition, record-only source transition and fresh body capture | 80–160 | Same A/B bindings and pair; window writes outside borrowed transactions; no weakened native frame/provider contract |
 | M08 | Purpose-specific observation after interruption | 90–180 | Old/new/partial/unknown stay distinct; zero replay |
 | M09 | Exact A restoration/adoption, health/floors and explicit admission reopen | 110–195 | Actual gate readback recorded before Restored; timeout needsOwnerRecovery; fresh request without restart |
-| M10 | Root Setup startup/interruption recovery worker | 110–195 | No GUI dependency; old owner settlement; bounded restoration retry |
-| M11 | Authenticated status and durable visible failure | 80–170 | Available during recovery; separate A/B outcomes; sensitive values stay private |
+| M10 | Root Setup startup/interruption recovery worker | 110–195 | No GUI dependency; actual owner/worker/cleanup settlement; orphan retained for explicit recovery |
+| M11 | Authenticated status and durable visible failure | 80–170 | Orphan status available while reserved; lost owner → explicit M12 action → fresh admission; live or uncertain owners stay closed |
 | M12 | Explicit restoration-only native action | 100–190 | Fresh rights/binding/revision; no arbitrary job, reset, force or replay |
 | M13 | App restoration UI and phone waiting/unavailable integration | 100–190 | Clear A outage, genuine expiry distinguished from denial, safe reconnect/readback |
 | M14 | Separate Setup-native normal-update preflight facade | 110–195 | Actual update authority/candidate and closed machine drain; Authority guard preserved |
