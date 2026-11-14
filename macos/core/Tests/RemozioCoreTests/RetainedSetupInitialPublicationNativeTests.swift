@@ -7,9 +7,9 @@ import XCTest
 final class RetainedSetupInitialPublicationNativeTests: XCTestCase {
     private typealias Facade = MachineUpdateRetainedSetupInitialPublicationNative
     private typealias Context = MachineUpdateRetainedSetupRuntimeNativeContext
-    private typealias Artifact = RuntimePublishedArtifactValidation.Artifact
+    typealias Artifact = RuntimePublishedArtifactValidation.Artifact
     private enum Fault: Error { case host }
-    private final class Files {
+    final class Files {
         let root = URL(fileURLWithPath: "/private/tmp/remozio-native-publication-" + UUID().uuidString)
         let directory: ProtectedSetupDirectory
         let names: [String: AdministrativeSetupPublication.File]
