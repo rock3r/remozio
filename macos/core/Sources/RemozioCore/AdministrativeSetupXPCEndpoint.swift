@@ -15,6 +15,7 @@ public enum AdministrativeSetupInterface {
     public static let portableImportVersion: UInt64 = 9
     public static let portableImportRecoveryVersion: UInt64 = 10
     public static let auditUpgradeVersion: UInt64 = 11
+    public static let retainedRuntimeVersion: UInt64 = 12
     public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion, portableImportRecoveryVersion, auditUpgradeVersion]
 }
 
