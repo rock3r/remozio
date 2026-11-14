@@ -71,7 +71,7 @@ final class RetainedSetupRuntimeNativeAuthorityTests: XCTestCase {
             let snapshot = try f.machine().retainedSetupPolicySnapshot(owner: runtime.setup.owner, candidate: f.candidate)
             let (selected, host) = try Entry.publishedAuthority(runtime: runtime, accountID: account)
             let old = try Entry.publishedAuthority(expected: snapshot, accountID: account)
-            XCTAssertEqual(selected, old.0); XCTAssertEqual(try host.canonicalBytes, try old.1.canonicalBytes)
+            XCTAssertEqual(selected, old.0); XCTAssertEqual(host.canonicalBytes, old.1.canonicalBytes)
             let target = try initial(f, account: runtime.preparation.accountID)
             let originalCurrent = try read(f, initial: selected), originalTarget = try read(f, initial: target)
             let currentBytes = try bytes(selected), targetBytes = try bytes(target)
