@@ -175,7 +175,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
         func withResources<Value>(_ body: (ReleaseDestinationLease, UpdateOrdinaryAdmissionLease) throws -> Value) throws -> Value {
             try custody.withResources(body)
         }
-        func withMachine<Value>(expected: Entry, opening: PreparationIntentStore.Opening,
+        func withMachine<Value>(expected: Entry, opening: PreparationIntentStore.Opening, closing: MachineClosing = .provider,
             perform: (PreparationIntentStore) throws -> Value) throws -> Value {
             guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
             try verification.verifyEntry(expected)
@@ -185,17 +185,22 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
                         macID: expected.runtime.preparation.macID, maximumRecords: 64, initialize: false, opening: opening)
                     do { try machine.validateStorageLease(nativeDirectory: MachineBootstrap.machineDirectory); return machine }
                     catch { try? machine.close(); throw error }
-                }, perform: perform)
+                }, closing: closing, perform: perform)
             }
         }
     }
+    enum MachineClosing { case provider, owner }
     /// Owned machines exercise the same close path. This helper cannot construct a native context or approval.
-    static func withOpenedMachine<Value>(open: () throws -> PreparationIntentStore,
+    static func withOpenedMachine<Value>(open: () throws -> PreparationIntentStore, closing: MachineClosing = .provider,
         perform: (PreparationIntentStore) throws -> Value) throws -> Value {
         let machine = try open()
         do {
             try machine.validateStorageLease(); let result = try perform(machine)
-            try machine.validateStorageLease(); try machine.close(); return result
+            switch closing {
+            case .provider: try machine.validateStorageLease(); try machine.close()
+            case .owner: try machine.requireClosedForRetainedSetupPolicyWrite()
+            }
+            return result
         } catch { try? machine.close(); throw error }
     }
     /// The native context accepts only the held current-authority approval capability.
