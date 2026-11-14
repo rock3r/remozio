@@ -28,7 +28,7 @@ final class RuntimeMaintenanceAdmissionProjectionTests: XCTestCase {
             requestRevision: data(4), identity: gate ?? gateIdentity, authorityIncarnation: data(5), challenge: data(6),
             responseDigest: data(7, 32), hold: .released, admission: .available) : nil
         return try .init(id: data(3), revision: data(4), purpose: .retainedRuntime, scope: scope(mac: mac, installation: installation),
-            phase: phase, operation: outcome, service: [.reopenPending, .restored].contains(phase) ? .healthy : .unknown,
+            phase: phase, operation: outcome, service: [Record.Phase.reopenPending, .restored].contains(phase) ? .healthy : .unknown,
             failure: phase == .needsOwnerRecovery ? .healthFailed : nil, gate: readback)
     }
     private func registration(identity: PreparationFileIdentity? = nil, omitA: Bool = false,
