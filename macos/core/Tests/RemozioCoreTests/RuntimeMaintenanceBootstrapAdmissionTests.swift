@@ -5,6 +5,7 @@ import XCTest
 
 final class RuntimeMaintenanceBootstrapAdmissionTests: XCTestCase {
     private enum Fault: Error { case changedConfiguration, maintenancePhase, callback }
+    private final class CaptureLifetime { var reads = 0 }
     private let accountID = Data(repeating: 31, count: 16)
     private func fixture(_ body: (UpdateAdmissionTestFixture, UpdateAdmissionBarrier, UpdateAdmissionRegistrationRecord.Account) throws -> Void) throws {
         let f = try UpdateAdmissionTestFixture(), (barrier, identity) = try f.provisionAccount(accountID)
@@ -31,7 +32,7 @@ final class RuntimeMaintenanceBootstrapAdmissionTests: XCTestCase {
             let drain = try barrier.beginDrain(); try drain.validate(); drain.close()
         }
     }
-    func testAdmissionClosesWhenEachNativeCallbackThrows() throws {
+    func testAdmissionClosesAfterEachNativeCallbackError() throws {
         try fixture { _, barrier, account in
             let job = try InstalledAccountJobManifest(accountID: accountID, role: .authority, executionUID: 0,
                 userName: "root", bundlePath: "/Applications/Remozio.app")
@@ -41,15 +42,35 @@ final class RuntimeMaintenanceBootstrapAdmissionTests: XCTestCase {
                     self.busy(barrier); callbacks += 1
                     if callbacks == failAt { throw Fault.callback }
                 }
-                XCTAssertThrowsError(try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: { account },
-                    acquire: { _ in try barrier.acquireAdmission() }) { verify in
-                    try RuntimeJobRegistration.reconcile(job: job, verifyCurrent: {}, requireMaintenanceOpen: { _ in try verify() },
-                        inspect: { try callback(); inspections += 1; return inspections == 1 ? .absent : .matching },
-                        bootstrap: callback)
-                }) { XCTAssertTrue($0 is Fault) }
-                XCTAssertEqual(callbacks, failAt)
+                func attempt() throws {
+                    try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: { account },
+                        acquire: { _ in try barrier.acquireAdmission() }) { verify in
+                        try RuntimeJobRegistration.reconcile(job: job, verifyCurrent: {}, requireMaintenanceOpen: { _ in try verify() },
+                            inspect: { try callback(); inspections += 1; return inspections == 1 ? .absent : .matching },
+                            bootstrap: callback)
+                    }
+                }
+                if failAt == 2 { try attempt() }
+                else { XCTAssertThrowsError(try attempt()) { XCTAssertTrue($0 is Fault) } }
+                XCTAssertEqual(callbacks, failAt == 2 ? 3 : failAt)
                 let drain = try barrier.beginDrain(); try drain.validate(); drain.close()
             }
+        }
+    }
+    func testThrowingSynchronousOwnerReleasesTheCaptureAndAdmissionBeforeReturning() throws {
+        try fixture { _, barrier, account in
+            weak var released: CaptureLifetime?
+            do {
+                let lifetime = CaptureLifetime(); released = lifetime
+                XCTAssertThrowsError(try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: { [lifetime] in
+                    lifetime.reads += 1; return account
+                }, acquire: { _ in try barrier.acquireAdmission() }, body: { verify in
+                    try verify(); self.busy(barrier); throw Fault.callback
+                })) { XCTAssertTrue($0 is Fault) }
+                XCTAssertEqual(lifetime.reads, 3)
+            }
+            XCTAssertNil(released)
+            let drain = try barrier.beginDrain(); try drain.validate(); drain.close()
         }
     }
     func testGateAppearingDisappearingOrChangingBetweenCaptureAndAcquireRefuses() throws {
