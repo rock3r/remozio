@@ -1053,3 +1053,44 @@ All new execution tests use ordinary-owner controls and real owned files. They d
 Kernel witness capture, installed Root admission, Release and the full Core suite remain unqualified.
 M07a, C02 composition, M09 restoration, live725 and attended provider checks remain incomplete.
 Toni owns publication, review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
+
+
+### M07a durable shutdown binding (Toni3341/3344/3347/3349/3351/3360/3361)
+
+Source 5c79cea7 follows qualified M05d2 source21efca1b. It changes100 production lines across six paths.
+The slice adds19 test methods and renames two existing methods. It adds one manifest test.
+The selected gate passes178 fresh native methods,56 manifest tests and48 CI tests. It transfers or skips no outcome.
+Core and Debug build fresh. The original compiled draftbd706c2f remains unchanged.
+The actual gate and weights terminals are consumed. Its prior draft compile stays charged to the same1800-second budget.
+The cumulative time is 1393.714 seconds. This is a selected local gate, not the full Core suite or Release qualification.
+
+Format2 stores the exact account, attempt, original revision, incarnation and connection values in the existing window row.
+The binding is installed once during draining. The normal revision advances R1 to R2; the saved binding retains R1.
+No same-revision write, second record or schema30 is introduced. Every other field remains unchanged during binding installation.
+Later transitions preserve all five values. Only restored clears the binding and returns to byte-compatible format1.
+The frozen reader1 accepts legacy bytes and refuses an open format2 record. Startup keeps its hold and exposes recovery.
+Rollback to reader1 is unsupported while a format2 window remains open.
+
+The protected reader compares every supplied binding to the saved binding, including observe, arm, cancel and reopen.
+It also checks the phase, actual incarnation, protected account and registered gate in one transaction.
+Open with no binding compares the current row revision. A new connection using R2 cannot adopt the saved targetR1.
+Pre-stop reopen retains the saved binding. Healthy reopen remains M09 work.
+
+The capture sequence opens the authenticated channel and captures the original process witness.
+It then persists and confirms the exact binding before the first bound observe.
+Uncertain persistence or a wrong readback retires the client, reports needsOwnerRecovery and sends no observe or arm.
+There is no automatic persistence replay. Busy observations and stagesPending reuse the one saved binding and original deadline.
+Pairing ready is diagnostic and can be vacuous. Actual work counts and applied arm determine whether stopping is allowed.
+The future C02 callback must close the writer before arm. Owned controls do not prove that production composition.
+
+Real Authority and Setup declarations read formats1 and2. Only Setup declares writer1.
+Writer2 remains unavailable in the real manifest until C02 connects the actual production entry.
+Positive library writer2 tests use explicit synthetic declarations. The built Debug artifact refuses writer2 production.
+The schema remains29. Scope digests, including candidateDigest and authorityPolicyDigest, remain opaque immutable references.
+Their meanings and the actual C02 invocation owner remain unqualified.
+
+The native stop caller polls through removing and waiting until registrationRemoved. Only then does it call requireRemoved.
+One bound inspection failure reports needsOwnerRecovery and poisons that session. It cannot retry a native command.
+The optional no-commit cancellation change stays outside this slice.
+Installed Root, launchctl, daemon signals, kernel witness capture, M09, live725 and provider checks remain unqualified.
+Toni owns publication, review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
