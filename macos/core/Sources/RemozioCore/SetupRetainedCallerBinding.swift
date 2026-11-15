@@ -120,7 +120,7 @@ struct SetupRetainedCallerBinding: CustomStringConvertible, CustomDebugStringCon
               window.scope.target.ownerUID == targetOwner.uid, window.scope.target.directoryID == withUnsafeBytes(of: &b, { Data($0) }),
               window.scope == capture.window.scope, window.purpose == capture.window.purpose,
               window.shutdownBinding == capture.marker.binding,
-              try lookup(authorityOwner.uid) == authorityOwner, lookup(targetOwner.uid) == targetOwner else {
+              try lookup(authorityOwner.uid) == authorityOwner, try lookup(targetOwner.uid) == targetOwner else {
             throw RuntimePreparationError.changedScope
         }
         let normalized = try Source(actual: state.source.actual, preparations: actual.source.preparations,
