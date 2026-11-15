@@ -55,13 +55,15 @@ enum RuntimeMaintenanceBootstrapGuard {
     private static func withAccountAdmission(capture: () throws -> UpdateAdmissionRegistrationRecord.Account?,
         acquire: (UpdateAdmissionRegistrationRecord.Account) throws -> UpdateAdmissionToken,
         body: (_ verify: () throws -> Void) throws -> Void) throws {
-        let account = try capture(), token = try account.map(acquire)
-        defer { token?.close() }
-        func verify() throws {
-            if let account { try token?.validateAccountScope(account) }
-            guard try capture() == account else { throw RuntimePreparationError.changedScope }
-            if let account { try token?.validateAccountScope(account) }
+        try withoutActuallyEscaping(capture) { capture in
+            let account = try capture(), token = try account.map(acquire)
+            defer { token?.close() }
+            func verify() throws {
+                if let account { try token?.validateAccountScope(account) }
+                guard try capture() == account else { throw RuntimePreparationError.changedScope }
+                if let account { try token?.validateAccountScope(account) }
+            }
+            try verify(); try body(verify); try verify()
         }
-        try verify(); try body(verify); try verify()
     }
 }
