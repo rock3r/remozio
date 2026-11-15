@@ -40,13 +40,13 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     private let lock = NSRecursiveLock()
     private let access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget
     private let verify: () throws -> Void
-    private let invalidate: @Sendable () -> Void, onHandshake: @Sendable () -> Void
+    private let invalidate: () -> Void, onHandshake: @Sendable () -> Void
     private var context: (Request, AuthorityMaintenancePairingAdmission.Connection)?
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var active: UUID?, budgetOwners = Set<UUID>()
     private var closed = false
     private init(access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget,
-        verify: @escaping () throws -> Void, invalidate: @escaping @Sendable () -> Void, onHandshake: @escaping @Sendable () -> Void) {
+        verify: @escaping () throws -> Void, invalidate: @escaping () -> Void, onHandshake: @escaping @Sendable () -> Void) {
         self.access = access; self.budget = budget; self.verify = verify; self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     convenience init(connection: NSXPCConnection, setupCode: AuthorityCodeEntry, access: AuthorityMaintenanceChannelAccess,
@@ -64,7 +64,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
         connection.interruptionHandler = { [weak self] in self?.close() }; connection.invalidationHandler = { [weak self] in self?.close() }
     }
     static func openOwned(access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget,
-        verify: @escaping () throws -> Void = {}, invalidate: @escaping @Sendable () -> Void = {},
+        verify: @escaping () throws -> Void = {}, invalidate: @escaping () -> Void = {},
         onHandshake: @escaping @Sendable () -> Void = {}) throws -> AuthorityMaintenanceXPCEndpoint {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
         return .init(access: access, budget: budget, verify: verify, invalidate: invalidate, onHandshake: onHandshake)
