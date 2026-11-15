@@ -807,4 +807,15 @@ extension AuthorityPairingSetupTests {
         XCTAssertEqual(try admission.stagedReservations(), 0)
     }
 
+    func testMaintenanceStageCannotTransferAReservationAfterReentrantAuthorizationClose() throws {
+        let f = try Fixture(), holder = Box<AuthorityPairingXPCEndpoint?>(nil), admission = f.access.maintenanceAdmission
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+            authorize: { _ in holder.value?.close() }, invalidate: {})
+        holder.value = endpoint; defer { holder.value = nil; endpoint.close() }; try hello(endpoint)
+        endpoint.stagePairing(try f.proposal().encode(), authorization: authorization) { XCTAssertNil($0) }
+        XCTAssertEqual(try admission.stagedReservations(), 0); XCTAssertEqual(try f.records(), 0)
+        XCTAssertEqual(f.environment.signed.value, 0); XCTAssertThrowsError(try endpoint.maintenancePairingWork())
+        try f.assertCheckpoint()
+    }
+
 }

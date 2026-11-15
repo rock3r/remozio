@@ -108,6 +108,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
             let staged = try access.stage(proposal)
             let bytes = try staged.transcript.encode()
+            guard !closed else { throw AuthorityPairingSetupError.unavailable }
             state.withLock { $0.attempt = staged; $0.activity = activity; $0.stage = stage }; transferred = true
             startExpiryTimer()
             return bytes
