@@ -99,8 +99,8 @@ The readback and native permit must still enforce their current code, protected 
 | M05b2a | Canonical channel codec with applied/stagesPending/refused outcomes | 119 measured | Source7c293c7d; gate66084 passed Core/Debug,15 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Pending only for arm with work; refused has no work. Applied arm reports actual transfer. |
 | M05b2b | Authenticated endpoint with committed-state outcomes, rollback and joined operations | 191 measured | Source905b3bfb, gate68601:22 endpoint +24 admission +15 codec +10 Debug checks fresh;73 focused methods/54 Python transferred. Refused arm leaves no block from that request; uncertain rollback returns nil. Cancel/reopen have no fallible checks after release. Root producer/listener remain later. |
 | M05b2c | Fixed listener, signed participant scope and joined retired endpoints | 146 measured | Source94a9ee11. Core and Debug builds passed. Gates14466 and84763 admit50 fresh unique methods and110 transferred methods. All6 scope methods ran fresh under Toni3088. Anonymous XPC proves lifecycle with owned controls. The Root access producer and product registration remain for b4. |
-| M05b3 | Native authenticated client with exact reply correlation and bounded recovery | 120–195 planned | Serialize exchanges: only one request may be in flight. A concurrent exchange closes the connection and releases pre-arm restrictions. Preserve armed binding through disconnect; nil/transport ambiguity requires recovery, never blind arm replay. Fixed self/peer identities and original wait bound. |
-| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
+| M05b3 | Native authenticated Setup client with serialized exchanges and bounded recovery | 169 measured | Source8e494e12. Core/Debug and110 fresh methods passed;73 unrelated methods and54 Python results transferred. Harmless hello precedes identifiers and changes no admission state. Only stagesPending permits another arm before the original deadline. Refused is terminal; nil, timeout or malformed reply requires recovery. No product entry. |
+| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | Verify installation, gate, phase, attempt, revision, account and incarnation at the protected read boundary. Retain real stages and exact armed target; no close-time read. If this cut registers maintenance, include both version1 format declarations, the fixed per-account MachServices entry, generator and real-manifest tests in this same cut. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
@@ -225,3 +225,39 @@ There are50 fresh unique methods and110 explicit unchanged-class transfers. One 
 The54 Python results remain explicit transfers. This is not a full Core or Release qualification.
 Root positive code admission, installed execution, the b4 factory and the full goal remain incomplete.
 Next is b3, following the existing serialization and ambiguous-state recovery contract.
+
+### Setup maintenance client and registration boundaries (Toni3091/3094/3096)
+
+The native client derives the fixed account service. It validates the Setup self path, code hash and generation.
+It configures the Authority signing requirement before activation. Hello contains only a version and no identifying metadata.
+The endpoint authenticates hello on the original invocation stack. Hello creates no Connection, admission state, work task or held budget.
+It does not report the listener's open handshake as complete. Open still includes the actual M05a capture.
+The client verifies the Authority's kernel identity after hello and before sending any identifying request.
+Each request carries a fresh challenge and the fixed account, attempt, revision, installation and gate scope.
+
+The client allows only one complete operation at a time, including the bounded stagesPending wait.
+A concurrent operation closes the connection and requires recovery. It never sends a second concurrent request.
+Only stagesPending allows another arm, with the same binding and original absolute deadline.
+Expiry sends cancel for that exact binding. That cleanup has its own bounded RPC timeout and never renews the arm deadline.
+Refused terminates the attempt without another arm. A refused cancel or reopen requires owner recovery.
+Nil, transport loss, timeout or malformed correlation requires recovery. No arm is replayed after an uncertain result.
+An applied arm cannot be repeated on that client. Connection close preserves its process-owned armed target.
+Explicit reopen can use an exact retained target only after a new open confirms the same incarnation.
+These responses remain observations and correlation data. They grant no idle proof, marker or stop permit.
+
+The registration cut, whether b4 or M15, must add these items together:
+- Authority and Setup declare authority.maintenance-channel reader1 and writer1.
+- The per-account plist declares the fixed <namespace>.maintenance address in MachServices.
+- The release manifest generator and tests/test_macos_release_manifest.py include those exact declarations.
+- A test checks the real generated manifest and per-account plist. A synthetic metadata fixture is insufficient.
+No supporting cut may add the declarations before the actual producer becomes reachable.
+
+Live session#725 must measure open latency with the journal busy, including the actual M05a capture.
+Keep the current5-second handshake bound pending that measurement.
+If open exceeds1 second, recalculate the bound or move the handshake completion before capture through a reviewed change.
+The source tests do not supply this live measurement. No timeout adjustment or handshake movement is claimed here.
+
+Source8e494e12 changes169 production lines and adds23 tests above94a9ee11.
+The gate runs all affected maintenance classes fresh, plus Debug inspection, with explicit unrelated transfers.
+The injected owned client and anonymous transport fixture refuse Root. Installed Root admission and product wiring remain unqualified.
+Next is b4 under Toni's protected record and real owner composition contract.
