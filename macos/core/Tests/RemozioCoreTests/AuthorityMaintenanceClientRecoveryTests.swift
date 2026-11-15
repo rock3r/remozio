@@ -10,23 +10,24 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     private typealias Record = RuntimeMaintenanceWindowRecord
     private typealias Request = AuthorityMaintenanceChannelRequest
     private enum Fault: Error { case injected }
+    private final class Trace: Sendable { let values = Mutex<[String]>([]) }
     private final class Driver: AuthorityMaintenanceClientDriver, Sendable {
         enum Mode: Sendable, Equatable { case normal, heldArm, lostCancel, badHello, lostReopen, lostGate, foreignEpoch, busyGate, heldGate, wrongChallenge }
         struct State {
             var mode = Mode.normal, calls: [Request] = [], gates: [AuthorityMaintenanceGateRequest] = []
             var invalidated: (@Sendable () -> Void)?, held: (@Sendable (AuthorityMaintenanceClientReply) -> Void)?
         }
-        let state = Mutex(State()), trace: Mutex<[String]>, label: String
-        init(_ label: String, trace: Mutex<[String]>) { self.label = label; self.trace = trace }
+        let state = Mutex(State()), trace: Trace, label: String
+        init(_ label: String, trace: Trace) { self.label = label; self.trace = trace }
         func start(_ invalidated: @escaping @Sendable () -> Void) { state.withLock { $0.invalidated = invalidated } }
         func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
-            trace.withLock { $0.append(label + ".hello") }
+            trace.values.withLock { $0.append(label + ".hello") }
             reply(.hello(state.withLock { $0.mode == .badHello ? 2 : 1 }))
         }
         func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             do {
                 let q = try Request.decode(bytes), mode = state.withLock { $0.calls.append(q); return $0.mode }
-                trace.withLock { $0.append(label + "." + String(describing: q.action)) }
+                trace.values.withLock { $0.append(label + "." + String(describing: q.action)) }
                 if mode == .heldArm && q.action == .arm { state.withLock { $0.held = reply }; return }
                 if mode == .lostCancel && q.action == .cancel || mode == .lostReopen && q.action == .reopen { reply(.bytes(nil)); return }
                 let binding = try q.binding ?? AuthorityMaintenanceBinding(accountID: q.accountID, attemptID: q.attemptID,
@@ -38,7 +39,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             do {
                 var q = try AuthorityMaintenanceGateRequest.decode(bytes)
-                let mode = state.withLock { $0.gates.append(q); return $0.mode }; trace.withLock { $0.append(label + ".gate") }
+                let mode = state.withLock { $0.gates.append(q); return $0.mode }; trace.values.withLock { $0.append(label + ".gate") }
                 if mode == .lostGate { reply(.bytes(nil)); return }
                 if mode == .wrongChallenge {
                     q = try .init(accountID: q.accountID, attemptID: q.attemptID, revision: q.revision,
@@ -54,7 +55,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     }
     private final class Fixture: @unchecked Sendable {
         let native: MaintenanceStopTestFixture, client: AuthorityMaintenanceXPCClient
-        let trace = Mutex<[String]>([]), row = Mutex<Record?>(nil), writes = Mutex<[Record]>([])
+        let trace = Trace(), row = Mutex<Record?>(nil), writes = Mutex<[Record]>([])
         let old: Driver, fresh: Driver
         let faultPhase = Mutex<Record.Phase?>(nil), commitThenFail = Mutex(false), wrongPending = Mutex(false)
         init() throws {
@@ -73,10 +74,10 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         func recover(_ window: Record, deadline: ContinuousClock.Instant = .now.advanced(by: .seconds(3))) async throws -> Record {
             try await client.cancelAndReopenOwned(window: window, drain: native.drain, directory: native.directory,
                 until: deadline, makeDriver: {
-                    self.trace.withLock { $0.append("make") }; XCTAssertThrowsError(try self.native.drain.validate())
+                    self.trace.values.withLock { $0.append("make") }; XCTAssertThrowsError(try self.native.drain.validate())
                     return self.fresh
                 }, persist: { next, previous in
-                    self.trace.withLock { $0.append("write." + String(describing: next.phase)) }
+                    self.trace.values.withLock { $0.append("write." + String(describing: next.phase)) }
                     self.writes.withLock { $0.append(next) }; XCTAssertEqual(self.row.withLock { $0 }, previous)
                     try next.requireReplacing(previous)
                     if self.faultPhase.withLock({ $0 }) == next.phase {
@@ -96,7 +97,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     }
     func testCancelCommitsPendingBeforeOneFreshHelloReopenAndExactReadback() async throws {
         let f=try Fixture(), window=try await f.start(), restored=try await f.recover(window)
-        XCTAssertEqual(f.trace.withLock { $0 }, ["old.hello","old.open","old.cancel","write.reopenPending","make","new.hello","new.reopen","new.gate","write.restored"])
+        XCTAssertEqual(f.trace.values.withLock { $0 }, ["old.hello","old.open","old.cancel","write.reopenPending","make","new.hello","new.reopen","new.gate","write.restored"])
         XCTAssertEqual(f.phases,[.reopenPending,.restored]); XCTAssertEqual(f.newActions,[.reopen])
         XCTAssertEqual(restored.phase,.restored); XCTAssertNil(restored.shutdownBinding)
         let pending=try XCTUnwrap(f.writes.withLock { $0.first }), q=try XCTUnwrap(f.fresh.state.withLock { $0.gates.first })
@@ -134,7 +135,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         let f=try Fixture(), window=try await f.start(); f.faultPhase.withLock { $0 = .reopenPending }
         await expectRecovery { _=try await f.recover(window) }; try f.native.drain.validate()
         XCTAssertEqual(f.phases,[.reopenPending]); XCTAssertTrue(f.newActions.isEmpty)
-        XCTAssertFalse(f.trace.withLock { $0.contains("make") })
+        XCTAssertFalse(f.trace.values.withLock { $0.contains("make") })
         await expectRecovery { _=try await f.recover(window) }; XCTAssertEqual(f.phases,[.reopenPending])
     }
     func testUncertainPendingCommitNeverRewritesOrSendsRecovery() async throws {
@@ -145,7 +146,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     func testWrongPendingReadbackCannotReleaseTheDrainOrConstructATransport() async throws {
         let f=try Fixture(), window=try await f.start(); f.wrongPending.withLock { $0=true }
         await expectRecovery { _=try await f.recover(window) }; try f.native.drain.validate()
-        XCTAssertFalse(f.trace.withLock { $0.contains("make") }); XCTAssertTrue(f.newActions.isEmpty)
+        XCTAssertFalse(f.trace.values.withLock { $0.contains("make") }); XCTAssertTrue(f.newActions.isEmpty)
     }
     func testWrongHelloVersionPersistsOwnerRecoveryWithoutReopen() async throws {
         let f=try Fixture(), window=try await f.start(); f.fresh.state.withLock { $0.mode = .badHello }
@@ -177,7 +178,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         let f=try Fixture(), window=try await f.start()
         await expectRecovery { _=try await f.recover(window,deadline:.now.advanced(by:.seconds(-1))) }
         XCTAssertEqual(f.phases,[.reopenPending,.needsOwnerRecovery]); XCTAssertTrue(f.newActions.isEmpty)
-        XCTAssertFalse(f.trace.withLock { $0.contains("new.hello") })
+        XCTAssertFalse(f.trace.values.withLock { $0.contains("new.hello") })
     }
     func testWrongPhaseCannotCancelOrWriteAndCannotBeRetried() async throws {
         let f=try Fixture(), window=try await f.start()
@@ -189,7 +190,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     func testLostDrainCannotPersistOrStartTheRecoveryTransport() async throws {
         let f=try Fixture(), window=try await f.start(); f.native.drain.close()
         await expectRecovery { _=try await f.recover(window) }; XCTAssertTrue(f.phases.isEmpty)
-        XCTAssertFalse(f.trace.withLock { $0.contains("make") })
+        XCTAssertFalse(f.trace.values.withLock { $0.contains("make") })
     }
     func testOwnedTransportCannotSelectTheNativeCleanupFactory() async throws {
         let f=try Fixture(), window=try await f.start()
