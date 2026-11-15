@@ -583,3 +583,31 @@ M06a remains a negative guard. M06b must hold the shared account token across en
 M05d must reject a re-registered job or a new Authority incarnation before the body.
 M06b requires its measured candidate and main reconciliation before application.
 Release, installed Root, full Core, merge readiness and the full objective remain incomplete.
+
+
+### M06b admission closure and restoration follow-up (Toni3275/3279/3287/3291)
+
+M06b source `20c6590ad75cd8ac52e30c863ac621993beaaf31` follows M06a owner source `395ecf34`.
+Its production delta is93 lines in four files. Sixteen new regressions cover the shared account token and draining writer.
+Gate67760 exited0/3d6fb6. Core and Debug built fresh. All150 selected native methods and54 manifest Python tests passed.
+The candidate weights passed48 existing CI tests. No native outcome was transferred.
+The first build remains failed. The intermediate prepared gate was never executed.
+Root admission, actual launchctl, Release and the full Core suite remain unqualified.
+Toni owns publication, current-head review, merge and main reconciliation. Bepi did not push.
+
+The separate diagnostic commit maps only busy account SH acquisition to `maintenancePending`.
+Capture and store errors keep their original categories. Its focused gate remains separate from the parent150-method receipt.
+No parent outcome is relabeled for the diagnostic source.
+
+M09 must reuse the exact restoration owner's held account EX drain when it calls ensure.
+Acquiring SH on a new descriptor would conflict with that same EX drain.
+The typed exception must verify the exact window, purpose, account, gate identity and restoration owner.
+It cannot be selected by a request flag or release admission before health succeeds.
+This exception is unimplemented and remains a prerequisite for reachable restoration.
+M05d must also verify job absence and reject a new incarnation after bootout, before its body.
+
+M05c remains source analysis only. No marker candidate, close path or test has been applied.
+Capture the marker scope during authenticated arm. Close must not reread the machine database.
+Only successful bound runner.close may publish the marker. Ordinary close, retirement, startup failure and deinit must not publish it.
+Readback must check exact canonical bytes, protected metadata and durability.
+M07, M09, live725, attended provider checks and the full objective remain incomplete.

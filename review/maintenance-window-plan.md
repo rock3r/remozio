@@ -391,7 +391,7 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M06a | Common protected bootstrap guard | 61 measured | All active phases refuse, including restoration. Core/Debug,109 fresh native methods,54 Python. No native Root or launchctl proof. |
 | M07 | Ordinary admission, durable armed binding and fresh body capture | 80–160 planned | Preserve the same A/B bindings and pair. Persist the exact five-value maintenance binding with the attempt before arm; uncertain persistence means no arm. Prove all opaque digests and candidateDigest. Window writes stay outside borrowed transactions. |
 | M08 | Purpose-specific observation after interruption | 90–180 | Old/new/partial/unknown stay distinct; zero replay |
-| M09 | Exact restoration and explicit reopen for both incarnation branches | 110–195 planned | notStopped: hello then exact durable-target reopen without open or a new reservation, on the same incarnation. healthy: new connection/open on the new incarnation releases only the M02 startup hold, never inventing an armed block. GateReadback.authorityIncarnation must equal the actual AuthorityClock epoch used by pairing admission. Record actual gate readback before Restored. |
+| M09 | Exact restoration and explicit reopen for both incarnation branches | 110–195 planned | notStopped: hello then exact durable-target reopen without open or a new reservation, on the same incarnation. healthy: new connection/open on the new incarnation releases only the M02 startup hold, never inventing an armed block. GateReadback.authorityIncarnation must equal the actual AuthorityClock epoch used by pairing admission. Record actual gate readback before Restored. | Exact restoration reuses its held account EX drain. It must not acquire SH against its own drain.
 | M10 | Root Setup startup/interruption recovery worker | 110–195 | No GUI dependency; actual owner/worker/cleanup settlement; orphan retained for explicit recovery |
 | M11 | Authenticated status and durable visible failure | 80–170 | Orphan status available while reserved; lost owner → explicit M12 action → fresh admission; live or uncertain owners stay closed |
 | M12 | Explicit restoration-only native action | 100–190 | Fresh rights/binding/revision; no arbitrary job, reset, force or replay |
@@ -929,3 +929,31 @@ M06a remains a negative guard. M06b must hold the shared account token across en
 M05d must reject a re-registered job or a new Authority incarnation before the body.
 M06b requires its measured candidate and main reconciliation before application.
 Release, installed Root, full Core, merge readiness and the full objective remain incomplete.
+
+
+### M06b admission closure and restoration follow-up (Toni3275/3279/3287/3291)
+
+M06b source `20c6590ad75cd8ac52e30c863ac621993beaaf31` follows M06a owner source `395ecf34`.
+Its production delta is93 lines in four files. Sixteen new regressions cover the shared account token and draining writer.
+Gate67760 exited0/3d6fb6. Core and Debug built fresh. All150 selected native methods and54 manifest Python tests passed.
+The candidate weights passed48 existing CI tests. No native outcome was transferred.
+The first build remains failed. The intermediate prepared gate was never executed.
+Root admission, actual launchctl, Release and the full Core suite remain unqualified.
+Toni owns publication, current-head review, merge and main reconciliation. Bepi did not push.
+
+The separate diagnostic commit maps only busy account SH acquisition to `maintenancePending`.
+Capture and store errors keep their original categories. Its focused gate remains separate from the parent150-method receipt.
+No parent outcome is relabeled for the diagnostic source.
+
+M09 must reuse the exact restoration owner's held account EX drain when it calls ensure.
+Acquiring SH on a new descriptor would conflict with that same EX drain.
+The typed exception must verify the exact window, purpose, account, gate identity and restoration owner.
+It cannot be selected by a request flag or release admission before health succeeds.
+This exception is unimplemented and remains a prerequisite for reachable restoration.
+M05d must also verify job absence and reject a new incarnation after bootout, before its body.
+
+M05c remains source analysis only. No marker candidate, close path or test has been applied.
+Capture the marker scope during authenticated arm. Close must not reread the machine database.
+Only successful bound runner.close may publish the marker. Ordinary close, retirement, startup failure and deinit must not publish it.
+Readback must check exact canonical bytes, protected metadata and durability.
+M07, M09, live725, attended provider checks and the full objective remain incomplete.
