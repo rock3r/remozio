@@ -391,7 +391,7 @@ The prepared production candidate is based on bca7a7d6, before the retired host5
 Its complete delta measures110 lines across six production files, including additions and deletions.
 Git independently counted the patch and checked it against the exact base. This is no compile or runtime result.
 Candidate: /private/tmp/remozio-presence-mux-candidate-3221-r3-20261115/preparation.json.
-The candidate remains unapplied, uncompiled, untested and unpublished. Recount every later production change before its gate.
+That initial candidate was unapplied at preparation time. The implementation and local gate are recorded below.
 
 The listener admits the union of the current App and Setup signing requirements.
 UID0 routes to maintenance before any App reservation. All other UIDs route to the existing App path.
@@ -434,3 +434,29 @@ Run Core, the affected fresh focused methods, Debug, actual Debug manifest inspe
 Source checks and injected peer tests do not prove native Root code admission. Preserve those attended boundaries.
 M07 still uses counts and the actual arm result. Ready is vacuously true with no endpoints.
 The separate M09 branches and live#725 measurements remain required. The full objective is incomplete.
+
+
+### M05b5 implementation and local gate (Toni3227)
+
+Source `4b151d09dbfbb6bbdb53b912b818505caccd025c`; tree `2b60135a8d69093dabdd73b8f320a96033f4d99f`; base `bca7a7d623f7b4e20f4072e5f99f9d6c98e042f8`.
+The complete production delta is160 changed lines. The earlier110-line candidate remains immutable preparation history.
+One presence listener admits App or Setup. Each branch selects its exact policy before activation.
+Maintenance uses its own connection owner and budget. Root arrivals before attachment reserve no App capacity.
+The client resolves N.presence. Authority and Setup declare channel1 together.
+The host codecs, installed plist and machine schema remain unchanged. The retired host5 branch remains unpublished.
+
+Core and Debug built. The gate passed193 fresh native methods with0 allowed GUI skips and zero transfers.
+All11 new mux methods passed. Python passed54 fresh manifest tests.
+The193 expected methods include actual Debug manifest inspection and all affected classes.
+Gate73076 exited0/d042fc; the actual terminal was consumed.
+The cumulative mux budget is635.557/1800 seconds, including three preserved failed runs.
+The first run failed compilation. The second had an owned fixture identity error.
+The third omitted an observe binding and expected a new connection to reuse the old binding.
+The final recovery test preserves the old armed target and uses its exact binding to reopen.
+
+The anonymous XPC tests use the real listener, endpoints, budgets and journal.
+Their UID, role, current-hash and eligibility controls are synthetic. Native Root admission remains unqualified.
+The native constructor cannot accept owned controls; the owned factory requires an ordinary account.
+Release, installed Root, the full Core suite and merge readiness remain unqualified.
+Toni owns publication, review, the watcher, merge and main reconciliation. Bepi did not push.
+M07, M09, live#725, attended provider tests and the full objective remain incomplete.
