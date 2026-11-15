@@ -97,7 +97,7 @@ public actor AuthorityWakeService {
         recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke()
         phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
-        let offers = updateScheduling?.offers, maintenance = maintenancePresence()
+        let offers = updateScheduling?.offers, maintenance = maintenanceOwners.withLock { $0?.pairing }
         let worker = task, drain = settingsDrain, recovery = recoveryDrain, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
