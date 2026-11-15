@@ -85,6 +85,19 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         try .init(foreground: foreground, material: material.reference, inventory: inventory, settings: settings())
     }
 
+    func testPushProposalRejectsHost5BeforeConstructingALegacyHostOrJob() throws {
+        try fixture(rootSettingsControl: true) { foreground, material, inventory in
+            let original = try foreground.encoded
+            let future = try RuntimeActivationPlan.decode(Host5ReaderFixture.activation(original))
+            XCTAssertEqual(try bundle(foreground, material, inventory).commandHost.formatVersion, foreground.host.formatVersion)
+            XCTAssertThrowsError(try bundle(future, material, inventory)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertEqual(try foreground.encoded, original)
+            XCTAssertTrue(future.host.maintenanceChannelEnabled)
+        }
+    }
+
     func testPushProposalPreservesAnEnabledRootSettingsControlEndpoint() throws {
         try fixture(rootSettingsControl: true) { foreground, material, inventory in
             XCTAssertTrue(foreground.host.gatewaySettingsControlEnabled)

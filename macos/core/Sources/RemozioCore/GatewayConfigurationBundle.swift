@@ -16,6 +16,7 @@ struct GatewayConfigurationBundle: CustomStringConvertible, CustomDebugStringCon
          settings: GatewayServiceSettings, wakePollMilliseconds: UInt64 = 1000, wakeTimeoutMilliseconds: UInt64 = 5000,
          wakeMaximumConnections: Int = 4, wakeMaximumOperations: Int = 8,
          wakeChallengeLifetimeMilliseconds: UInt64 = 5000) throws {
+        guard !foreground.host.maintenanceChannelEnabled else { throw GatewayPreparationError.changedScope }
         let services = foreground.reference.services, account = services.accountID
         let paths = try RuntimePreparationPaths(accountID: account)
         guard foreground.reference == material.runtime,

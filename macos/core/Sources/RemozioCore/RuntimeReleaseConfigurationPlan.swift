@@ -41,6 +41,7 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
          transport sourceTransport: TransportPairingStartupConfiguration,
          gateway sourceGateway: GatewaySettingsConsumerHostConfiguration, clients sourceClients: RuntimeActivationClients,
          stage: RuntimeReleasePolicyStage) throws {
+        guard !sourceHost.maintenanceChannelEnabled else { throw RuntimeActivationError.changedScope }
         let policy = try MachineUpdatePolicyPlan(source: currentPolicy, candidate: candidate)
         let binding = try RuntimeReleaseBinding(accountID: accountID, source: source, candidate: candidate, policy: policy)
         let reference = sourceGateway.runtime
@@ -114,6 +115,7 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
         try RuntimeRetainedSetupCompletionBinding.requireCompletedHostFormats(candidate)
         let archive = try RuntimeRetainedSetupCompletionArchive(snapshot: snapshot, current: current, candidate: candidate)
         let original = try archive.originalActivation(), binding = archive.binding
+        guard !original.host.maintenanceChannelEnabled else { throw RuntimeActivationError.changedScope }
         let sourceGateway = original.gatewaySettingsHost
         try binding.startupBinding.requireStartupPolicy(original.host.codePolicy)
         try validateValues(host: original.host, transport: original.transport, gateway: sourceGateway, clients: sourceClients,

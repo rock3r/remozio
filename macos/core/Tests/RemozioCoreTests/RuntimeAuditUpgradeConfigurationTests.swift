@@ -6,6 +6,20 @@ import XCTest
 
 /// Value preparation only. No test publishes a live configuration or registers a service.
 final class RuntimeAuditUpgradeConfigurationTests: XCTestCase {
+    func testAuditUpgradeRejectsHost5BeforeConstructingALegacyHostOrJob() throws {
+        let f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneAudit: true,
+            auditDelivery: true, materialAuditDelivery: false)
+        let before = try XCTUnwrap(f.machine.inventory()).canonicalBytes
+        let request = try intent(f)
+        XCTAssertEqual(try prepare(f.plan, f, intent: request).host.formatVersion, f.plan.host.formatVersion)
+        let future = try RuntimeActivationPlan.decode(Host5ReaderFixture.activation(f.plan.encoded))
+        XCTAssertThrowsError(try prepare(future, f, intent: request)) {
+            XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+        }
+        XCTAssertEqual(try XCTUnwrap(f.machine.inventory()).canonicalBytes, before)
+        XCTAssertTrue(future.host.maintenanceChannelEnabled)
+    }
+
     private let limits = try! CBORLimits(maxBytes: 262_144, maxDepth: 3, maxItems: 512)
     private func fields(_ bytes: Data) throws -> [UInt64: CBORValue] {
         guard case .map(let values) = try DeterministicCBOR.decode(bytes, limits: limits) else {

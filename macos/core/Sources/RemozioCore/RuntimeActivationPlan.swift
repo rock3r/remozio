@@ -96,6 +96,7 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
     /// Prepares values only. The owner must verify and coordinate retained dependencies before live replacement.
     func preparingAuditUpgrade(_ intent: RuntimeAuditUpgradeIntent, installedRelease: SignedReleaseEvidence,
                                currentPolicy: AuthorityCodePolicy) throws -> Self {
+        guard !host.maintenanceChannelEnabled else { throw RuntimeActivationError.changedScope }
         try RuntimeAuditUpgradeRecord.validatePreparation(intent, release: installedRelease, policy: currentPolicy)
         guard reference == intent.source, try host.codePolicy.bytes == currentPolicy.bytes,
               try RuntimeAuditDeliverySupport.selectedVersion(reference: intent.target, release: installedRelease,

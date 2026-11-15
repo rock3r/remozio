@@ -825,6 +825,25 @@ final class MachineUpdateReplacementTests: XCTestCase {
             directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
     }
 
+    func testReleaseConfigurationRejectsHost5BeforeConstructingALegacyHost() throws {
+        let f = try Fixture(configurationEpoch: true)
+        _ = try retainFixtureConfigurationEpoch(f)
+        let source = try restartSource(f), archive = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+        let configuration = try XCTUnwrap(archive.configuration(accountID: f.machine.account)), inputs = configuration.source
+        let policy = try XCTUnwrap(archive.policy(accountID: f.machine.account))
+        let future = try InstalledAuthorityCommandConfiguration.decode(Host5ReaderFixture.host(inputs.host))
+        let before = try f.machine.store.retainedRuntimeCompatibilityInputs()
+        for stage in [RuntimeReleasePolicyStage.startup, .completion] {
+            XCTAssertThrowsError(try RuntimeReleaseConfigurationPlan(accountID: f.machine.account, source: source,
+                currentPolicy: policy, candidate: f.newRelease, host: future, transport: inputs.transport,
+                gateway: inputs.gateway, clients: inputs.clients, stage: stage)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs(), before)
+        XCTAssertEqual(try archive.configuration(accountID: f.machine.account)?.startup.encoded, configuration.startup.encoded)
+    }
+
     func testConfigurationEpochRetainsTheTypedArchiveAndAdvancesPublication() throws {
         let f = try Fixture(configurationEpoch: true)
         let record = try retainFixtureConfigurationEpoch(f)
@@ -5633,6 +5652,29 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedPromotionCaptureRequiresRecordedCompletionAndActualRegistration"))
         try suite.withRetainedPromotionValueFixture { try body($0.publication) }
+    }
+
+    func testRetainedCompletionConfigurationRejectsHost5BeforeConstructingALegacyHost() throws {
+        try withRetainedPromotionValueFixture { f in
+            let old = f.completion.activation, original = try XCTUnwrap(old.state.plan)
+            let future = try RuntimeRetainedSetupActivationPlan.decode(Host5ReaderFixture.activation(original.encoded))
+            let activation = try MachineUpdateRetainedSetupActivationSnapshot(runtime: old.runtime,
+                state: .init(plan: future, jobsRegistered: true), intent: old.intent, candidate: f.candidate)
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(f.completion.intent).encoded) as? [String: Any])
+            fields["activationPlanDigest"] = MachineUpdateActivationRecord.digest(try future.encoded).base64EncodedString()
+            let intent = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            let completion = try MachineUpdateRetainedSetupCompletionSnapshot(activation: activation, intent: intent, candidate: f.candidate)
+            let archive = try RuntimeRetainedSetupCompletionArchive(snapshot: completion, current: f.current, candidate: f.candidate)
+            XCTAssertEqual(try archive.originalActivation().host.formatVersion, 5)
+            let before = try original.encoded
+            XCTAssertThrowsError(try RuntimeRetainedSetupCompletionConfiguration(snapshot: completion, current: f.current,
+                candidate: f.candidate, clients: f.publication.sourceClients)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            XCTAssertEqual(try old.state.plan?.encoded, before)
+            XCTAssertFalse(f.publication.configuration.host.maintenanceChannelEnabled)
+        }
     }
 
     private func withRetainedPromotionValueFixture(_ body: (RetainedPromotionFixture) throws -> Void) throws {
