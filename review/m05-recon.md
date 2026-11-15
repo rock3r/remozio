@@ -101,7 +101,8 @@ The readback and native permit must still enforce their current code, protected 
 | M05b2c | Fixed listener, signed participant scope and joined retired endpoints | 146 measured | Source94a9ee11. Core and Debug builds passed. Gates14466 and84763 admit50 fresh unique methods and110 transferred methods. All6 scope methods ran fresh under Toni3088. Anonymous XPC proves lifecycle with owned controls. The Root access producer and product registration remain for b4. |
 | M05b3 | Native authenticated Setup client with serialized exchanges and bounded recovery | 169 measured | Source8e494e12. Core/Debug and110 fresh methods passed;73 unrelated methods and54 Python results transferred. Harmless hello precedes identifiers and changes no admission state. Only stagesPending permits another arm before the original deadline. Refused is terminal; nil, timeout or malformed reply requires recovery. No product entry. |
 | M05b4a | Protected command frame and actual pairing stage reservations | 94 measured | Source645f4dfd above acknowledgement repairf54fed93. Gate5876 passed76 fresh native methods and143 explicit unchanged-method transfers, fresh Python manifest checks, Core/Debug. One read transaction binds installation, gate, phase, current revision and incarnation. Retained Stage handles keep one attempt counted through actual reply cleanup. No Root factory. |
-| M05b4b | Root factory and actual M05a owner composition | 100–180 planned | Use the one protected command reader and real journal, execution and pairing owners. Never accept a Root-usable injected observation. No close-time read. If this cut registers maintenance, include both version1 format declarations, fixed per-account MachServices, generator and real-manifest tests together. |
+| M05b4b | Root factory and actual M05a owner composition | 121 measured | Source8ce7c89c above645f4dfd. The factory accepts the installed registration and actual WakeService only. Command reads use a short protected lease. Pairing endpoints remain retained through reply cleanup. Core and124 fresh supporting fixture methods passed. Installed Root execution remains unqualified. No registration. |
+| M05b5 | Native maintenance service registration | 100–195 planned | Immediately after b4b and before the first caller in M07. Add per-account MachServices for <namespace>.maintenance, Authority and Setup reader1/writer1 declarations, the manifest generator, Python tests and a generated-manifest test together. Never publish only part of this registration. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
@@ -328,3 +329,33 @@ The final gate runs76 native methods fresh and reuses143 exact unchanged methods
 Two helper-only test changes add a database path; their constructor/read smoke methods run fresh. No whole replacement or unrelated native-context suite is claimed.
 Gate5876 admits219 unique native methods (76 fresh and143 transferred) and54 Python manifest tests fresh, with no transfers.
 Installed Root admission, the b4b factory, M09, product registration and the full goal remain incomplete.
+
+### Current b4b composition and registration order (Toni3150/3155)
+
+This section supersedes earlier statements that the b4b factory is unimplemented or that registration may wait until M15.
+Source8ce7c89c adds121 production lines and six tests above645f4dfd.
+The Root factory accepts the installed registration and the actual AuthorityWakeService. It accepts no observation or callback factory.
+Only native service composition retains the real journal, command execution worker, presence listener and AuthorityClock.
+The ordinary fixture initializer cannot populate those private native owners.
+Factory and command checks require the current live service. Close and deinitialization disable new native access without reading the machine store.
+The installed registration captures the expected prepared account, then each command reads one protected stable frame through a short lease.
+No machine store survives an await. The current record, account, installation, release, gate, phase, revision and incarnation remain mandatory.
+Only the actual admission owner can retrieve the exact armed target for pre-stop reopen.
+The healthy branch remains M09 work. It never adopts a decoded armed target.
+
+Pairing aggregation retains actual endpoints through their operation, reply and activity cleanup, including a close inside the reply.
+A closed, fully settled endpoint is pruned. A foreign admission cannot enter the aggregate.
+The stage guard and attempt/activity/stage transfer now share one state.withLock.
+The work samples remain separate observations. They grant no atomic idle proof, clean marker, stop permit or native stop authority.
+
+M05b5 is the next separate supporting cut. It must precede M07 or any first native channel caller.
+The same cut adds the per-account <namespace>.maintenance Mach service, Authority and Setup version1 reader/writer declarations,
+the manifest generator, Python manifest checks and a test of the actual generated manifest.
+B4b does not register or start that listener.
+
+M09 GateReadback.authorityIncarnation must equal the epoch of the actual AuthorityClock used by this process's pairing admission.
+A separate startup UUID is wrong, even when it has16 bytes. Every later command would otherwise refuse with changedScope.
+The protected reader regression uses an actual AuthorityClock epoch and rejects another clock's epoch.
+The admission regression checks that the existing access uses its actual clock epoch.
+The same-incarnation notStopped and new-incarnation healthy branches still need their distinct native reopen operations.
+Installed Root positive admission, product registration, Release qualification and the full goal remain incomplete.
