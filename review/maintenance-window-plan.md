@@ -1126,3 +1126,14 @@ Operation, restoration and footprint precede grant and consent; administratorInt
 No digest is a capability or stores an authorization external form.
 C02 dispatch, M07b1/b2, M09, live725, installed Root, provider checks, Release and the full Core suite remain unqualified.
 Toni owns publication, review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
+
+
+### M09a cancellation obligation (Toni3468/3470)
+
+M09a releases its local admission hold only through the authenticated reopen command. An applied cancel alone does not reopen A.
+The current M05b3 capture client sends cancel after an arm timeout or a capture failure after open. It then finishes without reopen.
+M09b must persist reopenPending after an applied cancel, then send reopen for the exact saved target. It must create no new open reservation.
+If persistence or reopen fails, report needsOwnerRecovery. Do not repeat the body or retry these steps automatically.
+C02 must remain unreachable until this native cancel to reopenPending to reopen path exists and its tests pass. Writer2 remains undeclared until then.
+The M09a regression must execute open, cancel, an explicit durable reopenPending write, reopen and a fresh admission without restart.
+This is a required client obligation. The compiled M09a draft does not implement the native recovery client or qualify installed recovery.
