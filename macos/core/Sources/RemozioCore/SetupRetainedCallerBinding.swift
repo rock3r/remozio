@@ -107,8 +107,9 @@ struct SetupRetainedCallerBinding: CustomStringConvertible, CustomDebugStringCon
     func recapturing(state actual: State, entry: MachineUpdateRetainedSetupInitialRuntimeEntry,
         transitions: [PreparationIntentStore.RuntimeMaintenanceTransition], candidate: SignedReleaseEvidence,
         capture: RuntimeMaintenanceStopCapture, lookup: (UInt32) throws -> LocalAccountIdentity) throws -> Self {
+        guard let bindingTransition = capture.bindingTransition else { throw RuntimePreparationError.changedScope }
         let window = try PreparationIntentStore.RuntimeMaintenanceTransition.requireChain(transitions,
-            from: state.source.actual, to: actual.source.actual)
+            from: state.source.actual, to: actual.source.actual, binding: bindingTransition)
         try capture.validate()
         guard try capture.configuration.codePolicy.bytes == publishedAuthorityPolicy.bytes else {
             throw RuntimePreparationError.changedScope

@@ -5743,6 +5743,7 @@ public final class PreparationIntentStore {
 
     /// Issued only after the real window writer confirms its commit and every unrelated row.
     struct RuntimeMaintenanceTransition {
+        private let receiptID = UUID()
         let record: RuntimeMaintenanceWindowRecord
         private let previous: RuntimeMaintenanceWindowRecord?
         private let before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot
@@ -5751,7 +5752,12 @@ public final class PreparationIntentStore {
             self.record = record; self.previous = previous; self.before = before; self.after = after
         }
         static func requireChain(_ values: [Self], from before: MachineUpdateStableReleaseSnapshot,
-            to after: MachineUpdateStableReleaseSnapshot) throws -> RuntimeMaintenanceWindowRecord {
+            to after: MachineUpdateStableReleaseSnapshot, binding: Self? = nil) throws -> RuntimeMaintenanceWindowRecord {
+            if let binding {
+                guard binding.record.shutdownBinding != nil, values.contains(where: { $0.receiptID == binding.receiptID }) else {
+                    throw PreparationStoreError.invalidTransition
+                }
+            }
             guard !values.isEmpty, values.count <= 16, let first = values.first,
                   first.record.phase == .authorized, first.previous == nil || first.previous?.phase == .restored else {
                 throw PreparationStoreError.invalidTransition
@@ -5862,8 +5868,16 @@ public final class PreparationIntentStore {
         expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
         admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken,
         verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
+        try persistRuntimeMaintenanceBindingTransition(binding, window: window, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped).record
+    }
+    /// The capture retains this real binding commit as one link in the pre-body chain.
+    func persistRuntimeMaintenanceBindingTransition(_ binding: AuthorityMaintenanceBinding, window: RuntimeMaintenanceWindowRecord,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceTransition {
         let next = try window.retainingShutdownBinding(binding)
-        return try writeRuntimeMaintenanceWindow(next, replacing: window, expected: expected, candidate: candidate,
+        return try writeRuntimeMaintenanceTransition(next, replacing: window, expected: expected, candidate: candidate,
             directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped)
     }
     /// A negative bootstrap guard only. No phase grants restoration or native custody.

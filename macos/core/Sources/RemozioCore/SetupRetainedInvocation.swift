@@ -104,14 +104,15 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         }
     }
     /// Fresh rights authorize metadata for this invocation. The real writer still proves storage and native ownership.
-    func authorizedMaintenanceWindow(expected: SetupAccountOwner.RetainedMaintenanceCapture,
+    func authorizedMaintenanceWindow(invocation: XPCInvocationGuard, expected: SetupAccountOwner.RetainedMaintenanceCapture,
         purpose: RuntimeMaintenanceWindowRecord.Purpose, candidate: SignedReleaseEvidence,
         id: Data, revision: Data) throws -> RuntimeMaintenanceWindowRecord {
         try RuntimeMaintenanceCommitments.requireProfile(purpose)
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         return try lock.withLock {
             try validateLifetime()
-            guard !active, !invoked, expected.binding.peer == peer, expected.binding.incarnation == incarnation else {
+            guard !active, !invoked, invocation.incarnation == incarnation, try invocation.verifyInvocation() == peer,
+                  expected.binding.peer == peer, expected.binding.incarnation == incarnation else {
                 throw XPCPeerPolicyError.wrongPeer
             }
             let commitments = try RuntimeMaintenanceCommitments.capture(binding: expected.binding,

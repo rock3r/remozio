@@ -108,7 +108,8 @@ struct RuntimeMaintenanceCommitments: Equatable {
                   !path.split(separator: "/", omittingEmptySubsequences: false).dropFirst().contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
                 throw RuntimePreparationError.changedScope
             }
-            return String(path.dropFirst())
+            return path == RuntimePreparationPaths.sharedDirectory ? "."
+                : String(path.dropFirst(RuntimePreparationPaths.sharedDirectory.count + 1))
         }
     }
     private static func account(_ id: Data, owner: LocalAccountIdentity) throws -> RuntimeMaintenanceWindowRecord.Account {
