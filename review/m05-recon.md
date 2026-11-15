@@ -102,8 +102,7 @@ The readback and native permit must still enforce their current code, protected 
 | M05b3 | Native authenticated Setup client with serialized exchanges and bounded recovery | 169 measured | Source8e494e12. Core/Debug and110 fresh methods passed;73 unrelated methods and54 Python results transferred. Harmless hello precedes identifiers and changes no admission state. Only stagesPending permits another arm before the original deadline. Refused is terminal; nil, timeout or malformed reply requires recovery. No product entry. |
 | M05b4a | Protected command frame and actual pairing stage reservations | 94 measured | Source645f4dfd above acknowledgement repairf54fed93. Gate5876 passed76 fresh native methods and143 explicit unchanged-method transfers, fresh Python manifest checks, Core/Debug. One read transaction binds installation, gate, phase, current revision and incarnation. Retained Stage handles keep one attempt counted through actual reply cleanup. No Root factory. |
 | M05b4b | Root factory and actual M05a owner composition | 121 measured | Source8ce7c89c above645f4dfd. The factory accepts the installed registration and actual WakeService only. Command reads use a short protected lease. Pairing endpoints remain retained through reply cleanup. Core and124 fresh supporting fixture methods passed. Installed Root execution remains unqualified. No registration. |
-| M05b5a | Host5 reader baseline | ≤200 required | Decode5, exact ordinary/retained job reconstruction and the complete nested reader matrix. Authority/Setup read1–5 and write1–4. Ship before b5b. |
-| M05b5b | Setup selection and native registration | Measure before implementation | First explicit maintenance selection. Qualify durable intent/progress/readback before restart. Host writer5, channel1 and all announcements ship together. Rollback targets must read5. |
+| M05b5 | Existing presence listener multiplexing | 110 measured candidate | One listener/delegate, exact App/Setup branch policies, independent maintenance connection owner, installed eligibility and channel1 declarations. No plist/host/schema change. Unapplied and unqualified. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
@@ -359,7 +358,7 @@ The admission regression checks that the existing access uses its actual clock e
 The same-incarnation notStopped and new-incarnation healthy branches still need their distinct native reopen operations.
 Installed Root positive admission, product registration, Release qualification and the full goal remain incomplete.
 
-### Host5 reader baseline and later writer (Toni3192)
+### Retired host5 design (Toni3192; retired by3221)
 
 This section supersedes the earlier single M05b5 registration cut. Toni selected option B: a persisted host5 marker.
 The source matrix remains source analysis. It does not prove a durable publication transition or an installed listener.
@@ -382,3 +381,56 @@ The pairing ready value is true when there are no endpoints. It is not an idle d
 M07 uses stage, operation and activity counts together with the actual arm result. Persist the binding before arm.
 Live session#725 measures store opens per second during the250ms arm wait, open latency and the effect of a busy journal.
 Installed Root admission, Release qualification, M09 and the full objective remain incomplete.
+
+### Current M05b5 decision: presence multiplexing (Toni3221/3223)
+
+This section retires M05b5a, M05b5b and the dedicated host/plist publication proposal. Their commits and receipts remain history.
+Do not publish the host5 branch. Keep the host codecs, installed plist and machine schema unchanged.
+M05b5 uses the existing per-account N.presence name, one native listener and one delegate.
+The prepared production candidate is based on bca7a7d6, before the retired host5 work.
+Its complete delta measures110 lines across six production files, including additions and deletions.
+Git independently counted the patch and checked it against the exact base. This is no compile or runtime result.
+Candidate: /private/tmp/remozio-presence-mux-candidate-3221-r3-20261115/preparation.json.
+The candidate remains unapplied, uncompiled, untested and unpublished. Recount every later production change before its gate.
+
+The listener admits the union of the current App and Setup signing requirements.
+UID0 routes to maintenance before any App reservation. All other UIDs route to the existing App path.
+Each branch configures its exact signing requirement before connection activation. UID routing grants no authority.
+Maintenance requires the current Setup team, identifier, cdhash and generation, UID0, authenticated hello and synchronous invocation checks.
+The existing App endpoint already configures its exact App requirement before activation; preserve that behavior and test it.
+Keep independent maintenance connection limits, work budget and retained endpoint cleanup. The owner cannot activate, invalidate or replace the shared listener.
+The old standalone maintenance listener becomes a connection owner. The client and fixed-address scope resolve N.presence.
+Remove the unused .maintenance Mach-name derivation in the same cut. Preserve the b3 wire payload and reply semantics.
+
+Installed composition checks the current signed release and both authority.maintenance-channel version1 declarations.
+Authority and Setup gain that declaration together, with generator, Python checks and actual generated-manifest inspection.
+Configure the listener filter before startup. Attach the maintenance owner only after the actual service and pairing listener start.
+Root connections during that interval receive unavailable and reserve no App capacity.
+Close and deinitialization join retained maintenance work before closing its stores. Closing the shared listener must preserve an armed block.
+No endpoint, callback or parsed payload can stand in for the actual b4b native owners or current protected frame.
+
+#### Installed eligibility
+
+AuthorityCommandRuntimeComposition.openInstalled passes the concrete presence configuration to openInstalledPresence.
+That path creates account presence and its app endpoint, then the listener, and starts it in startRequests.
+It does not depend on the readiness listener, optional phone push or the gateway settings listener.
+The generic request-only AuthorityWakeService.open path has no presence listener and is not maintenance eligible.
+Native maintenance also needs the actual execution worker and pairing admission. Pairing configuration remains optional in the startup codec.
+If pairing, execution, active Setup metadata or signed channel declarations are absent, the account is not eligible.
+Its existing App/command behavior remains intact. Do not create a weaker maintenance path or claim degraded maintenance support.
+The candidate exposes this eligibility explicitly before configuring the union or starting the root connection owner.
+
+An owner UID0 is already invalid in AuthorityAccountPresenceConfiguration and AuthorityPresenceEndpointConfiguration.
+Retain both guards and add regressions through the actual composition inputs. No root owner can enter the App route.
+
+#### Required focused evidence
+
+Test App saturation without blocking maintenance, and maintenance saturation without consuming App capacity.
+Test root non-Setup, stale Setup hash, App with UID0 and Setup with nonzero UID through both relevant policies.
+Test exact requirement installation before activation on both branches and harmless authenticated hello before any work.
+Test close, reentrancy, endpoint retirement and joining. Reprove an armed block after closing this actual shared listener.
+Test installed composition eligibility and explicit refusal without a fallback for accounts lacking pairing or execution.
+Run Core, the affected fresh focused methods, Debug, actual Debug manifest inspection and the Python manifest suite through ATC.
+Source checks and injected peer tests do not prove native Root code admission. Preserve those attended boundaries.
+M07 still uses counts and the actual arm result. Ready is vacuously true with no endpoints.
+The separate M09 branches and live#725 measurements remain required. The full objective is incomplete.
