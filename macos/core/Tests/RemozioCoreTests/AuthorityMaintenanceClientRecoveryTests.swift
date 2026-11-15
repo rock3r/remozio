@@ -12,7 +12,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     private enum Fault: Error { case injected }
     private final class Trace: Sendable { let values = Mutex<[String]>([]) }
     private final class Driver: AuthorityMaintenanceClientDriver, Sendable {
-        enum Mode: Sendable, Equatable { case normal, heldArm, lostCancel, badHello, lostReopen, lostGate, foreignEpoch, busyGate, heldGate, unknownGate, wrongChallenge }
+        enum Mode: Sendable, Equatable { case normal, heldArm, lostCancel, badHello, lostReopen, lostGate, foreignEpoch, busyGate, busyThenAvailable, heldGate, unknownGate, wrongChallenge }
         struct State {
             var mode = Mode.normal, calls: [Request] = [], gates: [AuthorityMaintenanceGateRequest] = []
             var invalidated: (@Sendable () -> Void)?, held: (@Sendable (AuthorityMaintenanceClientReply) -> Void)?
@@ -47,7 +47,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
                 }
                 reply(.bytes(try AuthorityMaintenanceGateResponse(request: q,
                     authorityIncarnation: mode == .foreignEpoch ? Data(repeating: 99, count: 16) : q.target.incarnation,
-                    hold: mode == .heldGate ? .held : mode == .unknownGate ? .unknown : .released, admission: mode == .busyGate ? .busy : .available).encoded))
+                    hold: mode == .heldGate ? .held : mode == .unknownGate ? .unknown : .released, admission: mode == .busyGate || mode == .busyThenAvailable && state.withLock({ $0.gates.count }) <= 2 ? .busy : .available).encoded))
             } catch { reply(.bytes(nil)) }
         }
         func close() { state.withLock { $0.invalidated }?() }
@@ -159,8 +159,8 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         XCTAssertEqual(f.newActions,[.reopen]); XCTAssertTrue(f.fresh.state.withLock { $0.gates.isEmpty })
         XCTAssertEqual(f.phases,[.reopenPending,.needsOwnerRecovery])
     }
-    func testMissingHeldBusyForeignAndUncorrelatedGateResultsNeverRestore() async throws {
-        for mode in [Driver.Mode.lostGate,.heldGate,.unknownGate,.busyGate,.foreignEpoch,.wrongChallenge] {
+    func testMissingHeldUnknownForeignAndUncorrelatedGateResultsNeverRestore() async throws {
+        for mode in [Driver.Mode.lostGate,.heldGate,.unknownGate,.foreignEpoch,.wrongChallenge] {
             let f=try Fixture(), window=try await f.start(); f.fresh.state.withLock { $0.mode=mode }
             await expectRecovery { _=try await f.recover(window) }
             XCTAssertEqual(f.newActions,[.reopen]); XCTAssertEqual(f.fresh.state.withLock { $0.gates.count },1)
@@ -322,5 +322,26 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     }
     func testUnknownReadbackPersistsOwnerRecoveryAcrossAnActualStoreRestart() throws {
         try withSQLCleanup(readbackHold:.unknown)
+    }
+    func testBusyThenAvailableRereadsOnOneConnectionAndSavesOnlyTheFinalReadback() async throws {
+        let f=try Fixture(), window=try await f.start(); f.fresh.state.withLock { $0.mode = .busyThenAvailable }
+        let restored=try await f.recover(window), gates=f.fresh.state.withLock { $0.gates }
+        XCTAssertEqual(f.newActions,[.reopen]); XCTAssertEqual(f.trace.values.withLock { $0.filter { $0=="new.hello" }.count },1)
+        XCTAssertEqual(gates.count,3); XCTAssertEqual(Set(gates.map(\.challenge)).count,3)
+        XCTAssertEqual(Set(gates.map(\.revision)).count,1); XCTAssertTrue(gates.allSatisfy { $0.target==window.shutdownBinding })
+        let last=try XCTUnwrap(gates.last)
+        let expected=try AuthorityMaintenanceGateResponse(request:last,authorityIncarnation:last.target.incarnation,
+            hold:.released,admission:.available).readback(expectedIncarnation:last.target.incarnation)
+        XCTAssertEqual(restored.gate,expected); XCTAssertEqual(f.phases,[.reopenPending,.restored])
+    }
+    func testBusyUntilTheCleanupDeadlinePersistsOwnerRecoveryWithOnlyOneReopen() async throws {
+        let f=try Fixture(), window=try await f.start(); f.fresh.state.withLock { $0.mode = .busyGate }
+        let began=ContinuousClock.now
+        await expectRecovery { _=try await f.recover(window,deadline:began.advanced(by:.milliseconds(150))) }
+        XCTAssertLessThan(began.duration(to:.now),.seconds(1)); XCTAssertEqual(f.newActions,[.reopen])
+        XCTAssertEqual(f.trace.values.withLock { $0.filter { $0=="new.hello" }.count },1)
+        let gates=f.fresh.state.withLock { $0.gates }; XCTAssertGreaterThan(gates.count,1)
+        XCTAssertEqual(Set(gates.map(\.challenge)).count,gates.count)
+        XCTAssertEqual(f.phases,[.reopenPending,.needsOwnerRecovery]); XCTAssertEqual(f.row.withLock { $0?.failure },.admissionUnconfirmed)
     }
 }

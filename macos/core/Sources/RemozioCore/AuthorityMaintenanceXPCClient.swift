@@ -320,13 +320,20 @@ actor AuthorityMaintenanceXPCClient {
         }
         binding = target; state = .open
         _ = try await send(.reopen, target: target, until: deadline)
-        let q = try AuthorityMaintenanceGateRequest(accountID: context.accountID, attemptID: context.attemptID,
-            revision: context.revision, installationID: context.installationID, gate: context.gate,
-            target: target, challenge: AccountPreparationIntent.randomID())
-        guard case .bytes(let bytes) = try await invoke(nil, gate: q, until: deadline), let bytes else {
-            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        while ContinuousClock.now < deadline {
+            let q = try AuthorityMaintenanceGateRequest(accountID: context.accountID, attemptID: context.attemptID,
+                revision: context.revision, installationID: context.installationID, gate: context.gate,
+                target: target, challenge: AccountPreparationIntent.randomID())
+            guard case .bytes(let bytes) = try await invoke(nil, gate: q, until: deadline), let bytes else {
+                throw AuthorityMaintenanceClientError.needsOwnerRecovery
+            }
+            let result = try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: target.incarnation)
+            guard result.hold == .released else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            if result.admission == .available { return result }
+            guard result.admission == .busy else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
         }
-        return try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: target.incarnation)
+        throw AuthorityMaintenanceClientError.needsOwnerRecovery
     }
 
     func close() { finish() }
