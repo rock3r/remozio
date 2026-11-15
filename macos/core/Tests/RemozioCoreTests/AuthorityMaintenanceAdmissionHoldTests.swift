@@ -54,7 +54,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
             let row = try Record(id: binding.attemptID, revision: data(91), purpose: .retainedRuntime, scope: scope,
                 phase: .reopenPending, service: .notStopped, shutdownBinding: binding)
             try f.edit([RuntimeMaintenanceWindowStorage.createSQL, "PRAGMA user_version=29",
-                "INSERT INTO runtime_maintenance_windows_v1 VALUES(X'\(hex(f.authority.accountID))',X'\(hex(row.id))',X'\(hex(row.revision))',8,X'\(try hex(row.encoded))')"])
+                "INSERT INTO runtime_maintenance_windows_v1 VALUES(X'\(hex(f.authority.accountID))',X'\(hex(row.id))',X'\(hex(row.revision))',\(row.phase.rawValue),X'\(try hex(row.encoded))')"])
             let path = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent(), anchor = path.deletingLastPathComponent().path
             func directory() throws -> ReleaseDestinationLease { try .init(anchor: anchor, relativeDirectory: path.lastPathComponent, owner: getuid()) }
             let reader = Reader(f, admission: admission, incarnation: incarnation)
@@ -233,7 +233,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
             let row = try Record(id: binding.attemptID, revision: data(91), purpose: .retainedRuntime, scope: scope,
                 phase: .draining, service: .notStopped)
             try f.edit([RuntimeMaintenanceWindowStorage.createSQL, "PRAGMA user_version=29",
-                "INSERT INTO runtime_maintenance_windows_v1 VALUES(X'\(hex(f.authority.accountID))',X'\(hex(row.id))',X'\(hex(row.revision))',8,X'\(try hex(row.encoded))')"])
+                "INSERT INTO runtime_maintenance_windows_v1 VALUES(X'\(hex(f.authority.accountID))',X'\(hex(row.id))',X'\(hex(row.revision))',\(row.phase.rawValue),X'\(try hex(row.encoded))')"])
             let path = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent(), anchor = path.deletingLastPathComponent().path
             func directory() throws -> ReleaseDestinationLease { try .init(anchor: anchor, relativeDirectory: path.lastPathComponent, owner: getuid()) }
             let reader = Reader(f, admission: admission, incarnation: incarnation)
