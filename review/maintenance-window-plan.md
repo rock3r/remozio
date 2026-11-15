@@ -891,3 +891,41 @@ M06a alone does not close the interval between the last read and bootstrap.
 The first class-wide gate timed out at120 seconds and its cleanup assertion failed; both outcomes remain immutable.
 The second-writer diagnostic passed separately; it is not transferred into this gate.
 Toni3257 requested per-method selectors and fixture reuse. The failed selector run retained23 passing outcomes. The continuation runs only the remaining86 native methods after actual XCTest inventory validation.
+
+
+### M06a real SetupAccountOwner boundary proof (Toni3264/3266/3269)
+
+Source `395ecf3490c609822d2d2059c7c6d61f956fe92b`; tree `d1f1372704a7ed3551c604826a2d5c39d543b970`. This commit changes only RuntimeActivationOwnerTests.swift above da88d06a.
+All production bytes remain identical. M06a still changes61 production lines above467b049f.
+The M06b candidate remains source-only, unapplied and unqualified.
+
+The source audit found no production retained-mode constructor.
+SetupAccountOwner.open uses the scoped initializer. AdministrativeSetupService closes its startup store before constructing a scoped owner.
+The retained initializer is internal and has no production caller.
+Machines.useActivation rejects retained mode before its body. resumeActivation uses that method before any preparation or registration callback.
+GatewayRuntimeActivationRootOperation and RuntimeAuditUpgradeRestart close their own machine borrows before native registration.
+Toni independently confirmed the source trace in3269. No production correction was required.
+
+Both new regressions run through the actual SetupAccountOwner implementation with real owned SQLite files.
+Retained mode owns the writer, reads progress, and refuses activation with unavailable before every callback.
+It leaves progress unchanged and releases its writer when the owner closes.
+Scoped mode completes activation through the actual maintenance guard and registration reconciliation.
+A second writer opens during all six simulated native callbacks for the Authority and Transport registrations.
+These are ordinary-owner tests. Native callbacks remain simulated; no installed Root or launchctl proof is claimed.
+
+Gate4438 exited0/3015e4. Core and Debug built fresh.
+All12 RuntimeActivationOwnerTests methods and10 fresh Debug SignedReleaseInspection methods passed.
+The source-based admission retains99 native outcomes from the prior qualified source and54 manifest Python outcomes.
+Only an unrelated private test fixture and its class changed; that complete class ran fresh.
+Every production input and every other tracked test input is byte-identical. No test-binary identity reuse is claimed.
+The qualification covers121 unique native outcomes:22 fresh and99 transferred. No skip occurred.
+The first timed-out class and failed zero-selector run remain failed and immutable.
+The weights candidate passed48 fresh existing CI tests against this new test inventory (41030:0/af5949).
+The weights JSON remains unapplied. Its measured Bootstrap class and14 methods still come from da88d06a.
+The conservative cumulative budget, including CI checks, is1117.732/1800 seconds.
+No owned native process remains. The checkout is clean. Bepi did not push.
+
+M06a remains a negative guard. M06b must hold the shared account token across ensure/launchctl and require the real account drain for authorized-to-draining.
+M05d must reject a re-registered job or a new Authority incarnation before the body.
+M06b requires its measured candidate and main reconciliation before application.
+Release, installed Root, full Core, merge readiness and the full objective remain incomplete.
