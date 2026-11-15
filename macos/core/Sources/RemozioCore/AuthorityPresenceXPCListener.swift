@@ -36,6 +36,8 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     private let pairingAccess: AuthorityPairingSetupAccess?
     private let maintenancePairingOwners: AuthorityMaintenancePairingOwners?
     private let clock: AuthorityClock
+    private var maintenance: AuthorityMaintenanceConnections?, setupPolicy: XPCPeerPolicy?
+    var supportsMaintenance: Bool { maintenancePairingOwners != nil }
     private var running = false
     private var closed = false
     public init(configuration: AuthorityPresenceEndpointConfiguration, journal: AuthorityJournal,
@@ -59,7 +61,30 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
         super.init()
         policy.configure(listener); listener.delegate = self
     }
-    deinit { listener.invalidate(); registry.close() }
+    deinit {
+        listener.invalidate(); registry.close(); let owner = maintenance
+        owner?.close(); Task { await owner?.closeAndWait() }
+    }
+    func prepareMaintenance(policy setup: XPCPeerPolicy) throws {
+        try lock.withLock {
+            guard !running, !closed, supportsMaintenance, policy.expectedUserID > 0, setup.expectedUserID == 0,
+                  setupPolicy == nil else { throw AuthorityPresenceIPCError.unavailable }
+            listener.setConnectionCodeSigningRequirement("(\(policy.requirement)) or (\(setup.requirement))")
+            setupPolicy = setup
+        }
+    }
+    func installMaintenance(_ owner: AuthorityMaintenanceConnections) throws {
+        try lock.withLock {
+            guard running, !closed, maintenance == nil, let setupPolicy,
+                  owner.setupPolicy?.requirement == setupPolicy.requirement else { throw AuthorityPresenceIPCError.unavailable }
+            try owner.start(); maintenance = owner
+        }
+    }
+    func closeMaintenanceAndWait() async {
+        let owner = lock.withLock { maintenance }
+        await owner?.closeAndWait()
+        lock.withLock { if maintenance === owner { maintenance = nil } }
+    }
     public func start() throws {
         try lock.withLock {
             guard getuid() == 0, geteuid() == 0, !running, !closed else { throw AuthorityPresenceIPCError.unavailable }
@@ -74,11 +99,16 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     }
     public func close() {
         lock.withLock { closed = true; running = false; listener.invalidate(); listener.delegate = nil }
-        registry.close()
+        registry.close(); maintenance?.close()
     }
     public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         lock.withLock {
-            guard listener === self.listener, running, !closed, let id = registry.reserve() else { connection.invalidate(); return false }
+            guard listener === self.listener, running, !closed else { connection.invalidate(); return false }
+            if connection.effectiveUserIdentifier == 0 {
+                guard let maintenance else { connection.invalidate(); return false }
+                return maintenance.accept(connection)
+            }
+            guard let id = registry.reserve() else { connection.invalidate(); return false }
             do {
                 let binding = try AuthorityPresenceBinding(macID: presence.configuration.macID, accountID: presence.configuration.accountID,
                     clockEpoch: clock.epoch, connectionID: id)
