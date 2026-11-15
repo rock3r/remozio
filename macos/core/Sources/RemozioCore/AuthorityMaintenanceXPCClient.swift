@@ -118,7 +118,7 @@ actor AuthorityMaintenanceXPCClient {
     deinit { lifetime.close(); timer?.cancel(); driver.close() }
     func start(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .new else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
-        guard case .hello(1) = try await invoke(nil, until: deadline) else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         let response = try await send(.open, until: deadline); binding = response.binding; if state != .closed { state = .open }; return response
     }
     func observe(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {

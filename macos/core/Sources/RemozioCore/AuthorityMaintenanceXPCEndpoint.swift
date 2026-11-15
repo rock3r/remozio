@@ -85,7 +85,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     private var context: (Request, AuthorityMaintenancePairingAdmission.Connection)?
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var active: UUID?, budgetOwners = Set<UUID>()
-    private var closed = false
+    private var closed = false, helloAccepted = false
     private init(access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget,
         verify: @escaping () throws -> Void, invalidate: @escaping () -> Void, onHandshake: @escaping @Sendable () -> Void) {
         self.access = access; self.budget = budget; self.verify = verify; self.invalidate = invalidate; self.onHandshake = onHandshake
@@ -122,7 +122,8 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     func hello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             try verify()
-            try lock.withLock { guard !closed else { throw AuthorityXPCEndpointError.unavailable }; reply(1) }
+            try lock.withLock { guard !closed else { throw AuthorityXPCEndpointError.unavailable }
+                helloAccepted = true; reply(AuthorityMaintenanceChannelScope.protocolVersion) }
         } catch { close(); reply(0) }
     }
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
@@ -145,7 +146,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
         do {
             try verify(); let request = try AuthorityMaintenanceGateRequest.decode(payload)
             try lock.withLock {
-                guard !closed, active == nil, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                guard !closed, helloAccepted, active == nil, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
                 let id = UUID(); active = id; budgetOwners.insert(id)
                 tasks[id] = Task { [self] in
                     defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
