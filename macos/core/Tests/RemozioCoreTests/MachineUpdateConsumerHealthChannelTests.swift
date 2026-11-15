@@ -135,6 +135,32 @@ final class MachineUpdateConsumerHealthChannelTests: XCTestCase, @unchecked Send
         await gateway.close()
     }
 
+    func testInstalledReadinessKeepsExactHost5HelloAndRejectsLegacyHello() async throws {
+        let fixture = try RuntimeActivationFixture(nativeConsumerHosts: true)
+        let expected = try Host5ReaderFixture.host(fixture.plan.host)
+        for legacy in [false, true] {
+            let driver = try Driver(authority: true)
+            driver.state.withLock { $0.greeting = legacy ? fixture.plan.host.canonicalBytes : expected }
+            let moment = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+            let client = try MachineUpdateConsumerHealthChannel(driver: driver, expectedHello: expected,
+                requirement: driver.requirement, registration: nil, authorityInstalledReadiness: true,
+                timeoutMilliseconds: 1000, clock: { moment })
+            let root = try await client.prepareAuthorityReadinessChallenge()
+            let gateway = try await gatewayScope(boundTo: driver, request: root)
+            do {
+                let scope = try await client.openScope(authorityGatewayExchange: gateway.exchange)
+                XCTAssertFalse(legacy)
+                XCTAssertEqual(scope.proof.role.requirement, driver.requirement)
+                XCTAssertEqual(driver.state.withLock { $0.checks }, 1)
+                await scope.close()
+            } catch {
+                XCTAssertTrue(legacy)
+                XCTAssertEqual(driver.state.withLock { $0.checks }, 0)
+            }
+            await client.close(); await gateway.close()
+        }
+    }
+
     func testInstalledAuthorityRejectsGatewayExchangeForAnotherRootChallenge() async throws {
         let driver = try Driver(authority: true)
         let client = try channel(driver, authorityInstalledReadiness: true)

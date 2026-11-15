@@ -85,7 +85,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertEqual(settings.writers, GatewaySettingsControlInterface.supportedVersions)
                 let host = try XCTUnwrap(component.formats.first { $0.name == "authority.command-host-config" })
                 XCTAssertEqual(host.readers, InstalledAuthorityCommandConfiguration.supportedVersions)
-                XCTAssertEqual(host.writers, InstalledAuthorityCommandConfiguration.supportedVersions)
+                XCTAssertEqual(host.writers, InstalledAuthorityCommandConfiguration.writerSupportedVersions)
             }
             try RuntimeMaintenanceWindowStorage.requireReaderFormats(evidence)
             try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 28)

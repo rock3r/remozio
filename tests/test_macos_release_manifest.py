@@ -428,7 +428,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(roles, {1, 2, 4, 5, 6, 8, 11, 12})
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
-        self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3, 4])
+        self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3, 4, 5])
         self.assertEqual(declarations['authority.installation-preparation'],
                          {0: 'authority.installation-preparation', 1: list(range(1, 30)), 2: list(range(1, 26)), 3: {1: 2, 24: 25}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
@@ -486,14 +486,16 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             else:
                 self.assertNotIn('authority.gateway-settings-control', declarations)
 
-    def test_host_codec_four_is_declared_by_both_retained_settings_participants(self):
+    def test_host5_readers_ship_without_writer5_or_a_channel_announcement(self):
         expected = MANIFEST.format_declaration('authority.command-host-config', [1, 2, 3, 4])
+        expected[1] = [1, 2, 3, 4, 5]
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
                 self.assertEqual(declarations['authority.command-host-config'], expected)
             else:
                 self.assertNotIn('authority.command-host-config', declarations)
+            self.assertNotIn('authority.maintenance-channel', declarations)
 
     def test_no_component_declares_the_installed_readiness_service_yet(self):
         # Host version 4 can name the readiness service only when the Authority also declares this format.
