@@ -214,8 +214,8 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
         let events = Mutex<[String]>([])
         init(_ listener: NSXPCListener) { connection = .init(listenerEndpoint: listener.endpoint); connection.remoteObjectInterface = NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self) }
         func start(_ invalidated: @escaping @Sendable () -> Void) {
-            connection.invalidationHandler = { [self] in events.withLock { $0.append("invalidated") }; invalidated() }
-            connection.interruptionHandler = { [self] in events.withLock { $0.append("interrupted") }; invalidated() }; connection.activate()
+            connection.invalidationHandler = { [weak self] in self?.events.withLock { $0.append("invalidated") }; invalidated() }
+            connection.interruptionHandler = { [weak self] in self?.events.withLock { $0.append("interrupted") }; invalidated() }; connection.activate()
         }
         private func proxy(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) -> (any AuthorityMaintenanceXPCProtocol)? {
             connection.remoteObjectProxyWithErrorHandler { [self] error in
