@@ -26,6 +26,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         var ready = false, closed = false, busy = false
         var attempt: PairingEnrollmentAttempt?
         var activity: ReleaseActivityToken?
+        var stage: AuthorityMaintenancePairingAdmission.Stage?
+        var currentOperation: UUID?, retiringStages: [UUID: AuthorityMaintenancePairingAdmission.Stage] = [:]
         var operations: [UUID: Bool] = [:]
     }
     private let state = Mutex(WorkState())
@@ -97,12 +99,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             guard attempt == nil, proposal.count <= 132_000,
                   authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingSetupError.unavailable }
             try authorize(authorization)
-            let activity = try access.acquireReleaseActivity()
+            let stage = try access.maintenanceAdmission.reserveStage()
+            let activity: ReleaseActivityToken?
+            do { activity = try access.acquireReleaseActivity() } catch { stage.close(); throw error }
             var transferred = false
-            defer { if !transferred { activity?.close() } }
+            defer { if !transferred { activity?.close(); stage.close() } }
             let staged = try access.stage(proposal)
             let bytes = try staged.transcript.encode()
-            state.withLock { $0.attempt = staged; $0.activity = activity }; transferred = true
+            state.withLock { $0.attempt = staged; $0.activity = activity; $0.stage = stage }; transferred = true
             startExpiryTimer()
             return bytes
         }
@@ -141,10 +145,10 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         return try lock.withLock {
             guard !closed, !busy, ready != handshake, budget.acquire() else { throw AuthorityPairingSetupError.unavailable }
             let id = UUID()
-            state.withLock { $0.busy = true; $0.operations[id] = false }
+            state.withLock { $0.busy = true; $0.currentOperation = id; $0.operations[id] = false }
             var completion: Completion?, transferred = false
             defer {
-                busy = false; budget.release()
+                state.withLock { $0.busy = false; $0.currentOperation = nil }; budget.release()
                 if !transferred {
                     if let completion { completion.close() }
                     else { _ = state.withLock { $0.operations.removeValue(forKey: id) } }
@@ -153,6 +157,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             let activity = try access.acquireReleaseActivity()
             state.withLock { $0.operations[id] = activity != nil }
             let owned = Completion(activity: activity) { [self] in
+                let stage = state.withLock { $0.retiringStages.removeValue(forKey: id) }; stage?.close()
                 _ = state.withLock { $0.operations.removeValue(forKey: id) }
             }
             completion = owned
@@ -165,9 +170,12 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     private func clearAttempt() {
         expiryTimer?.cancel(); expiryTimer = nil
-        state.withLock { $0.attempt = nil }
+        let stage = state.withLock { s -> AuthorityMaintenancePairingAdmission.Stage? in
+            s.attempt = nil; guard let stage = s.stage else { return nil }; s.stage = nil
+            if let id = s.currentOperation { s.retiringStages[id] = stage; return nil }; return stage
+        }
         attemptActivity?.close()
-        state.withLock { $0.activity = nil }
+        state.withLock { $0.activity = nil }; stage?.close()
     }
     private func startExpiryTimer() {
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
