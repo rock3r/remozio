@@ -53,7 +53,9 @@ struct AuthorityMain {
             }
         } catch {
             let failure = error
-            do { try await runner.close() } catch { throw RunFailure.shutdown }
+            do {
+                if failure is CancellationError { try await runner.closeForTermination() } else { try await runner.close() }
+            } catch { throw RunFailure.shutdown }
             throw failure
         }
     }
