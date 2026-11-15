@@ -72,7 +72,9 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             let target: ProtectedSetupDirectory
             if mapped {
                 let relative = try RuntimeMaintenanceCommitments.MutationFootprint.relative(artifact.path)
-                target = try .init(anchor: root.path, relativePath: (relative as NSString).deletingLastPathComponent,
+                let parent = (relative as NSString).deletingLastPathComponent
+                target = try .init(anchor: parent.isEmpty ? root.deletingLastPathComponent().path : root.path,
+                    relativePath: parent.isEmpty ? root.lastPathComponent : parent,
                     owner: getuid(), visibility: .sharedMetadata)
             } else { target = directory }
             defer { if mapped { target.close() } }
