@@ -495,3 +495,53 @@ The active App entry uses a guard. No maintenance error can force its ordinary s
 Toni3238 orders: this correction, M06a, M05c, M05d, then M07a.
 M06a guards all three bootstrap paths and rejects restoration until its exact owner is implemented.
 No later slice has been applied. Each publication and merge remains with Toni.
+
+
+### M06a common bootstrap guard (Toni3238/3243/3250)
+
+Source `da88d06aa19f62198ee38299a3905d14ffd6568a`; tree `47eb3de5ce11a6a7b5e5489851af626d611ba833`.
+Local base `467b049fb8da38b3f73e9512a570e5071ac7c28c` preserves main1e1ce999 and qualified M05b5 source4ad482c6.
+The reconciliation differs from4ad482c6 only in main test weights. It preserves both histories.
+Toni will publish the M06a delta on actual main after the preceding M05b5 PR773 merges.
+
+The complete production delta is61 changed lines across four files. The new class adds14 regression methods.
+RuntimeJobRegistration.ensure uses one common guard, covering RuntimeActivationFiles, GatewayRuntimeActivationOperation and RuntimeAuditUpgradeRestart.
+Every existing reconciliation verification checks the current window through a brief protected transaction.
+The native wrapper closes the machine store before native inspection or bootstrap. Existing job and Audit EX guards remain unchanged.
+Missing or restored windows preserve ordinary registration. Every active phase, including restoration, refuses with maintenancePending.
+A read error, corrupt record or changed account, installation, bundle or directory cannot become an absent window.
+Another account's window does not restrict this account. Transport and gateway roles do not open the guard store.
+No record grants restoration, stop permission, body execution, drain ownership or native custody.
+M06a has no restoration exception. The exact restoration owner remains a later prerequisite.
+
+The Core build is an exact-source transfer; Debug built fresh. Gate40081 exited0/fc06c2; the actual terminal was consumed.
+The qualification admits109 unique native outcomes:86 fresh in this continuation and23 transferred from the failed selector run.
+The23 transfers include the14 new bootstrap methods. The10 actual Debug manifest inspections are fresh.
+Python passed54 fresh manifest tests. There are no skipped outcomes. The original failed runs remain failed.
+All source hashes remained unchanged. No owned native process remains.
+The cumulative M06a budget is1049.751/1800 seconds. Earlier M05b5 gates remain separate evidence.
+The second-writer regression opens another real writer during simulated inspect/bootstrap/inspect callbacks.
+It verifies actual lock release, not an assertion about a callback name or database Boolean.
+Other tests cover every active phase, restored/absent windows, scope mismatches, corruption and uncertain store opening.
+A window that appears after preflight prevents bootstrap. A window that appears after bootstrap prevents confirmation.
+These checks do not claim that a prior successful command can be undone.
+Native callbacks are simulated. Installed Root admission and actual launchctl execution remain unqualified.
+Release, the full Core suite and merge readiness remain unqualified. Bepi did not push.
+
+Toni's order remains M05b5 correction, M06a, M05c, M05d, then M07a.
+M05c must publish an exact durable marker only after successful bound close and provide protected readback.
+M05d must combine its native permit and stop owner after supporting guards are complete.
+M07a must persist the exact five-value binding before arm and refuse uncertain persistence.
+Maintenance is never a prerequisite for ordinary Authority process startup.
+The guard controls native registration, not the ordinary process's request startup.
+M09, live#725, attended provider tests and the full objective remain incomplete.
+
+Toni3259 assigns race prevention to M06b, after M06a and before M05d.
+The shared account admission token must span ensure and launchctl.
+The authorized-to-draining transition must require the real exclusive account drain.
+Preserve legacy bootstrap without an account registration; maintenance without a gate must refuse.
+M05d must independently reject a registered Authority job or new incarnation after bootout and before the body.
+M06a alone does not close the interval between the last read and bootstrap.
+The first class-wide gate timed out at120 seconds and its cleanup assertion failed; both outcomes remain immutable.
+The second-writer diagnostic passed separately; it is not transferred into this gate.
+Toni3257 requested per-method selectors and fixture reuse. The failed selector run retained23 passing outcomes. The continuation runs only the remaining86 native methods after actual XCTest inventory validation.
