@@ -12,7 +12,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     private enum Fault: Error { case injected }
     private final class Trace: Sendable { let values = Mutex<[String]>([]) }
     private final class Driver: AuthorityMaintenanceClientDriver, Sendable {
-        enum Mode: Sendable, Equatable { case normal, heldArm, lostCancel, badHello, lostReopen, lostGate, foreignEpoch, busyGate, heldGate, wrongChallenge }
+        enum Mode: Sendable, Equatable { case normal, heldArm, lostCancel, badHello, lostReopen, lostGate, foreignEpoch, busyGate, heldGate, unknownGate, wrongChallenge }
         struct State {
             var mode = Mode.normal, calls: [Request] = [], gates: [AuthorityMaintenanceGateRequest] = []
             var invalidated: (@Sendable () -> Void)?, held: (@Sendable (AuthorityMaintenanceClientReply) -> Void)?
@@ -47,7 +47,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
                 }
                 reply(.bytes(try AuthorityMaintenanceGateResponse(request: q,
                     authorityIncarnation: mode == .foreignEpoch ? Data(repeating: 99, count: 16) : q.target.incarnation,
-                    hold: mode == .heldGate ? .held : .released, admission: mode == .busyGate ? .busy : .available).encoded))
+                    hold: mode == .heldGate ? .held : mode == .unknownGate ? .unknown : .released, admission: mode == .busyGate ? .busy : .available).encoded))
             } catch { reply(.bytes(nil)) }
         }
         func close() { state.withLock { $0.invalidated }?() }
@@ -160,7 +160,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         XCTAssertEqual(f.phases,[.reopenPending,.needsOwnerRecovery])
     }
     func testMissingHeldBusyForeignAndUncorrelatedGateResultsNeverRestore() async throws {
-        for mode in [Driver.Mode.lostGate,.heldGate,.busyGate,.foreignEpoch,.wrongChallenge] {
+        for mode in [Driver.Mode.lostGate,.heldGate,.unknownGate,.busyGate,.foreignEpoch,.wrongChallenge] {
             let f=try Fixture(), window=try await f.start(); f.fresh.state.withLock { $0.mode=mode }
             await expectRecovery { _=try await f.recover(window) }
             XCTAssertEqual(f.newActions,[.reopen]); XCTAssertEqual(f.fresh.state.withLock { $0.gates.count },1)
@@ -214,15 +214,16 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
     }
     private final class SQLFixture: @unchecked Sendable {
         let f: RuntimeMaintenanceWriterFixture
+        let last = Mutex<Record?>(nil)
         init(_ f: RuntimeMaintenanceWriterFixture) { self.f=f }
         func write(_ next: Record, previous: Record?, drain: UpdateDrainToken? = nil) throws -> Record {
             let snapshot=try f.machine().stableMachineUpdateSnapshot(candidate:f.candidate)
             let receipt=try f.machine().writeRuntimeMaintenanceTransition(next,replacing:previous,expected:snapshot,
                 candidate:f.candidate,directory:f.directory,admission:f.admission,accountDrain:drain)
             if let previous { try receipt.requireReplacement(next,replacing:previous) }
-            return receipt.record
+            last.withLock { $0=receipt.record }; return receipt.record
         }
-        func run() async throws {
+        func run(readbackHold: Record.GateReadback.Hold? = nil) async throws {
             let snapshot=try f.machine().stableMachineUpdateSnapshot(candidate:f.candidate)
             let gate=try XCTUnwrap(snapshot.admission.accounts.first { $0.accountID==f.authority.accountID }).identity
             let anchor=URL(fileURLWithPath:f.databasePath).deletingLastPathComponent().deletingLastPathComponent().path
@@ -259,9 +260,11 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
                     incarnation:incarnation,armedBinding:target,candidate:self.f.candidate)
                 try hold.reopen(row,binding:target,incarnation:incarnation,releaseBinding:release)
             },readGate:{ q in
-                try AuthorityMaintenanceGateObservation.capture(request:q,incarnation:incarnation,hold:hold,boundary:boundary,read:{
+                let observed=try AuthorityMaintenanceGateObservation.capture(request:q,incarnation:incarnation,hold:hold,boundary:boundary,read:{
                     try self.f.machine().runtimeMaintenanceGateRecord(q,account:self.f.authority,candidate:self.f.candidate)
                 })
+                if let readbackHold { return try .init(request:q,authorityIncarnation:incarnation,hold:readbackHold,admission:observed.admission) }
+                return observed
             })
             let first=try AuthorityMaintenanceXPCEndpoint.openOwned(access:access,budget:.init(maximum:1))
             let second=try AuthorityMaintenanceXPCEndpoint.openOwned(access:access,budget:.init(maximum:1))
@@ -270,10 +273,27 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
             let client=try AuthorityMaintenanceXPCClient.openOwned(context:request,driver:EndpointDriver(first))
             let opened=try await client.start(until:.now.advanced(by:.seconds(5)))
             let bound=try draining.retainingShutdownBinding(opened.binding); _=try write(bound,previous:draining,drain:drain)
-            let restored=try await client.cancelAndReopenOwned(window:bound,drain:drain,directory:f.directory,
-                until:.now.advanced(by:.seconds(5)),makeDriver:{ EndpointDriver(second) },persist:{ next,previous in
-                    try self.write(next,previous:previous)
-                })
+            let restored: Record
+            do {
+                restored=try await client.cancelAndReopenOwned(window:bound,drain:drain,directory:f.directory,
+                    until:.now.advanced(by:.seconds(5)),makeDriver:{ EndpointDriver(second) },persist:{ next,previous in
+                        try self.write(next,previous:previous)
+                    })
+            } catch {
+                await first.closeAndWait(); await second.closeAndWait()
+                guard readbackHold != nil else { throw error }
+                XCTAssertEqual(error as? AuthorityMaintenanceClientError,.needsOwnerRecovery)
+                let failed=try XCTUnwrap(last.withLock { $0 })
+                XCTAssertEqual(failed.phase,.needsOwnerRecovery); XCTAssertEqual(failed.failure,.admissionUnconfirmed)
+                try f.machine().requireRuntimeMaintenanceObservationWindow(failed,candidate:f.candidate)
+                try f.reopen(nil)
+                try f.machine().requireRuntimeMaintenanceObservationWindow(failed,candidate:f.candidate)
+                let startup=f.machine().runtimeMaintenanceStartupProjection(account:f.authority,candidate:f.candidate)
+                XCTAssertTrue(startup.requiresLocalHold); XCTAssertTrue(startup.needsOwnerRecovery)
+                XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath,omitMaintenance:true),unrelated)
+                hold.close(); return
+            }
+            XCTAssertNil(readbackHold)
             await first.closeAndWait(); await second.closeAndWait()
             XCTAssertEqual(restored.phase,.restored); XCTAssertEqual(restored.gate?.authorityIncarnation,incarnation)
             try f.machine().requireRuntimeMaintenanceObservationWindow(restored,candidate:f.candidate)
@@ -282,16 +302,25 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
             let admitted=try boundary.acquireAdmission(); try admitted.validate(); admitted.close(); hold.close()
         }
     }
-    func testActualSQLiteCommitsAndKernelGatesCompleteTheOwnedClientCleanupWithoutANewReservation() throws {
+    private func withSQLCleanup(readbackHold: Record.GateReadback.Hold? = nil) throws {
         try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
             let box=SQLFixture(fixture), done=DispatchSemaphore(value:0), result=Mutex<Result<Void,Error>?>(nil)
             Task {
-                do { try await box.run(); result.withLock { $0 = .success(()) } }
+                do { try await box.run(readbackHold:readbackHold); result.withLock { $0 = .success(()) } }
                 catch { result.withLock { $0 = .failure(error) } }
                 done.signal()
             }
             XCTAssertEqual(done.wait(timeout:.now()+30),.success)
             try XCTUnwrap(result.withLock { $0 }).get()
         }
+    }
+    func testActualSQLiteCommitsAndKernelGatesCompleteTheOwnedClientCleanupWithoutANewReservation() throws {
+        try withSQLCleanup()
+    }
+    func testHeldReadbackPersistsOwnerRecoveryAcrossAnActualStoreRestart() throws {
+        try withSQLCleanup(readbackHold:.held)
+    }
+    func testUnknownReadbackPersistsOwnerRecoveryAcrossAnActualStoreRestart() throws {
+        try withSQLCleanup(readbackHold:.unknown)
     }
 }
