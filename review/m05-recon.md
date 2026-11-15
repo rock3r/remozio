@@ -2,7 +2,7 @@
 
 Current decisions: Toni3104,3108,3111,3112,3117 and3131. Earlier appendices retain historical source states. The current table and final section govern active work.
 This revision supersedes the full live-idle design in689ee08e. That commit retains the detailed hosted-owner audit as history.
-The current implementation source is1b29a5aa above locally qualified M05c2 source67a52505.
+The current implementation source is21efca1b above locally qualified M05d1 source1b29a5aa.
 The final M05c section records selected local evidence. It qualifies no installed Root execution, daemon signal or service stop.
 
 ## Decision
@@ -674,3 +674,36 @@ A successful body must not fail only because it finishes late. A body error reta
 M05d2 must still prove bootout at most once, permit consumption, process and thread checks, marker mismatches and pair cleanup.
 M07a must persist the five-value binding before arm. The actual C02 owner, M09 restoration and installed tests remain separate requirements.
 Toni owns publication, current-head review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
+
+
+### M05d2 permit, stop and paired body loan (Toni3325/3328/3331)
+
+Source21efca1b follows1b29a5aa. It changes133 production lines in two files and adds17 regression methods.
+The corrected gate builds Core and Debug fresh and passes96 fresh native methods,55 manifest tests and48 CI tests.
+No outcome is transferred or skipped. The first source14b4969b fails compilation before tests.
+Its test-only correction splits closure declarations with different throwing types. Production bytes remain unchanged.
+The original failed run remains failed and its time remains charged to the same1800-second budget.
+
+The private native permit requires captured arm evidence. Ordinary controls cannot select either native factory.
+The permit is consumed once and checks its process, thread, purpose, cohort and current protected configuration.
+The native factory derives only Authority A. It uses shared machine admission and A's exact account drain.
+The shared stop issues bootout at most once, including pending polls and a lost reply.
+Caught reentry poisons the operation. Another thread or fork cannot validate the consumed permit.
+A matching registration with a new PID or an exited original process refuses before another removal.
+Absence, original process exit and exact durable marker readback all precede pair opening and body entry.
+Missing, stale or foreign-incarnation markers cannot start the body.
+
+The body retains both actual store locks, current policy and checkpoint. The loan runs once on its owner thread.
+Consume, stop, removal checks and the last check before body entry use the permit deadline.
+A late pair open refuses before the body and closes both stores.
+After the body, identity, job absence, witness, marker and admission checks continue without that clock.
+A successful body retains its result after the deadline. A throwing body retains its original error.
+A later registration, marker or owner change refuses success and closes the pair.
+Both stores close before a restoration callback can reopen their writer locks.
+Bound stop and validation failures signal needsOwnerRecovery. They do not persist a recovery phase.
+The future M07/C02 owner must persist the five-value binding before arm and retain exact durable ownership through these boundaries.
+
+All new execution tests use ordinary-owner controls and real owned files. They do not execute Root launchctl or native daemon signals.
+Kernel witness capture, installed Root admission, Release and the full Core suite remain unqualified.
+M07a, C02 composition, M09 restoration, live725 and attended provider checks remain incomplete.
+Toni owns publication, review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
