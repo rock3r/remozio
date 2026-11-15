@@ -58,9 +58,10 @@ final class RuntimeMaintenanceBootstrapTests: XCTestCase {
         }
     }
     func testEveryActivePhaseIncludingRestorationRefusesBeforeNativeCallbacks() throws {
-        for phase in Record.Phase.allCases where phase != .restored {
-            try fixture { f in
-                let job = try job(f); try retain(record(f, phase: phase), f)
+        try fixture { f in
+            let job = try job(f); var create = true
+            for phase in Record.Phase.allCases where phase != .restored {
+                try retain(record(f, phase: phase), f, create: create); create = false
                 var callbacks = 0
                 XCTAssertThrowsError(try RuntimeJobRegistration.reconcile(job: job, verifyCurrent: {},
                     requireMaintenanceOpen: { try self.requireOpen($0, f) }, inspect: { callbacks += 1; return .absent },
@@ -88,10 +89,10 @@ final class RuntimeMaintenanceBootstrapTests: XCTestCase {
         }
     }
     func testChangedMachineInstallationAndDirectoryCannotAdoptARestoredWindow() throws {
-        for change in 0..<3 {
-            try fixture { f in
-                let job = try job(f)
-                try retain(record(f, phase: .restored, badMac: change == 0, badInstallation: change == 1, badDirectory: change == 2), f)
+        try fixture { f in
+            let job = try job(f)
+            for change in 0..<3 {
+                try retain(record(f, phase: .restored, badMac: change == 0, badInstallation: change == 1, badDirectory: change == 2), f, create: change == 0)
                 XCTAssertThrowsError(try requireOpen(job, f)) { XCTAssertEqual($0 as? RuntimePreparationError, .changedScope) }
             }
         }
