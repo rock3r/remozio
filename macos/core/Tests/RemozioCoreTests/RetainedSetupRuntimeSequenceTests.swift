@@ -397,7 +397,10 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         XCTAssertNoThrow(try fresh.claim())
     }
     func testActualRuntimeBodyPreservesAllRowsAndFilesOutsideItsDeclaredFootprint() throws {
-        try fixture { s in
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(sharedImportFormats: true, schema29: true) { f in
+            let s = State(f)
+            defer { if let files = s.files { XCTAssertNoThrow(try files.close()) }; try? f.machine().close() }
+            XCTAssertEqual(s.initialRuntime.setup.source.actual.schemaVersion, 29)
             let root = URL(fileURLWithPath: s.directory.path).deletingLastPathComponent()
             let sentinel = root.appendingPathComponent("outside-maintenance-profile.cbor")
             try Data([1, 3, 5, 7]).write(to: sentinel)
