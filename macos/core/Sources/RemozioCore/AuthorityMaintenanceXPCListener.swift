@@ -72,11 +72,11 @@ final class AuthorityMaintenanceConnections: @unchecked Sendable {
         registry = try .init(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try .init(maximum: maximumOperations)
     }
-    static func openOwned(builder: any AuthorityMaintenanceEndpointBuilding,
+    static func openOwned(builder: any AuthorityMaintenanceEndpointBuilding, setupPolicy: XPCPeerPolicy? = nil,
         maximumConnections: Int = 2, maximumOperations: Int = 1, handshakeTimeoutMilliseconds: UInt64 = 5000,
         verifyCurrent: @escaping @Sendable () throws -> Void = {}) throws -> AuthorityMaintenanceConnections {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return try .init(builder: builder, setupPolicy: nil, maximumConnections: maximumConnections, maximumOperations: maximumOperations,
+        return try .init(builder: builder, setupPolicy: setupPolicy, maximumConnections: maximumConnections, maximumOperations: maximumOperations,
             handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds, verifyCurrent: verifyCurrent)
     }
     deinit {
