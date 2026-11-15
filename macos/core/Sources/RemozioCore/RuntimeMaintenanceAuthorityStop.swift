@@ -33,7 +33,7 @@ struct RuntimeMaintenanceAuthorityCohort {
 }
 
 /// Retains every observed process witness. Registration removal alone is not whole-runtime settlement.
-/// Only ordinary-owner fixtures can construct this session until the live idle proof and native permit exist.
+/// The native factory requires its private arm permit. Owned fixtures cannot authorize a system job removal.
 final class RuntimeMaintenanceAuthorityStop {
     private final class Boundary {
         let processID = getpid(), thread = pthread_self()
@@ -79,8 +79,36 @@ final class RuntimeMaintenanceAuthorityStop {
     }
     private let boundary: Boundary
     private let session: RuntimeJobStopSession
+    private var permit: RuntimeMaintenanceStopPermit?
+    private var bodyUsed = false
     private init(boundary: Boundary, session: RuntimeJobStopSession) { self.boundary = boundary; self.session = session }
 
+    static func openNative(permit: RuntimeMaintenanceStopPermit, purpose: RuntimeMaintenanceWindowRecord.Purpose,
+        cohort: RuntimeMaintenanceAuthorityCohort, scope: UpdateOrdinaryAdmissionLease.Scope,
+        drain: UpdateDrainToken, directory: ReleaseDestinationLease) throws -> RuntimeMaintenanceAuthorityStop {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let witness = try permit.consume(cohort: cohort, purpose: purpose)
+        let boundary = Boundary(scope: scope, drain: drain, directory: directory, cohort: cohort, verify: permit.validate)
+        return try boundary.perform {
+            let target = "system/" + cohort.job.declaration.label
+            var removalIssued = false
+            let session = RuntimeJobStopSession(verifyCurrent: boundary.check, inspect: {
+                let result = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["print", target])
+                let observed = try RuntimeJobStopSession.classify(result, job: cohort.job)
+                if case .matching(let pid) = observed {
+                    guard pid == witness.processID, try !witness.hasExited() else { throw RuntimePreparationError.changedScope }
+                }
+                return observed
+            }, capture: { pid in
+                guard pid == witness.processID else { throw RuntimePreparationError.changedScope }; return witness
+            }, bootout: {
+                guard !removalIssued else { return }; removalIssued = true
+                _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootout", target])
+            })
+            let owner = RuntimeMaintenanceAuthorityStop(boundary: boundary, session: session)
+            owner.permit = permit; return owner
+        }
+    }
     /// The callbacks model observations only. Root cannot use this seam to authorize a system job removal.
     static func openOwned(cohort: RuntimeMaintenanceAuthorityCohort, scope: UpdateOrdinaryAdmissionLease.Scope,
         drain: UpdateDrainToken, directory: ReleaseDestinationLease, verify: @escaping () throws -> Void = {},
@@ -98,7 +126,31 @@ final class RuntimeMaintenanceAuthorityStop {
     }
     func poll() throws -> RuntimeJobStopSession.Progress { try boundary.perform { try session.poll() } }
     /// Fresh observation only. This method never issues removal or captures another process.
-    func requireRemoved() throws { try boundary.perform { try session.requireRemoved() } }
+    func requireRemoved() throws { try boundary.perform { try session.requireRemoved(); try permit?.requireClosed() } }
+    /// One synchronous body loan. The pair closes before restoration, including when the body throws.
+    func withNativeBody<Value>(purpose: RuntimeMaintenanceWindowRecord.Purpose, initialization: AuthorityInitializationIntent,
+        policy: AuthorityCodePolicy, _ body: (AuthorityJournalCutoverInspection) throws -> Value) throws -> Value {
+        try boundary.perform {
+            guard !bodyUsed, let permit, permit.window.purpose == purpose,
+                  initialization.macID == permit.window.scope.macID, initialization.installationID == permit.window.scope.installationID,
+                  initialization.accountID == permit.window.scope.authority.accountID,
+                  initialization.releaseDigest == permit.window.scope.releaseDigest,
+                  try policy.bytes == permit.codePolicy.bytes else {
+                throw RuntimePreparationError.changedScope
+            }
+            try session.requireRemoved(); try permit.requireClosed()
+            let pair = try AuthorityJournalCutoverInspection.openForMaintenance(initialization: initialization, policy: policy,
+                scope: boundary.scope, drain: boundary.drain, directory: boundary.directory,
+                machineIdentity: boundary.cohort.machineIdentity, accountIdentity: boundary.cohort.accountIdentity,
+                verifyOwner: boundary.check)
+            defer { try? pair.close() }
+            try pair.validate(); try session.requireRemoved(); try permit.requireClosed(); try boundary.check()
+            bodyUsed = true
+            let result = try body(pair)
+            try pair.validate(); try session.requireRemoved(); try permit.requireClosed(); try boundary.check()
+            try pair.close(); return result
+        }
+    }
     /// Retires the session without releasing the caller's admission or drain ownership.
     func close() { boundary.close() }
     deinit { close() }

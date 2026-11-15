@@ -35,6 +35,20 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     private func checked(_ value: AuthorityMaintenanceClientReply, _ reply: @Sendable (AuthorityMaintenanceClientReply) -> Void) {
         do { _ = try policy.verifyCredentials(connection); reply(value) } catch { reply(.bytes(nil)) }
     }
+    func captureProcess(job: InstalledAccountJobManifest, code: AuthorityCodeEntry) throws -> RuntimeJobProcessObservation {
+        let expected = try XPCPeerPolicy(teamID: code.teamID, componentIdentifier: code.identifier,
+            approvedCodeDirectoryHashes: [code.codeDirectoryHash], expectedUserID: 0)
+        guard expected.requirement == policy.requirement else { throw RuntimePreparationError.changedScope }
+        let peer = try policy.verifyCredentials(connection)
+        let witness = try RuntimeJobProcessObservation.open(job: job, code: code, processID: peer.processID)
+        guard try policy.verifyCredentials(connection) == peer, try !witness.hasExited() else { throw RuntimePreparationError.changedScope }
+        return witness
+    }
+    func requireProcess(_ witness: RuntimeJobProcessObservation) throws {
+        guard try policy.verifyCredentials(connection).processID == witness.processID, try !witness.hasExited() else {
+            throw RuntimePreparationError.changedScope
+        }
+    }
     func close() { connection.invalidate() }
     deinit { close() }
 }
@@ -114,6 +128,57 @@ actor AuthorityMaintenanceXPCClient {
         // Cancellation is cleanup. Its bounded RPC can extend the original wait by up to five seconds.
         _ = try await send(.cancel, until: .now.advanced(by: timeout)); finish(.cancelled); throw AuthorityMaintenanceClientError.cancelled
     }
+    /// The native driver captures the original process. Copied replies cannot construct this permit.
+    func prepareNativeStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
+        admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        until deadline: ContinuousClock.Instant, stopDeadline: ContinuousClock.Instant,
+        verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopPermit {
+        guard getuid() == 0, geteuid() == 0, state == .open, let native = driver as? NativeMaintenanceClient,
+              window.phase == .draining, window.operation == .notStarted, window.service == .notStopped,
+              context.attemptID == window.id, context.revision == window.revision,
+              context.accountID == window.scope.authority.accountID, cohort.accountID == context.accountID,
+              cohort.targetAccountID == window.scope.target.accountID, context.installationID == window.scope.installationID,
+              context.gate == cohort.accountIdentity, deadline > .now, stopDeadline > deadline else {
+            throw RuntimePreparationError.changedScope
+        }
+        func check() throws {
+            try verifyOwner(); try admission.validateMachineBoundary(directory: directory, expected: cohort.machineIdentity)
+            try drain.validateAccountBoundary(directory: directory, accountID: cohort.accountID, expected: cohort.accountIdentity)
+        }
+        try check()
+        let configuration = try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath)
+        guard configuration.jobPlacement == .systemAccount, configuration.label == cohort.job.declaration.label,
+              configuration.command.accountID == cohort.accountID, configuration.command.macID == window.scope.macID,
+              configuration.command.callerUID == window.scope.authority.ownerUID,
+              configuration.installationID == window.scope.installationID, configuration.releaseDigest == window.scope.releaseDigest,
+              let code = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else {
+            throw RuntimePreparationError.changedScope
+        }
+        while true {
+            try check(); let response = try await observe(until: deadline); try check()
+            if response.work?.allowsMaintenanceStop == true { break }
+            guard ContinuousClock.now < deadline else { throw AuthorityMaintenanceClientError.cancelled }
+            try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
+        }
+        let witness = try native.captureProcess(job: cohort.job, code: code)
+        let response = try await arm(until: deadline)
+        do {
+            try check(); try native.requireProcess(witness)
+            guard response.outcome == .applied, response.work?.allowsMaintenanceStop == true else {
+                throw AuthorityMaintenanceClientError.cancelled
+            }
+            let marker = try AuthorityMaintenanceCloseMarker(binding: response.binding, macID: window.scope.macID,
+                installationID: configuration.installationID, releaseDigest: configuration.releaseDigest,
+                codeHash: code.codeDirectoryHash, directoryID: window.scope.authority.directoryID,
+                ownerUID: window.scope.authority.ownerUID, gate: context.gate)
+            return .init(window: window, marker: marker, witness: witness, configuration: configuration,
+                deadline: stopDeadline, verifyOwner: verifyOwner)
+        } catch {
+            do { try await release(until: .now.advanced(by: timeout)) }
+            catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            throw error
+        }
+    }
     func release(_ target: AuthorityMaintenanceBinding? = nil, reopen: Bool = false,
                  until deadline: ContinuousClock.Instant) async throws {
         guard state == .open || state == .armed else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
@@ -173,5 +238,60 @@ actor AuthorityMaintenanceXPCClient {
         state = .closed; if preservingReply { lifetime.invalidate() } else { lifetime.close() }; timer?.cancel(); timer = nil
         pending = nil; driver.close()
         if let value { p?.1.resume(returning: value) } else { p?.1.resume(throwing: error) }
+    }
+}
+
+private extension AuthorityMaintenanceChannelWork {
+    var allowsMaintenanceStop: Bool {
+        journal.requests.liveRequests == 0 && journal.requests.commandCaptures == 0 && journal.requests.activityOwners == 0
+            && journal.exchanges.active == 0 && !journal.exchanges.stopped && journal.nativeExecutions == 0
+            && journal.executionActivityOwners == 0 && execution.started && !execution.stopping && !execution.failed
+            && execution.queuedTurns == 0 && execution.rejectedTurns == 0 && pairing.ready && pairing.stagedAttempts == 0
+            && pairing.activityOwners == 0 && !pairing.operationActive
+    }
+}
+
+/// A native arm result plus its original process. Construction remains private to the native client.
+final class RuntimeMaintenanceStopPermit: @unchecked Sendable {
+    let window: RuntimeMaintenanceWindowRecord, marker: AuthorityMaintenanceCloseMarker
+    private let witness: RuntimeJobProcessObservation
+    private let configuration: InstalledAuthorityCommandConfiguration
+    var codePolicy: AuthorityCodePolicy { configuration.codePolicy }
+    private let deadline: ContinuousClock.Instant, verifyOwner: @Sendable () throws -> Void
+    private let processID = getpid(), lock = NSLock()
+    private var consumed = false, ownerThread: pthread_t?
+    fileprivate init(window: RuntimeMaintenanceWindowRecord, marker: AuthorityMaintenanceCloseMarker,
+        witness: RuntimeJobProcessObservation, configuration: InstalledAuthorityCommandConfiguration,
+        deadline: ContinuousClock.Instant, verifyOwner: @escaping @Sendable () throws -> Void) {
+        self.window = window; self.marker = marker; self.witness = witness; self.configuration = configuration
+        self.deadline = deadline; self.verifyOwner = verifyOwner
+    }
+    func consume(cohort: RuntimeMaintenanceAuthorityCohort, purpose: RuntimeMaintenanceWindowRecord.Purpose) throws -> any RuntimeJobExitWitness {
+        try lock.withLock {
+            guard !consumed else { throw JournalLeaseError.invalidated }
+            consumed = true; ownerThread = pthread_self()
+        }
+        try validate()
+        guard window.purpose == purpose, cohort.accountID == window.scope.authority.accountID,
+              cohort.targetAccountID == window.scope.target.accountID, cohort.accountIdentity == marker.gate,
+              cohort.job.configurationPath == (try RuntimePreparationPaths(accountID: cohort.accountID)).privateDirectory + "/command-host.cbor",
+              cohort.job.declaration.label == configuration.label, cohort.job.bundlePath == MachineBootstrap.bundlePath,
+              try !witness.hasExited() else { throw RuntimePreparationError.changedScope }
+        return witness
+    }
+    func validate() throws {
+        guard getpid() == processID, getuid() == 0, geteuid() == 0, ContinuousClock.now < deadline else {
+            throw JournalLeaseError.invalidated
+        }
+        try lock.withLock {
+            guard consumed, let ownerThread, pthread_equal(pthread_self(), ownerThread) != 0 else { throw JournalLeaseError.invalidated }
+        }
+        try verifyOwner()
+        guard try InstalledAuthorityCommandConfiguration.load(path: (try RuntimePreparationPaths(accountID: marker.binding.accountID)).privateDirectory
+            + "/command-host.cbor").canonicalBytes == configuration.canonicalBytes else { throw InstalledAuthorityCommandError.changedConfiguration }
+    }
+    func requireClosed() throws {
+        try validate(); guard try witness.hasExited() else { throw RuntimeActivationError.unavailable }
+        try AuthorityMaintenanceCloseMarker.readback(marker); try validate()
     }
 }
