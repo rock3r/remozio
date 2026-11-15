@@ -1,8 +1,8 @@
 # M05: work observation and clean shutdown
 
-Current decisions: Toni2996,2998 and3002, following Saturn2994/2997.
+Current decisions: Toni3104,3108,3111,3112,3117 and3131. Earlier appendices retain historical source states. The current table and final section govern active work.
 This revision supersedes the full live-idle design in689ee08e. That commit retains the detailed hosted-owner audit as history.
-The inspected implementation source remains7698e3ef1761a145aea841a866336ed1b440e4de.
+The current implementation source is645f4dfd above the locally qualified acknowledgement repairf54fed93.
 This report is source-only. It qualifies no installed control channel, marker, shutdown or service stop.
 
 ## Decision
@@ -100,7 +100,8 @@ The readback and native permit must still enforce their current code, protected 
 | M05b2b | Authenticated endpoint with committed-state outcomes, rollback and joined operations | 191 measured | Source905b3bfb, gate68601:22 endpoint +24 admission +15 codec +10 Debug checks fresh;73 focused methods/54 Python transferred. Refused arm leaves no block from that request; uncertain rollback returns nil. Cancel/reopen have no fallible checks after release. Root producer/listener remain later. |
 | M05b2c | Fixed listener, signed participant scope and joined retired endpoints | 146 measured | Source94a9ee11. Core and Debug builds passed. Gates14466 and84763 admit50 fresh unique methods and110 transferred methods. All6 scope methods ran fresh under Toni3088. Anonymous XPC proves lifecycle with owned controls. The Root access producer and product registration remain for b4. |
 | M05b3 | Native authenticated Setup client with serialized exchanges and bounded recovery | 169 measured | Source8e494e12. Core/Debug and110 fresh methods passed;73 unrelated methods and54 Python results transferred. Harmless hello precedes identifiers and changes no admission state. Only stagesPending permits another arm before the original deadline. Refused is terminal; nil, timeout or malformed reply requires recovery. No product entry. |
-| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | Verify installation, gate, phase, attempt, revision, account and incarnation at the protected read boundary. Retain real stages and exact armed target; no close-time read. If this cut registers maintenance, include both version1 format declarations, the fixed per-account MachServices entry, generator and real-manifest tests in this same cut. |
+| M05b4a | Protected command frame and actual pairing stage reservations | 94 measured | Source645f4dfd above acknowledgement repairf54fed93. Gate5876 passed76 fresh native methods and143 explicit unchanged-method transfers, fresh Python manifest checks, Core/Debug. One read transaction binds installation, gate, phase, current revision and incarnation. Retained Stage handles keep one attempt counted through actual reply cleanup. No Root factory. |
+| M05b4b | Root factory and actual M05a owner composition | 100–180 planned | Use the one protected command reader and real journal, execution and pairing owners. Never accept a Root-usable injected observation. No close-time read. If this cut registers maintenance, include both version1 format declarations, fixed per-account MachServices, generator and real-manifest tests together. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
@@ -261,3 +262,69 @@ Source8e494e12 changes169 production lines and adds23 tests above94a9ee11.
 The gate runs all affected maintenance classes fresh, plus Debug inspection, with explicit unrelated transfers.
 The injected owned client and anonymous transport fixture refuse Root. Installed Root admission and product wiring remain unqualified.
 Next is b4 under Toni's protected record and real owner composition contract.
+
+### b4a, phase binding and Setup recovery (Toni3104/3108/3111/3112/3117)
+
+The b4 responsibility is split. b4a adds the protected command reader and actual pairing stage ownership.
+b4b adds the Root producer and real M05a owner composition. The listener remains unregistered.
+The reader uses one protected transaction and one stable frame.
+It checks the actual installed account, prepared directory, installation, registered gate, record account, attempt and current revision.
+It compares a supplied binding to the current incarnation. Retained gate metadata cannot replace the native owner's incarnation.
+Open, observe, arm and cancel are accepted only in draining. No action is accepted in stopping.
+
+Only reopen may carry two revisions. request.revision is the exact current reopenPending revision.
+binding.revision remains the original draining revision. Request and response codecs both enforce equality for every other action.
+The b4a reader admits reopen only for notStopped/notStarted and the exact armed binding retained by this incarnation.
+A missing, stale or foreign target refuses. The reader is metadata validation; b4b must retrieve the actual live shutdown owner.
+A healthy reopen is refused by b4a and belongs to M09. No binding is reconstructed from readback alone.
+
+The pairing access owns one admission object per account incarnation, shared by all its endpoints.
+A real pairing attempt acquires a Stage reservation before staging can proceed.
+Its staged, commit, cancel and reply owners retain handles to that same reservation.
+The admission count remains one attempt until every actual owner settles.
+Endpoint close inside a stage reply cannot drop the last reservation before the reply returns.
+Existing stages are neither cancelled nor force-expired to make arm succeed.
+Natural expiry, disconnect, failed staging and completed commit release only their actual references.
+
+The native arm retry interval is250ms. The original absolute arm deadline is never extended.
+An exact cancel after deadline is cleanup. Its bounded RPC can add up to5 seconds after the wait bound.
+An uncertain cleanup reply requires owner recovery and cannot authorize a stop or body.
+
+M07 must persist the exact five16-byte binding values with the attempt before sending arm.
+Those values are correlation metadata, not credentials. Native peer authentication remains mandatory.
+If persistence is uncertain, do not send arm. Never invent the saved connectionID or draining revision after a restart.
+M09 reloads the saved binding, performs hello and verifies the peer again.
+For notStopped, A retains that exact armed target in the same incarnation.
+M09 needs an explicit hello-to-reopen path without open or a new Connection reservation.
+The current b3 start method sends open and b2b begin requires an open context; this path remains unimplemented.
+For healthy, A has a new incarnation and no old armed block.
+M09 admits open in reopenPending/healthy, then releases only the M02 startup hold through the proper native owner.
+It must retain the explicit previous-revision relationship for that restart branch. It must not adopt or mint an armed block.
+Both branches still require actual admission readback before the durable Restored transition.
+
+The original b4a draft245335ce was uncompiled and remains on its saved local reference.
+Toni3117 supplied main-basedb1a1ef4a with the merged M03b2 writer and transition rules.
+The draft rebased to0d0deaf1; source377f3e4a added the reply ownership tests. That gate failed on the pre-existing client race; it remains failed.
+RuntimeMaintenanceWindowRecord and its tests remain byte-identical to that approved base.
+No old-stack qualification or test outcome was retargeted.
+The original b4a gate51157 failed; base diagnostic35382 failed1 of5, and phase diagnostic34479 failed5 of20.
+The latter traces showed reopen data delivered before invalidation, then discarded by the original client.
+Separate endpoint8b39f0c6 and clientf54fed93 fixes passed gate16001, including deterministic applied/refused ordering and20 clean transport repeats.
+Applied cancel/reopen no longer closes on the server. The client records on-time replies synchronously before actor processing.
+Local cancellation, invalidation before delivery and late replies remain closed. No armed operation is replayed.
+The combined repair source is locally qualified for114 fresh unique methods plus20 extra executions and Core/Debug builds.
+Intermediate b4a sourcecd5c447c replayed only its two implementation commits abovef54fed93.
+Its gate24811 passed180 methods, including all10 command reader tests, then stopped at a zero-method writer selector with exit65.
+The selector used the SQL writer class for a pure transition test. RuntimeMaintenanceWindowTransitionTests is a separate class.
+That command contributes no test outcome. The old gate remains stopped with its original terminal and logs.
+Toni3136 requested a separate gate on exact PR768 head5b265f54. Gate37748 compiled Core and passed62 fresh endpoint/admission/codec methods.
+No b2c, b3 or b4a source was in that exact PR tree. No unrelated app or installed proof is claimed.
+Final source645f4dfd adds the Toni3135 guard and a deterministic close-during-authorization test.
+It refuses transfer of a new attempt into an endpoint that closed reentrantly. Both local and reply Stage handles then settle normally.
+The changed pairing test file runs all38 methods fresh. All143 transferred test files and their production paths are unchanged.
+Only the one method-body guard changed aftercd5c447c. No transferred test invokes that pairing endpoint.
+The final evidence admits219 unique methods, not219 fresh methods. The20 new b4a tests include earlier exact-source admissions.
+The final gate runs76 native methods fresh and reuses143 exact unchanged methods from the source-bound partial run. Python and Core/Debug are fresh. The selected base checks include the actual schema29 context method.
+Two helper-only test changes add a database path; their constructor/read smoke methods run fresh. No whole replacement or unrelated native-context suite is claimed.
+Gate5876 admits219 unique native methods (76 fresh and143 transferred) and54 Python manifest tests fresh, with no transfers.
+Installed Root admission, the b4b factory, M09, product registration and the full goal remain incomplete.
