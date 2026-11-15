@@ -852,7 +852,8 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
             let setup = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.setup", approvedCodeDirectoryHashes: [Data(repeating: 9, count: 20)], expectedUserID: 0)
             root = try .openOwned(builder: MuxRootBuilder(access, state, f.policy, requirement), setupPolicy: setup, maximumConnections: rootMaximum)
             let controls = AuthorityPresenceXPCListener.OwnedControls(listener: native, builder: MuxAppBuilder(f, state, requirement),
-                peerUID: { state.route($0) }, configure: { value in state.lock.withLock { state.policies.append(value) } })
+                peerUID: { state.route($0) }, configure: { value in state.lock.withLock { state.policies.append(value) } },
+                supportsMaintenance: true, validateSelf: { _ in })
             server = try .openOwned(configuration: .init(serviceName: RuntimePreparationPaths(accountID: f.account).presenceService,
                 appPolicy: f.policy), journal: f.journal, presence: f.presence, clock: AuthorityClock(), controls: controls)
             try server.prepareMaintenance(policy: setup); try server.start()
@@ -987,10 +988,13 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try AuthorityPresenceEndpointConfiguration(serviceName: RuntimePreparationPaths(accountID: f.f.account).presenceService, appPolicy: rootPolicy))
         await f.close()
     }
-    func testMuxNativePresenceWithoutPairingIsIneligibleWithoutAFallback() throws {
+    func testMuxUnpairedEligibilityRejectsBeforeUnionOrRootOwner() throws {
         let f = try Fixture(ownerUID: getuid())
-        let listener = try AuthorityPresenceXPCListener(configuration: .init(serviceName: RuntimePreparationPaths(accountID: f.account).presenceService,
-            appPolicy: f.policy), journal: f.journal, presence: f.presence, clock: AuthorityClock())
+        let controls = AuthorityPresenceXPCListener.OwnedControls(listener: .anonymous(),
+            builder: MuxAppBuilder(f, MuxState(), try runningTestRequirement()), peerUID: { $0.effectiveUserIdentifier },
+            configure: { _ in }, supportsMaintenance: false, validateSelf: { _ in })
+        let listener = try AuthorityPresenceXPCListener.openOwned(configuration: .init(serviceName: RuntimePreparationPaths(accountID: f.account).presenceService,
+            appPolicy: f.policy), journal: f.journal, presence: f.presence, clock: AuthorityClock(), controls: controls)
         defer { listener.close() }
         XCTAssertFalse(listener.supportsMaintenance)
         let setup = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.setup", approvedCodeDirectoryHashes: [Data(repeating: 9, count: 20)], expectedUserID: 0)

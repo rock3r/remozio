@@ -35,6 +35,8 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
         let listener: NSXPCListener, builder: any AuthorityPresenceOwnedEndpointBuilding
         let peerUID: @Sendable (NSXPCConnection) -> uid_t
         let configure: @Sendable (String) -> Void
+        let supportsMaintenance: Bool
+        let validateSelf: @Sendable (JournalTransaction) throws -> Void
     }
     private let owned: OwnedControls?
     private let lock = NSRecursiveLock()
@@ -48,7 +50,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     private let maintenancePairingOwners: AuthorityMaintenancePairingOwners?
     private let clock: AuthorityClock
     private var maintenance: AuthorityMaintenanceConnections?, setupPolicy: XPCPeerPolicy?
-    var supportsMaintenance: Bool { maintenancePairingOwners != nil || owned != nil }
+    var supportsMaintenance: Bool { maintenancePairingOwners != nil || owned?.supportsMaintenance == true }
     private var running = false
     private var closed = false
     public convenience init(configuration: AuthorityPresenceEndpointConfiguration, journal: AuthorityJournal,
@@ -75,7 +77,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         policy = configuration.appPolicy; self.presence = presence; self.clock = clock
         access = try AuthorityPresenceAccess(journal: journal, presence: presence, appPolicy: configuration.appPolicy,
-            now: { try clock.now() })
+            now: { try clock.now() }, validateSelf: owned?.validateSelf ?? AuthoritySelfValidation.validate)
         if let pairingConfiguration {
             guard let signer, signer.macID == presence.configuration.macID, signer.accountID == presence.configuration.accountID else {
                 throw AuthorityPairingSetupError.wrongScope
