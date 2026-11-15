@@ -25,6 +25,10 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
                 incarnation: incarnation, armedBinding: target, candidate: fixture.candidate)
         }
     }
+    private final class LegacyReader: @unchecked Sendable {
+        let fixture: BoundAdmissionRegistrationFixture
+        init(_ fixture: BoundAdmissionRegistrationFixture) { self.fixture = fixture }
+    }
     private func data(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
     private func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
     private func call(_ e: AuthorityMaintenanceXPCEndpoint, _ q: Request) throws -> AuthorityMaintenanceChannelResponse {
@@ -34,7 +38,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
         return try .decode(XCTUnwrap(result.withLock { $0 }), expected: q)
     }
     func testActualStartupHoldAndAuthenticatedSavedTargetReopenAdmitWithoutRestartOrOpen() throws {
-        try MachineUpdateReplacementTests.withMaintenanceReaderFixture { f in
+        try MachineUpdateReplacementTests.withMaintenanceReaderFixture(releasingRestartAdmission: true) { f in
             let before = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
             let gate = try XCTUnwrap(before.admission.accounts.first { $0.accountID == f.authority.accountID }).identity
             let incarnation = data(4), admission = try AuthorityMaintenancePairingAdmission(accountID: f.authority.accountID, incarnation: incarnation)
@@ -56,8 +60,8 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
             let reader = Reader(f, admission: admission, incarnation: incarnation)
             let activity = try ReleaseActivityBarrier(directory: directory(), owner: getuid())
             let startup = try XCTUnwrap(AuthorityUpdateAdmissionStartup.capture(machine: f.machine(), macID: before.inventory.macID,
-                installationID: before.inventory.installationID, accountID: f.authority.accountID, activity: activity,
-                readCurrent: { try reader.fixture.machine().updateAdmissionState() }, readMaintenance: { machine in
+                installationID: before.inventory.installationID, accountID: f.authority.accountID, activity: activity, candidate: f.candidate,
+                readCurrent: { try reader.fixture.machine().updateAdmissionState(candidate: reader.fixture.candidate) }, readMaintenance: { machine in
                     machine.runtimeMaintenanceStartupProjection(account: reader.fixture.authority, candidate: reader.fixture.candidate)
                 }, openBarrier: { scope, identity in
                     try .init(directory: directory(), owner: getuid(), expected: identity, scope: scope)
@@ -175,6 +179,17 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
         XCTAssertEqual(try f.machine.f.f.sql("PRAGMA user_version"), 16)
         let value = f.machine.store.runtimeMaintenanceStartupProjection(account: a, candidate: f.machine.release)
         XCTAssertFalse(value.requiresLocalHold); XCTAssertFalse(value.needsOwnerRecovery)
+        let reader = LegacyReader(f)
+        let startup = try XCTUnwrap(AuthorityUpdateAdmissionStartup.capture(machine: f.machine.store, macID: inventory.macID,
+            installationID: inventory.installationID, accountID: account.accountID, activity: f.activity(), candidate: f.machine.release,
+            readCurrent: { try reader.fixture.machine.store.updateAdmissionState(candidate: reader.fixture.machine.release) },
+            readMaintenance: { machine in
+                machine.runtimeMaintenanceStartupProjection(account: a, candidate: reader.fixture.machine.release)
+            }, openBarrier: { scope, identity in
+                try .init(directory: f.directory(), owner: getuid(), expected: identity, scope: scope)
+            }))
+        defer { startup.recovery.close(); startup.maintenanceHold?.close() }
+        let admitted = try startup.boundary.acquireAdmission(); try admitted.validate(); admitted.close()
         XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.machinePath + "/installation.sqlite"), before)
     }
     func testLegacyStartupStillRefusesForeignAccountScope() throws {
@@ -204,7 +219,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
     }
 
     func testOpenCancelAndExplicitPendingWriteRequireReopenBeforeAdmission() throws {
-        try MachineUpdateReplacementTests.withMaintenanceReaderFixture { f in
+        try MachineUpdateReplacementTests.withMaintenanceReaderFixture(releasingRestartAdmission: true) { f in
             let before = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
             let gate = try XCTUnwrap(before.admission.accounts.first { $0.accountID == f.authority.accountID }).identity
             let incarnation = data(4), admission = try AuthorityMaintenancePairingAdmission(accountID: f.authority.accountID, incarnation: incarnation)
@@ -224,8 +239,8 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
             let reader = Reader(f, admission: admission, incarnation: incarnation)
             let activity = try ReleaseActivityBarrier(directory: directory(), owner: getuid())
             let startup = try XCTUnwrap(AuthorityUpdateAdmissionStartup.capture(machine: f.machine(), macID: before.inventory.macID,
-                installationID: before.inventory.installationID, accountID: f.authority.accountID, activity: activity,
-                readCurrent: { try reader.fixture.machine().updateAdmissionState() }, readMaintenance: { machine in
+                installationID: before.inventory.installationID, accountID: f.authority.accountID, activity: activity, candidate: f.candidate,
+                readCurrent: { try reader.fixture.machine().updateAdmissionState(candidate: reader.fixture.candidate) }, readMaintenance: { machine in
                     machine.runtimeMaintenanceStartupProjection(account: reader.fixture.authority, candidate: reader.fixture.candidate)
                 }, openBarrier: { scope, identity in
                     try .init(directory: directory(), owner: getuid(), expected: identity, scope: scope)
@@ -284,18 +299,15 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
             XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), unchanged)
         }
     }
-    func testEveryCanonicalLegacySchemaThrough28KeepsAdmissionOpen() throws {
-        try MachineUpdateReplacementTests.withMaintenanceReaderFixture { f in
+    func testStableCatalogSchemas24Through28KeepAdmissionOpen() throws {
+        try MachineUpdateReplacementTests.withMaintenanceReaderFixture(releasingRestartAdmission: true) { f in
             let reader = Reader(f, admission: try .init(accountID: f.authority.accountID, incarnation: data(4)), incarnation: data(4))
             let path = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent(), anchor = path.deletingLastPathComponent().path
             func directory() throws -> ReleaseDestinationLease { try .init(anchor: anchor, relativeDirectory: path.lastPathComponent, owner: getuid()) }
+            // These are catalog fixtures from the current stable store, not historical release upgrades.
             let tables: [Int: String] = [28: "retained_setup_promotion_ready_v1", 27: "retained_setup_promotion_intents_v1",
-                26: "retained_setup_completion_intents_v1", 25: "retained_setup_policy_intents_v1", 24: "stable_release_state_v1",
-                23: "installed_release_state_v1", 22: "machine_update_completion_publication_v1", 21: "machine_update_completion_intent_v1",
-                20: "machine_update_backend_epoch_v1", 19: "machine_update_configuration_epoch_v1", 18: "machine_update_replacement_v1",
-                17: "machine_update_activation_v1"]
-            XCTAssertEqual(Set(tables.keys).union([16]), Set(16...28))
-            for version in stride(from: 28, through: 16, by: -1) {
+                26: "retained_setup_completion_intents_v1", 25: "retained_setup_policy_intents_v1"]
+            for version in stride(from: 28, through: 24, by: -1) {
                 let before = try runtimeMaintenanceFixtureRows(f.databasePath)
                 let projection = f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate)
                 guard !projection.requiresLocalHold else { XCTFail("Valid legacy schema \(version) retained a hold"); return }
@@ -303,13 +315,14 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
                 let inventory = try XCTUnwrap(f.machine().inventory())
                 let startup = try XCTUnwrap(AuthorityUpdateAdmissionStartup.capture(machine: f.machine(), macID: inventory.macID,
                     installationID: inventory.installationID, accountID: f.authority.accountID,
-                    activity: .init(directory: directory(), owner: getuid()), readCurrent: { try reader.fixture.machine().updateAdmissionState() },
+                    activity: .init(directory: directory(), owner: getuid()), candidate: f.candidate,
+                    readCurrent: { try reader.fixture.machine().updateAdmissionState(candidate: reader.fixture.candidate) },
                     readMaintenance: { machine in machine.runtimeMaintenanceStartupProjection(account: reader.fixture.authority, candidate: reader.fixture.candidate) },
                     openBarrier: { scope, identity in try .init(directory: directory(), owner: getuid(), expected: identity, scope: scope) }))
                 let fresh = try startup.boundary.acquireAdmission(); try fresh.validate(); fresh.close()
                 startup.recovery.close(); startup.maintenanceHold?.close()
                 XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
-                if version > 16 { try f.edit(["DROP TABLE " + XCTUnwrap(tables[version]), "PRAGMA user_version=\(version - 1)"]) }
+                if version > 24 { try f.edit(["DROP TABLE " + XCTUnwrap(tables[version]), "PRAGMA user_version=\(version - 1)"]) }
             }
         }
     }
