@@ -172,6 +172,17 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
         return mach_port_type(mach_task_self_, port, &type) == KERN_SUCCESS &&
             (type & (UInt32(1) << (MACH_PORT_RIGHT_RECEIVE + 16))) != 0
     }
+    func testUnarmedShutdownPeekDoesNotWaitForAnOccupiedServiceActor() async throws {
+        let f = try Fixture(), entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), finished = Mutex(false)
+        let service = try AuthorityWakeService(makePublisher: { XCTFail(); throw JournalLeaseError.invalidated },
+            hints: AuthorityWakeHintSource(registration: f.registration), interval: 100, startRequests: {}, closeRequests: { try f.journal.close() })
+        defer { release.signal() }
+        let busy = Task { await service.holdActorForUnarmedCloseTest(entered: entered, release: release, finished: { finished.withLock { $0 = true } }) }
+        try await waitUntil { entered.wait(timeout: .now()) == .success }
+        XCTAssertNil(service.armedMaintenanceCloseAdmission())
+        XCTAssertFalse(finished.withLock { $0 })
+        release.signal(); await busy.value; try await service.close()
+    }
     func testCommandReceiverDrainsBeforeServiceClosesSharedJournal() async throws {
         let f = try Fixture(), port = ReceivePort(), block = Mutex(false), entered = Mutex(false), closes = Mutex(0)
         let gate = DispatchSemaphore(value: 0), journal = f.journal
@@ -778,5 +789,11 @@ extension AuthorityWakePublisherTests {
         try await waitUntil { released == nil }
         XCTAssertEqual(closes.withLock { $0 }, 0)
         gate.signal(); try await waitUntil { closes.withLock { $0 } == 1 }
+    }
+}
+
+private extension AuthorityWakeService {
+    func holdActorForUnarmedCloseTest(entered: DispatchSemaphore, release: DispatchSemaphore, finished: @Sendable () -> Void) {
+        entered.signal(); _ = release.wait(timeout: .now() + 2); finished()
     }
 }
