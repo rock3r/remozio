@@ -95,9 +95,9 @@ The readback and native permit must still enforce their current code, protected 
 | --- | --- | --- | --- |
 | M05a | Actual work observation through pairing reply/activity release; shared budget releases at work return | 152 measured | Sourcec86366af, published by Toni as #764/ab540f5e. Gate18129 passed Core/Debug,31 pairing and10 Debug checks fresh;42 focused methods and54 Python outcomes transferred. |
 | M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Source303fcc08. Gate26372 passed Core/Debug,10 admission and10 Debug checks fresh;73 focused methods and54 Python outcomes transferred. No endpoint integration. |
-| M05b2t | Transfer the armed pairing block to its process-owned shutdown binding | 49 measured | Base303fcc08, source970f30df. Connection close/deinit and dropping a handle preserve the block; exact cancel/reopen alone release it. Existing stages must settle. Native validation pending at this revision. |
-| M05b2a | Bounded canonical channel open/request/response codec | Under200 per complete cut | First reply carries work observations and a minted binding. Correlate exact installation, gate, action, challenge and binding; no native proof from bytes. |
-| M05b2b | Native authenticated endpoint and joined work lifetime | Under200 per complete cut | Synchronous XPCInvocationGuard; repeated observations; use b2t for arm transfer. After arming, XPC close cannot release the block. Wrong-binding reopen fails; exact cancel/reopen releases it. |
+| M05b2t | Process-owned armed pairing block, independent of the connection | 49 measured | Source970f30df; gate46648 passed Core/Debug,20 admission and10 Debug checks fresh;73 focused methods/54 Python transferred. Exact cancel/reopen only; closed admission stays unavailable. |
+| M05b2a | Bounded canonical maintenance request/response and complete work observation codec | 109 measured | Source482407e5 after b2t; gate87265 passed Core/Debug,12 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Exact installation, gate, action, challenge and binding correlation. No endpoint or native proof. |
+| M05b2b | Native authenticated endpoint and joined work lifetime | Under200 per complete cut | Synchronous XPCInvocationGuard and repeated observations. Use b2t and preserve the block after XPC close. Distinguish stages still present (bounded wait) from lost/closed/wrong blocker (cancel, no retry), with separate tests. Exact-binding cancel/reopen only. |
 | M05b2c | Fixed-address native listener and retained disconnected work | Under200 per complete cut | Root self/release/Setup peer checks, registry and joined retired endpoints. Test listener teardown after arming preserves the block. No product registration. |
 | M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
 | M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
@@ -138,5 +138,15 @@ M05b4 verifies installation and gate identity against the request. The five-valu
 
 Current M05a isc86366af with the shared budget fix, published by Toni as #764/ab540f5e.
 Current M05b1 is303fcc08 with the completed gate26372. The existing plan's earlier states remain historical.
-The saved codec20f1f655 is source-only. Its preparation started no build or test before the order changed.
-Rebase that codec only after the completed b2t gate. Each subsequent source receives its own bound evidence.
+The original saved codec20f1f655 remains source-only. Its preparation started no build or test before the order changed.
+The codec rebased only after the completed b2t gate. Its source482407e5 then received its own gate87265.
+
+### Endpoint retry distinction (Toni3049)
+
+Transfer currently reports the same unavailable error for live stages and an invalid blocker.
+M05b2b must distinguish these cases with a dedicated error or explicit count.
+If stages still exist, preserve them and wait/retry only within the configured pre-stop bound.
+If the block is lost, closed or held by another owner, cancel the attempt and do not retry that transfer.
+Test live stages, lost block, closed admission and wrong blocker separately. No generic unavailable retry is allowed.
+This endpoint behavior is still unimplemented. The b2t library gate does not prove native connection handling.
+The completed codec preserves all M05a fields as non-atomic data. It grants no idle proof or shutdown authority.
