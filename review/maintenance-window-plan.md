@@ -381,7 +381,7 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M05b2t | Process-owned armed pairing block, independent of the connection | 49 measured | Source970f30df; gate46648 passed Core/Debug,20 admission and10 Debug checks fresh;73 focused methods/54 Python transferred. Exact cancel/reopen only; closed admission stays unavailable. |
 | M05b2a | Canonical channel codec with applied/stagesPending/refused outcomes | 119 measured | Source7c293c7d; gate66084 passed Core/Debug,15 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Pending only for arm with work; refused has no work. Applied arm reports actual transfer. |
 | M05b2b | Authenticated endpoint with committed-state outcomes, rollback and joined operations | 191 measured | Source905b3bfb, gate68601:22 endpoint +24 admission +15 codec +10 Debug checks fresh;73 focused methods/54 Python transferred. Refused arm leaves no block from that request; uncertain rollback returns nil. Cancel/reopen have no fallible checks after release. Root producer/listener remain later. |
-| M05b2c | Fixed-address native listener and retained disconnected work | Under200 per complete cut | Root self/release/Setup peer checks, registry and joined retired endpoints. Test listener teardown after arming preserves the block. No product registration. |
+| M05b2c | Fixed listener, signed participant scope and joined retired endpoints | 146 measured | Source94a9ee11. Core and Debug builds passed. Gates14466 and84763 admit50 fresh unique methods and110 transferred methods. All6 scope methods ran fresh under Toni3088. Anonymous XPC proves lifecycle with owned controls. The Root access producer and product registration remain for b4. |
 | M05b3 | Native authenticated client with exact reply correlation and bounded recovery | 120–195 planned | Serialize exchanges: only one request may be in flight. A concurrent exchange closes the connection and releases pre-arm restrictions. Preserve armed binding through disconnect; nil/transport ambiguity requires recovery, never blind arm replay. Fixed self/peer identities and original wait bound. |
 | M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
 | M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
@@ -546,3 +546,28 @@ Before arming, that close releases only the connection's unarmed block and prese
 After arming, connection close still cannot release the process-owned shutdown target.
 The correction gate covers rollback, uncertain rollback, fresh reconnection, pre-release validation and actual concurrent calls.
 The listener candidate remains unapplied, uncompiled and untested in /private/tmp; b2c follows the corrected endpoint.
+
+### Fixed listener completion (Toni3073 and3088)
+
+Source94a9ee11 adds the fixed account maintenance listener above corrected endpoint905b3bfb.
+The complete listener cut changes146 production lines and adds16 test methods.
+Scope checks bind each active participant to the retained role, identity, team, generation, code hash and fixed executable path.
+Both participants must read and write maintenance wire version1.
+The native constructor requires Root identity and validates the current Authority executable before activation and each accept.
+The injected owned constructor refuses Root. It provides the anonymous XPC test fixture.
+
+The listener retains disconnected endpoints until their actual work and release activity settle.
+Listener teardown preserves the process-owned armed binding. Only the exact explicit cancel or reopen target can release it.
+Concurrent joined closes wait for actual noncooperative work, including work disconnected before listener close.
+Connection limits, handshake expiry, builder failures and early close return their exact reservations.
+No product listener registration or maintenance writer declaration is added.
+The protected native access producer and actual owner composition remain required in b4.
+
+The first83d61ddc run failed because one test constructed an invalid ReleaseFormat before scope validation.
+Its failed terminal74242/1/3a6d4d and original logs remain unchanged.
+Fixture-only94a9ee11 passed gate14466/0/3a77a7 and the full scope class in gate84763/0/c44f42.
+Toni3088 requires byte-identical test files for reuse. The five earlier scope passes are not admitted as transfers.
+There are50 fresh unique methods and110 explicit unchanged-class transfers. One selected method also ran before the full class.
+The54 Python results remain explicit transfers. This is not a full Core or Release qualification.
+Root positive code admission, installed execution, the b4 factory and the full goal remain incomplete.
+Next is b3, following the existing serialization and ambiguous-state recovery contract.
