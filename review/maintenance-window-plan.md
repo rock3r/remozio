@@ -380,9 +380,9 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Source303fcc08. Gate26372 passed Core/Debug,10 admission and10 Debug checks fresh;73 focused methods and54 Python outcomes transferred. No endpoint integration. |
 | M05b2t | Process-owned armed pairing block, independent of the connection | 49 measured | Source970f30df; gate46648 passed Core/Debug,20 admission and10 Debug checks fresh;73 focused methods/54 Python transferred. Exact cancel/reopen only; closed admission stays unavailable. |
 | M05b2a | Canonical channel codec with applied/stagesPending/refused outcomes | 119 measured | Source7c293c7d; gate66084 passed Core/Debug,15 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Pending only for arm with work; refused has no work. Applied arm reports actual transfer. |
-| M05b2b | Original-stack authenticated endpoint with explicit outcomes and joined per-operation lifetime | 183 measured | Source796f2517. Gate61351 passed Core/Debug,17 endpoint +24 admission +15 codec +10 Debug checks fresh;73 focused methods/54 Python transferred. Actual anonymous XPC teardown uses owned peer controls. Root positive admission and the protected access producer remain unqualified. |
+| M05b2b | Authenticated endpoint with committed-state outcomes, rollback and joined operations | 191 measured | Source905b3bfb, gate68601:22 endpoint +24 admission +15 codec +10 Debug checks fresh;73 focused methods/54 Python transferred. Refused arm leaves no block from that request; uncertain rollback returns nil. Cancel/reopen have no fallible checks after release. Root producer/listener remain later. |
 | M05b2c | Fixed-address native listener and retained disconnected work | Under200 per complete cut | Root self/release/Setup peer checks, registry and joined retired endpoints. Test listener teardown after arming preserves the block. No product registration. |
-| M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
+| M05b3 | Native authenticated client with exact reply correlation and bounded recovery | 120–195 planned | Serialize exchanges: only one request may be in flight. A concurrent exchange closes the connection and releases pre-arm restrictions. Preserve armed binding through disconnect; nil/transport ambiguity requires recovery, never blind arm replay. Fixed self/peer identities and original wait bound. |
 | M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
 | M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
 | M05d | Purpose-bound native permit and stop factory, introduced together | 120–195 after support | Bounded work wait, pre-stop cancellation, exact bootout, clean marker plus original exit witness; then actual pair custody |
@@ -529,3 +529,20 @@ The fixed listener, Authority self/release validation and listener teardown proo
 The first two b2b gates stopped during compilation and ran no test. Their original terminals88020/1/34cdee and67002/1/08609e remain preserved.
 The later gate61351 uses distinct source, adapter and outputs. Its budget includes both failed runs.
 No marker, stop permit, native stop factory, writer declaration or production entry was added.
+
+### Outcome follows committed state (Toni3076/3078)
+
+All access, activity and cancellation checks occur before the transfer or release mutation.
+Arm may capture work after transfer. If any post-transfer step throws, cancel that exact shutdown binding before reporting refused.
+A successful rollback leaves neither the armed target nor that connection's unarmed block. reserveStage must work again.
+Refused retires the connection. A subsequent attempt needs a fresh connection and open/observe/arm sequence.
+If rollback fails, return nil as an ambiguous result. Never report refused while this request may still hold an armed target.
+A stale rollback must not release a newer binding. The client recovers uncertain state through b3.
+Cancel/reopen prepare their applied reply first. Release is their last fallible operation; no post-release validate or capture follows it.
+Failure before cancel leaves the existing armed block untouched and reports refused.
+
+Setup serializes exchanges and waits for each response. A second concurrent exchange closes the connection.
+Before arming, that close releases only the connection's unarmed block and preserves existing stage tokens.
+After arming, connection close still cannot release the process-owned shutdown target.
+The correction gate covers rollback, uncertain rollback, fresh reconnection, pre-release validation and actual concurrent calls.
+The listener candidate remains unapplied, uncompiled and untested in /private/tmp; b2c follows the corrected endpoint.
