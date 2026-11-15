@@ -51,7 +51,7 @@ final class RuntimeMaintenanceCommitmentsTests: XCTestCase {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let first = try binding(f), second = try binding(f, incarnation: UUID(), pid: getpid() + 1)
             XCTAssertNotEqual(first.peer, second.peer); XCTAssertNotEqual(first.incarnation, second.incarnation)
-            XCTAssertEqual(try capture(f, first), capture(f, second))
+            XCTAssertEqual(try capture(f, first), try capture(f, second))
         }
     }
     func testAuthorityGroupChangeChangesOnlyItsGrantCommitment() throws {
