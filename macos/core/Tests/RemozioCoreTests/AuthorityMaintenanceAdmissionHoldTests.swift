@@ -203,4 +203,115 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
         XCTAssertTrue(value.requiresLocalHold); XCTAssertTrue(value.needsOwnerRecovery)
     }
 
+    func testOpenCancelAndExplicitPendingWriteRequireReopenBeforeAdmission() throws {
+        try MachineUpdateReplacementTests.withMaintenanceReaderFixture { f in
+            let before = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+            let gate = try XCTUnwrap(before.admission.accounts.first { $0.accountID == f.authority.accountID }).identity
+            let incarnation = data(4), admission = try AuthorityMaintenancePairingAdmission(accountID: f.authority.accountID, incarnation: incarnation)
+            let binding = try AuthorityMaintenanceBinding(accountID: f.authority.accountID, attemptID: data(90),
+                revision: data(80), incarnation: incarnation, connectionID: data(5))
+            let scope = try Record.Scope(macID: before.inventory.macID, installationID: before.inventory.installationID,
+                authority: f.authority, target: .init(accountID: data(92), ownerUID: 65001, directoryID: data(93)),
+                releaseDigest: before.inventory.releaseDigest, candidateDigest: data(1, 32), authorityPolicyDigest: data(2, 32),
+                operationDigest: data(3, 32), restorationDigest: data(4, 32), mutationFootprintDigest: data(5, 32),
+                authorityGrantDigest: data(6, 32), targetConsentDigest: data(7, 32), administratorIntentDigest: data(8, 32))
+            let row = try Record(id: binding.attemptID, revision: data(91), purpose: .retainedRuntime, scope: scope,
+                phase: .draining, service: .notStopped)
+            try f.edit([RuntimeMaintenanceWindowStorage.createSQL, "PRAGMA user_version=29",
+                "INSERT INTO runtime_maintenance_windows_v1 VALUES(X'\(hex(f.authority.accountID))',X'\(hex(row.id))',X'\(hex(row.revision))',8,X'\(try hex(row.encoded))')"])
+            let path = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent(), anchor = path.deletingLastPathComponent().path
+            func directory() throws -> ReleaseDestinationLease { try .init(anchor: anchor, relativeDirectory: path.lastPathComponent, owner: getuid()) }
+            let reader = Reader(f, admission: admission, incarnation: incarnation)
+            let activity = try ReleaseActivityBarrier(directory: directory(), owner: getuid())
+            let startup = try XCTUnwrap(AuthorityUpdateAdmissionStartup.capture(machine: f.machine(), macID: before.inventory.macID,
+                installationID: before.inventory.installationID, accountID: f.authority.accountID, activity: activity,
+                readCurrent: { try reader.fixture.machine().updateAdmissionState() }, readMaintenance: { machine in
+                    machine.runtimeMaintenanceStartupProjection(account: reader.fixture.authority, candidate: reader.fixture.candidate)
+                }, openBarrier: { scope, identity in
+                    try .init(directory: directory(), owner: getuid(), expected: identity, scope: scope)
+                }))
+            let hold = try XCTUnwrap(startup.maintenanceHold)
+            XCTAssertThrowsError(try startup.boundary.acquireAdmission()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
+            let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: admission,
+                check: { q in let actual = try reader.read(q); if q.action == .open { try hold.retain(actual) } }, observe: { q in
+                    guard q.action == .open else { throw RuntimePreparationError.changedScope }
+                    return try .init(journal: .init(requests: .init(liveRequests: 0, commandCaptures: 0, activityOwners: 0),
+                        exchanges: .init(active: 0, stopped: false), nativeExecutions: 0, executionActivityOwners: 0),
+                        execution: .init(started: true, stopping: false, failed: false, queuedTurns: 0, rejectedTurns: 0),
+                        pairing: .init(ready: true, stagedAttempts: 0, activityOwners: 0, operationActive: false))
+                },
+                reopen: { q, release in
+                    let record = try reader.read(q), target = try XCTUnwrap(q.binding)
+                    try hold.reopen(record, binding: target, incarnation: incarnation) {
+                        try release(); XCTAssertEqual(try reader.read(q), record)
+                    }
+                })
+            let verified = Mutex(0), endpoint = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access,
+                budget: .init(maximum: 1), verify: { verified.withLock { $0 += 1 } })
+            defer { endpoint.close(); startup.recovery.close(); hold.close() }
+            let hello = DispatchSemaphore(value: 0)
+            endpoint.hello { version in XCTAssertEqual(version, 1); hello.signal() }
+            XCTAssertEqual(hello.wait(timeout: .now() + 3), .success)
+            let open = try Request(action: .open, accountID: f.authority.accountID, attemptID: row.id, revision: row.revision,
+                installationID: scope.installationID, gate: gate, binding: nil, challenge: data(6, 32))
+            let opened = try call(endpoint, open); XCTAssertEqual(opened.outcome, .applied)
+            let saved = opened.binding
+            XCTAssertEqual(try admission.connectionReservations(), 1)
+            let bound = try row.retainingShutdownBinding(saved)
+            func persist(_ value: Record) throws {
+                // Explicit owned SQL stands for the future native client's durable window writer.
+                try f.mutate("UPDATE runtime_maintenance_windows_v1 SET revision=X'\(hex(value.revision))',phase=\(value.phase.rawValue),record=X'\(try hex(value.encoded))'")
+            }
+            try persist(bound)
+            let cancel = try Request(action: .cancel, accountID: f.authority.accountID, attemptID: row.id, revision: saved.revision,
+                installationID: scope.installationID, gate: gate, binding: saved, challenge: data(7, 32))
+            XCTAssertEqual(try call(endpoint, cancel).outcome, .applied)
+            XCTAssertEqual(try admission.connectionReservations(), 0)
+            XCTAssertThrowsError(try startup.boundary.acquireAdmission())
+            let pending = try Record(id: row.id, revision: AccountPreparationIntent.randomID(), purpose: row.purpose, scope: row.scope,
+                phase: .reopenPending, service: .notStopped, shutdownBinding: saved)
+            try persist(pending)
+            XCTAssertThrowsError(try startup.boundary.acquireAdmission())
+            endpoint.close()
+            let recovery = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access, budget: .init(maximum: 1))
+            defer { recovery.close() }
+            let reopen = try Request(action: .reopen, accountID: f.authority.accountID, attemptID: row.id, revision: pending.revision,
+                installationID: scope.installationID, gate: gate, binding: saved, challenge: data(8, 32))
+            let unchanged = try runtimeMaintenanceFixtureRows(f.databasePath)
+            XCTAssertEqual(try call(recovery, reopen).outcome, .applied)
+            XCTAssertEqual(try admission.connectionReservations(), 0)
+            let fresh = try startup.boundary.acquireAdmission(); try fresh.validate(); fresh.close()
+            XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), unchanged)
+        }
+    }
+    func testEveryCanonicalLegacySchemaThrough28KeepsAdmissionOpen() throws {
+        try MachineUpdateReplacementTests.withMaintenanceReaderFixture { f in
+            let reader = Reader(f, admission: try .init(accountID: f.authority.accountID, incarnation: data(4)), incarnation: data(4))
+            let path = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent(), anchor = path.deletingLastPathComponent().path
+            func directory() throws -> ReleaseDestinationLease { try .init(anchor: anchor, relativeDirectory: path.lastPathComponent, owner: getuid()) }
+            let tables: [Int: String] = [28: "retained_setup_promotion_ready_v1", 27: "retained_setup_promotion_intents_v1",
+                26: "retained_setup_completion_intents_v1", 25: "retained_setup_policy_intents_v1", 24: "stable_release_state_v1",
+                23: "installed_release_state_v1", 22: "machine_update_completion_publication_v1", 21: "machine_update_completion_intent_v1",
+                20: "machine_update_backend_epoch_v1", 19: "machine_update_configuration_epoch_v1", 18: "machine_update_replacement_v1",
+                17: "machine_update_activation_v1"]
+            XCTAssertEqual(Set(tables.keys).union([16]), Set(16...28))
+            for version in stride(from: 28, through: 16, by: -1) {
+                let before = try runtimeMaintenanceFixtureRows(f.databasePath)
+                let projection = f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate)
+                guard !projection.requiresLocalHold else { XCTFail("Valid legacy schema \(version) retained a hold"); return }
+                XCTAssertFalse(projection.needsOwnerRecovery)
+                let inventory = try XCTUnwrap(f.machine().inventory())
+                let startup = try XCTUnwrap(AuthorityUpdateAdmissionStartup.capture(machine: f.machine(), macID: inventory.macID,
+                    installationID: inventory.installationID, accountID: f.authority.accountID,
+                    activity: .init(directory: directory(), owner: getuid()), readCurrent: { try reader.fixture.machine().updateAdmissionState() },
+                    readMaintenance: { machine in machine.runtimeMaintenanceStartupProjection(account: reader.fixture.authority, candidate: reader.fixture.candidate) },
+                    openBarrier: { scope, identity in try .init(directory: directory(), owner: getuid(), expected: identity, scope: scope) }))
+                let fresh = try startup.boundary.acquireAdmission(); try fresh.validate(); fresh.close()
+                startup.recovery.close(); startup.maintenanceHold?.close()
+                XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
+                if version > 16 { try f.edit(["DROP TABLE " + XCTUnwrap(tables[version]), "PRAGMA user_version=\(version - 1)"]) }
+            }
+        }
+    }
+
 }
