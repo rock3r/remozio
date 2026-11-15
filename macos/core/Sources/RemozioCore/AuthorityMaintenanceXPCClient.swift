@@ -39,8 +39,15 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     deinit { close() }
 }
 private final class MaintenanceClientLifetime: @unchecked Sendable {
-    private let lock = NSRecursiveLock(); private var active = true
-    func close() { lock.withLock { active = false } }
+    private let lock = NSRecursiveLock(); private var active = true, expected: UUID?
+    private var delivered: AuthorityMaintenanceClientReply?
+    func close() { lock.withLock { active = false; expected = nil; delivered = nil } }
+    func invalidate() { lock.withLock { active = false } }
+    func begin(_ id: UUID) -> Bool { lock.withLock { guard active else { return false }; expected = id; delivered = nil; return true } }
+    func record(_ id: UUID, _ value: AuthorityMaintenanceClientReply, until deadline: ContinuousClock.Instant) -> Bool {
+        lock.withLock { guard active, expected == id, delivered == nil, ContinuousClock.now < deadline else { return false }; delivered = value; return true }
+    }
+    func reply(_ id: UUID) -> AuthorityMaintenanceClientReply? { lock.withLock { expected == id ? delivered : nil } }
     func ifActive(_ body: () -> Void = {}) -> Bool { lock.withLock { guard active else { return false }; body(); return true } }
 }
 
@@ -90,7 +97,7 @@ actor AuthorityMaintenanceXPCClient {
     func start(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .new else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
         guard case .hello(1) = try await invoke(nil, until: deadline) else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        let response = try await send(.open, until: deadline); binding = response.binding; state = .open; return response
+        let response = try await send(.open, until: deadline); binding = response.binding; if state != .closed { state = .open }; return response
     }
     func observe(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .open else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
@@ -100,7 +107,7 @@ actor AuthorityMaintenanceXPCClient {
         guard state == .open else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
         while ContinuousClock.now < deadline {
             let response = try await send(.arm, until: deadline)
-            if response.outcome == .applied { state = .armed; return response }
+            if response.outcome == .applied { if state != .closed { state = .armed }; return response }
             do { try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval))) }
             catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         }
@@ -139,24 +146,31 @@ actor AuthorityMaintenanceXPCClient {
         let value: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending = (id, continuation)
+                guard lifetime.begin(id) else { finish(); return }
                 timer = Task { [weak self] in
                     do { try await ContinuousClock().sleep(until: end) } catch { return }; await self?.expire(id)
                 }
-                let reply: @Sendable (AuthorityMaintenanceClientReply) -> Void = { [weak self] value in Task { await self?.received(id, value) } }
-                if q == nil { driver.start { [weak self, lifetime] in lifetime.close(); Task { await self?.close() } } }
+                let reply: @Sendable (AuthorityMaintenanceClientReply) -> Void = { [weak self, lifetime] value in
+                    guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }
+                }
+                if q == nil { driver.start { [weak self, lifetime] in lifetime.invalidate(); Task { await self?.finish(preservingReply: true) } } }
                 guard lifetime.ifActive({ if let payload { driver.exchange(payload, reply) } else { driver.hello(reply) } }) else { finish(); return }
             }
         } onCancel: { [weak self, lifetime, driver] in lifetime.close(); driver.close(); Task { await self?.close() } }
         do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        guard state != .closed, lifetime.ifActive(), ContinuousClock.now < end else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }; return value
+        guard lifetime.reply(id) != nil else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        if !lifetime.ifActive() { finish(preservingReply: true) }; return value
     }
-    private func received(_ id: UUID, _ value: AuthorityMaintenanceClientReply) {
+    private func received(_ id: UUID) {
         guard let p = pending, p.0 == id else { return }
-        guard lifetime.ifActive() else { finish(); return }; pending = nil; timer?.cancel(); timer = nil; p.1.resume(returning: value)
+        guard let value = lifetime.reply(id) else { finish(); return }; pending = nil; timer?.cancel(); timer = nil; p.1.resume(returning: value)
     }
-    private func expire(_ id: UUID) { if pending?.0 == id { finish() } }
-    private func finish(_ error: AuthorityMaintenanceClientError = .needsOwnerRecovery) {
-        guard state != .closed else { return }; state = .closed; lifetime.close(); timer?.cancel(); timer = nil
-        let p = pending; pending = nil; driver.close(); p?.1.resume(throwing: error)
+    private func expire(_ id: UUID) { if pending?.0 == id { finish(preservingReply: true) } }
+    private func finish(_ error: AuthorityMaintenanceClientError = .needsOwnerRecovery, preservingReply: Bool = false) {
+        guard state != .closed else { return }
+        let p = pending, value = preservingReply ? pending.flatMap { lifetime.reply($0.0) } : nil
+        state = .closed; if preservingReply { lifetime.invalidate() } else { lifetime.close() }; timer?.cancel(); timer = nil
+        pending = nil; driver.close()
+        if let value { p?.1.resume(returning: value) } else { p?.1.resume(throwing: error) }
     }
 }

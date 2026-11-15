@@ -25,10 +25,11 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
             var invalidated: (@Sendable () -> Void)?, held: (@Sendable (AuthorityMaintenanceClientReply) -> Void)?
             var heldRequest: Request?, mode = Mode.normal, pendingArms = 0, calls: [Request] = []
             var helloVersion: UInt64 = 1, peerAllowed = true, starts = 0, hellos = 0, closes = 0, duplicate = false
+            var invalidateAfterReply: Request.Action?
         }
         private let state = Mutex(State())
-        func configure(mode: Mode = .normal, pendingArms: Int = 0, helloVersion: UInt64 = 1, peerAllowed: Bool = true, duplicate: Bool = false) {
-            state.withLock { $0.mode = mode; $0.pendingArms = pendingArms; $0.helloVersion = helloVersion; $0.peerAllowed = peerAllowed; $0.duplicate = duplicate }
+        func configure(mode: Mode = .normal, pendingArms: Int = 0, helloVersion: UInt64 = 1, peerAllowed: Bool = true, duplicate: Bool = false, invalidateAfterReply: Request.Action? = nil) {
+            state.withLock { $0.mode = mode; $0.pendingArms = pendingArms; $0.helloVersion = helloVersion; $0.peerAllowed = peerAllowed; $0.duplicate = duplicate; $0.invalidateAfterReply = invalidateAfterReply }
         }
         var calls: [Request] { state.withLock { $0.calls } }
         var hellos: Int { state.withLock { $0.hellos } }
@@ -66,7 +67,9 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
                 let observes = q.action == .open || q.action == .observe || q.action == .arm
                 let response = try Response(request: expected, binding: binding,
                     work: observes && !refused ? AuthorityMaintenanceClientTests.work(stages: result.1 ? 1 : 0) : nil, outcome: outcome)
-                let value = AuthorityMaintenanceClientReply.bytes(try response.encoded); reply(value); if result.3 { reply(value) }
+                let value = AuthorityMaintenanceClientReply.bytes(try response.encoded); reply(value)
+                if state.withLock({ $0.invalidateAfterReply == q.action }) { invalidate() }
+                if result.3 { reply(value) }
             } catch { reply(.bytes(nil)) }
         }
         func invalidate() { let callback = state.withLock { $0.invalidated }; callback?() }
@@ -280,4 +283,45 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    func testDeliveredAppliedRepliesSurviveImmediateTransportInvalidation() async throws {
+        for action in [Request.Action.open, .observe, .arm, .cancel, .reopen] {
+            let d = Driver(), c = try client(d)
+            if action == .open {
+                d.configure(invalidateAfterReply: .open); let reply = try await c.start(until: deadline); XCTAssertEqual(reply.outcome, .applied)
+            } else {
+                _ = try await c.start(until: deadline); d.configure(invalidateAfterReply: action)
+                switch action {
+                case .observe: let reply = try await c.observe(until: deadline); XCTAssertEqual(reply.outcome, .applied)
+                case .arm: let reply = try await c.arm(until: deadline); XCTAssertEqual(reply.outcome, .applied)
+                case .cancel, .reopen: try await c.release(reopen: action == .reopen, until: deadline)
+                case .open: XCTFail()
+                }
+            }
+            await expect(.invalidState) { _ = try await c.arm(until: self.deadline) }
+            XCTAssertEqual(d.calls.last?.action, action)
+        }
+    }
+    func testDeliveredRefusedRepliesRemainCancelledAfterImmediateInvalidation() async throws {
+        for action in [Request.Action.open, .observe, .arm] {
+            let d = Driver(), c = try client(d)
+            if action != .open { _ = try await c.start(until: deadline) }
+            d.configure(mode: .refused(action), invalidateAfterReply: action)
+            await expect(.cancelled) {
+                switch action {
+                case .open: _ = try await c.start(until: self.deadline)
+                case .observe: _ = try await c.observe(until: self.deadline)
+                case .arm: _ = try await c.arm(until: self.deadline)
+                default: XCTFail()
+                }
+            }
+            XCTAssertEqual(d.calls.last?.action, action)
+        }
+    }
+    func testInvalidationBeforeDeliveryCannotAdoptTheLateAppliedReply() async throws {
+        let d = Driver(), c = try client(d); _ = try await c.start(until: deadline); d.configure(mode: .hold(.arm))
+        let arm = Task { try await c.arm(until: deadline) }; try await waitUntil { d.calls.count == 2 }
+        d.invalidate(); await expect(.needsOwnerRecovery) { _ = try await arm.value }; d.completeHeld()
+        await expect(.invalidState) { _ = try await c.arm(until: self.deadline) }; XCTAssertEqual(d.calls.map(\.action), [.open, .arm])
+    }
+
 }
