@@ -211,13 +211,28 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
     }
     private final class AnonymousDriver: AuthorityMaintenanceClientDriver, @unchecked Sendable {
         let connection: NSXPCConnection
+        let events = Mutex<[String]>([])
         init(_ listener: NSXPCListener) { connection = .init(listenerEndpoint: listener.endpoint); connection.remoteObjectInterface = NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self) }
-        func start(_ invalidated: @escaping @Sendable () -> Void) { connection.invalidationHandler = invalidated; connection.interruptionHandler = invalidated; connection.activate() }
-        private func proxy(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) -> (any AuthorityMaintenanceXPCProtocol)? {
-            connection.remoteObjectProxyWithErrorHandler { _ in reply(.bytes(nil)) } as? any AuthorityMaintenanceXPCProtocol
+        func start(_ invalidated: @escaping @Sendable () -> Void) {
+            connection.invalidationHandler = { [self] in events.withLock { $0.append("invalidated") }; invalidated() }
+            connection.interruptionHandler = { [self] in events.withLock { $0.append("interrupted") }; invalidated() }; connection.activate()
         }
-        func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { proxy(reply)?.hello { reply(.hello($0)) } }
-        func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { proxy(reply)?.exchange(bytes) { reply(.bytes($0)) } }
+        private func proxy(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) -> (any AuthorityMaintenanceXPCProtocol)? {
+            connection.remoteObjectProxyWithErrorHandler { [self] error in
+                let e = error as NSError; events.withLock { $0.append("proxy " + e.domain + ":" + String(e.code)) }; reply(.bytes(nil))
+            } as? any AuthorityMaintenanceXPCProtocol
+        }
+        func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+            events.withLock { $0.append("hello sent") }; proxy(reply)?.hello { [self] version in
+                events.withLock { $0.append("hello reply " + String(version)) }; reply(.hello(version))
+            }
+        }
+        func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+            let action = (try? Request.decode(bytes).action.rawValue) ?? 0; events.withLock { $0.append("send " + String(action)) }
+            proxy(reply)?.exchange(bytes) { [self] bytes in
+                events.withLock { $0.append(bytes == nil ? "nil reply" : "data reply") }; reply(.bytes(bytes))
+            }
+        }
         func close() { connection.invalidate() }
         deinit { close() }
     }
@@ -235,12 +250,22 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
         let q = try context(), admission = try AuthorityMaintenancePairingAdmission(accountID: q.accountID, incarnation: Data(repeating: 4, count: 16))
         let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: admission, check: { _ in }, observe: { _ in try Self.work(stages: admission.stagedReservations()) })
         let native = NSXPCListener.anonymous(), owner = try AuthorityMaintenanceXPCListener.openOwned(listener: native, builder: Builder(access: access))
-        try owner.start(); let c = try AuthorityMaintenanceXPCClient.openOwned(context: q, driver: AnonymousDriver(native))
-        let opened = try await c.start(until: deadline); let armed = try await c.arm(until: deadline); XCTAssertEqual(armed.binding, opened.binding)
-        await c.close(); XCTAssertThrowsError(try admission.reserveStage())
-        let recovery = try AuthorityMaintenanceXPCClient.openOwned(context: q, driver: AnonymousDriver(native))
-        _ = try await recovery.start(until: deadline); try await recovery.release(opened.binding, reopen: true, until: deadline)
-        let stage = try admission.reserveStage(); stage.close(); await owner.closeAndWait(); XCTAssertEqual(owner.retainedEndpoints(), 0)
+        try owner.start(); defer { owner.close() }
+        let first = AnonymousDriver(native), second = AnonymousDriver(native)
+        let c = try AuthorityMaintenanceXPCClient.openOwned(context: q, driver: first)
+        var phase = "initial open"
+        do {
+            let opened = try await c.start(until: deadline); phase = "arm"
+            let armed = try await c.arm(until: deadline); XCTAssertEqual(armed.binding, opened.binding)
+            await c.close(); XCTAssertThrowsError(try admission.reserveStage()); phase = "recovery open"
+            let recovery = try AuthorityMaintenanceXPCClient.openOwned(context: q, driver: second)
+            _ = try await recovery.start(until: deadline); phase = "exact reopen"
+            try await recovery.release(opened.binding, reopen: true, until: deadline)
+            let stage = try admission.reserveStage(); stage.close(); await owner.closeAndWait(); XCTAssertEqual(owner.retainedEndpoints(), 0)
+        } catch {
+            XCTFail("Anonymous transport failed during \(phase); first=\(first.events.withLock { $0 }); second=\(second.events.withLock { $0 })")
+            throw error
+        }
     }
     func testNativeClientRefusesOrdinaryIdentityBeforeConstructingAConnection() throws {
         XCTAssertNotEqual(getuid(), 0)
