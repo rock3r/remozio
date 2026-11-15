@@ -96,8 +96,8 @@ The readback and native permit must still enforce their current code, protected 
 | M05a | Actual work observation through pairing reply/activity release; shared budget releases at work return | 152 measured | Sourcec86366af, published by Toni as #764/ab540f5e. Gate18129 passed Core/Debug,31 pairing and10 Debug checks fresh;42 focused methods and54 Python outcomes transferred. |
 | M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Source303fcc08. Gate26372 passed Core/Debug,10 admission and10 Debug checks fresh;73 focused methods and54 Python outcomes transferred. No endpoint integration. |
 | M05b2t | Process-owned armed pairing block, independent of the connection | 49 measured | Source970f30df; gate46648 passed Core/Debug,20 admission and10 Debug checks fresh;73 focused methods/54 Python transferred. Exact cancel/reopen only; closed admission stays unavailable. |
-| M05b2a | Bounded canonical maintenance request/response and complete work observation codec | 109 measured | Source482407e5 after b2t; gate87265 passed Core/Debug,12 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Exact installation, gate, action, challenge and binding correlation. No endpoint or native proof. |
-| M05b2b | Native authenticated endpoint and joined work lifetime | Under200 per complete cut | Synchronous XPCInvocationGuard and repeated observations. Use b2t and preserve the block after XPC close. Distinguish stages still present (bounded wait) from lost/closed/wrong blocker (cancel, no retry), with separate tests. Exact-binding cancel/reopen only. |
+| M05b2a | Canonical channel codec with applied/stagesPending/refused outcomes | 119 measured | Source7c293c7d; gate66084 passed Core/Debug,15 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Pending only for arm with work; refused has no work. Applied arm reports actual transfer. |
+| M05b2b | Native authenticated endpoint and joined work lifetime | Under200 per complete cut | Original-stack XPCInvocationGuard; use b2t and preserve the armed block through XPC close. Produce stagesPending only from live stage work, refused from closed/lost/wrong ownership, and applied arm only after actual transfer. No generic transport-error retry. |
 | M05b2c | Fixed-address native listener and retained disconnected work | Under200 per complete cut | Root self/release/Setup peer checks, registry and joined retired endpoints. Test listener teardown after arming preserves the block. No product registration. |
 | M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
 | M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
@@ -150,3 +150,16 @@ If the block is lost, closed or held by another owner, cancel the attempt and do
 Test live stages, lost block, closed admission and wrong blocker separately. No generic unavailable retry is allowed.
 This endpoint behavior is still unimplemented. The b2t library gate does not prove native connection handling.
 The completed codec preserves all M05a fields as non-atomic data. It grants no idle proof or shutdown authority.
+
+### Explicit channel outcomes (Toni3058/3060)
+
+The codec has a closed outcome set: applied, stagesPending and refused. Unknown values fail decode.
+Applied retains the action-specific work shape. Applied arm means the native owner actually transferred the block.
+StagesPending is valid only for arm and requires work observations. Setup may wait and retry only within the original bound.
+Refused carries no work. It covers a lost, closed or foreign block; Setup cancels without retry.
+A missing or failed observation never becomes a zero-work snapshot. A transport error never becomes stagesPending.
+The native endpoint must map the two distinct transfer errors to these outcomes and test each path separately.
+That endpoint remains unimplemented. The historical draft in /private/tmp predates this decision and must not be applied wholesale.
+The correction gate includes all15 codec methods. The failed2f5cdfc5 gate stopped during test compilation and ran no test.
+Its actual terminal67584/1/10ab59 and logs remain immutable; its time stays in the codec budget.
+The test-only missing-try fix produced current7c293c7d. No failed receipt was relabeled.
