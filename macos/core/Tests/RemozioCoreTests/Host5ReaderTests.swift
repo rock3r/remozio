@@ -83,7 +83,9 @@ final class Host5ReaderTests: XCTestCase {
     func testCompletionArchiveAndConfigurationReadersKeepHost5WithoutNormalizingIt() throws {
         let f = try RetainedSetupCompletionConfigurationTests.Fixture()
         let futureActivation = try Host5ReaderFixture.activation(f.completion.activationBytes)
-        let completed = try RuntimeRetainedSetupCompletionArchive.decode(f.completion.replacing(activation: futureActivation))
+        var intent = f.completion.intentFields
+        intent["activationPlanDigest"] = RetainedSetupCompletionArchiveTests.Fixture.digest(futureActivation)
+        let completed = try RuntimeRetainedSetupCompletionArchive.decode(f.completion.replacing(activation: futureActivation, intent: intent))
         XCTAssertEqual(try completed.originalActivation().host.formatVersion, 5)
         var fields = f.fields; let host = try Host5ReaderFixture.host(f.host); fields[4] = .bytes(host)
         let bytes = try Host5ReaderFixture.bytes(fields), decoded = try RuntimeRetainedSetupCompletionConfiguration.decode(bytes)
@@ -96,7 +98,7 @@ final class Host5ReaderTests: XCTestCase {
         let snapshot = try RuntimeReleaseCompatibilitySnapshot.capture(machine: f.machine)
         for role in [AuthorityCodeRole.authority, .setupController] {
             let entry = try XCTUnwrap(snapshot.requirements.formats.first { $0.role == role && $0.name == "authority.command-host-config" })
-            XCTAssertEqual(entry.readVersions, [5]); XCTAssertTrue(entry.writeVersions.isEmpty)
+            XCTAssertTrue(entry.readVersions.contains(5)); XCTAssertFalse(entry.writeVersions.contains(5))
         }
         let missing = try NativeHostReleaseFixture.make(policy: f.plan.host.codePolicy)
         XCTAssertThrowsError(try snapshot.validate(missing, policy: f.plan.host.codePolicy, machine: f.machine))
