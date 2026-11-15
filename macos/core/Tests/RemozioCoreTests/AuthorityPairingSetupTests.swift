@@ -798,4 +798,13 @@ extension AuthorityPairingSetupTests {
         XCTAssertEqual(try admission.stagedReservations(), 1); endpoint = nil; XCTAssertEqual(try admission.stagedReservations(), 0)
     }
 
+    func testMaintenanceStageReservationSurvivesEndpointCloseInsideItsStageReply() throws {
+        let f = try Fixture(), endpoint = try f.endpoint(), admission = f.access.maintenanceAdmission
+        try hello(endpoint)
+        endpoint.stagePairing(try f.proposal().encode(), authorization: authorization) { reply in
+            XCTAssertNotNil(reply); endpoint.close(); XCTAssertEqual(try? admission.stagedReservations(), 1)
+        }
+        XCTAssertEqual(try admission.stagedReservations(), 0)
+    }
+
 }

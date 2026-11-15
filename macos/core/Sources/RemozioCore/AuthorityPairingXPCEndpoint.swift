@@ -27,7 +27,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         var attempt: PairingEnrollmentAttempt?
         var activity: ReleaseActivityToken?
         var stage: AuthorityMaintenancePairingAdmission.Stage?
-        var currentOperation: UUID?, retiringStages: [UUID: AuthorityMaintenancePairingAdmission.Stage] = [:]
+        var currentOperation: UUID?, retiringStages: [UUID: [AuthorityMaintenancePairingAdmission.Stage]] = [:]
         var operations: [UUID: Bool] = [:]
     }
     private let state = Mutex(WorkState())
@@ -104,6 +104,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             do { activity = try access.acquireReleaseActivity() } catch { stage.close(); throw error }
             var transferred = false
             defer { if !transferred { activity?.close(); stage.close() } }
+            let replyStage = try stage.retained()
+            state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
             let staged = try access.stage(proposal)
             let bytes = try staged.transcript.encode()
             state.withLock { $0.attempt = staged; $0.activity = activity; $0.stage = stage }; transferred = true
@@ -157,7 +159,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             let activity = try access.acquireReleaseActivity()
             state.withLock { $0.operations[id] = activity != nil }
             let owned = Completion(activity: activity) { [self] in
-                let stage = state.withLock { $0.retiringStages.removeValue(forKey: id) }; stage?.close()
+                let stages = state.withLock { $0.retiringStages.removeValue(forKey: id) }; stages?.forEach { $0.close() }
                 _ = state.withLock { $0.operations.removeValue(forKey: id) }
             }
             completion = owned
@@ -172,7 +174,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         expiryTimer?.cancel(); expiryTimer = nil
         let stage = state.withLock { s -> AuthorityMaintenancePairingAdmission.Stage? in
             s.attempt = nil; guard let stage = s.stage else { return nil }; s.stage = nil
-            if let id = s.currentOperation { s.retiringStages[id] = stage; return nil }; return stage
+            if let id = s.currentOperation { s.retiringStages[id, default: []].append(stage); return nil }; return stage
         }
         attemptActivity?.close()
         state.withLock { $0.activity = nil }; stage?.close()
