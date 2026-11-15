@@ -97,7 +97,7 @@ The readback and native permit must still enforce their current code, protected 
 | M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Source303fcc08. Gate26372 passed Core/Debug,10 admission and10 Debug checks fresh;73 focused methods and54 Python outcomes transferred. No endpoint integration. |
 | M05b2t | Process-owned armed pairing block, independent of the connection | 49 measured | Source970f30df; gate46648 passed Core/Debug,20 admission and10 Debug checks fresh;73 focused methods/54 Python transferred. Exact cancel/reopen only; closed admission stays unavailable. |
 | M05b2a | Canonical channel codec with applied/stagesPending/refused outcomes | 119 measured | Source7c293c7d; gate66084 passed Core/Debug,15 codec and10 Debug checks fresh;93 focused methods/54 Python transferred. Pending only for arm with work; refused has no work. Applied arm reports actual transfer. |
-| M05b2b | Native authenticated endpoint and joined work lifetime | Under200 per complete cut | Original-stack XPCInvocationGuard; use b2t and preserve the armed block through XPC close. Produce stagesPending only from live stage work, refused from closed/lost/wrong ownership, and applied arm only after actual transfer. No generic transport-error retry. |
+| M05b2b | Original-stack authenticated endpoint with explicit outcomes and joined per-operation lifetime | 183 measured | Source796f2517. Gate61351 passed Core/Debug,17 endpoint +24 admission +15 codec +10 Debug checks fresh;73 focused methods/54 Python transferred. Actual anonymous XPC teardown uses owned peer controls. Root positive admission and the protected access producer remain unqualified. |
 | M05b2c | Fixed-address native listener and retained disconnected work | Under200 per complete cut | Root self/release/Setup peer checks, registry and joined retired endpoints. Test listener teardown after arming preserves the block. No product registration. |
 | M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
 | M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
@@ -163,3 +163,23 @@ That endpoint remains unimplemented. The historical draft in /private/tmp predat
 The correction gate includes all15 codec methods. The failed2f5cdfc5 gate stopped during test compilation and ran no test.
 Its actual terminal67584/1/10ab59 and logs remain immutable; its time stays in the codec budget.
 The test-only missing-try fix produced current7c293c7d. No failed receipt was relabeled.
+
+### Endpoint result and ownership contract (Toni3063/3065)
+
+Every response constructor requires an explicit outcome. There is no default applied result.
+A refused open echoes account/attempt/revision through unowned metadata. It creates no connection reservation or pairing restriction.
+The endpoint completes open validation and work capture before reserving its connection. Tests then perform a fresh successful open.
+Live stage reservations produce stagesPending. Invalid, closed or foreign block ownership produces refused without work.
+Applied arm is emitted only after actual transfer. Setup/b3 owns bounded waiting; the endpoint performs no generic transport-error retry.
+Unarmed cancellation checks ownership and the absence of another armed target in one lock step.
+Wrong-binding reopen cannot acknowledge releasing another restriction. Stale close cannot release an armed target.
+Per-operation task and budget ownership remains distinct through replies. An immediate next call cannot lose its budget to older cleanup.
+Disconnect cancels and joins actual work, retaining activity and budget until it settles. Reply cleanup remains joinable.
+An actual anonymous XPC disconnect after arm preserves the block. This test uses owned peer controls, not installed Root authentication.
+
+The native constructor enforces Root identity and the original XPC invocation guard. The owned seams refuse Root.
+The process-bound access type has no native Root producer yet. Its protected construction belongs to b4.
+The fixed listener, Authority self/release validation and listener teardown proof remain b2c. No product listener is registered.
+The first two b2b gates stopped during compilation and ran no test. Their original terminals88020/1/34cdee and67002/1/08609e remain preserved.
+The later gate61351 uses distinct source, adapter and outputs. Its budget includes both failed runs.
+No marker, stop permit, native stop factory, writer declaration or production entry was added.
