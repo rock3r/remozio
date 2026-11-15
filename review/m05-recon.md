@@ -2,8 +2,8 @@
 
 Current decisions: Toni3104,3108,3111,3112,3117 and3131. Earlier appendices retain historical source states. The current table and final section govern active work.
 This revision supersedes the full live-idle design in689ee08e. That commit retains the detailed hosted-owner audit as history.
-The current implementation source is645f4dfd above the locally qualified acknowledgement repairf54fed93.
-This report is source-only. It qualifies no installed control channel, marker, shutdown or service stop.
+The current implementation source is67a52505 above locally qualified M05c1 source4c858128.
+The final M05c section records selected local evidence. It qualifies no installed Root execution, daemon signal or service stop.
 
 ## Decision
 
@@ -103,7 +103,7 @@ The readback and native permit must still enforce their current code, protected 
 | M05b4a | Protected command frame and actual pairing stage reservations | 94 measured | Source645f4dfd above acknowledgement repairf54fed93. Gate5876 passed76 fresh native methods and143 explicit unchanged-method transfers, fresh Python manifest checks, Core/Debug. One read transaction binds installation, gate, phase, current revision and incarnation. Retained Stage handles keep one attempt counted through actual reply cleanup. No Root factory. |
 | M05b4b | Root factory and actual M05a owner composition | 121 measured | Source8ce7c89c above645f4dfd. The factory accepts the installed registration and actual WakeService only. Command reads use a short protected lease. Pairing endpoints remain retained through reply cleanup. Core and124 fresh supporting fixture methods passed. Installed Root execution remains unqualified. No registration. |
 | M05b5 | Existing presence listener multiplexing and startup isolation | 179 measured | Core/Debug,207 fresh selected native outcomes,54 Python. No installed Root/Release or merge-readiness claim. |
-| M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
+| M05c | Protected marker storage, then bound publication after successful close | M05c1:78; M05c2:147 measured | Sources4c858128/67a52505 pass separate selected local gates. Installed Root and actual signals remain unqualified. See the final M05c section. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
 Every PR remains capped at200 changed production lines. Measure before tests. No partial implementation may enable the body.
@@ -606,8 +606,39 @@ It cannot be selected by a request flag or release admission before health succe
 This exception is unimplemented and remains a prerequisite for reachable restoration.
 M05d must also verify job absence and reject a new incarnation after bootout, before its body.
 
-M05c remains source analysis only. No marker candidate, close path or test has been applied.
+The M05c source-only state above is historical. The current local evidence is recorded in the final M05c section.
 Capture the marker scope during authenticated arm. Close must not reread the machine database.
 Only successful bound runner.close may publish the marker. Ordinary close, retirement, startup failure and deinit must not publish it.
 Readback must check exact canonical bytes, protected metadata and durability.
 M07, M09, live725, attended provider checks and the full objective remain incomplete.
+
+
+### M05c1 and M05c2 local evidence (Toni3302/3305)
+
+M05c1 source4c858128 changes78 production lines in four files.
+Its selected gate admits27 fresh native methods and7 unchanged-source transfers, with no skips.
+The gate includes55 fresh manifest tests,48 fresh CI tests, and fresh Core and Debug builds.
+It supplies the bounded canonical marker, protected fixed storage, durable readback and role format declarations.
+
+M05c2 source67a52505 follows4c858128 and changes147 production lines in seven files.
+Its gate passes202 fresh native methods,55 fresh manifest tests and48 fresh CI tests, with no transfers or skips.
+Core and Debug build fresh. One earlier build fails before tests; its receipt remains failed.
+The corrected source changes only the test observation of a blocked service actor.
+The cumulative M05c2 gate uses168.104 seconds of its1800-second budget, including that failure and the CI checks.
+
+The authenticated arm retains the exact marker. The unarmed peek needs no actor hop or code validation.
+The shared run loop propagates actual task cancellation into the termination catch used by AuthorityMain.
+Only successful bound runner.close publishes. Ordinary close, retirement, startup failure and deinit cannot publish.
+The real registration close runs with nonnil admission recovery while a second shared token remains valid.
+A competing exclusive token remains unavailable until the final shared token closes.
+Armed marker errors report shutdown failure. Unarmed shutdown retains ordinary cleanup.
+A suspended close creates no marker beyond the observation bound. No new native timeout or plist deadline is introduced.
+
+These are selected local tests under an ordinary owner. Installed Root execution and real daemon signals remain unqualified.
+Release, the full Core suite, native stop permits and original-process exit witnesses remain unqualified.
+Toni owns publication, review, merge and main reconciliation. Bepi has not pushed.
+The original unqualified draftc0bbaad2 remains unchanged. The two focused cuts preserve their separate evidence.
+M05d must still combine the native stop permit, exact marker readback and original-process exit witness.
+It must check job absence and reject a new incarnation after bootout, before the body.
+It must retain the actual journal and continuity pair before lending the body.
+M07a, M09, live725, attended provider checks and the full objective remain incomplete.
