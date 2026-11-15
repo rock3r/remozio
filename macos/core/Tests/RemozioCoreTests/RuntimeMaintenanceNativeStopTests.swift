@@ -58,7 +58,9 @@ private final class MaintenanceNativeStopHarness: @unchecked Sendable {
     let capture: RuntimeMaintenanceStopCapture, file: MaintenanceCloseFileFixture, stores: MaintenanceBodyStores
     var observation: RuntimeJobStopSession.Observation = .matching(100)
     var removals = 0, inspections = 0, pairOpens = 0, bodyCalls = 0
-    var onInspect: () throws -> Void = {}, onRemove: () throws -> Void = {}, onOpenPair: () -> Void = {}
+    var onInspect: () throws -> Void = {}
+    var onRemove: () throws -> Void = {}
+    var onOpenPair: () -> Void = {}
     init() async throws {
         let f = try MaintenanceStopTestFixture(), client = try f.client()
         self.f = f; self.client = client; capture = try await f.capture(client)
