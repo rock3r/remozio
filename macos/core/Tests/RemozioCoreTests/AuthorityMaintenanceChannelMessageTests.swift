@@ -28,7 +28,7 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
     }
     private func encode(_ f: [UInt64: CBORValue]) throws -> Data { try DeterministicCBOR.encode(.map(f), limits: wide) }
     private func response(_ q: Request) throws -> Response {
-        try .init(request: q, binding: binding(), work: [.cancel, .reopen].contains(q.action) ? nil : work())
+        try .init(request: q, binding: binding(), work: [Request.Action.cancel, .reopen].contains(q.action) ? nil : work())
     }
     func testAllActionsHaveExactRequestAndResponseRoundTrips() throws {
         for action in Request.Action.allCases {
