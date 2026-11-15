@@ -38,7 +38,7 @@ final class AuthorityMaintenanceCloseMarkerTests: XCTestCase {
         XCTAssertEqual(before.st_uid, getuid()); XCTAssertEqual(before.st_mode & 0o777, 0o600); XCTAssertEqual(before.st_nlink, 1)
         try f.readback(marker); try f.publish(marker)
         var after = stat(); XCTAssertEqual(lstat(f.path, &after), 0); XCTAssertEqual(before.st_ino, after.st_ino)
-        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.path)), marker.encoded)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.path)), try marker.encoded)
     }
     func testReadbackCannotCreateAMissingMarker() throws {
         let f = try MaintenanceCloseFileFixture(); defer { try? f.close() }
