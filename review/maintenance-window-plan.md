@@ -385,7 +385,7 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M05b3 | Native authenticated Setup client with serialized exchanges and bounded recovery | 169 measured | Source8e494e12. Core/Debug and110 fresh methods passed;73 unrelated methods and54 Python results transferred. Harmless hello precedes identifiers and changes no admission state. Only stagesPending permits another arm before the original deadline. Refused is terminal; nil, timeout or malformed reply requires recovery. No product entry. |
 | M05b4a | Protected command frame and actual pairing stage reservations | 94 measured | Source645f4dfd above acknowledgement repairf54fed93. Gate5876 passed76 fresh native methods and143 explicit unchanged-method transfers, fresh Python manifest checks, Core/Debug. One read transaction binds installation, gate, phase, current revision and incarnation. Retained Stage handles keep one attempt counted through actual reply cleanup. No Root factory. |
 | M05b4b | Root factory and actual M05a owner composition | 121 measured | Source8ce7c89c above645f4dfd. The factory accepts the installed registration and actual WakeService only. Command reads use a short protected lease. Pairing endpoints remain retained through reply cleanup. Core and124 fresh supporting fixture methods passed. Installed Root execution remains unqualified. No registration. |
-| M05b5 | Existing presence listener multiplexing | 110 measured candidate | One listener/delegate, exact App/Setup branch policies, independent maintenance connection owner, installed eligibility and channel1 declarations. No plist/host/schema change. Unapplied and unqualified. |
+| M05b5 | Existing presence listener multiplexing and startup isolation | 179 measured | Core/Debug,207 fresh selected native outcomes,54 Python. No installed Root/Release or merge-readiness claim. |
 | M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
 | M05d | Purpose-bound native permit and stop factory, introduced together | 120–195 after support | Bounded work wait, pre-stop cancellation, exact bootout, clean marker plus original exit witness; then actual pair custody |
 | M06 | Shared bootstrap/recovery phase guard for the M05d stop lifecycle | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn |
@@ -806,3 +806,38 @@ The native constructor cannot accept owned controls; the owned factory requires 
 Release, installed Root, the full Core suite and merge readiness remain unqualified.
 Toni owns publication, review, the watcher, merge and main reconciliation. Bepi did not push.
 M07, M09, live#725, attended provider tests and the full objective remain incomplete.
+
+
+### M05b5 startup isolation correction (Toni3234/3236)
+
+Source `4ad482c6183dda06fab18e107f7f9b0b34c8a3b0`; tree `7a0682f850d8d49a2090d2507a7efc6a2c6ab699`; base `bca7a7d623f7b4e20f4072e5f99f9d6c98e042f8`.
+The complete production delta is179 changed lines. The earlier110-line candidate remains immutable preparation history.
+One presence listener admits App or Setup. Each branch selects its exact policy before activation.
+Maintenance uses its own connection owner and budget. Root arrivals before attachment reserve no App capacity.
+The client resolves N.presence. Authority and Setup declare channel1 together.
+The host codecs, installed plist and machine schema remain unchanged. The retired host5 branch remains unpublished.
+
+Core and Debug built. The gate passed207 fresh native methods with0 allowed GUI skips and zero transfers.
+All14 mux methods passed, including three startup failure regressions. Python passed54 fresh manifest tests.
+The207 expected methods include actual Debug manifest inspection and all affected classes.
+Gate33833 exited0/2805a9; the actual terminal was consumed.
+The cumulative mux budget is893.452/1800 seconds, including three preserved failed runs.
+The first run failed compilation. The second had an owned fixture identity error.
+The third omitted an observe binding and expected a new connection to reuse the old binding.
+The final recovery test preserves the old armed target and uses its exact binding to reopen.
+
+The anonymous XPC tests use the real listener, endpoints, budgets and journal.
+Their UID, role, current-hash and eligibility controls are synthetic. Native Root admission remains unqualified.
+The native constructor cannot accept owned controls; the owned factory requires an ordinary account.
+Release, installed Root, the full Core suite and merge readiness remain unqualified.
+Toni owns publication, review, the watcher, merge and main reconciliation. Bepi did not push.
+M07, M09, live#725, attended provider tests and the full objective remain incomplete.
+
+Maintenance is never a prerequisite for ordinary Authority startup.
+Prepare and install errors record only a fixed failure category and leave maintenance unavailable.
+The tests cover failure before and after the listener union, failed installation and post-start factory failure.
+Each case proves a running Authority, successful settings continuation, rejected root and a working App endpoint.
+The active App entry uses a guard. No maintenance error can force its ordinary startup to fail.
+Toni3238 orders: this correction, M06a, M05c, M05d, then M07a.
+M06a guards all three bootstrap paths and rejects restoration until its exact owner is implemented.
+No later slice has been applied. Each publication and merge remains with Toni.
