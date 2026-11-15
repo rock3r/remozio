@@ -34,7 +34,7 @@ struct RuntimeMaintenanceCommitments: Equatable {
         }
         try LocalAccountDirectory.validateOwnership(authorityOwner, uid: authorityPreparation.ownerUID, directoryID: authorityPreparation.directoryID)
         let authority = try account(authorityAccountID, owner: authorityOwner), target = try account(runtime.preparation.accountID, owner: targetOwner)
-        let operation = try OperationManifest(purpose: purpose, entry: entry, initial: targetInitial, choices: importChoices(inputs)).digest
+        let operation = try OperationManifest(purpose: purpose, entry: entry, initial: targetInitial, choices: stableImportChoices(inputs)).digest
         let restoration = try RestorationDeclarations(initial: initial, host: host, inventory: inventory).digest
         let footprint = try MutationFootprint(runtime: runtime, inputs: inputs).digest
         let candidateDigest = try InstallationInventory.digest(candidate)
@@ -54,6 +54,7 @@ struct RuntimeMaintenanceCommitments: Equatable {
         guard actual.macID == expected.macID, actual.installationID == expected.installationID,
               actual.authority == expected.authority, actual.target == expected.target,
               actual.releaseDigest == expected.releaseDigest, actual.candidateDigest == expected.candidateDigest,
+              actual.operationDigest == expected.operationDigest,
               actual.authorityPolicyDigest == expected.authorityPolicyDigest, actual.restorationDigest == expected.restorationDigest,
               actual.mutationFootprintDigest == expected.mutationFootprintDigest, actual.authorityGrantDigest == expected.authorityGrantDigest,
               actual.targetConsentDigest == expected.targetConsentDigest,
@@ -81,9 +82,7 @@ struct RuntimeMaintenanceCommitments: Equatable {
         var digest: Data { get throws {
             let runtime = entry.runtime
             return try RuntimeMaintenanceCommitments.digest(.operation, .array([.unsigned(purpose.rawValue),
-                .bytes(runtime.preparation.bytes), .bytes(initial.bytes), .bytes(runtime.plan.encoded),
-                optional(runtime.state.reference?.encoded), .unsigned(runtime.state.configurationPublished ? 1 : 0),
-                optional(entry.intent?.encoded), choices]))
+                .bytes(runtime.preparation.bytes), .bytes(initial.bytes), .bytes(runtime.plan.encoded), choices]))
         } }
     }
     private struct RestorationDeclarations {
@@ -165,10 +164,6 @@ struct RuntimeMaintenanceCommitments: Equatable {
     private static func uuid(_ value: UUID) -> Data { var raw = value.uuid; return withUnsafeBytes(of: &raw) { Data($0) } }
     private static func optional(_ value: Data?) -> CBORValue { value.map(CBORValue.bytes) ?? .null }
     private static func strings(_ values: [String]) -> CBORValue { .array(values.map(CBORValue.text)) }
-    private static func importChoices(_ inputs: MachineUpdateRetainedSetupRuntimeInputs) throws -> CBORValue {
-        .array([.unsigned(inputs.journalPresent ? 1 : 0), optional(try inputs.intent?.bytes),
-            optional(inputs.relay?.plan?.bytes), optional(inputs.relay?.snapshot?.digest)])
-    }
     private static func stableImportChoices(_ inputs: MachineUpdateRetainedSetupRuntimeInputs) throws -> CBORValue {
         let intent: CBORValue
         if let value = inputs.intent {
@@ -182,7 +177,7 @@ struct RuntimeMaintenanceCommitments: Equatable {
     }
     private static func digest(_ domain: Domain, _ value: CBORValue) throws -> Data {
         Data(SHA256.hash(data: try DeterministicCBOR.encode(
-            .array([.text("remozio.maintenance." + domain.rawValue + (domain == .targetConsent ? ".v2" : ".v1")), value]),
+            .array([.text("remozio.maintenance." + domain.rawValue + (domain == .targetConsent || domain == .operation ? ".v2" : ".v1")), value]),
             limits: .init(maxBytes: 2 * 1024 * 1024, maxDepth: 8, maxItems: 4096))))
     }
 }

@@ -98,7 +98,7 @@ enum RuntimeMaintenanceRuntimeObservation {
     private static func observe(window: RuntimeMaintenanceWindowRecord, candidate: SignedReleaseEvidence, readers: Readers) -> State {
         do {
             try RuntimeMaintenanceCommitments.requireProfile(window.purpose)
-            guard window.phase != .restored else { return .unknown }
+            guard [.stopping, .stopped, .executing].contains(window.phase) else { return .unknown }
             let process = getpid(), thread = pthread_self()
             func current() throws {
                 guard getpid() == process, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
@@ -152,7 +152,7 @@ enum RuntimeMaintenanceRuntimeObservation {
             if complete { return .new }
             // Pre-existing valid partial files remain partial. Metadata equality never hides a mixed publication.
             if progressed { return .partial }
-            return observed.scope.operationDigest == window.scope.operationDigest ? .old : .unknown
+            return .old
         } catch { return .unknown }
     }
     private static func publicationLeaves(_ runtime: MachineUpdateStableRuntimePreparationSnapshot) throws -> [Leaf] {
