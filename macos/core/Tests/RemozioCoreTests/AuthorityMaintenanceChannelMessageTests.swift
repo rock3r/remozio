@@ -137,7 +137,7 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
     func testResponseRejectsUnknownMissingTagsVersionsAndUnexpectedWork() throws {
         let q = try request(), original = try fields(response(q).encoded)
         for key in original.keys { var f = original; f.removeValue(forKey: key); XCTAssertThrowsError(try Response.decode(encode(f), expected: q)) }
-        var f = original; f[5] = .null; XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
+        var f = original; f[6] = .null; XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
         f = original; f[0] = .unsigned(2); XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
         f = original; f[1] = .text("authority.maintenance-request"); XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
         for key in [UInt64(2), 3, 4] { f = original; f[key] = .boolean(false); XCTAssertThrowsError(try Response.decode(encode(f), expected: q)) }
@@ -151,8 +151,59 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
         for b in [qb + Data([0]), Data(repeating: 0, count: 513), Data([0xab, 0, 0x18, 1]) + qb.dropFirst(3), Data([0xac, 0, 1]) + qb.dropFirst()] {
             XCTAssertThrowsError(try Request.decode(b))
         }
-        for b in [rb + Data([0]), Data(repeating: 0, count: 1025), Data([0xa5, 0, 0x18, 1]) + rb.dropFirst(3), Data([0xa6, 0, 1]) + rb.dropFirst()] {
+        for b in [rb + Data([0]), Data(repeating: 0, count: 1025), Data([0xa6, 0, 0x18, 1]) + rb.dropFirst(3), Data([0xa7, 0, 1]) + rb.dropFirst()] {
             XCTAssertThrowsError(try Response.decode(b, expected: q))
+        }
+    }
+}
+
+extension AuthorityMaintenanceChannelMessageTests {
+    func testEveryActionOutcomeAndWorkCombinationIsValidatedAndRoundTrips() throws {
+        for action in Request.Action.allCases {
+            let q = try request(action)
+            for outcome in Response.Outcome.allCases {
+                for hasWork in [false, true] {
+                    let w = hasWork ? try work() : nil
+                    let observes = [Request.Action.open, .observe, .arm].contains(action)
+                    let valid: Bool
+                    switch outcome {
+                    case .applied: valid = observes == hasWork
+                    case .stagesPending: valid = action == .arm && hasWork
+                    case .refused: valid = !hasWork
+                    }
+                    if valid {
+                        let r = try Response(request: q, binding: binding(), work: w, outcome: outcome)
+                        XCTAssertEqual(try Response.decode(r.encoded, expected: q), r)
+                    } else {
+                        XCTAssertThrowsError(try Response(request: q, binding: binding(), work: w, outcome: outcome))
+                        var f = try fields(response(q).encoded); f[5] = .unsigned(outcome.rawValue)
+                        if hasWork { f[4] = try fields(response(request(.arm)).encoded)[4] } else { f[4] = .null }
+                        XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
+                    }
+                }
+            }
+        }
+    }
+    func testUnknownMissingAndWrongTypeOutcomesCannotBecomeApplied() throws {
+        let q = try request(.arm), original = try fields(response(q).encoded)
+        for value: CBORValue in [.unsigned(0), .unsigned(4), .unsigned(.max), .text("applied"), .boolean(true), .null] {
+            var f = original; f[5] = value; XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
+        }
+        var f = original; f.removeValue(forKey: 5)
+        XCTAssertThrowsError(try Response.decode(encode(f), expected: q))
+    }
+    func testPendingAndRefusedRemainDistinctAndKeepExactRequestCorrelation() throws {
+        let q = try request(.arm)
+        let pending = try Response(request: q, binding: binding(), work: work(), outcome: .stagesPending)
+        let refused = try Response(request: q, binding: binding(), work: nil, outcome: .refused)
+        let applied = try Response(request: q, binding: binding(), work: work(), outcome: .applied)
+        XCTAssertEqual(try Response.decode(pending.encoded, expected: q).outcome, .stagesPending)
+        XCTAssertEqual(try Response.decode(refused.encoded, expected: q).outcome, .refused)
+        XCTAssertNil(try Response.decode(refused.encoded, expected: q).work)
+        XCTAssertNotEqual(try pending.encoded, applied.encoded)
+        for r in [pending, refused, applied] {
+            XCTAssertThrowsError(try Response.decode(r.encoded, expected: request(.arm, challenge: 99)))
+            XCTAssertThrowsError(try Response.decode(r.encoded, expected: request(.observe)))
         }
     }
 }

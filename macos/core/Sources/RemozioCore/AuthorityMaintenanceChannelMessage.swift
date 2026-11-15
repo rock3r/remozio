@@ -77,28 +77,38 @@ struct AuthorityMaintenanceChannelWork: Equatable, Sendable {
     }
 }
 
-/// Replies echo the exact request, including installation, gate, action and challenge. Bytes grant no native authority.
+/// Replies echo the exact request. Applied arm reports actual transfer; stagesPending permits only bounded waiting.
+/// Refused carries no work and requires cancellation without retry. Bytes grant no native authority.
 struct AuthorityMaintenanceChannelResponse: Equatable, Sendable {
+    enum Outcome: UInt64, CaseIterable, Sendable { case applied = 1, stagesPending = 2, refused = 3 }
     let request: AuthorityMaintenanceChannelRequest
     let binding: AuthorityMaintenanceBinding
     let work: AuthorityMaintenanceChannelWork?
-    init(request: AuthorityMaintenanceChannelRequest, binding: AuthorityMaintenanceBinding, work: AuthorityMaintenanceChannelWork?) throws {
+    let outcome: Outcome
+    init(request: AuthorityMaintenanceChannelRequest, binding: AuthorityMaintenanceBinding, work: AuthorityMaintenanceChannelWork?,
+         outcome: Outcome = .applied) throws {
         let observes = [AuthorityMaintenanceChannelRequest.Action.open, .observe, .arm].contains(request.action)
+        let valid: Bool
+        switch outcome {
+        case .applied: valid = observes == (work != nil)
+        case .stagesPending: valid = request.action == .arm && work != nil
+        case .refused: valid = work == nil
+        }
         guard request.accountID == binding.accountID, request.attemptID == binding.attemptID, request.revision == binding.revision,
-              request.binding == nil || request.binding == binding, observes == (work != nil) else {
+              request.binding == nil || request.binding == binding, valid else {
             throw RuntimePreparationError.changedScope
         }
-        self.request = request; self.binding = binding; self.work = work
+        self.request = request; self.binding = binding; self.work = work; self.outcome = outcome
     }
     var encoded: Data { get throws {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("authority.maintenance-response"),
-            2: .bytes(request.encoded), 3: .bytes(binding.encoded), 4: work?.value ?? .null]), limits: Self.limits)
+            2: .bytes(request.encoded), 3: .bytes(binding.encoded), 4: work?.value ?? .null, 5: .unsigned(outcome.rawValue)]), limits: Self.limits)
     } }
     static func decode(_ bytes: Data, expected: AuthorityMaintenanceChannelRequest) throws -> Self {
-        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...4),
+        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...5),
               f[0] == .unsigned(1), f[1] == .text("authority.maintenance-response"), f[2] == .bytes(try expected.encoded),
-              case .bytes(let binding) = f[3] else { throw RuntimePreparationError.invalidRecord }
-        let result = try Self(request: expected, binding: .decode(binding), work: f[4] == .null ? nil : .decode(f[4]!))
+              case .bytes(let binding) = f[3], let outcome = Outcome(rawValue: try channelUInt(f[5])) else { throw RuntimePreparationError.invalidRecord }
+        let result = try Self(request: expected, binding: .decode(binding), work: f[4] == .null ? nil : .decode(f[4]!), outcome: outcome)
         guard try result.encoded == bytes else { throw RuntimePreparationError.invalidRecord }; return result
     }
     private static let limits = try! CBORLimits(maxBytes: 1024, maxDepth: 2, maxItems: 32)
