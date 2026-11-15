@@ -59,7 +59,7 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
                     var formats = c.formats.filter { $0.name != AuthorityMaintenanceCloseMarker.formatName }
                     if mode != 0 {
                         formats.append(try .init(name: AuthorityMaintenanceCloseMarker.formatName, readers: mode == 1 ? [2] : [1],
-                            writers: mode == 2 ? (role == .authority ? [] : [1]) : (role == .authority ? [1] : [])))
+                            writers: mode == 2 ? (role == .authority ? [] : [1]) : (role == .authority ? [2] : [])))
                     }
                     return try .init(role: c.role, identifier: c.identifier, generation: c.generation, relativePath: c.relativePath,
                         codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: formats)
