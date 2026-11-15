@@ -54,6 +54,9 @@ final class AuthorityMaintenanceListenerTests: XCTestCase, @unchecked Sendable {
             created.withLock { $0 += 1 }; if earlyClose.withLock({ $0 }) { endpoint.close() }; return endpoint
         }
     }
+    private final class JoinCounts: Sendable {
+        let started = Mutex(0), joined = Mutex(0)
+    }
     private final class Peer: @unchecked Sendable {
         let connection: NSXPCConnection
         init(_ listener: NSXPCListener) {
@@ -130,15 +133,17 @@ final class AuthorityMaintenanceListenerTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(f.captures.withLock { $0 }, 2)
         }
         owner.close()
-        let started = Mutex(0), joined = Mutex(0)
-        let first = Task { started.withLock { $0 += 1 }; await owner.closeAndWait(); joined.withLock { $0 += 1 } }
-        let second = Task { started.withLock { $0 += 1 }; await owner.closeAndWait(); joined.withLock { $0 += 1 } }
-        try await waitUntil { started.withLock { $0 == 2 } }
-        XCTAssertEqual(joined.withLock { $0 }, 0); XCTAssertGreaterThan(owner.retainedEndpoints(), 0)
+        let counts = JoinCounts()
+        let join: @Sendable () async -> Void = { [owner, counts] in
+            counts.started.withLock { $0 += 1 }; await owner.closeAndWait(); counts.joined.withLock { $0 += 1 }
+        }
+        let first = Task(operation: join), second = Task(operation: join)
+        try await waitUntil { counts.started.withLock { $0 == 2 } }
+        XCTAssertEqual(counts.joined.withLock { $0 }, 0); XCTAssertGreaterThan(owner.retainedEndpoints(), 0)
         XCTAssertThrowsError(try installer.acquireExclusive())
         f.pause.resume(); await first.value; await second.value
         let outcome = await exchange.result; if case .success = outcome { XCTFail("Disconnected exchange cannot report applied") }
-        XCTAssertEqual(joined.withLock { $0 }, 2); XCTAssertEqual(owner.retainedEndpoints(), 0)
+        XCTAssertEqual(counts.joined.withLock { $0 }, 2); XCTAssertEqual(owner.retainedEndpoints(), 0)
         let exclusive = try installer.acquireExclusive(); exclusive.close()
     }
     func testListenerShutdownJoinsWorkBeforeReleasingActualActivity() async throws { try await drain(disconnectFirst: false) }
