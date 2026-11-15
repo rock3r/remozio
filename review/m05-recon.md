@@ -2,7 +2,7 @@
 
 Current decisions: Toni3104,3108,3111,3112,3117 and3131. Earlier appendices retain historical source states. The current table and final section govern active work.
 This revision supersedes the full live-idle design in689ee08e. That commit retains the detailed hosted-owner audit as history.
-The current implementation source is67a52505 above locally qualified M05c1 source4c858128.
+The current implementation source is1b29a5aa above locally qualified M05c2 source67a52505.
 The final M05c section records selected local evidence. It qualifies no installed Root execution, daemon signal or service stop.
 
 ## Decision
@@ -642,3 +642,35 @@ M05d must still combine the native stop permit, exact marker readback and origin
 It must check job absence and reject a new incarnation after bootout, before the body.
 It must retain the actual journal and continuity pair before lending the body.
 M07a, M09, live725, attended provider checks and the full objective remain incomplete.
+
+
+### M05d1 pair and arm capture (Toni3325/3328)
+
+Source1b29a5aa follows67a52505. It changes167 production lines in two files and adds14 regression methods.
+Gate36300 exits0/a21612. Core and Debug build fresh. All79 selected native methods and55 manifest tests pass without transfers or skips.
+The corrected weights candidate passes48 fresh CI tests. The first CI check remains failed and immutable.
+The first candidate supplied per-method weights for an app-dependent class. The corrected candidate retains its measured class weight only.
+The cumulative local budget is132.722/1800 seconds, including that failed check. No native suite was rerun.
+
+The private native client captures the original process witness through authenticated XPC credentials and installed code.
+The shared sequence waits for actual work, arms, and checks the process again before returning capture data.
+An ordinary-owner regression changes incarnation after applied arm. Cancel reaches the changed peer, receives refused and requires owner recovery.
+Another regression proves that copied replies cannot select the native capture factory from an ordinary process.
+Pairing readiness is vacuous with no endpoints. An endpoint without hello blocks until its handshake timeout.
+The window policy digest stays opaque. Capture retains the policy bytes from the protected configuration.
+
+The pair factory verifies shared machine admission and the exact exclusive account drain before storage opens and at later boundaries.
+Tests retain both real writer locks, refuse wrong account and machine drains, and refuse changed gate identities and owner loss.
+An escaped scope cannot validate the pair. Its locks remain owned until explicit close.
+The Audit factory retains its Root entry and exclusive activity check. The storage opening and inspection path remains shared.
+The owned controls use actual process IDs without override parameters. Their tested UID predicate refuses Root and mismatched IDs.
+Actual UID0 calls were not executed. These tests do not qualify installed Root admission or kernel witness capture.
+
+M05d1 creates no stop permit, bootout factory or body loan. M05d2 remains a separate unapplied prototype.
+Its preparation must be refreshed against this actual predecessor and the added journal controls before use.
+Toni3325 sets the permit deadline for consume, stop, removal checks and the final body-entry check.
+After the body, validate identity, absence, witness, marker and boundary without the permit clock.
+A successful body must not fail only because it finishes late. A body error retains its original meaning.
+M05d2 must still prove bootout at most once, permit consumption, process and thread checks, marker mismatches and pair cleanup.
+M07a must persist the five-value binding before arm. The actual C02 owner, M09 restoration and installed tests remain separate requirements.
+Toni owns publication, current-head review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
