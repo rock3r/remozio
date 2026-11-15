@@ -23,6 +23,8 @@ final class AuthorityMaintenanceEndpointTests: XCTestCase, @unchecked Sendable {
     private final class Fixture: Sendable {
         let admission: AuthorityMaintenancePairingAdmission
         let valid = Mutex(true), failCapture = Mutex(false), pauseObserve = Mutex(false)
+        let armFailureMode = Mutex(0), postReleaseChecks = Mutex(0)
+        let replacement = Mutex<AuthorityMaintenanceBinding?>(nil), requiredArmedDuringRelease = Mutex<AuthorityMaintenanceBinding?>(nil)
         let checks = Mutex(0), captures = Mutex(0), acquisitions = Mutex(0), handshakes = Mutex(0), invalidations = Mutex(0)
         let pause = Pause()
         let activity: ReleaseActivityBarrier?
@@ -33,11 +35,26 @@ final class AuthorityMaintenanceEndpointTests: XCTestCase, @unchecked Sendable {
         func access() throws -> AuthorityMaintenanceChannelAccess {
             try .openOwned(admission: admission, acquireActivity: { [self] in
                 acquisitions.withLock { $0 += 1 }; return try activity?.acquireShared()
-            }, check: { [self] _ in
+            }, check: { [self] q in
                 checks.withLock { $0 += 1 }; guard valid.withLock({ $0 }) else { throw Fault.denied }
+                if [.cancel, .reopen].contains(q.action), let b = requiredArmedDuringRelease.withLock({ $0 }),
+                   (try? admission.shutdownBinding(matching: b)) == nil {
+                    postReleaseChecks.withLock { $0 += 1 }; throw Fault.denied
+                }
             }, observe: { [self] q in
                 captures.withLock { $0 += 1 }
                 if failCapture.withLock({ $0 }) { throw Fault.denied }
+                if q.action == .arm, armFailureMode.withLock({ $0 }) != 0 {
+                    let binding = try XCTUnwrap(q.binding)
+                    let armed = try admission.shutdownBinding(matching: binding)
+                    if armFailureMode.withLock({ $0 }) == 2 {
+                        try armed.cancel(matching: binding)
+                        let next = try admission.openConnection(attemptID: q.attemptID, revision: q.revision)
+                        _ = try next.blockNewStages(matching: next.binding); _ = try next.transferToShutdown(matching: next.binding)
+                        replacement.withLock { $0 = next.binding }; next.close()
+                    }
+                    throw Fault.denied
+                }
                 if q.action == .observe && pauseObserve.withLock({ $0 }) { await pause.wait() }
                 return try .init(journal: .init(requests: .init(liveRequests: 0, commandCaptures: 0, activityOwners: 0),
                     exchanges: .init(active: 0, stopped: false), nativeExecutions: 0, executionActivityOwners: 0),
@@ -67,11 +84,14 @@ final class AuthorityMaintenanceEndpointTests: XCTestCase, @unchecked Sendable {
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !body() { guard ContinuousClock.now < deadline else { throw Fault.timeout }; try await Task.sleep(for: .milliseconds(2)) }
     }
-    private func call(_ e: AuthorityMaintenanceXPCEndpoint, _ q: Request) async throws -> Response {
+    private func rawCall(_ e: AuthorityMaintenanceXPCEndpoint, _ q: Request) async throws -> Data? {
         let result = Mutex<(Bool, Data?)>((false, nil))
         invoke(e, try q.encoded) { b in result.withLock { $0 = (true, b) } }
         try await waitUntil { result.withLock { $0.0 } && e.pendingOperations() == 0 }
-        return try Response.decode(XCTUnwrap(result.withLock { $0.1 }), expected: q)
+        return result.withLock { $0.1 }
+    }
+    private func call(_ e: AuthorityMaintenanceXPCEndpoint, _ q: Request) async throws -> Response {
+        let bytes = try await rawCall(e, q); return try Response.decode(XCTUnwrap(bytes), expected: q)
     }
     private func open(_ e: AuthorityMaintenanceXPCEndpoint) async throws -> AuthorityMaintenanceBinding {
         let r = try await call(e, request(.open)); XCTAssertEqual(r.outcome, .applied); return r.binding
@@ -291,5 +311,74 @@ extension AuthorityMaintenanceEndpointTests {
         let target = try f.admission.shutdownBinding(matching: opened.binding)
         XCTAssertEqual(target.binding, opened.binding); try target.reopen(matching: opened.binding)
         let stage = try f.admission.reserveStage(); stage.close()
+    }
+}
+
+extension AuthorityMaintenanceEndpointTests {
+    func testPostTransferCaptureFailureRollsBackWithoutAnOrphanAndAFreshConnectionCanArm() async throws {
+        let f = try Fixture(), e = try f.endpoint(), b = try await open(e)
+        f.armFailureMode.withLock { $0 = 1 }
+        let refused = try await call(e, request(.arm, binding: b))
+        XCTAssertEqual(refused.outcome, .refused); XCTAssertNil(refused.work)
+        XCTAssertThrowsError(try f.admission.shutdownBinding(matching: b))
+        XCTAssertEqual(try f.admission.connectionReservations(), 0)
+        let stage = try f.admission.reserveStage(); stage.close()
+        f.armFailureMode.withLock { $0 = 0 }
+        let fresh = try f.endpoint(), next = try await open(fresh)
+        XCTAssertNotEqual(b.connectionID, next.connectionID)
+        let observed = try await call(fresh, request(.observe, binding: next)); XCTAssertEqual(observed.outcome, .applied)
+        let armed = try await call(fresh, request(.arm, binding: next)); XCTAssertEqual(armed.outcome, .applied)
+        await fresh.closeAndWait(); try f.admission.shutdownBinding(matching: next).cancel(matching: next)
+    }
+    func testFailedRollbackReturnsAmbiguousNilAndCannotReleaseANewerArmedTarget() async throws {
+        let f = try Fixture(), e = try f.endpoint(), b = try await open(e)
+        f.armFailureMode.withLock { $0 = 2 }
+        let reply = try await rawCall(e, request(.arm, binding: b)); XCTAssertNil(reply)
+        let replacement = try XCTUnwrap(f.replacement.withLock { $0 })
+        XCTAssertNotEqual(replacement.connectionID, b.connectionID)
+        XCTAssertThrowsError(try f.admission.shutdownBinding(matching: b)); XCTAssertThrowsError(try f.admission.reserveStage())
+        let held = try f.admission.shutdownBinding(matching: replacement)
+        XCTAssertEqual(held.binding, replacement); try held.cancel(matching: replacement)
+    }
+    func testValidationFailureBeforeCancelLeavesTheExistingArmedBlockUntouched() async throws {
+        let f = try Fixture(), e = try f.endpoint(), b = try await open(e)
+        let armed = try await call(e, request(.arm, binding: b)); XCTAssertEqual(armed.outcome, .applied)
+        f.valid.withLock { $0 = false }
+        let refused = try await call(e, request(.cancel, binding: b)); XCTAssertEqual(refused.outcome, .refused)
+        XCTAssertEqual(try f.admission.shutdownBinding(matching: b).binding, b); XCTAssertThrowsError(try f.admission.reserveStage())
+        f.valid.withLock { $0 = true }; let fresh = try f.endpoint(); _ = try await open(fresh)
+        let cancelled = try await call(fresh, request(.cancel, binding: b)); XCTAssertEqual(cancelled.outcome, .applied)
+        let stage = try f.admission.reserveStage(); stage.close()
+    }
+    func testCancelAndReopenHaveNoFallibleValidationAfterTheirRelease() async throws {
+        for action in [Request.Action.cancel, .reopen] {
+            let f = try Fixture(), e = try f.endpoint(), b = try await open(e)
+            let armed = try await call(e, request(.arm, binding: b)); XCTAssertEqual(armed.outcome, .applied)
+            f.requiredArmedDuringRelease.withLock { $0 = b }
+            let released = try await call(e, request(action, binding: b)); XCTAssertEqual(released.outcome, .applied)
+            XCTAssertEqual(f.postReleaseChecks.withLock { $0 }, 0)
+            XCTAssertThrowsError(try f.admission.shutdownBinding(matching: b))
+            let stage = try f.admission.reserveStage(); stage.close()
+        }
+    }
+    func testConcurrentExchangeClosesTheConnectionAndReleasesOnlyItsUnarmedRestriction() async throws {
+        let f = try Fixture(), stage = try f.admission.reserveStage(), budget = try AuthorityXPCWorkBudget(maximum: 1)
+        let e = try f.endpoint(budget: budget), b = try await open(e)
+        defer { f.pause.resume(); stage.close(); e.close() }
+        let pending = try await call(e, request(.arm, binding: b)); XCTAssertEqual(pending.outcome, .stagesPending)
+        XCTAssertThrowsError(try f.admission.reserveStage())
+        f.pauseObserve.withLock { $0 = true }
+        let firstReplies = Mutex(0), concurrentReplies = Mutex(0)
+        invoke(e, try request(.observe, binding: b).encoded) { _ in firstReplies.withLock { $0 += 1 } }
+        try await waitUntil { f.pause.entered }
+        invoke(e, try request(.observe, binding: b, challenge: 99).encoded) { data in
+            XCTAssertNil(data); concurrentReplies.withLock { $0 += 1 }
+        }
+        XCTAssertEqual(concurrentReplies.withLock { $0 }, 1); XCTAssertFalse(budget.acquire())
+        XCTAssertEqual(try f.admission.connectionReservations(), 0)
+        let extra = try f.admission.reserveStage(); XCTAssertEqual(try f.admission.stagedReservations(), 2); extra.close()
+        f.pause.resume(); await e.closeAndWait()
+        XCTAssertEqual(firstReplies.withLock { $0 }, 0); XCTAssertEqual(try f.admission.stagedReservations(), 1)
+        XCTAssertTrue(budget.acquire()); budget.release()
     }
 }

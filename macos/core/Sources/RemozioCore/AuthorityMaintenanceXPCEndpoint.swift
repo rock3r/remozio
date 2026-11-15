@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 
+/// Setup serializes exchanges. A concurrent call closes the connection and releases its pre-arm block.
 @objc protocol AuthorityMaintenanceXPCProtocol {
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
 }
@@ -119,6 +120,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
         // A refused open echoes metadata only. No Connection exists until all open checks and capture succeed.
         var binding = q.binding ?? (try? access.admission.refusalBinding(accountID: q.accountID, attemptID: q.attemptID, revision: q.revision))
         var opened = false
+        var transferred: AuthorityMaintenancePairingAdmission.Shutdown?
         do {
             try Task.checkCancellation(); try access.validate(q)
             let activity = try access.acquireActivity(); defer { activity?.close() }
@@ -127,25 +129,31 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
             try access.validate(q); try activity?.validate(); try Task.checkCancellation()
             let owner = try begin(q); opened = q.action == .open; binding = q.binding ?? owner.binding
             guard let binding else { throw RuntimePreparationError.changedScope }
+            if q.action == .cancel || q.action == .reopen {
+                let bytes = try Response(request: q, binding: binding, work: nil, outcome: .applied).encoded
+                try access.validate(q); try activity?.validate(); try Task.checkCancellation()
+                if let shutdown = try? access.admission.shutdownBinding(matching: binding) {
+                    if q.action == .cancel { try shutdown.cancel(matching: binding) } else { try shutdown.reopen(matching: binding) }
+                } else { try owner.releaseUnarmed(matching: binding) }
+                return (bytes, true)
+            }
             let outcome: Response.Outcome
             do {
-                switch q.action {
-                case .open, .observe: break
-                case .arm: _ = try owner.blockNewStages(matching: binding); _ = try owner.transferToShutdown(matching: binding)
-                case .cancel, .reopen:
-                    if let shutdown = try? access.admission.shutdownBinding(matching: binding) {
-                        if q.action == .cancel { try shutdown.cancel(matching: binding) } else { try shutdown.reopen(matching: binding) }
-                    } else { try owner.releaseUnarmed(matching: binding) }
+                if q.action == .arm {
+                    _ = try owner.blockNewStages(matching: binding)
+                    try access.validate(q); try activity?.validate(); try Task.checkCancellation()
+                    transferred = try owner.transferToShutdown(matching: binding)
                 }
                 outcome = .applied
             } catch AuthorityMaintenancePairingAdmission.TransferError.stagesPending(_) { outcome = .stagesPending }
-            catch { outcome = .refused }
-            let observes = outcome != .refused && [Request.Action.open, .observe, .arm].contains(q.action)
-            let work = q.action == .open ? initialWork : observes ? try await access.capture(q) : nil
-            try access.validate(q); try activity?.validate(); try Task.checkCancellation()
+            let work = q.action == .open ? initialWork : try await access.capture(q)
+            if transferred == nil { try access.validate(q); try activity?.validate(); try Task.checkCancellation() }
             let bytes = try Response(request: q, binding: binding, work: work, outcome: outcome).encoded
-            return (bytes, outcome == .refused || q.action == .cancel || q.action == .reopen)
+            return (bytes, false)
         } catch {
+            if let transferred {
+                do { try transferred.cancel(matching: transferred.binding) } catch { return (nil, true) }
+            }
             guard !opened, let binding else { return (nil, true) }
             return (try? Response(request: q, binding: binding, work: nil, outcome: .refused).encoded, true)
         }
