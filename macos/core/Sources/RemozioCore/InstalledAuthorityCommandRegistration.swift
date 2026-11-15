@@ -113,7 +113,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             let manifest = try InstalledAccountJobManifest(accountID: configuration.command.accountID, role: .authority,
                 executionUID: 0, userName: "root", bundlePath: bundle.path,
                 gatewaySettingsControlEnabled: configuration.gatewaySettingsControlEnabled,
-                installedReadinessEnabled: configuration.installedReadinessEnabled)
+                installedReadinessEnabled: configuration.installedReadinessEnabled, maintenanceChannelEnabled: configuration.maintenanceChannelEnabled)
             guard manifest.declaration == declaration, manifest.configurationPath == path else {
                 throw InstalledAuthorityCommandError.changedConfiguration
             }

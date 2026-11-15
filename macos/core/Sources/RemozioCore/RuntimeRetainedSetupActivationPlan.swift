@@ -45,7 +45,7 @@ struct RuntimeRetainedSetupActivationPlan: CustomStringConvertible, CustomDebugS
         let authorityJob = try InstalledAccountJobManifest(accountID: services.accountID, role: .authority,
             executionUID: 0, userName: "root", bundlePath: archive.bundlePath,
             gatewaySettingsControlEnabled: host.gatewaySettingsControlEnabled,
-            installedReadinessEnabled: host.installedReadinessEnabled, retainedSetupHealthEnabled: true)
+            installedReadinessEnabled: host.installedReadinessEnabled, retainedSetupHealthEnabled: true, maintenanceChannelEnabled: host.maintenanceChannelEnabled)
         let transportJob = try selected.job(.transport)
         storage = .init(archive: archive, consumerHosts: selected, authorityJob: authorityJob, transportJob: transportJob)
     }

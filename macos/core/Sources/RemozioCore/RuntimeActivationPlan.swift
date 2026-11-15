@@ -135,7 +135,7 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion)
         let services = reference.services
         let authorityJob = try InstalledAccountJobManifest(accountID: services.accountID, role: .authority, executionUID: 0, userName: "root", bundlePath: bundlePath,
-            gatewaySettingsControlEnabled: host.gatewaySettingsControlEnabled)
+            gatewaySettingsControlEnabled: host.gatewaySettingsControlEnabled, maintenanceChannelEnabled: host.maintenanceChannelEnabled)
         let transportJob: InstalledAccountJobManifest
         if let selected { transportJob = try selected.job(.transport) }
         else { transportJob = try .init(accountID: services.accountID, role: .transport, executionUID: claim.number, userName: claim.name, bundlePath: bundlePath) }

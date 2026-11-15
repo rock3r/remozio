@@ -76,6 +76,9 @@ enum RuntimeActivationFiles {
     static func publish(plan: RuntimeActivationPlan, privateState: ProtectedSetupDirectory, jobs: ProtectedSetupDirectory,
                         owner: uid_t, verifyCurrent: () throws -> Void,
                         didPublish: (Int) throws -> Void = { _ in }) throws {
+        guard InstalledAuthorityCommandConfiguration.writerSupportedVersions.contains(plan.host.formatVersion) else {
+            throw InstalledAuthorityCommandError.unavailable
+        }
         try verifyCurrent()
         _ = try AdministrativeSetupPublication.publish(plan.host.canonicalBytes, file: .commandHost,
             directory: privateState, owner: owner, verify: verifyCurrent)

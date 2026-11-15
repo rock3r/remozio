@@ -286,11 +286,10 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                 }
             }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)
-            let version: UInt64
-            if case .retained(let retained)? = plan { version = retained.host.formatVersion }
-            else { version = control ? 3 : 2 }
+            let version = plan?.host.formatVersion ?? (control ? 3 : 2)
             for role in [AuthorityCodeRole.authority, .setupController] {
-                try include(role, "authority.command-host-config", [version], [version])
+                try include(role, "authority.command-host-config", [version],
+                    InstalledAuthorityCommandConfiguration.writerSupportedVersions.contains(version) ? [version] : [])
                 if control { try include(role, GatewaySettingsControlReleaseValidation.formatName, [1], [1]) }
             }
         }

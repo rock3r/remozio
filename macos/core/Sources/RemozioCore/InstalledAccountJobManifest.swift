@@ -16,11 +16,12 @@ struct InstalledAccountJobManifest {
 
     init(accountID: Data, role: AuthorityCodeRole, executionUID: UInt32, userName: String,
          bundlePath: String, gatewaySettingsControlEnabled: Bool = false, settingsConsumerHostEnabled: Bool = false,
-         installedReadinessEnabled: Bool = false, retainedSetupHealthEnabled: Bool = false) throws {
+         installedReadinessEnabled: Bool = false, retainedSetupHealthEnabled: Bool = false, maintenanceChannelEnabled: Bool = false) throws {
         let paths = try RuntimePreparationPaths(accountID: accountID)
         let serviceRole: ServiceAccountRole = role == .notificationGateway ? .gateway : .transport
         guard role == .authority || role == .transport || role == .notificationGateway,
               !gatewaySettingsControlEnabled || role == .authority,
+              !maintenanceChannelEnabled || role == .authority,
               !installedReadinessEnabled || (role == .authority && gatewaySettingsControlEnabled),
               !retainedSetupHealthEnabled || (role == .authority && gatewaySettingsControlEnabled),
               !settingsConsumerHostEnabled || role == .transport || role == .notificationGateway,
@@ -46,7 +47,8 @@ struct InstalledAccountJobManifest {
         machServices = role == .authority ? Set([paths.authorityService, paths.commandService, paths.presenceService]
             + (gatewaySettingsControlEnabled ? [paths.gatewaySettingsControlService] : [])
             + (installedReadinessEnabled ? [try MachineUpdateAuthorityReadinessDeclaration.serviceName(accountID: accountID)] : [])
-            + (retainedSetupHealthEnabled ? [try MachineUpdateRetainedSetupHealthService.authority(accountID: accountID)] : [])) :
+            + (retainedSetupHealthEnabled ? [try MachineUpdateRetainedSetupHealthService.authority(accountID: accountID)] : [])
+            + (maintenanceChannelEnabled ? [try AuthorityMaintenanceChannelScope.serviceName(accountID: accountID)] : [])) :
             role == .notificationGateway ? Set([paths.gatewayService, paths.gatewayWakeService]
                 + (settingsConsumerHostEnabled ? [try GatewaySettingsConsumerRole.gateway.serviceName(accountID: accountID),
                     try GatewaySettingsConsumerRole.gateway.recoveryServiceName(accountID: accountID)] : [])) :
