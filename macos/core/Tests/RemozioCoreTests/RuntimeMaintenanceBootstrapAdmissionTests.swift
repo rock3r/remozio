@@ -14,6 +14,25 @@ final class RuntimeMaintenanceBootstrapAdmissionTests: XCTestCase {
     private func busy(_ barrier: UpdateAdmissionBarrier) {
         XCTAssertThrowsError(try barrier.beginDrain()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
     }
+    func testHeldAccountDrainReportsMaintenanceWhileStoreAndMetadataErrorsStayDistinct() throws {
+        try fixture { _, barrier, account in
+            let drain = try barrier.beginDrain()
+            XCTAssertThrowsError(try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: { account },
+                acquire: { _ in try barrier.acquireAdmission() }, body: { _ in XCTFail() })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .maintenancePending)
+            }
+            drain.close()
+            XCTAssertThrowsError(try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: { throw JournalLeaseError.busy },
+                acquire: { _ in XCTFail(); return try barrier.acquireAdmission() }, body: { _ in XCTFail() })) {
+                XCTAssertEqual($0 as? JournalLeaseError, .busy)
+            }
+            XCTAssertThrowsError(try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: { account },
+                acquire: { _ in throw JournalLeaseError.system(ENOENT) }, body: { _ in XCTFail() })) {
+                XCTAssertEqual($0 as? JournalLeaseError, .system(ENOENT))
+            }
+            let resumed = try barrier.acquireAdmission(); try resumed.validate(); resumed.close()
+        }
+    }
     func testAdmissionStaysHeldForEveryReconcileCallbackAndClosesOnReturn() throws {
         try fixture { _, barrier, account in
             let job = try InstalledAccountJobManifest(accountID: accountID, role: .authority, executionUID: 0,

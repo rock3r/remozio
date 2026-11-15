@@ -56,7 +56,10 @@ enum RuntimeMaintenanceBootstrapGuard {
         acquire: (UpdateAdmissionRegistrationRecord.Account) throws -> UpdateAdmissionToken,
         body: (_ verify: () throws -> Void) throws -> Void) throws {
         try withoutActuallyEscaping(capture) { capture in
-            let account = try capture(), token = try account.map(acquire)
+            let account = try capture()
+            let token: UpdateAdmissionToken?
+            do { token = try account.map(acquire) }
+            catch UpdateAdmissionBarrierError.busy { throw RuntimeActivationError.maintenancePending }
             defer { token?.close() }
             func verify() throws {
                 if let account { try token?.validateAccountScope(account) }
