@@ -841,7 +841,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             }
         }
         XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs(), before)
-        XCTAssertEqual(try archive.configuration(accountID: f.machine.account)?.startup.encoded, configuration.startup.encoded)
+        XCTAssertEqual(try archive.configuration(accountID: f.machine.account)?.startup.encoded, try configuration.startup.encoded)
     }
 
     func testConfigurationEpochRetainsTheTypedArchiveAndAdvancesPublication() throws {
