@@ -200,7 +200,7 @@ extension AuthorityMaintenanceChannelMessageTests {
         XCTAssertEqual(try Response.decode(pending.encoded, expected: q).outcome, .stagesPending)
         XCTAssertEqual(try Response.decode(refused.encoded, expected: q).outcome, .refused)
         XCTAssertNil(try Response.decode(refused.encoded, expected: q).work)
-        XCTAssertNotEqual(try pending.encoded, applied.encoded)
+        XCTAssertNotEqual(try pending.encoded, try applied.encoded)
         for r in [pending, refused, applied] {
             XCTAssertThrowsError(try Response.decode(r.encoded, expected: request(.arm, challenge: 99)))
             XCTAssertThrowsError(try Response.decode(r.encoded, expected: request(.observe)))
