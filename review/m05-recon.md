@@ -321,7 +321,7 @@ Toni3136 requested a separate gate on exact PR768 head5b265f54. Gate37748 compil
 No b2c, b3 or b4a source was in that exact PR tree. No unrelated app or installed proof is claimed.
 Final source645f4dfd adds the Toni3135 guard and a deterministic close-during-authorization test.
 It refuses transfer of a new attempt into an endpoint that closed reentrantly. Both local and reply Stage handles then settle normally.
-The changed pairing test file runs all38 methods fresh. All143 transferred test files and their production paths are unchanged.
+The changed pairing test file runs all38 methods fresh. All143 transferred methods use11 unchanged test files and unchanged production paths.
 Only the one method-body guard changed aftercd5c447c. No transferred test invokes that pairing endpoint.
 The final evidence admits219 unique methods, not219 fresh methods. The20 new b4a tests include earlier exact-source admissions.
 The final gate runs76 native methods fresh and reuses143 exact unchanged methods from the source-bound partial run. Python and Core/Debug are fresh. The selected base checks include the actual schema29 context method.
