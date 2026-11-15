@@ -258,14 +258,15 @@ extension AuthorityMaintenanceEndpointTests {
     }
     private final class Bridge: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         let endpoint: AuthorityMaintenanceXPCEndpoint
-        let connections = Mutex<[NSXPCConnection]>([])
+        private let connectionLock = NSLock()
+        private var connections: [NSXPCConnection] = []
         init(_ endpoint: AuthorityMaintenanceXPCEndpoint) { self.endpoint = endpoint }
         func listener(_ listener: NSXPCListener, shouldAcceptNewConnection c: NSXPCConnection) -> Bool {
             c.exportedInterface = NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self); c.exportedObject = endpoint
             c.invalidationHandler = { [weak endpoint] in endpoint?.close() }; c.interruptionHandler = { [weak endpoint] in endpoint?.close() }
-            connections.withLock { $0.append(c) }; c.activate(); return true
+            connectionLock.withLock { connections.append(c) }; c.activate(); return true
         }
-        func close() { let held = connections.withLock { let held = $0; $0 = []; return held }; held.forEach { $0.invalidate() }; endpoint.close() }
+        func close() { let held = connectionLock.withLock { let held = connections; connections = []; return held }; held.forEach { $0.invalidate() }; endpoint.close() }
     }
     /// Real anonymous XPC transport with owned peer controls. Installed Root peer authentication remains unqualified.
     func testAnonymousXPCDisconnectAfterArmingRetainsTheExactBlock() async throws {
