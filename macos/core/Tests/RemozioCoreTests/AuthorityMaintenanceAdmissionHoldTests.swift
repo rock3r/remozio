@@ -299,15 +299,20 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
             XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), unchanged)
         }
     }
-    func testStableCatalogSchemas24Through28KeepAdmissionOpen() throws {
+    func testLegacyCatalogSchemas16Through28KeepAdmissionOpen() throws {
         try MachineUpdateReplacementTests.withMaintenanceReaderFixture(releasingRestartAdmission: true) { f in
             let reader = Reader(f, admission: try .init(accountID: f.authority.accountID, incarnation: data(4)), incarnation: data(4))
             let path = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent(), anchor = path.deletingLastPathComponent().path
             func directory() throws -> ReleaseDestinationLease { try .init(anchor: anchor, relativeDirectory: path.lastPathComponent, owner: getuid()) }
-            // These are catalog fixtures from the current stable store, not historical release upgrades.
+            // The fixture uses canonical catalogs, not upgrades from historical releases.
+            // At schemas 16...23 the activation is absent. A completed activation is valid only at schema 24 or later.
             let tables: [Int: String] = [28: "retained_setup_promotion_ready_v1", 27: "retained_setup_promotion_intents_v1",
-                26: "retained_setup_completion_intents_v1", 25: "retained_setup_policy_intents_v1"]
-            for version in stride(from: 28, through: 24, by: -1) {
+                26: "retained_setup_completion_intents_v1", 25: "retained_setup_policy_intents_v1", 24: "stable_release_state_v1",
+                23: "installed_release_state_v1", 22: "machine_update_completion_publication_v1", 21: "machine_update_completion_intent_v1",
+                20: "machine_update_backend_epoch_v1", 19: "machine_update_configuration_epoch_v1", 18: "machine_update_replacement_v1",
+                17: "machine_update_activation_v1"]
+            XCTAssertEqual(Set(tables.keys).union([16]), Set(16...28))
+            for version in stride(from: 28, through: 16, by: -1) {
                 let before = try runtimeMaintenanceFixtureRows(f.databasePath)
                 let projection = f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate)
                 guard !projection.requiresLocalHold else { XCTFail("Valid legacy schema \(version) retained a hold"); return }
@@ -322,7 +327,11 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
                 let fresh = try startup.boundary.acquireAdmission(); try fresh.validate(); fresh.close()
                 startup.recovery.close(); startup.maintenanceHold?.close()
                 XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
-                if version > 24 { try f.edit(["DROP TABLE " + XCTUnwrap(tables[version]), "PRAGMA user_version=\(version - 1)"]) }
+                if version > 16 {
+                    var edits = ["DROP TABLE " + (try XCTUnwrap(tables[version])), "PRAGMA user_version=\(version - 1)"]
+                    if version == 24 { edits.insert("DELETE FROM machine_update_activation_v1", at: 0) }
+                    try f.edit(edits)
+                }
             }
         }
     }
