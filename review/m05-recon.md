@@ -2,7 +2,7 @@
 
 Current decisions: Toni3104,3108,3111,3112,3117 and3131. Earlier appendices retain historical source states. The current table and final section govern active work.
 This revision supersedes the full live-idle design in689ee08e. That commit retains the detailed hosted-owner audit as history.
-The current implementation source is 5c79cea7 above locally qualified M05d2 source21efca1b.
+The current implementation source is 68b2b705 above selected-local-qualified M07a source5c79cea7.
 The final M07a section records selected local evidence. It qualifies no installed Root execution, daemon signal or service stop.
 
 ## Decision
@@ -747,4 +747,36 @@ The native stop caller polls through removing and waiting until registrationRemo
 One bound inspection failure reports needsOwnerRecovery and poisons that session. It cannot retry a native command.
 The optional no-commit cancellation change stays outside this slice.
 Installed Root, launchctl, daemon signals, kernel witness capture, M09, live725 and provider checks remain unqualified.
+Toni owns publication, review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
+
+
+### M07b0 invocation context (Toni3375/3378/3381/3386)
+
+Source 68b2b705 follows selected-local-qualified M07a source5c79cea7. It changes169 production lines in four files and adds14 tests.
+The selected gate passes55 fresh native methods,56 manifest tests and48 CI checks, with no transfers or skips.
+Core and Debug build fresh. Both earlier production-only compiles remain source-bound and charged to the same budget.
+The cumulative time is 518.335/1800 seconds. Draft9cdf719a remains unchanged for independent review.
+
+The native factory mints the context only on the exported invocation after verifyInvocation and under the actual reservation owner.
+Its initializer is private. Ordinary-owner controls refuse Root and cannot select the native factory.
+The context retains the exact accepted connection, policy and verified credentials. It performs no PID lookup or private API call.
+The connection's code requirement protects its messages. The worker compares the same connection object and cached credentials.
+This comparison proves neither peer liveness nor a fresh code identity. Privileged work must still make its own fresh checks.
+The context retires after the asynchronous interruption or invalidation handler executes. The pre-handler interval is not a liveness guarantee.
+The wrapper retires before the previous handler and before endpoint close. Previous behavior remains intact.
+A regression exercises actual local NSXPC invalidation and verifies release of the context, guard and exported object after handler cleanup.
+The other positive lifetime tests use explicit ordinary-owner controls. They do not qualify installed Root minting or accepted native peer identity.
+
+The actual invocation worker fixes its thread before the first context call. Another thread cannot claim that first loan.
+The context rejects a fork, foreign thread, foreign connection and caught re-entry. It expires on return or throw.
+Its read occurs under the invocation lock. Owner or reservation closure refuses later use.
+M07b1 must perform the entire frame, import-choice and held-pair recapture inside one withWorker call.
+The context grants no native capability or dispatch. M07b1 record-only transition and fresh capture remain incomplete.
+
+M07b2 must produce typed canonical digests after the real owner verifies protected facts.
+Every current window has distinct B; there is no none branch. The stable authority grant excludes invocation incarnation and dynamic peer credentials.
+It binds A's exact owner and the selected release's published app policy entry. Footprint paths remain relative to their anchor.
+Operation, restoration and footprint precede grant and consent; administratorIntent is last. Operation includes no authorization digest.
+No digest is a capability or stores an authorization external form.
+C02 dispatch, M07b1/b2, M09, live725, installed Root, provider checks, Release and the full Core suite remain unqualified.
 Toni owns publication, review, merge and main reconciliation. Bepi has not pushed. The full objective remains incomplete.
