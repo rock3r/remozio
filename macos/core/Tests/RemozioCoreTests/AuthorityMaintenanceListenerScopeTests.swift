@@ -42,7 +42,7 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
             XCTAssertNoThrow(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
         }
         for role in [AuthorityCodeRole.authority, .setupController] {
-            for formats in [[], [try format(readers: [2])], [try format(writers: [])], [try format(writers: [2])]] {
+            for formats in [[], [try format(readers: [2], writers: [2])], [try format(writers: [])], [try format(readers: [1, 2], writers: [2])]] {
                 let evidence = try release { $0 == role ? formats : [try self.format()] }
                 XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
             }
