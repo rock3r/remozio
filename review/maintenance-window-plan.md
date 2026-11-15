@@ -376,11 +376,14 @@ The ranges below are source-planning estimates, not measured diffs. Toni confirm
 | M03b2 | Exact CAS phase/outcome writer and atomic first-window migration | 100–195 | One active attempt; unrelated rows exact; uncertainty retirement; no production caller |
 | M03c | Schema 29 policy, material and publication writers | Separate capped cuts | Each writer has an actual schema 29 test; no blanket version widening |
 | M04 | Derived A-only cohort and ordinary-owner stop session | 113 measured | Exact registered scope/identity, retained exit witnesses; no native factory or caller |
-| M05a | Internal real work observation, including cross-thread pairing state through reply/activity release | 152 measured | Source6a591d02: Core/Debug and31 pairing plus10 Debug checks fresh;42 focused methods and54 Python results explicitly transferred. No native idle or stop authority. |
-| M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Exact account/attempt/revision/incarnation and minted connection identity; preserve existing stage reservations; serialize stage versus block; exact cancel/reopen/disconnect release. Late close cannot release a newer owner. Internal library only. |
-| M05b2 | Native authenticated endpoint/listener and joined accepted connection ownership | 130–195 planned | Fixed Setup peer and synchronous invocation verification; repeated observations; preserve the M05b1 binding through owned replies and cleanup. No product registration or marker. |
+| M05a | Actual work observation through pairing reply/activity release; shared budget releases at work return | 152 measured | Sourcec86366af, published by Toni as #764/ab540f5e. Gate18129 passed Core/Debug,31 pairing and10 Debug checks fresh;42 focused methods and54 Python outcomes transferred. |
+| M05b1 | Canonical binding and shared pairing stage admission owner | 115 measured | Source303fcc08. Gate26372 passed Core/Debug,10 admission and10 Debug checks fresh;73 focused methods and54 Python outcomes transferred. No endpoint integration. |
+| M05b2t | Transfer the armed pairing block to its process-owned shutdown binding | 49 measured | Base303fcc08, source970f30df. Connection close/deinit and dropping a handle preserve the block; exact cancel/reopen alone release it. Existing stages must settle. Native validation pending at this revision. |
+| M05b2a | Bounded canonical channel open/request/response codec | Under200 per complete cut | First reply carries work observations and a minted binding. Correlate exact installation, gate, action, challenge and binding; no native proof from bytes. |
+| M05b2b | Native authenticated endpoint and joined work lifetime | Under200 per complete cut | Synchronous XPCInvocationGuard; repeated observations; use b2t for arm transfer. After arming, XPC close cannot release the block. Wrong-binding reopen fails; exact cancel/reopen releases it. |
+| M05b2c | Fixed-address native listener and retained disconnected work | Under200 per complete cut | Root self/release/Setup peer checks, registry and joined retired endpoints. Test listener teardown after arming preserves the block. No product registration. |
 | M05b3 | Native authenticated client with bounded cancellation and exact reply correlation | 120–195 planned | Fixed installed self and Authority identity; account/attempt/revision/incarnation/connection matching; no automatic retry after an ambiguous reply. |
-| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | One authenticated protected read boundary; exact phase/revision; real shared reservation through the staged attempt; block new stages before revalidating zero; release only the exact RAM binding. No close-time record read. |
+| M05b4 | Protected record read and actual M05a/pairing owner composition | 100–180 planned | At one authenticated read boundary, verify installation and gate identity against the request, plus exact phase/attempt/revision/account/incarnation. Retain real stage ownership, block before zero revalidation and release only the exact armed target. No close-time read. |
 | M05c | Durable clean-close marker written after successful bound runner.close, with exact Setup readback | 110–195 per complete cut | No marker after failed/unbound close; crash/durability and mismatch tests; no exit-status claim |
 | M05d | Purpose-bound native permit and stop factory, introduced together | 120–195 after support | Bounded work wait, pre-stop cancellation, exact bootout, clean marker plus original exit witness; then actual pair custody |
 | M06 | Shared bootstrap/recovery phase guard for the M05d stop lifecycle | 110–195 | Audit EX guard unchanged; no conflicting A bootstrap or KeepAlive churn |
@@ -461,7 +464,25 @@ Provider semantics, physical hardware, installed activation and the remaining fu
 Toni3018 required the M05a pairing correction first. Its source6a591d02 passed the focused gate72151.
 M05b1 follows that correction; M05b2, M05b3 and M05b4 follow in order. Toni owns publication and merges.
 The four supporting cuts keep each production diff below200 lines. Measure again before each cut's tests.
-M05b1 source5fa698f2 contains the internal owner and its tests; native validation is pending at this plan revision.
+M05b1 source303fcc08 contains the internal owner and passed gate26372. Original5fa698f2 remains preserved after the requested rebase.
 Its stage reservations are not yet attached to real pairing endpoints. M05b4 must prove that integration.
 An observation or decoded binding grants no native authority, idle proof, clean-close marker or stop permit.
 M09 reuses this channel. The existing gateway settings channel and its contracts remain unchanged.
+
+### Native channel order after Toni3042/3044
+
+The latest order is M05b2t, M05b2a, M05b2b and M05b2c. It supersedes the placement in3040.
+M05b3 and M05b4 retain their client and protected composition responsibilities.
+M05b2t transfers the blocked admission from Connection to a shutdown target bound to the exact five identifiers.
+An armed block survives connection close, deinit and expected listener teardown during bootout.
+Only explicit cancel/reopen for that exact target, or Authority process termination, ends the armed restriction.
+Pre-arm disconnect still releases the connection's restriction. A stale close cannot release a newer target.
+A later authenticated command may reattach only to the existing armed target after native and protected scope checks.
+Decoding its identifiers neither creates an armed block nor grants shutdown authority.
+M05b2b proves XPC teardown behavior. M05b2c proves listener teardown behavior.
+M05b4 verifies installation and gate identity against the request. The five-value binding alone omits those identities.
+
+Current M05a isc86366af with the shared budget fix, published by Toni as #764/ab540f5e.
+Current M05b1 is303fcc08 with the completed gate26372. The existing plan's earlier states remain historical.
+The saved codec20f1f655 is source-only. Its preparation started no build or test before the order changed.
+Rebase that codec only after the completed b2t gate. Each subsequent source receives its own bound evidence.
