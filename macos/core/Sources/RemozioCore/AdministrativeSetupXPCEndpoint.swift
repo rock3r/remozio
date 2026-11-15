@@ -105,8 +105,10 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupMaintenanceXPCProtocol.self)
         connection.exportedObject = self
-        connection.interruptionHandler = { [weak self] in invocation.retireConnection(); self?.close() }
-        connection.invalidationHandler = { [weak self] in invocation.retireConnection(); self?.close() }
+        let interrupted = connection.interruptionHandler, invalidated = connection.invalidationHandler
+        connection.interruptionHandler = { [weak self] in interrupted?(); self?.close() }
+        connection.invalidationHandler = { [weak self] in invalidated?(); self?.close() }
+        try invocation.observeConnectionLifetime()
     }
     // Fixtures prove sequencing and scoped storage only. Product callers cannot inject authorization or invocation checks.
     init(owner: SetupAccountOwner, verify: @escaping () throws -> uid_t,
