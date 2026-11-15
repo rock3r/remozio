@@ -102,7 +102,8 @@ The readback and native permit must still enforce their current code, protected 
 | M05b3 | Native authenticated Setup client with serialized exchanges and bounded recovery | 169 measured | Source8e494e12. Core/Debug and110 fresh methods passed;73 unrelated methods and54 Python results transferred. Harmless hello precedes identifiers and changes no admission state. Only stagesPending permits another arm before the original deadline. Refused is terminal; nil, timeout or malformed reply requires recovery. No product entry. |
 | M05b4a | Protected command frame and actual pairing stage reservations | 94 measured | Source645f4dfd above acknowledgement repairf54fed93. Gate5876 passed76 fresh native methods and143 explicit unchanged-method transfers, fresh Python manifest checks, Core/Debug. One read transaction binds installation, gate, phase, current revision and incarnation. Retained Stage handles keep one attempt counted through actual reply cleanup. No Root factory. |
 | M05b4b | Root factory and actual M05a owner composition | 121 measured | Source8ce7c89c above645f4dfd. The factory accepts the installed registration and actual WakeService only. Command reads use a short protected lease. Pairing endpoints remain retained through reply cleanup. Core and124 fresh supporting fixture methods passed. Installed Root execution remains unqualified. No registration. |
-| M05b5 | Native maintenance service registration | 100–195 planned | Immediately after b4b and before the first caller in M07. Add per-account MachServices for <namespace>.maintenance, Authority and Setup reader1/writer1 declarations, the manifest generator, Python tests and a generated-manifest test together. Never publish only part of this registration. |
+| M05b5a | Host5 reader baseline | ≤200 required | Decode5, exact ordinary/retained job reconstruction and the complete nested reader matrix. Authority/Setup read1–5 and write1–4. Ship before b5b. |
+| M05b5b | Setup selection and native registration | Measure before implementation | First explicit maintenance selection. Qualify durable intent/progress/readback before restart. Host writer5, channel1 and all announcements ship together. Rollback targets must read5. |
 | M05c | Exact protected marker publication after successful ordered close, plus Setup readback | 110-195 per complete cut | No marker after failed/unbound close; crash/durability failures; wrong/stale/incarnation mismatch; armed shutdown preserves its binding through listener teardown. No claim about exit status. |
 | M05d | Purpose-bound permit and separate native stop factory, introduced together | 120-195 if prior support is complete | Actual bounded observation, pre-stop cancellation without interruption, exact bootout, clean-marker plus witness readback, then real pair custody. Audit EX unchanged. |
 
@@ -348,10 +349,8 @@ A closed, fully settled endpoint is pruned. A foreign admission cannot enter the
 The stage guard and attempt/activity/stage transfer now share one state.withLock.
 The work samples remain separate observations. They grant no atomic idle proof, clean marker, stop permit or native stop authority.
 
-M05b5 is the next separate supporting cut. It must precede M07 or any first native channel caller.
-The same cut adds the per-account <namespace>.maintenance Mach service, Authority and Setup version1 reader/writer declarations,
-the manifest generator, Python manifest checks and a test of the actual generated manifest.
-B4b does not register or start that listener.
+M05b5a ships the host5 reader baseline first. M05b5b follows with explicit Setup selection and complete native registration.
+Both precede M07 or any first native channel caller. B4b does not register or start that listener.
 
 M09 GateReadback.authorityIncarnation must equal the epoch of the actual AuthorityClock used by this process's pairing admission.
 A separate startup UUID is wrong, even when it has16 bytes. Every later command would otherwise refuse with changedScope.
@@ -359,3 +358,27 @@ The protected reader regression uses an actual AuthorityClock epoch and rejects 
 The admission regression checks that the existing access uses its actual clock epoch.
 The same-incarnation notStopped and new-incarnation healthy branches still need their distinct native reopen operations.
 Installed Root positive admission, product registration, Release qualification and the full goal remain incomplete.
+
+### Host5 reader baseline and later writer (Toni3192)
+
+This section supersedes the earlier single M05b5 registration cut. Toni selected option B: a persisted host5 marker.
+The source matrix remains source analysis. It does not prove a durable publication transition or an installed listener.
+
+M05b5a is the reader-only release. It decodes host5 and reconstructs both exact Authority plist variants.
+The complete reader matrix includes ordinary plans, retained plans, compatibility projections, release configurations, completion archives and readiness hello.
+Authority and Setup declare host readers1–5 and writers1–4. No public selector emits host5.
+This release adds no channel1 announcement, listener startup or automatic migration. It must ship before the writer release.
+
+M05b5b owns the first host5 write. Only Setup may select it, on the first explicit maintenance request.
+The change requires durable intent, progress and exact readback before any restart. Add a supporting cut if this transition lacks qualification.
+Host writer5, channel1, MachServices, native registration, generator checks and the actual generated-manifest test ship together.
+Do not publish a partial announcement. Do not treat a fixture or a parsed marker as native startup authority.
+
+After the first host5 write, the supported rollback baseline includes M05b5a reader5.
+Every supported rollback target must read host5. Explicitly reject a target that lacks reader5 before changing installed state.
+The exact release baseline and the transition remain gates for b5b. A local reader test does not establish either gate.
+
+The pairing ready value is true when there are no endpoints. It is not an idle decision.
+M07 uses stage, operation and activity counts together with the actual arm result. Persist the binding before arm.
+Live session#725 measures store opens per second during the250ms arm wait, open latency and the effect of a busy journal.
+Installed Root admission, Release qualification, M09 and the full objective remain incomplete.
