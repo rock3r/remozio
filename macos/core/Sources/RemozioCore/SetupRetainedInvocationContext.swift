@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
 
-/// Peer proof comes from the accepted code-requirement-bound connection. This context grants no native authority.
+/// Same accepted connection and cached credentials only. No peer liveness, fresh code approval or native authority.
+/// The connection's code requirement protects messages. Worker retirement follows its asynchronous handler execution.
 final class SetupRetainedInvocationContext: @unchecked Sendable {
     struct Scope {
         fileprivate let check: (NSXPCConnection?) throws -> Void

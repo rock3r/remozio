@@ -97,12 +97,16 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     func withWorkerContext<Value>(_ body: (SetupRetainedInvocationContext.Scope) throws -> Value) throws -> Value {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         try requireContextThread()
-        guard let context else { throw JournalLeaseError.invalidated }; return try context.withWorker(body)
+        return try lock.withLock {
+            guard let context else { throw JournalLeaseError.invalidated }; return try context.withWorker(body)
+        }
     }
+    @discardableResult
     func installOwnedContext(connection: NSXPCConnection,
-        readPeer: @escaping (NSXPCConnection) throws -> XPCPeerCredentials) throws {
+        readPeer: @escaping (NSXPCConnection) throws -> XPCPeerCredentials) throws -> SetupRetainedInvocationContext {
         try RuntimeMaintenanceOwnedControl.require()
         try installContext { try .openOwned(owner: self, connection: connection, readPeer: readPeer) }
+        return try lock.withLock { guard let context else { throw JournalLeaseError.invalidated }; return context }
     }
     private func requireContextThread() throws {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
@@ -157,9 +161,9 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         try lock.withLock {
             guard !active else { throw AdministrativeSetupError.unavailable }
             guard !closed else { return }
-            closed = true; context?.retire(); closeRights(); closeReservation()
+            closed = true; context?.retire(); context = nil; closeRights(); closeReservation()
         }
     }
     deinit { if getpid() == processID { closeRightsIfNeeded() } }
-    private func closeRightsIfNeeded() { if !closed { closed = true; closeRights() } }
+    private func closeRightsIfNeeded() { if !closed { closed = true; context?.retire(); context = nil; closeRights() } }
 }
