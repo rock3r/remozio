@@ -937,8 +937,9 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
     }
     func testMuxBusyMaintenanceBudgetDoesNotBlockApp() async throws {
         let f = try MuxFixture(requirement: runningTestRequirement())
-        let root = f.peer(.init(.setup, 0)); try await root.hello(); _ = try await root.call(.open); f.state.lock.withLock { f.state.holdRoot = true }
-        let observing = Task { try await root.call(.observe) }; try await muxWait { f.state.lock.withLock { f.state.rootBusy } }
+        let root = f.peer(.init(.setup, 0)); try await root.hello(); let opened = try await root.call(.open)
+        let binding = try XCTUnwrap(opened.binding); f.state.lock.withLock { f.state.holdRoot = true }
+        let observing = Task { try await root.call(.observe, binding: binding) }; try await muxWait { f.state.lock.withLock { f.state.rootBusy } }
         let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello(); _ = try await app.current()
         f.state.releaseRoot(); _ = try await observing.value; await f.close()
     }
@@ -964,7 +965,11 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         let armed = try await root.call(.arm, binding: binding); XCTAssertEqual(armed.outcome, .applied)
         f.server.close(); await f.server.closeMaintenanceAndWait(); XCTAssertThrowsError(try f.admission.reserveStage())
         let next = try MuxFixture(requirement: runningTestRequirement(), admission: f.admission), recovery = next.peer(.init(.setup, 0))
-        try await recovery.hello(); let recovered = try await recovery.call(.open); XCTAssertEqual(recovered.binding, binding)
+        try await recovery.hello(); let recovered = try await recovery.call(.open)
+        XCTAssertEqual(recovered.outcome, .applied); let fresh = try XCTUnwrap(recovered.binding)
+        XCTAssertNotEqual(fresh, binding); XCTAssertThrowsError(try f.admission.shutdownBinding(matching: fresh))
+        XCTAssertThrowsError(try f.admission.reserveStage())
+        _ = try f.admission.shutdownBinding(matching: binding)
         let reopened = try await recovery.call(.reopen, binding: binding); XCTAssertEqual(reopened.outcome, .applied)
         let stage = try f.admission.reserveStage(); stage.close(); await next.close(); await f.close()
     }
