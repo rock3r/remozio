@@ -1,13 +1,14 @@
 # N2b: join actual Setup recovery work
 
-Status: source audit and plan approved by Toni4930. Implementation may start; the native gate waits for Saturn approval.
+Status: source audit and plan approved by Toni4930 and Saturn4934, with the required additions confirmed by Toni4935.
+Implementation may start. Send the actual diff, test closure and forecast before the native gate.
 No N2b build, test, or runtime qualification exists. This document contains no product implementation.
 
 The audit uses main `9353b1e7f26dfac888414fd1e52375eba1df604c`, tree `b08a0df49616ae1124eb8436cb27decb1317dcf0`.
 Its 2,871-input manifest is `1f56c9e9a575f89f7f9b3c4b76ef0b047034f7c6046529412b9f7e6da085acab`.
 PR #820 is actually merged. The earlier N2a qualification remains bound to its original code tree.
 
-This plan applies the join design approved in Toni4868 and decisions4907,4910,4912,4915,4917,4920,4922,4926,4928.
+This plan applies the join design approved in Toni4868 and decisions4907,4910,4912,4915,4917,4920,4922,4926,4928,4930,4934,4935.
 The [await census](n2b-session-join-awaits.json) lists 277 lexical await sites in 16 files within the audited call closure.
 Each entry records its exact source line, file hash, cancellation family, and final dependency.
 The census includes shared native/Owned helpers. It does not claim that every listed Owned branch is reachable in production.
@@ -149,6 +150,7 @@ No new timeout may convert pending work into successful cleanup. No new restart 
 These are required scenarios, not discovered test counts or completed results.
 
 - Pause between slot admission and Task publication. Shutdown must wait for publication and the real join.
+- Exercise the never-created branch: no real work is created. Resolve the publication barrier and finish the join within the existing fixture bound.
 - Pause the wrapper after claim.join returns. Supervisor completion must not close the account or release either lease first.
 - Request shutdown before real RestorationWork publication. The late real Task must observe the saved shutdown request.
 - Use the concrete recovery engine with the existing retained claim. Pause at a controlled phase boundary, then request shutdown.
@@ -158,6 +160,7 @@ These are required scenarios, not discovered test counts or completed results.
 - Gather the actual result before custody release in the abandonment case.
 - Race session construction with cleanup admission closure. No registration may escape the final snapshot.
 - Exercise supervisor shutdown, ordinary disposal and direct shutdown.close. Each must join the same actual work.
+- Call direct close while recoveryBound is true. It must await the finalizer instead of throwing unavailable; state this contract change in the PR body.
 - Race two direct close callers. Pause the first finalizer, prove owner-lock checks remain possible, then let both observe the same result.
 - Make account cleanup return pending/failed after joins. Keep both leases; do not add repair logic or false closed status.
 - Exercise retiring hello, final closed hello, adoption, window-free release and refused restore separately.
@@ -166,6 +169,8 @@ These are required scenarios, not discovered test counts or completed results.
 - Test the existing successful orphan registration races with the real reconciliation helper and controlled observations, not real launchctl calls.
 - Record the existing inner-guard race and its terminal failure route. A fix for that shared startup path is outside N2b, per Toni4926.
 - Test crash readback for pre-write join, partial bound restore, partial unbound intent, verified completion before adopt, and pending cleanup.
+- Beside the partial-unbound crash case, request shutdown with the durable intent written and its RPC pending.
+- Expect the same durable reopenPending input and repairRequired startup result, never successful completion.
 - Check Setup IPC13 support and the built Debug/Release declarations. Explicitly prove that12 remains unexported.
 - Audit literal IPC-version lists and acceptance/rejection loops in Swift tests, Python manifest scripts and their tests.
 - Check complete expected reader/writer sets and fixture declarations. Do not update only scalar version assertions.
