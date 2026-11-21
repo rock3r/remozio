@@ -1,0 +1,1930 @@
+{
+  "auditKind": "Source-only await census; no runtime verification",
+  "auditedFiles": [
+    {
+      "SHA256": "23038363fea2bfe6e9eac3108c585706bf9bfca08873449eaeda3c06dc979a66",
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "ranges": [
+        {
+          "family": "endpoint",
+          "first": 49,
+          "last": 160
+        }
+      ]
+    },
+    {
+      "SHA256": "eb1696a5a14e6e368687ec2c445570dbc1a6d5c6180f97e34c3d9b7945a26605",
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "ranges": [
+        {
+          "family": "effect-dispatch",
+          "first": 57,
+          "last": 115
+        }
+      ]
+    },
+    {
+      "SHA256": "6d75a9de9aa85f5755d8bd429ff527c0a509fc2e24b34d59f29add010b1b85e4",
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "ranges": [
+        {
+          "family": "unbound-engine",
+          "first": 14,
+          "last": 110
+        }
+      ]
+    },
+    {
+      "SHA256": "55e3a1e3bfa9d6b20280c4ffab137dd503d0189abda0db35bce49a741a4e7b7f",
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "ranges": [
+        {
+          "family": "claim-and-result",
+          "first": 177,
+          "last": 242
+        }
+      ]
+    },
+    {
+      "SHA256": "aa44c065edeb01bf91e803598d3a482791529fb29029eb892e79ef8fa8a85617",
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "ranges": [
+        {
+          "family": "restoration-phases",
+          "first": 339,
+          "last": 478
+        },
+        {
+          "family": "real-task-and-publication",
+          "first": 481,
+          "last": 620
+        }
+      ]
+    },
+    {
+      "SHA256": "dcc715c9436c651998f93da46c6f0d9a73c3edcfab44a1fe6a990f50c7ce8507",
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedRecoveryLedger.swift",
+      "ranges": [
+        {
+          "family": "original-join",
+          "first": 75,
+          "last": 152
+        }
+      ]
+    },
+    {
+      "SHA256": "5128aa7559de564dd1dec1a9079681f74423205452ea6725237e22a73e84fd95",
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocation.swift",
+      "ranges": [
+        {
+          "family": "original-invocation",
+          "first": 301,
+          "last": 330
+        }
+      ]
+    },
+    {
+      "SHA256": "6fb494288efc46f2c6e56f91d9fec204ea1d82273f66a6c4c20ee1b30bb43fd2",
+      "path": "macos/core/Sources/RemozioCore/SetupAuditUpgradeWorkExecutor.swift",
+      "ranges": [
+        {
+          "family": "blocking-executor",
+          "first": 34,
+          "last": 72
+        }
+      ]
+    },
+    {
+      "SHA256": "9ca1d9a3ef50439726fd6b6745f7d51e1d9d07d6c3c258a60de8eaf3f4ba1ea7",
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "ranges": [
+        {
+          "family": "account-close",
+          "first": 160,
+          "last": 182
+        },
+        {
+          "family": "admission-phase",
+          "first": 408,
+          "last": 438
+        }
+      ]
+    },
+    {
+      "SHA256": "f3a41456a1d817aa9cb16b95274a115a80eed356e2490f850630b4f119dc7270",
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "ranges": [
+        {
+          "family": "client-unbound",
+          "first": 200,
+          "last": 363
+        },
+        {
+          "family": "client-healthy",
+          "first": 810,
+          "last": 985
+        },
+        {
+          "family": "client-reconnect",
+          "first": 1040,
+          "last": 1140
+        },
+        {
+          "family": "client-RPC",
+          "first": 1165,
+          "last": 1220
+        }
+      ]
+    },
+    {
+      "SHA256": "23c9acaa91fe2e520e69aedda072b0e76c02c54e45c1a1dfade0436a66c5bd69",
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "ranges": [
+        {
+          "family": "bound-native-entry",
+          "first": 872,
+          "last": 891
+        },
+        {
+          "family": "completion-cleanup",
+          "first": 1196,
+          "last": 1226
+        },
+        {
+          "family": "bound-engine",
+          "first": 1295,
+          "last": 1553
+        }
+      ]
+    },
+    {
+      "SHA256": "d8fdaa7888c418d8d40e991ca943a13584513ee4bb3be41a0a24d7e78e81594a",
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "ranges": [
+        {
+          "family": "scheduling",
+          "first": 121,
+          "last": 199
+        },
+        {
+          "family": "supervisor-join",
+          "first": 205,
+          "last": 376
+        }
+      ]
+    },
+    {
+      "SHA256": "5fb21202d52b87856d25962663bd9772993c57506377dc9dd90cad23f6da0076",
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "ranges": [
+        {
+          "family": "final-close",
+          "first": 52,
+          "last": 104
+        },
+        {
+          "family": "native-owner-acquisition",
+          "first": 115,
+          "last": 207
+        },
+        {
+          "family": "native-owner",
+          "first": 234,
+          "last": 263
+        }
+      ]
+    },
+    {
+      "SHA256": "072110a5fc3dd19cc0407fe7036330cb83ccec670e00f4bf7dd13e23bbdc83b3",
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupShutdown.swift",
+      "ranges": [
+        {
+          "family": "direct-shutdown",
+          "first": 66,
+          "last": 73
+        }
+      ]
+    },
+    {
+      "SHA256": "46e090d77c4c18122b1e5e3e74f1182f397bf40112b3b0aeceea9a3b4212d1f2",
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "ranges": [
+        {
+          "family": "retirement",
+          "first": 384,
+          "last": 428
+        }
+      ]
+    },
+    {
+      "SHA256": "d9057bac1159e996f02b57d732ad45153d7582d9ddeb68acf83720f76db13dc0",
+      "path": "macos/core/Sources/RemozioCore/SetupOwnerAsyncWork.swift",
+      "ranges": [
+        {
+          "family": "admission-idle",
+          "first": 47,
+          "last": 61
+        }
+      ]
+    }
+  ],
+  "awaits": [
+    {
+      "family": "endpoint",
+      "line": 92,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "work = Task { [self] in await run(value, target: target, request: decoded, deadline: deadline) }"
+    },
+    {
+      "family": "endpoint",
+      "line": 102,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "do { joined = try await value.join() } catch { finish(.failedJoin); return }"
+    },
+    {
+      "family": "endpoint",
+      "line": 107,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "let applicability = try await phases.run {"
+    },
+    {
+      "family": "endpoint",
+      "line": 118,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "let released = try await phases.run {"
+    },
+    {
+      "family": "endpoint",
+      "line": 124,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "let row = try await operations.effects.adopt(joined, target)"
+    },
+    {
+      "family": "endpoint",
+      "line": 130,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "let row = try await operations.effects.restore(joined, target, deadline)"
+    },
+    {
+      "family": "endpoint",
+      "line": 151,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanRecoveryEndpoint.swift",
+      "source": "await value?.value"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 64,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "restore: { joined, target, deadline in try await self.restore(joined: joined, target: target, until: deadline) },"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 65,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "adopt: { joined, _ in try await joined.finishRecordedRestorationOwned(processLease: self.processLease) })"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 71,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "let captured = try await phases.run {"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 81,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "return try await RuntimeMaintenanceUnboundRestoreRunner.restoreOwned(joined: joined, processLease: processLease,"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 84,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "let resources = try await phases.run { try self.makeResources() }"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 87,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "return try await RuntimeMaintenanceStartupRecovery.restoreExplicitOwned(joined: joined,"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 102,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "let metadata = try await phases.run {"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 110,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "return try await RuntimeMaintenanceStartupRecovery.restoreExplicitNative(joined: joined,"
+    },
+    {
+      "family": "effect-dispatch",
+      "line": 113,
+      "path": "macos/core/Sources/RemozioCore/SetupOrphanInProcessRestoreEffect.swift",
+      "source": "return try await RuntimeMaintenanceUnboundRestoreRunner.restoreNative(joined: joined,"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 19,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let work = try await joined.startRestoration { workID in"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 20,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let prepared = try await phases.run {"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 31,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "return try await finish(custody: prepared.custody, joined: joined, expected: expected,"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 34,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "return try await joined.finishRestorationOwned(work: work, processLease: processLease)"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 40,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let work = try await joined.startRestoration { workID in"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 41,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let custody = try await phases.run {"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 45,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "return try await finish(custody: custody, joined: joined, expected: expected,"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 48,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "return try await joined.finishRestorationNative(work: work, processLease: processLease)"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 59,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "try await phases.run {"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 67,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let client = try await phases.run { try makeClient(custody: custody, phases: phases, source: source) }"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 69,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let row = try await phases.run { try custody.requireUnboundCleanup(); return custody.current }"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 71,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let probe = try await client.probeUnboundGate(joined: joined, row: row, gate: gate, until: deadline)"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 76,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let release = try await client.releaseUnbound(joined: joined, row: row, gate: gate, until: deadline)"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 86,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "let observation = try await client.observeUnboundGate(joined: joined, row: row, gate: gate, until: deadline)"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 87,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "await client.close()"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 88,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "_ = try await phases.run { try custody.persistUnboundCompletion(observation) }"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 89,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "} catch { await client.close(); throw error }"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 95,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "do { _ = try await phases.cleanup { try custody.persistUnboundFailure(failureKind(error)) } }"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 100,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "outcome = .success(try await phases.cleanup {"
+    },
+    {
+      "family": "unbound-engine",
+      "line": 109,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceUnboundRestoreRunner.swift",
+      "source": "try await phases.closeActual { custody.closeUnboundCustody() }"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 181,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "try await phases.run { try self.requireCurrentAuthorization() }"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 186,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "try await finishRestorationNative(work: claim.token.currentRestoration(), processLease: processLease)"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 191,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "let completed = try await work.value()"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 193,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "try await phases.run {"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 200,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "return try await finishRestorationOwned(work: claim.token.currentRestoration(), processLease: processLease)"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 205,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "let completed = try await work.value()"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 207,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "try await phases.run {"
+    },
+    {
+      "family": "claim-and-result",
+      "line": 236,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedOrphanClaim.swift",
+      "source": "try await task.value"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 413,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "return try await hold.runRestorationPhase(on: executor, cancellation: token) { _ in"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 427,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "do { return try await once(until: deadline, cleanup: cleanup, body) }"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 431,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await ContinuousClock().sleep(for: .milliseconds(25))"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 437,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await afterRelease(until: deadline, released: { throw JournalLeaseError.invalidated }) {"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 438,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await self.once(until: self.deadline, cleanup: false, body)"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 442,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await afterRelease(until: deadline, released: { throw JournalLeaseError.invalidated }) {"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 443,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await self.admitted(until: self.deadline, body)"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 449,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "let cleanup = Task { try await self.admitted(until: nil, cleanup: true, body) }"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 450,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "return try await afterRelease(until: nil, released: { throw JournalLeaseError.invalidated }) {"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 451,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await cleanup.value"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 457,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "let cleanup = Task { try await self.admitted(until: nil, cleanup: true, body) }"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 458,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "return try await afterRelease(until: nil, released: { nil }) {"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 459,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "let value = try await cleanup.value"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 466,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "do { result = .success(try await operation()) }"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 468,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "await hold.waitForReleaseAfterRecord(until: deadline)"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 472,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "await hold.waitForReleaseAfterRecord(until: deadline)"
+    },
+    {
+      "family": "restoration-phases",
+      "line": 477,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await cleanup { body() }"
+    },
+    {
+      "family": "real-task-and-publication",
+      "line": 491,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "task = Task { await start.wait(); return try await body(id) }"
+    },
+    {
+      "family": "real-task-and-publication",
+      "line": 502,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "let result = await task.result"
+    },
+    {
+      "family": "real-task-and-publication",
+      "line": 524,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "await withCheckedContinuation { continuation in"
+    },
+    {
+      "family": "real-task-and-publication",
+      "line": 565,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "try await original.value"
+    },
+    {
+      "family": "real-task-and-publication",
+      "line": 566,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocationReservation.swift",
+      "source": "if let restoration { _ = try? await restoration.value() }"
+    },
+    {
+      "family": "original-join",
+      "line": 83,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedRecoveryLedger.swift",
+      "source": "await withCheckedContinuation { continuation in"
+    },
+    {
+      "family": "original-join",
+      "line": 105,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedRecoveryLedger.swift",
+      "source": "await worker.task.value"
+    },
+    {
+      "family": "original-join",
+      "line": 139,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedRecoveryLedger.swift",
+      "source": "await ledger.waitForInvocationCleanup()"
+    },
+    {
+      "family": "original-join",
+      "line": 140,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedRecoveryLedger.swift",
+      "source": "try await ledger.joinWorkers()"
+    },
+    {
+      "family": "original-join",
+      "line": 143,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedRecoveryLedger.swift",
+      "source": "do { try await hold.run(on: executor) { _ in try ledger.closeSynchronousCleanup() } }"
+    },
+    {
+      "family": "original-invocation",
+      "line": 309,
+      "path": "macos/core/Sources/RemozioCore/SetupRetainedInvocation.swift",
+      "source": "try await ledger.joinWorkers()"
+    },
+    {
+      "family": "blocking-executor",
+      "line": 37,
+      "path": "macos/core/Sources/RemozioCore/SetupAuditUpgradeWorkExecutor.swift",
+      "source": "try await execute(cancellation: cancellation, busy: BusyBeforeBody(), afterReturn: afterReturn ?? {}, body)"
+    },
+    {
+      "family": "blocking-executor",
+      "line": 41,
+      "path": "macos/core/Sources/RemozioCore/SetupAuditUpgradeWorkExecutor.swift",
+      "source": "try await execute(cancellation: cancellation, busy: AdministrativeSetupError.unavailable, afterReturn: afterReturn ?? {}, body)"
+    },
+    {
+      "family": "blocking-executor",
+      "line": 49,
+      "path": "macos/core/Sources/RemozioCore/SetupAuditUpgradeWorkExecutor.swift",
+      "source": "return try await withTaskCancellationHandler {"
+    },
+    {
+      "family": "blocking-executor",
+      "line": 51,
+      "path": "macos/core/Sources/RemozioCore/SetupAuditUpgradeWorkExecutor.swift",
+      "source": "return try await withCheckedThrowingContinuation { continuation in"
+    },
+    {
+      "family": "account-close",
+      "line": 173,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "await Self.pauseBeforeCleanupRetry()"
+    },
+    {
+      "family": "account-close",
+      "line": 175,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "await setupReplyWork.waitUntilIdle()"
+    },
+    {
+      "family": "account-close",
+      "line": 176,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "await asynchronousWork.waitUntilIdle()"
+    },
+    {
+      "family": "account-close",
+      "line": 180,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in"
+    },
+    {
+      "family": "admission-phase",
+      "line": 416,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "Task { try? await ContinuousClock().sleep(until: deadline); waiter.finish() }"
+    },
+    {
+      "family": "admission-phase",
+      "line": 418,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "await withTaskCancellationHandler {"
+    },
+    {
+      "family": "admission-phase",
+      "line": 419,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in"
+    },
+    {
+      "family": "admission-phase",
+      "line": 431,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "return try await executor.runRestorationPhase(cancellation: cancellation, afterReturn: endWorker, body)"
+    },
+    {
+      "family": "admission-phase",
+      "line": 437,
+      "path": "macos/core/Sources/RemozioCore/SetupAccountOwner.swift",
+      "source": "return try await executor.run(afterReturn: endWorker, body)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 207,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let response = try await send(.open, until: deadline); binding = response.binding; if state != .closed { state = .open }; return response"
+    },
+    {
+      "family": "client-unbound",
+      "line": 210,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }"
+    },
+    {
+      "family": "client-unbound",
+      "line": 216,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "return try await observeIncarnation(until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 220,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "try RuntimeMaintenanceOwnedControl.require(); return try await observeIncarnation(until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 225,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if state == .new { try await greet(until: deadline) }"
+    },
+    {
+      "family": "client-unbound",
+      "line": 230,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "guard case .bytes(let bytes) = try await invoke(nil, incarnation: q, until: deadline), let bytes else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }"
+    },
+    {
+      "family": "client-unbound",
+      "line": 247,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let proof = try await observeIncarnation(until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 252,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let reply = try await invokeUnbound(try challenge.request.encoded, kind: .gate, until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 272,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let proof = try await observeIncarnation(until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 283,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let reply = try await invokeUnbound(try request.encoded, kind: .release, until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 303,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let proof = try await observeIncarnation(until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 309,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let reply = try await invokeUnboundGate(bytes, until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 324,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "try await invokeUnbound(bytes, kind: .gate, until: deadline)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 332,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let recoveryPhases { try await recoveryPhases.run(verify) } else { try verify() }"
+    },
+    {
+      "family": "client-unbound",
+      "line": 337,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let result: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {"
+    },
+    {
+      "family": "client-unbound",
+      "line": 338,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "try await withCheckedThrowingContinuation { continuation in"
+    },
+    {
+      "family": "client-unbound",
+      "line": 342,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "do { try await ContinuousClock().sleep(until: end) } catch { return }; await self?.expire(id)"
+    },
+    {
+      "family": "client-unbound",
+      "line": 345,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }"
+    },
+    {
+      "family": "client-unbound",
+      "line": 355,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "lifetime.close(); driver.close(); Task { await self?.close() }"
+    },
+    {
+      "family": "client-unbound",
+      "line": 358,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let recoveryPhases { try await recoveryPhases.run(verify) } else { try verify() }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 817,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let result = try await phases.run {"
+    },
+    {
+      "family": "client-healthy",
+      "line": 834,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "return try await restoreStartupHealthy(proof, owner: owner, until: deadline, capturePeer: {"
+    },
+    {
+      "family": "client-healthy",
+      "line": 853,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "return try await restoreStartupHealthy(proof, owner: owner, afterProbe: afterProbe, until: deadline,"
+    },
+    {
+      "family": "client-healthy",
+      "line": 869,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await phases.run(controlled(.afterProbe) { afterProbe() }) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 875,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { actualContext = try await phases.run(controlled(.openRequest) { try owner.openRequest(challenge: expectedContext.challenge) }) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 881,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try? await phases.cleanup { try owner.commitOwnerRecovery(.changedScope) } }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 886,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try? await phases.cleanup { try owner.commitOwnerRecovery(.changedScope) } }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 895,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try? await phases.cleanup { try owner.commitOwnerRecovery(.changedScope) } }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 904,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .verifyBeforeOpen) { try check() } }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 906,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let opened = try await startObserved(proof, stopped: stopped, until: deadline)"
+    },
+    {
+      "family": "client-healthy",
+      "line": 908,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .healthyBinding) { try owner.requireHealthyBinding(opened.binding) } }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 915,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .validateBeforePending, validate) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 923,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { peer = try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .capturePeer, capture) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 934,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { pending = try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .preparePending, preparePending) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 945,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { committed = try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .persistPending, write) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 955,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .releaseDrain, release) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 957,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let readback = try await reopenHealthyCandidate(opened.binding, pending: pending, stopped: stopped,"
+    },
+    {
+      "family": "client-healthy",
+      "line": 959,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await phases.run(controlled(.peerBeforeRestored, requireLive)) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 965,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { confirmed = try await phases.run(controlled(.persistRestored) { try persist(restored, pending) }) }"
+    },
+    {
+      "family": "client-healthy",
+      "line": 981,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { _ = try? await phases.cleanup { try persist(failed, previous) } }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1055,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let explicit { explicitWindow = try await explicit.phases.run { try explicit.consume() } }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1072,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .reconnectValidation, validate) }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1083,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { committed = try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .reconnectPending, write) }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1092,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .reconnectRelease, release) }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1094,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let readback = try await reopenSavedObserved(proof, target: target, until: deadline)"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1099,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { confirmed = try await phases.run(controlled(.persistRestored) { try persist(restored, pending) }) }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1111,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { _ = try? await phases.cleanup { try persist(failed, previous) } }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1125,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .open, binding: candidate, boundary: .beforeReopen, requirePeerLive) }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1130,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "guard case .bytes(let bytes) = try await invoke(q, until: deadline), let bytes,"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1132,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if let phases { try await restorationPhase(phases, state: .open, binding: candidate, boundary: .afterReopen, requirePeerLive) }"
+    },
+    {
+      "family": "client-reconnect",
+      "line": 1134,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "return try await readReleasedGate(stopped, revision: pending.revision,"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1174,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "try await recoveryPhases.run(controlled(.beforeRPCVerify, rpc: kind, verify))"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1180,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "let value: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1181,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "try await withCheckedThrowingContinuation { continuation in"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1185,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "do { try await ContinuousClock().sleep(until: end) } catch { return }; await self?.expire(id)"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1188,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1190,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "if payload == nil { driver.start { [weak self, lifetime] in lifetime.invalidate(); Task { await self?.finish(preservingReply: true) } } }"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1198,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "} onCancel: { [weak self, lifetime, driver] in lifetime.close(); driver.close(); Task { await self?.close() } }"
+    },
+    {
+      "family": "client-RPC",
+      "line": 1203,
+      "path": "macos/core/Sources/RemozioCore/AuthorityMaintenanceXPCClient.swift",
+      "source": "try await recoveryPhases.run(controlled(.afterRPCVerify, rpc: kind, verify))"
+    },
+    {
+      "family": "bound-native-entry",
+      "line": 876,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await phases.run { try joined.requireRestorationAccount(accountID) }"
+    },
+    {
+      "family": "bound-native-entry",
+      "line": 877,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let work = try await joined.startRestoration { workID in"
+    },
+    {
+      "family": "bound-native-entry",
+      "line": 880,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let recovery = try await phases.run {"
+    },
+    {
+      "family": "bound-native-entry",
+      "line": 886,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "do { outcome = .success(try await recovery.finishExplicit(workID: workID) { try await recovery.runNative(until: deadline) }) }"
+    },
+    {
+      "family": "bound-native-entry",
+      "line": 888,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await phases.closeActual { recovery.custody.close() }"
+    },
+    {
+      "family": "bound-native-entry",
+      "line": 891,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "return try await joined.finishRestorationNative(work: work, processLease: processLease)"
+    },
+    {
+      "family": "completion-cleanup",
+      "line": 1204,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "if let phases { return try await phases.run(body) }"
+    },
+    {
+      "family": "completion-cleanup",
+      "line": 1208,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "if let phases { return try await phases.cleanup(body) }"
+    },
+    {
+      "family": "completion-cleanup",
+      "line": 1216,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let row = try await operation()"
+    },
+    {
+      "family": "completion-cleanup",
+      "line": 1220,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "return try await cleanupPhase {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1297,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "return try await run(mode: .native, until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1309,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "return try await run(mode: .owned(.init(makeDriver: makeDriver, capturePeer: capturePeer,"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1332,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "case .native: return try await client.observeIncarnationNative(until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1333,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "case .owned: return try await client.observeIncarnationOwned(until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1346,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "switch try await blockingPhase({ try self.prepare() }) {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1349,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "case .restoration(let prepared): owner = try await blockingPhase { try .openStartup(prepared) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1356,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let (client, proof, decision) = try await decisionProbe(mode, context: context, until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1363,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "explicitReconnect = try await blockingPhase {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1373,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "restored = try await client.cancelAndReopenExplicitNative(proof, prepared: explicitReconnect, until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1375,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "restored = try await client.cancelAndReopenStartupNative(proof, custody: custody, until: deadline, phases: phases)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1378,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await owned.beforeCancel(client)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1380,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "restored = try await client.cancelAndReopenExplicitOwned(proof, prepared: explicitReconnect, until: deadline, ownedPhaseControl: owned.phaseControl)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1382,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "restored = try await client.cancelAndReopenStartupOwned(proof, custody: custody, until: deadline, phases: nativePhases)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1385,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await client.close()"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1389,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await client.close()"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1393,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await client.close()"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1395,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "case .ownerRecovery(let failure): return try await blockingPhase { try self.recover(self.window, failure: failure) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1398,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "owner = try await blockingPhase { try .openStartup(self.restoring(self.window)) }; break"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1403,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "owner = try await blockingPhase {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1411,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "return try await restoreHealthy(owner, mode: mode, until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1425,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "_ = try? await cleanupPhase { try self.custody.persistRecovery(row, failure: failure, service: service) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1436,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "_ = try await blockingPhase { try self.custody.requireCurrent(self.window) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1437,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let client = try await blockingPhase { try self.makeClient(mode, context: context) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1439,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let proof = try await observe(client, mode: mode, until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1442,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let decision = try await blockingPhase { try self.afterAuthenticatedProbe(proof, client: client) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1445,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await client.close(); try Task.checkCancellation()"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1447,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "_ = try await blockingPhase { try self.custody.requireCurrent(self.window) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1448,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1459,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await blockingPhase {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1463,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await requireRestoringProcess(until: deadline)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1465,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let context = try await blockingPhase {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1469,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "let client = try await blockingPhase { try self.makeClient(mode, context: context) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1472,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "do { proof = try await observe(client, mode: mode, until: deadline) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1477,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "restored = try await client.restoreStartupHealthyNative(proof, owner: owner, until: deadline,"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1480,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await owned.beforeHealthyOpen(client)"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1481,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "restored = try await client.restoreStartupHealthyOwned(proof, owner: owner,"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1485,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await client.close()"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1488,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "await client.close()"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1492,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await blockingPhase { try self.custody.requireRestoring(owner.window) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1494,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1532,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await blockingPhase { try self.custody.requireRestoring(self.window) }"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1535,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "live = try await blockingPhase {"
+    },
+    {
+      "family": "bound-engine",
+      "line": 1551,
+      "path": "macos/core/Sources/RemozioCore/RuntimeMaintenanceStartupRecovery.swift",
+      "source": "try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))"
+    },
+    {
+      "family": "scheduling",
+      "line": 123,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "return await custody.validateForRecovery()"
+    },
+    {
+      "family": "scheduling",
+      "line": 128,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "if entry.finished { await entry.task.value; return }"
+    },
+    {
+      "family": "scheduling",
+      "line": 132,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "for await _ in signal.stream { break }"
+    },
+    {
+      "family": "scheduling",
+      "line": 144,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await entry.task.value"
+    },
+    {
+      "family": "scheduling",
+      "line": 149,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await self?.observe(request.key, observation)"
+    },
+    {
+      "family": "scheduling",
+      "line": 151,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await self?.releaseSlot(request.key)"
+    },
+    {
+      "family": "scheduling",
+      "line": 154,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "switch await self?.claimSlot(request.key) ?? .closed {"
+    },
+    {
+      "family": "scheduling",
+      "line": 158,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "for await _ in signal { break }"
+    },
+    {
+      "family": "scheduling",
+      "line": 160,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await task.value"
+    },
+    {
+      "family": "scheduling",
+      "line": 161,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await self?.releaseSlot(prior)"
+    },
+    {
+      "family": "scheduling",
+      "line": 166,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await self?.finish(request.key, observation)"
+    },
+    {
+      "family": "scheduling",
+      "line": 184,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "if await schedule(request) { return .scheduled }"
+    },
+    {
+      "family": "scheduling",
+      "line": 189,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await Self.waitForAvailability(signal.stream, until: expires, timing: runner.timing)"
+    },
+    {
+      "family": "scheduling",
+      "line": 195,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await withTaskGroup(of: Void.self) { group in"
+    },
+    {
+      "family": "scheduling",
+      "line": 196,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "group.addTask { for await _ in signal { break } }"
+    },
+    {
+      "family": "scheduling",
+      "line": 197,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "group.addTask { try? await timing.sleep(deadline) }"
+    },
+    {
+      "family": "scheduling",
+      "line": 198,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "_ = await group.next(); group.cancelAll()"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 209,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await closing?.value"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 212,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "closureResult = await finalClose.closeAfterJoiningResult()"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 221,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await closing?.value"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 224,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "closureResult = await finalClose.closeAfterJoiningResult()"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 265,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await self?.didJoin($0)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 275,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "let result = await runner.run(request, observe: observe, releaseSlot: releaseSlot, claimSlot: claimSlot)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 276,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await finish(result)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 284,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "for task in tasks { await task.value }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 285,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "if shutdown { await finished(await custody.closeAfterJoiningResult()) }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 286,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "else { custody.releaseAfterJoining(); await finished(nil) }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 299,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "private func current() async -> Bool { await custody.validateForRecovery() }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 312,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "guard await current() else { return .retired }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 315,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await observe(.recovering)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 318,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "guard await current() else { return .retired }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 319,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "switch try await driver.acquire(request, deadline) {"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 322,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "switch await runOwner(owner, deadline: deadline, observe: observe) {"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 328,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "try await timing.sleep(min(deadline, timing.now().advanced(by: backoff)))"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 332,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await releaseSlot()"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 333,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await observe(.busy)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 334,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "try await timing.sleep(timing.now().advanced(by: .seconds(60)))"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 335,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "guard await claimSlot() else { return .cancelled }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 338,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "guard await current() else { return .retired }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 344,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await withTaskCancellationHandler {"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 345,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await runAndJoinOwner(owner, deadline: deadline, observe: observe)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 353,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "else if !(await current()) { owner.cancel(); result = .retired; unusedAtDeadline = false }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 359,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "result = validated(try await owner.run(deadline))"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 361,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "if !(await current()) { result = .retired }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 365,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await observe(.joining)"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 366,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "let cleanup = Task { await owner.join() }"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 367,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "await cleanup.value"
+    },
+    {
+      "family": "supervisor-join",
+      "line": 370,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoverySupervisor.swift",
+      "source": "guard await current() else { return .finished(.retired) }"
+    },
+    {
+      "family": "final-close",
+      "line": 61,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "func closeAfterJoining() async { _ = await closeAfterJoiningResult() }"
+    },
+    {
+      "family": "final-close",
+      "line": 76,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "let result = await Self.boundedClose(attempt.task, until: .now.advanced(by: closeWait))"
+    },
+    {
+      "family": "final-close",
+      "line": 90,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "let returned = Task { signal.continuation.yield(await actual.value); signal.continuation.finish() }"
+    },
+    {
+      "family": "final-close",
+      "line": 92,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "do { try await ContinuousClock().sleep(until: deadline) }"
+    },
+    {
+      "family": "final-close",
+      "line": 97,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "for await result in signal.stream { return result }"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 120,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "func validateForRecovery() async -> Bool { await custody.validateForRecovery() }"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 133,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "func closeAfterJoining() async { await custody.closeAfterJoining() }"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 135,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "await custody.closeAfterJoiningResult()"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 152,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "return try await driver.acquire(request, deadline)"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 172,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "let acquisition: Supervisor.Acquisition = try await phases.acquire {"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 192,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "return .owner(.init(run: { try await held.run(until: $0) },"
+    },
+    {
+      "family": "native-owner-acquisition",
+      "line": 193,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "cancel: { held.cancel() }, join: { await held.join() }))"
+    },
+    {
+      "family": "native-owner",
+      "line": 240,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "let actual = Task { try await recovery.runNative(until: deadline) }"
+    },
+    {
+      "family": "native-owner",
+      "line": 243,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "let row = try await actual.value"
+    },
+    {
+      "family": "native-owner",
+      "line": 253,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "if let actual = lock.withLock({ task }) { _ = await actual.result }"
+    },
+    {
+      "family": "native-owner",
+      "line": 256,
+      "path": "macos/core/Sources/RemozioCore/SetupMaintenanceRecoveryNativeAdapter.swift",
+      "source": "try await phases.closeActual { self.recovery.closeNativeCustody() }"
+    },
+    {
+      "family": "direct-shutdown",
+      "line": 71,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupShutdown.swift",
+      "source": "if let owner = lock.withLock({ owner }) { try await owner.closeWhenIdle() }"
+    },
+    {
+      "family": "retirement",
+      "line": 393,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "if let firstSupervisor { await firstSupervisor.retire() }"
+    },
+    {
+      "family": "retirement",
+      "line": 394,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "await discovery?.value"
+    },
+    {
+      "family": "retirement",
+      "line": 396,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "if let runtime, firstSupervisor !== runtime.supervisor { await runtime.supervisor.retire() }"
+    },
+    {
+      "family": "retirement",
+      "line": 397,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "await idle?.value"
+    },
+    {
+      "family": "retirement",
+      "line": 398,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "for task in retries { await task.value }"
+    },
+    {
+      "family": "retirement",
+      "line": 401,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "if await runtime.supervisor.shouldExit { didClose(); return }"
+    },
+    {
+      "family": "retirement",
+      "line": 402,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "await retirementDelay()"
+    },
+    {
+      "family": "retirement",
+      "line": 403,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "await runtime.supervisor.retire()"
+    },
+    {
+      "family": "retirement",
+      "line": 405,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "do { try await closeWithoutRuntime(); didClose(); return }"
+    },
+    {
+      "family": "retirement",
+      "line": 406,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "catch { await retirementDelay() }"
+    },
+    {
+      "family": "retirement",
+      "line": 412,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "do { try await timing.sleep(timing.now().advanced(by: .milliseconds(250))) }"
+    },
+    {
+      "family": "retirement",
+      "line": 414,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "await withCheckedContinuation { continuation in"
+    },
+    {
+      "family": "retirement",
+      "line": 426,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "await withCheckedContinuation { stopped.append($0) }"
+    },
+    {
+      "family": "retirement",
+      "line": 428,
+      "path": "macos/core/Sources/RemozioCore/AdministrativeSetupLifecycle.swift",
+      "source": "func close() async { requestRetirement(); await waitUntilStopped() }"
+    },
+    {
+      "family": "admission-idle",
+      "line": 48,
+      "path": "macos/core/Sources/RemozioCore/SetupOwnerAsyncWork.swift",
+      "source": "await withCheckedContinuation { continuation in"
+    }
+  ],
+  "baseCommit": "9353b1e7f26dfac888414fd1e52375eba1df604c",
+  "buildsOrTestsRun": false,
+  "codeWritten": false,
+  "excludedWhy": "Their interfaces are outside the approved N2b native binding. Arbitrary Owned callbacks cannot prove production termination.",
+  "families": {
+    "account-close": "Retries actual cleanup and waits for admission tokens. No caller cancellation exit. Persistent cleanup failure may require external repair; accepted limit4915 and diagnosis issue821.",
+    "admission-idle": "Continuation ends when the actual admission Token closes. No cancellation shortcut. Permanent pending cleanup keeps it pending.",
+    "admission-phase": "Phase delegates to executor. Release observation has a cancellation handler and optional timer; it never releases the actual hold.",
+    "blocking-executor": "Cancellation handler marks a token, not the continuation. Worker Thread resumes continuation after the real body and afterReturn. A running synchronous OS command/body is not preempted.",
+    "bound-engine": "Phase wrappers, bounded Authority RPCs, actor close and250ms cancellation-aware polling; Owned hooks are excluded from native proof. Registration can call mutating bounded launchctl bootstrap.",
+    "bound-native-entry": "Creates real retained restoration Task; explicit initial check and phase checks cooperate only after that real Task is cancelled. Final cleanup still joins.",
+    "claim-and-result": "Join/result waits do not cancel the producer or return early. Phase admission cooperates. Adopt consumes the real completed result and starts no replacement restore.",
+    "client-RPC": "withTaskCancellationHandler closes transport and schedules actor finish to resume pending continuation. Timer also finishes. Pre/post checks observe cancellation; errors may map to needsOwnerRecovery.",
+    "client-healthy": "Delegates to phase wrappers and bounded RPC invoke. Polling sleeps cooperate; Owned callback hooks are fixture controls only. Native code uses fixed context.",
+    "client-reconnect": "Delegates to phase wrappers and bounded RPC invoke. Actual server effect can outlive transport cancellation; readback and durable state determine result.",
+    "client-unbound": "RPC uses cancellation handler, transport close and five-second timer. Pre/post phases and actor scheduling remain distinct. Native driver uses NSXPC; callback data cannot grant authority.",
+    "completion-cleanup": "Async engine result followed by uncancelled cleanup phase; derives completion only from the actual restored durable row.",
+    "direct-shutdown": "Current close rejects recoveryBound, then waits owner.closeWhenIdle. Proposed shared finalizer must join registered endpoint work before successful account closure.",
+    "effect-dispatch": "Dispatches fixed native engines or Owned-only adapters. Phase admission and real-result joins determine cancellation; no generic async signature proves cooperation.",
+    "endpoint": "Delegates to original join, phase executor, real restoration result, or snapshot Task.value. close does not currently cancel/join the wrapper. See plan matrix.",
+    "final-close": "Five-second observer may return timedOut on cancellation/time. Retained actual close task is never cancelled by that observer. No timedOut result proves lease release.",
+    "native-owner": "Existing cancel marks token plus actual.cancel. run/join await actual task value/result. Cleanup completes before scope.close and joined notification.",
+    "native-owner-acquisition": "Owner-minted phase acquisition delegates to blocking executor and current Host custody. Owned callbacks cannot establish native behavior.",
+    "original-invocation": "Delegates to ledger real worker joins. Deinit reports cleanup only after synchronous rights closure returned.",
+    "original-join": "Original deinit callback, cancelled registered worker real completion, then synchronous cleanup on executor. No early completion from waiter cancellation. Production registration call search found no external retainWorker/retainCleanup consumers.",
+    "real-task-and-publication": "Task.result and original Task.value await real work. Publication continuation ends at start.open. No current requestCancellation API; shutdown-only bridge and race latch are proposed, not implemented.",
+    "restoration-phases": "run/acquire check Task cancellation before phase admission; executor marks a separate token. Busy waits sleep25ms. cleanup creates a distinct uncancelled task with no deadline; afterRelease only cancels its observer.",
+    "retirement": "Retirement Task awaits supervisor/discovery/idle/retries then actual closed result. waitUntilStopped is a noncancellable continuation. Independent300s watchdog exits75 as crash, not successful cleanup.",
+    "scheduling": "Native sleeps/AsyncStreams cooperate or have scheduling deadline. Task.value joins remain real. Admission closure wakes slot waiters; timing callbacks are bounded only in native mode or controlled fixtures.",
+    "supervisor-join": "Cancels real NativeOwner through handler; joins entry tasks and owner cleanup tasks without caller-cancellation shortcut. Current snapshot excludes endpoint tasks; N2b adds the shared session join capability.",
+    "unbound-engine": "Forward phases/RPCs cooperate with real-task cancellation; cleanup and actual custody close ignore caller cancellation. Transport cancellation is not proof of remote effect cancellation."
+  },
+  "scope": "N2b restore/adopt engines, claims, original joins, shared supervisor/final-close paths, and cancellation helpers. Other Setup operations and separate restart-only entry points are excluded.",
+  "sourceManifestSHA256": "1f56c9e9a575f89f7f9b3c4b76ef0b047034f7c6046529412b9f7e6da085acab",
+  "tree": "b08a0df49616ae1124eb8436cb27decb1317dcf0"
+}
