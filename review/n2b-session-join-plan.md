@@ -1,6 +1,7 @@
 # N2b: join actual Setup recovery work
 
-Status: source audit and implementation plan only. No N2b code, build, test, or runtime qualification exists.
+Status: source audit and plan approved by Toni4930. Implementation may start; the native gate waits for Saturn approval.
+No N2b build, test, or runtime qualification exists. This document contains no product implementation.
 
 The audit uses main `9353b1e7f26dfac888414fd1e52375eba1df604c`, tree `b08a0df49616ae1124eb8436cb27decb1317dcf0`.
 Its 2,871-input manifest is `1f56c9e9a575f89f7f9b3c4b76ef0b047034f7c6046529412b9f7e6da085acab`.
@@ -166,6 +167,9 @@ These are required scenarios, not discovered test counts or completed results.
 - Record the existing inner-guard race and its terminal failure route. A fix for that shared startup path is outside N2b, per Toni4926.
 - Test crash readback for pre-write join, partial bound restore, partial unbound intent, verified completion before adopt, and pending cleanup.
 - Check Setup IPC13 support and the built Debug/Release declarations. Explicitly prove that12 remains unexported.
+- Audit literal IPC-version lists and acceptance/rejection loops in Swift tests, Python manifest scripts and their tests.
+- Check complete expected reader/writer sets and fixture declarations. Do not update only scalar version assertions.
+- Keep unrelated channel and codec versions unchanged. Record each affected literal and its intended channel.
 
 Use existing endpoint, orphan-claim, phase, native-adapter, supervisor, lifecycle and concrete restore-effect fixtures.
 Preserve their original bounds and actual joins. A controlled release is not a production cancellation proof.
