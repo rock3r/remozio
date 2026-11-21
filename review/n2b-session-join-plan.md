@@ -1,6 +1,9 @@
 # N2b: join actual Setup recovery work
 
-Status: source audit and plan approved by Toni4930 and Saturn4934, with the required additions confirmed by Toni4935.
+Status: the original audit was approved by Toni4930 and Saturn4934, with additions confirmed by Toni4935.
+Toni4966/4967/4969/4971 amend the disposal and retirement contracts below. Saturn agreed in4968.
+The amended candidate is source-only on base `3db87668d2385cc04b8ef51f809296ddbe13360e`.
+Its staged tree is `fd422409372a89986d40e6ed50f7b36d882e7d94`. No gate result is claimed.
 Implementation may start. Send the actual diff, test closure and forecast before the native gate.
 No N2b build, test, or runtime qualification exists. This document contains no product implementation.
 
@@ -19,7 +22,8 @@ The endpoint owns a wrapper Task, but current shutdown does not join that Task.
 The real restoration runs in a separate private `RestorationWork` Task.
 Cancelling a waiter does not cancel that Task and must not shorten its actual join.
 
-Add explicit `RestorationWork.requestCancellation()`. Only the shutdown finalizer calls it.
+Add explicit `RestorationWork.requestCancellation(using:)` with a capability minted only by the shutdown finalizer.
+A restoration handle alone grants no cancellation authority.
 Keep `value()` and `joinRecovery` as real joins. Set `returned` and `completed` only from the real result.
 Ordinary `claim.abandon()`, Setup invalidation, and an Authority transport failure must not request this cancellation.
 They retain their existing authorization and cleanup behavior. Decision4917 supersedes the ambiguous use of “abandon” in4907.
@@ -129,13 +133,19 @@ Keep this limitation in the eventual PR body. Do not misdescribe in-process reco
 6. Handle shutdown before restoration-work publication with a retained cancellation request. Any later real work must see it before its publication barrier opens.
 7. Ordinary claim abandonment must not set that request. A cancelled waiter must not set it either.
 8. Join original claim work and the actual endpoint wrapper separately. Neither join is evidence for the other.
-9. Extend the existing final-close capability with an actual async session join. Both supervisor shutdown and ordinary disposal must use it.
+9. Extend the final-close capability with two actual session joins. Shutdown and retirement close admission and cancel before joining.
+   Ordinary disposal joins passively. It neither cancels the real work nor permanently closes shared recovery admission.
+   Retain the actual disposal task before starting it. Direct close awaits that task when the weak supervisor has disappeared.
+   Pending owners still make close return unavailable after the join, retaining both leases for the existing lifecycle retry.
+   Owned custody without supervisor publication refuses direct close. Its caller must bind a supervisor or release the unused custody.
 10. Route direct shutdown.close through the same finalization owner. A second caller awaits that owner outside every lock; it cannot start a second drain.
 11. Only after actual joins, run existing audit cleanup and account closure. Pending/failed results retain both leases and use existing retry behavior.
 12. Bind a native operations factory from the accepted invocation and verified Host. Use only fixed restoreNative and finishRecordedRestorationNative engines.
 13. Read Host.configuration.maximumConnections. Do not accept caller-supplied peer identity, Host custody, routing state or connection limits.
 14. Add the recovery lane and selectors atomically with Setup IPC13 and signed app/Setup manifest declarations. Keep C02 preparation12 unexported.
-15. Serving permits the agreed operations. Retiring permits adopt/window-free release while cleanup admission remains open; it refuses restore.
+15. Serving permits the agreed operations. Retirement uses the shutdown finalizer, including every actual join before lease release.
+    Retiring refuses a new recovery hello cleanly with version0. The client can retry the same adopt or window-free release on the next daemon.
+    Refused hello must not import authorization, acquire the orphan, change its durable state, or consume that request.
 16. Final cleanup closure refuses every recovery hello with version0. A foreign selector refuses that call without discarding existing lane work.
 
 Production closure: Shutdown; Endpoint; Operations; Claim/Reservation; NativeAdapter/FinalClose protocol; Lifecycle/Service; ConnectionFacade; Listener/Slots; exported Setup contract and version declarations; signed manifest generator.
@@ -159,12 +169,19 @@ These are required scenarios, not discovered test counts or completed results.
 - Cancel a waiter or call claim.abandon without shutdown. The real restoration Task must not observe an injected cancellation.
 - Gather the actual result before custody release in the abandonment case.
 - Race session construction with cleanup admission closure. No registration may escape the final snapshot.
-- Exercise supervisor shutdown, ordinary disposal and direct shutdown.close. Each must join the same actual work.
-- Call direct close while recoveryBound is true. It must await the finalizer instead of throwing unavailable; state this contract change in the PR body.
+- Exercise supervisor shutdown, retirement, ordinary disposal and direct shutdown.close. Each must join the same actual work.
+- Verify passive disposal does not cancel the actual task or seal shared admission. A replacement supervisor and session must be accepted.
+- Dispose the supervisor while pending owners prevent binding release. Direct close must return unavailable after the actual disposal join.
+- Construct an unused Owned custody without openOwned. Direct close must refuse instead of waiting forever.
+- Call direct close while recoveryBound is true. It must await the actual finalizer before reporting its result. Pending owners or cleanup can still return unavailable; state this in the PR body.
 - Race two direct close callers. Pause the first finalizer, prove owner-lock checks remain possible, then let both observe the same result.
 - Make account cleanup return pending/failed after joins. Keep both leases; do not add repair logic or false closed status.
 - Exercise retiring hello, final closed hello, adoption, window-free release and refused restore separately.
-- Exercise both foreign-selector directions and native factory ownership/Host connection-limit checks.
+- On retirement, block the actual session and verify that both leases remain held until it returns.
+- After a refused retiring hello, a new daemon must accept the identical adopt or window-free release request.
+- Exercise both foreign-selector directions and shared release, lease, owner-registration and Host connection-limit checks.
+- Keep ordinary-owner bindings separate from the sealed native context. They cannot construct Root factories or replace native startup checks.
+- Root startup validation, native factories and installed listener wiring remain unverified until attended device E2E. State this in the PR body.
 - Inject the existing watchdog timer and terminate callback while a real N2b join remains pending. Expect exit75 notification, no lease.close/completion, and the correct durable startup input.
 - Test the existing successful orphan registration races with the real reconciliation helper and controlled observations, not real launchctl calls.
 - Record the existing inner-guard race and its terminal failure route. A fix for that shared startup path is outside N2b, per Toni4926.
