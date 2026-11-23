@@ -46,7 +46,7 @@ Run these baseline witnesses after part 3a merges:
 
 ### Receipt lookup limitation
 
-The current receipt response contains the setup ID and an optional commit signature. The Android client treats an absent signature as receipt unavailable. A candidate that never enrolled may also fail to open the receipt channel. Neither outcome proves an expired setup never committed. Keep an ambiguous entry in the bounded recovery slot until a verified receipt or the narrow supersession proof below resolves it. An authenticated terminal no-commit response, with durable evidence that the setup cannot commit, would need a separate protocol change.
+The current receipt response contains the setup ID and an optional commit signature. The Android client treats an absent signature as receipt unavailable. A candidate that never enrolled may also fail to open the receipt channel. Neither outcome proves an expired setup never committed. Keep an ambiguous entry in the bounded recovery slot until a verified receipt or the narrow supersession proof below resolves it. If the retained entry remains ambiguous, it occupies the re-pair slot for that Mac. In the recovery UI, explain that the user can choose ordinary pairing to continue with a new phone ID. Keep the ambiguous entry and its keys for receipt recovery. Issue [#901](https://github.com/rock3r/remozio/issues/901) tracks a signed terminal response from Root that proves the setup expired without a commit.
 
 ### Activation and local removal
 
