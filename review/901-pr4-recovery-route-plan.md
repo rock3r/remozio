@@ -4,15 +4,15 @@
 
 ## Admission and request
 
-Give recovery its own TLS purpose at the configured Mac transport endpoint. The phone pins the Mac transport identity from its retained pairing setup. The route works after the setup UI and invitation have closed. If the existing transport address cannot provide this reachability, settle the address and listener design before implementation. Prove direct reachability first. Exercise the relay path if the same address is advertised through relay.
+Use the existing Mac transport listener and address. Select a dedicated recovery purpose in the TLS handshake before choosing a handler. The phone pins the Mac transport identity from its retained pairing setup. Recovery has its own admission limit within the listener’s existing capacity. The relay forwards the connection without interpreting the purpose. The route works after the setup UI and invitation close, over both direct and relay connections.
 
-The connection accepts one lookup. The phone supplies the exact setup ID and transcript digest. Root checks the account and Mac scope against the retained transcript. It issues a short-lived challenge bound to that connection and lookup. The phone proves possession of the candidate transport key in a recovery-specific signing domain. The proof covers the challenge, setup ID, digest, and scope. Root verifies it against the key in the retained transcript. The proposed route envelope, challenge lifetime, and resource limits need review before implementation. Reuse existing connection limits and deadlines where they apply.
+The connection accepts one lookup. The phone supplies the exact setup ID, transcript digest, and scope. Root issues a fresh 32-byte challenge for all well-formed lookups, including an unknown setup ID. It expires at the handshake deadline and is consumed once. Bind the proof to the TLS exporter, challenge, setup ID, digest, and scope. Encode the fields with fixed widths or length prefixes. Use a signing domain distinct from both receipt and expiry proofs. Root verifies possession of the candidate transport key from the retained transcript.
 
 The recovery capability permits only lookup and reply. It grants no approval, enrollment, route change, or access to another setup. Root must verify the Transport caller and its current code policy. Keep the version 1 enrolled receipt flow and its admission unchanged. Legacy clients continue to use that flow for active enrollments.
 
 ## Root decisions
 
-Root reads the stage and committed enrollment under the existing owner and verified checkpoint. The recovery path is read-only. The maintenance and startup owners remain responsible for making expiry durable. In particular, a pending row past its deadline is inconclusive until the owner records the terminal state.
+Root reads the stage and committed enrollment under the existing owner and verified checkpoint. The recovery path is read-only. The maintenance and startup owners remain responsible for making expiry durable. A pending row past its deadline stays inconclusive until one of those owners records the terminal state. The phone can retry with bounded backoff and keeps the preparation and keys.
 
 | Evidence for the authenticated query | Reply |
 | --- | --- |
@@ -20,8 +20,8 @@ Root reads the stage and committed enrollment under the existing owner and verif
 | Exact pending stage, before or after its deadline | Return an inconclusive result. The phone retains the preparation and keys. |
 | Exact durable deadline-elapsed stage | Return a Root-signed expiry receipt with reason deadline elapsed. Use the signed payload from [PR #911](https://github.com/rock3r/remozio/pull/911). |
 | Exact durable retired-incarnation stage | Return the same signed receipt format with reason retired incarnation. This makes no claim about the wall deadline. |
-| Missing, replaced, discarded, or removed stage with no exact eligible commit | Return an inconclusive result. Absence alone never authorizes retirement. |
-| Wrong digest, scope, proof, or key | Refuse the request without revealing whether the setup exists. |
+| Missing, replaced, discarded, or removed stage with no exact eligible commit | Use the same refusal as for wrong binding or proof. Absence alone never authorizes retirement. |
+| Wrong digest, scope, proof, or key | Return a single refusal with the same response shape as an unknown setup ID. The challenge and refusal reveal no separate reason. |
 | Revoked enrollment, uncertain clock or lease, broken checkpoint, or failed signature | Return no useful proof. The phone retains the preparation and keys. |
 
 The expiry signature binds the exact setup ID, transcript digest, Mac and account, candidate phone and epoch, predecessor epoch, retained Root revision, expiry, and reason. Recheck the relevant retained record, caller policy, scope, and lease before releasing either signature. If any check fails after signing, discard the result. Revisions in the expiry proof come from the stored transcript. A change to unrelated trust does not change those signed claims.
@@ -32,13 +32,13 @@ Do not introduce a route to resend an enrollment proof. An authenticated client 
 
 | Scenario | Required proof |
 | --- | --- |
-| First real expired re-pair with no active enrollment | Use the real Transport and Root entry points with an ordinary-user fixture. Close setup, let the owner record expiry, and recover a valid proof with the candidate key. Confirm the same peer cannot establish an approval session. |
-| Pending on both sides of the deadline | Read before deadline and again after deadline while maintenance is held. Both reads leave the journal and checkpoint unchanged. Release maintenance, query again, and verify the signed deadline reason. |
+| First real expired re-pair with no active enrollment | Use the real Transport and Root entry points with an ordinary-user fixture. Close setup, let the owner record expiry, and recover a valid proof with the candidate key. Run over both direct and relay connections. Confirm the same peer cannot establish an approval session. |
+| Pending on both sides of the deadline | Read before deadline and again after deadline while maintenance is held. Both reads leave the journal and checkpoint unchanged. Release maintenance and prove the owner records expiry. Query again and verify the signed deadline reason. The restart case proves the alternative progress path. |
 | Retired incarnation | Reopen after startup reconciles the checkpoint and closes a prior incarnation's pending stage. Verify the retired-incarnation reason and the unchanged bytes across the lookup. |
 | Commit wins and its first reply is lost | Commit through the existing writer, then recover a valid positive proof through the intended route. The slot stays free. No expiry proof can be returned, including on retry or restart. |
 | Expiry wins a concurrent commit | Use barriers at the owner. The late commit refuses. The recovery reply remains a valid expiry proof with the same claims. An uncertain intermediate checkpoint gives no proof. |
 | Missing and replaced attempts | Query unknown IDs and old IDs after replacement, local revocation, or authorized discard. Confirm no expiry proof is issued. Include old-format journals and ordinary pairing. |
-| Proof binding and replay | Vary the transport key, digest, setup ID, scope, challenge and connection. Reject every mismatch and replay. Check that guessed IDs and requests with invalid proof cannot reveal retained state. |
+| Proof binding and replay | Vary the transport key, digest, setup ID, scope, challenge, and TLS exporter. Reject every mismatch and replay. Verify one challenge per lookup and compare the challenge and refusal shapes for unknown IDs, wrong bindings, and invalid proofs. |
 | Authority failure and closing | Change caller policy, retire the lease, interrupt signing, and inject a storage error. Refuse the reply and release the connection. Check deadlines, cancellation, malformed input, second-query refusal, and admission capacity. |
 | Compatibility | Run version 1 active receipt lookup and enrolled approval smoke tests. Test a legacy Transport without recovery support. An unavailable route leaves the phone's record intact. |
 
