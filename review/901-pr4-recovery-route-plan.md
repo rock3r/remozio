@@ -12,7 +12,7 @@ The recovery capability permits only lookup and reply. It grants no approval, en
 
 ## Root decisions
 
-Root reads the stage and committed enrollment under the existing owner and verified checkpoint. The recovery path is read-only. The maintenance and startup owners remain responsible for making expiry durable. A pending row past its deadline stays inconclusive until one of those owners records the terminal state. The phone can retry with bounded backoff and keeps the preparation and keys.
+Root reads the stage and committed enrollment under the existing owner and verified checkpoint. The recovery path is read-only. The maintenance and startup owners remain responsible for making expiry durable. A pending row past its deadline stays inconclusive until one of those owners records the terminal state. The phone treats a refusal as inconclusive. It keeps the preparation and keys even after it reaches the retry limit. It can retry with bounded backoff.
 
 | Evidence for the authenticated query | Reply |
 | --- | --- |
@@ -43,6 +43,14 @@ Do not introduce a route to resend an enrollment proof. An authenticated client 
 | Compatibility | Run version 1 active receipt lookup and enrolled approval smoke tests. Test a legacy Transport without recovery support. An unavailable route leaves the phone's record intact. |
 
 Use existing signed vectors for the payload format. Add a route test that verifies real Root-produced bytes against the same transcript. A desktop software-key fixture does not establish installed Root, hardware custody, or a physical Mac–Pixel result. Confirm exact test selectors and forecast before the implementation gate.
+
+## Required PR5 Android retirement tests
+
+| Phone observation | Required outcome |
+| --- | --- |
+| One uniform refusal or an inconclusive reply | Keep the exact PREPARED record and its keys. Join the recovery connection before releasing the lease. |
+| Every attempt in a bounded retry sequence returns a refusal or an inconclusive reply | After the final attempt, the same PREPARED record and keys remain usable. Record zero retirements and zero enrollment proof resubmissions. |
+| A valid signed expiry proof arrives after earlier refusals | Verify it against the same PREPARED record under its lease. Join recovery I/O and retire only that record and its unused keys. |
 
 ## Follow-up boundaries
 
