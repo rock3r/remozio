@@ -52,6 +52,7 @@ jobs:
             python3 scripts/ci-pr-jobs.py --all --github-output "$GITHUB_OUTPUT"
           fi
   python:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') }}
     name: Python checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -61,7 +62,7 @@ jobs:
   linux-protocol:
     name: Linux Swift protocol
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.linux == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.linux == 'true') }}
     runs-on: ubuntu-24.04
     # Ubuntu mirror lookups failed for about an hour on 2026-11-11; with apt retries the
     # packages still arrived, in about 16 minutes instead of under one.
@@ -167,7 +168,7 @@ jobs:
   mac:
     name: Mac build
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac == 'true') }}
     runs-on: macos-26
     timeout-minutes: 120
     outputs:
@@ -272,11 +273,19 @@ jobs:
         env:
           REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
         run: python3 scripts/ci-build-cache.py restore --scope experiments
+      - name: Trace the stale frontend case
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124' }}
+        run: |
+          sw_vers
+          xcodebuild -version
+          python3 scripts/run-macos-live-frontend.py --stale-only
       - name: Run the Mac stages that need neither the app nor macos/core
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') }}
         env:
           REMOZIO_CHECK_MAC_PART: experiments
         run: ./scripts/check.sh
       - name: Record validated Mac experiments cache inputs
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') }}
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope experiments --github-output "$GITHUB_OUTPUT"
       - name: Save validated Mac experiments compiler outputs
@@ -293,7 +302,7 @@ jobs:
   mac-core:
     name: Mac core tests (${{ matrix.part }})
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_core == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_core == 'true') }}
     runs-on: macos-26
     # The full suite took 54 to 58 minutes on main in November 2026, close to the old 60-minute limit. 90 minutes
     # leaves room for new tests and slow runners; a hung test still ends the job.
@@ -358,7 +367,7 @@ jobs:
   mac-interop:
     name: Mac interoperability
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_interop == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_interop == 'true') }}
     runs-on: macos-26
     timeout-minutes: 20
     outputs:
@@ -446,7 +455,7 @@ jobs:
   ios:
     name: iOS build
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true') }}
     runs-on: macos-26
     timeout-minutes: 45
     outputs:
@@ -499,7 +508,7 @@ jobs:
   kotlin:
     name: Kotlin protocol
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.kotlin == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.kotlin == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -542,7 +551,7 @@ jobs:
   android:
     name: Android build
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.android == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') && !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.android == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
@@ -590,7 +599,7 @@ jobs:
     # Mac core tests job runs on one or two runners. scripts/ci-pr-jobs.py --verify-needs fails this check when the
     # selection failed, when a selected job did not pass, or when a job that the selection needs was skipped.
     needs: [changes, python, linux-protocol, mac, mac-experiments, mac-core, mac-interop, ios, kotlin, android]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/bepi-933-stale-ci-20261124') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

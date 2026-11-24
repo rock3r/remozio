@@ -55,9 +55,20 @@ def build():
     return binary, helpers
 
 
-def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_forced_cleanup=None):
+def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_forced_cleanup=None, trace=False):
     target = "/bin/bash" if mode == "nested" else str(helpers["target"])
     environment = {"PATH": "/usr/bin:/bin"}
+    if trace:
+        if mode != "stale" or os.environ.get("GITHUB_ACTIONS") != "true":
+            raise RuntimeError("Stale tracing requires GitHub Actions and the stale case")
+        environment["REMOZIO_CI_STALE_TRACE"] = "1"
+
+    def print_trace(errors):
+        if trace:
+            for line in errors.decode(errors="replace").splitlines():
+                if line.startswith("STALE_TRACE "):
+                    print(line, flush=True)
+
     if stop_barrier is not None:
         environment["REMOZIO_FIXTURE_STOP_BARRIER"] = str(stop_barrier)
     process = subprocess.Popen([str(binary), "authority", mode, str(helpers["supervisor"]), str(helpers["monitor"]),
@@ -79,6 +90,7 @@ def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_fo
         # The authority remains alive to supervise cancellation and reap the actual monitor and target.
         process.send_signal(signal.SIGTERM)
         output, errors = process.communicate(timeout=timeouts[1])
+        print_trace(errors)
         raise
     finally:
         try:
@@ -97,6 +109,7 @@ def invoke(binary, helpers, mode, *, stop_barrier=None, timeouts=(60, 20), on_fo
             process.stderr.close()
     if process.returncode:
         raise RuntimeError(f"Live frontend {mode} returned {process.returncode}: {errors.decode(errors='replace')}")
+    print_trace(errors)
     observations = json.loads(output)
     if observations.get("nativeSupervisorStatus") != 13 << 8 or observations.get("oneOriginalAdmission") is not True:
         raise RuntimeError(f"Incomplete native result: {observations!r}")
@@ -152,7 +165,9 @@ def source_files():
     return sorted(set(files))
 
 
-def main():
+def main(*, stale_only=False):
+    if stale_only and os.environ.get("GITHUB_ACTIONS") != "true":
+        raise RuntimeError("Stale-only trials require GitHub Actions")
     if os.geteuid() == 0:
         raise RuntimeError("This experiment must run unprivileged")
     evidence_path = BUILD / "evidence.json"
@@ -165,6 +180,12 @@ def main():
     for path in files:
         if hashlib.sha256(path.read_bytes()).hexdigest() != hashes[str(path.relative_to(ROOT))]:
             raise RuntimeError("A live frontend source changed during compilation")
+    if stale_only:
+        for trial in range(1, TRIALS + 1):
+            print(f"Stale trial {trial}/{TRIALS}", flush=True)
+            invoke(binary, helpers, "stale", trace=True)
+        print(f"All {TRIALS} stale diagnostic trials passed.")
+        return
     cases = {}
     for mode in ["job", "stale", "nested"]:
         observations = [invoke(binary, helpers, mode) for _ in range(TRIALS)]
@@ -188,4 +209,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] not in ([], ["--stale-only"]):
+        sys.exit("Usage: run-macos-live-frontend.py [--stale-only]")
+    main(stale_only=sys.argv[1:] == ["--stale-only"])
