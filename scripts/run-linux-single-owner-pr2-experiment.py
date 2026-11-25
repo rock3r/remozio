@@ -626,6 +626,53 @@ elif step == "wrong":
     s = connect()
     b, p, t = generation()
     out["wrongPeer"] = category(ask(s, f"HELLO {b} {p} {t} {secrets.token_hex(16)}"))
+elif step == "retry":
+    # The authority's first store directory already exists, so the first SUBMIT fails; the same nonce
+    # then gets the next directory and the first mode slot.
+    s = connect()
+    b, p, t = generation()
+    ask(s, f"HELLO {b} {p} {t} {secrets.token_hex(16)}")
+    nonce = secrets.token_hex(16)
+    out["retryFirst"] = category(ask(s, f"SUBMIT {nonce} {os.getppid()}"))
+    second = ask(s, f"SUBMIT {nonce} {os.getppid()}")
+    out["retrySecond"] = category(second)
+    words = second.split(" ")
+    out["retryMode"] = words[4] if out["retrySecond"] == "PERMIT" and len(words) > 4 else "missing"
+elif step == "zombie":
+    # Q says HELLO and exits; this process does not reap it until Q's child, which still holds the
+    # connection, has sent a SUBMIT. The authority must refuse an exited, unreaped peer.
+    import time
+    r, w = os.pipe()
+    q = os.fork()
+    if q == 0:
+        try:
+            os.close(r)
+            s = connect()
+            b, p, t = generation()
+            hello = category(ask(s, f"HELLO {b} {p} {t} {secrets.token_hex(16)}"))
+            if os.fork() == 0:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        text = open(f"/proc/{p}/stat").read()
+                    except OSError:
+                        break
+                    if text[text.rindex(")") + 2] == "Z":
+                        break
+                    time.sleep(0.01)
+                submit = category(ask(s, f"SUBMIT {secrets.token_hex(16)} {os.getppid()}"))
+                os.write(w, json.dumps({"zombieHello": hello, "zombieSubmit": submit}).encode())
+        finally:
+            os._exit(0)
+    os.close(w)
+    data = b""
+    while True:
+        chunk = os.read(r, 4096)
+        if not chunk:
+            break
+        data += chunk
+    os.waitpid(q, 0)
+    out.update(json.loads(data or b"{}"))
 elif step == "connect":
     try:
         connect()
@@ -779,39 +826,58 @@ def selftest_socket_dir():
     return directory
 
 
+RETRY_EXPECT = {"retryFirst": "REFUSED", "retrySecond": "PERMIT", "retryMode": "short"}
+ZOMBIE_EXPECT = {"zombieHello": "OK", "zombieSubmit": "REFUSED"}
+
+
 def authority_selftest(work_dir, binary=None, timeout=20):
-    """The authority control cases as the current user, without Root. Returns the case result."""
+    """The authority control cases as the current user, without Root, and two self-test rows: a SUBMIT
+    that fails after its store directory exists, then a retry; and an exited, unreaped peer."""
     if os.geteuid() == 0:
         raise RuntimeError("the self-test runs without Root")
     work_dir = Path(work_dir).resolve()
     binary = Path(binary) if binary else build_authority(work_dir)
     root = work_dir / f"selftest-{secrets.token_hex(4)}"
     root.mkdir(mode=0o700, parents=True)
-    sockets = selftest_socket_dir()
+    sockets = None
     uid, gid = os.getuid(), os.getgid()
     groups = sorted(set(os.getgroups()) | {gid})[:64]
     processes, listeners = [], []
     try:
-        for name, owner_uid in (("a", uid), ("b", uid + 1 if uid + 1 < 2**32 - 1 else uid - 1)):
+        sockets = selftest_socket_dir()
+        other = uid + 1 if uid + 1 < 2**32 - 1 else uid - 1
+        for name, owner_uid, modes in (("a", uid, ("normal", "normal")), ("b", other, ("normal", "normal")),
+                                       ("c", uid, ("short", "normal"))):
             (root / f"store-{name}").mkdir(mode=0o700)
             listener = bind_listener(sockets / f"{name}.sock")
             listeners.append(listener)
             processes.append(AuthorityProcess(binary, listener, root / f"store-{name}", owner_uid, binary, binary,
-                                              root / "marker", (uid, gid, groups), ("normal", "normal")))
+                                              root / "marker", (uid, gid, groups), modes))
+        (root / "store-c/request-1").mkdir(mode=0o700)  # the first SUBMIT on c fails at its directory
         first, later, wrong, _operator = run_controls(sockets / "a.sock", {}, {}, wrong_socket=sockets / "b.sock",
                                                       timeout=timeout)
+        retry = run_client("retry", sockets / "c.sock", timeout=timeout)
+        zombie = run_client("zombie", sockets / "c.sock", timeout=timeout)
         events = authority_events(processes[0].stop()) + authority_events(processes[1].stop())
+        events_c = authority_events(processes[2].stop())
         observed = control_observations(first, later, wrong, events)
         result = evaluate("authority-controls", observed)
         result["storeWritten"] = (root / "store-a/request-1/fixture.sqlite").is_file()
-        result["passed"] = result["passed"] and result["storeWritten"]
+        result["retryNextDirectory"] = retry == RETRY_EXPECT and \
+            (root / "store-c/request-2/fixture.sqlite").is_file()
+        result["zombiePeerRefused"] = zombie == ZOMBIE_EXPECT and any(
+            e["event"] == "submit" and e["result"] == "refused" and e.get("reason") == "generation-lost"
+            for e in events_c)
+        result["passed"] = result["passed"] and result["storeWritten"] and result["retryNextDirectory"] and \
+            result["zombiePeerRefused"]
         return result
     finally:
         for process in processes:
             process.kill()
         for listener in listeners:
             listener.close()
-        shutil.rmtree(sockets, ignore_errors=True)
+        if sockets is not None:
+            shutil.rmtree(sockets, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -920,6 +986,10 @@ class Run:
         self.groups = os.getgrouplist(self.operator.pw_name, self.operator.pw_gid)
         if len(self.groups) > SO.MAX_GROUPS:
             raise RuntimeError("too many operator groups")
+        # passwd -S proves euid 0 by reading /etc/shadow; an operator in the shadow group could read it
+        # without euid 0, so unit-sudo and unit-apparmor would prove nothing.
+        if shadow_gid() in self.groups:
+            raise RuntimeError("operator is in the shadow group")
         os.mkdir(self.base, 0o755)
         self.base_created = True
         os.chmod(self.base, 0o755)
@@ -966,8 +1036,6 @@ class Run:
         apparmor = self._load_profile()
         operator_groups = set(self.groups)
         return {"serviceIdentitiesUnprivileged": True,
-                # passwd -S proves euid 0 by reading /etc/shadow; the shadow group could read it without.
-                "operatorOutsideShadowGroup": shadow_gid() not in operator_groups,
                 "serviceOutsideOperatorGroups": self.owner_gid not in operator_groups
                 and self.authority_gid not in operator_groups,
                 "operatorUnprivileged": self.operator.pw_uid != 0 and 0 not in operator_groups,
@@ -1035,6 +1103,9 @@ class Run:
             if PL.run_owned(unit_command(self.tools["systemd-run"], unit, properties, arguments),
                             self.timeout)[0] != 0:
                 raise RuntimeError("unit start failed")
+            # retire_unit reads the unit's cgroup under system.slice: fail closed if it lives elsewhere.
+            if not unit_cgroup_ok(self.show(unit, ("ControlGroup",)), unit):
+                raise RuntimeError("unit outside system.slice")
             if not select.select([rendezvous], [], [], self.timeout)[0]:
                 raise TimeoutError()
             connection, _ = rendezvous.accept()
@@ -1072,9 +1143,9 @@ class Run:
         deadline = time.monotonic() + self.RETIRE_SECONDS
         while True:
             pids = self.cgroup_pids(unit)
-            if pids == []:
-                break
-            for pid in pids or ():
+            if pids is None or pids == []:
+                break  # gone, or unreadable: the readback below decides, and an unreadable cgroup fails it
+            for pid in pids:
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGKILL)
             if time.monotonic() >= deadline:
@@ -1170,6 +1241,11 @@ class Run:
                        for n in (self.owner_name, self.authority_name))
         return {"unitsRemoved": units, "profileRemoved": profile, "filesRemoved": not self.base.exists(),
                 "serviceUsersRemoved": accounts, "serviceProcessesGone": gone}
+
+
+def unit_cgroup_ok(values, unit):
+    """systemctl show's ControlGroup is exactly /system.slice/<unit>, where retire_unit reads it."""
+    return values.get("ControlGroup") == f"/system.slice/{unit}"
 
 
 def shadow_gid():

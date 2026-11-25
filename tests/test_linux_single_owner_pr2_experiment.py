@@ -405,6 +405,21 @@ class EvaluateTests(unittest.TestCase):
         observed["dispatches"][0]["noNewPrivs"] = "0"
         self.assertEqual(EXPERIMENT.evaluate("unit-nnp-control", observed)["mismatches"], ["d1.noNewPrivs"])
 
+    def test_a_ledger_error_fails_only_replay_ledger(self):
+        events = EXPERIMENT.authority_events(
+            b'{"event":"submit","phase":"executing","result":"permit"}\n'
+            b'{"event":"submit","ledger":"error","phase":"executing","result":"replay-refused"}\n')
+        first = {"firstHello": "OK", "firstPermit": "yes", "replaySubmit": "REFUSED", "firstOutcome": "OK",
+                 "replayOutcome": "REFUSED"}
+        observed = EXPERIMENT.control_observations(first, {"earlierGenerationHello": "REFUSED",
+                                                           "earlierGenerationOutcome": "REFUSED"},
+                                                   {"wrongPeer": "REFUSED"}, events)
+        self.assertEqual(observed["replayLedger"], "error")
+        observed.update(firstOutcomePhase="failed", firstOutcomeReason="notStarted",
+                        earlierGenerationEvent="generation-refused", wrongPeerEvent="wrong-peer")
+        result = EXPERIMENT.evaluate("authority-controls", observed)
+        self.assertEqual(result["mismatches"], ["replayLedger"])
+
     def test_controls_case(self):
         observed = {**EXPERIMENT.CONTROL_EXPECT, "operatorConnect": EXPERIMENT.NA}
         self.assertTrue(EXPERIMENT.evaluate("authority-controls", observed)["passed"])
@@ -716,7 +731,22 @@ class RetireUnitTests(unittest.TestCase):
         self.assertTrue(self.retire(stop_code=5)[0])
 
     def test_a_cgroup_read_error_is_not_removed(self):
-        self.assertFalse(self.retire(procs="", read_error=PermissionError())[0])
+        result, _calls, killed, _unit = self.retire(procs="", read_error=PermissionError())
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_a_read_error_stops_the_kill_loop_at_once(self):
+        # Unreadable cgroup: the kill loop reads once and goes straight to systemctl; the readback fails.
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
+        run.RETIRE_SECONDS = 0.05
+        events = []
+        with patch.object(run, "cgroup_pids", side_effect=lambda unit: events.append("read")), \
+                patch.object(run, "systemctl", side_effect=lambda *args: events.append("systemctl") or 0), \
+                patch.object(run, "show", return_value={"LoadState": "not-found"}), \
+                patch.object(EXPERIMENT.time, "sleep", side_effect=lambda seconds: events.append("sleep")):
+            self.assertFalse(run.retire_unit("u"))
+        self.assertEqual(events[:3], ["read", "systemctl", "systemctl"])
 
     def test_a_failed_show_is_not_removed(self):
         self.assertFalse(self.retire(show={})[0])
@@ -748,7 +778,25 @@ class CgroupTests(unittest.TestCase):
             self.assertEqual(EXPERIMENT.shadow_gid(), 42)
         with patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("shadow")):
             self.assertIsNone(EXPERIMENT.shadow_gid())
-        self.assertIn('"operatorOutsideShadowGroup": shadow_gid() not in operator_groups', SCRIPT.read_text())
+
+    def test_setup_refuses_an_operator_in_the_shadow_group(self):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
+        with patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=True), \
+                patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000, 42]), \
+                patch.object(EXPERIMENT, "shadow_gid", return_value=42), \
+                patch.object(EXPERIMENT.os, "mkdir") as mkdir:
+            with self.assertRaises(RuntimeError):
+                run.setup()
+        mkdir.assert_not_called()
+        self.assertFalse(run.base_created)
+
+    def test_the_unit_cgroup_must_be_under_system_slice(self):
+        unit = f"rmzso-{TAG}-x.service"
+        self.assertTrue(EXPERIMENT.unit_cgroup_ok({"ControlGroup": f"/system.slice/{unit}"}, unit))
+        for value in (f"/user.slice/{unit}", f"/system.slice/other.service", "", None):
+            self.assertFalse(EXPERIMENT.unit_cgroup_ok({"ControlGroup": value} if value is not None else {}, unit))
+        self.assertIn('if not unit_cgroup_ok(self.show(unit, ("ControlGroup",)), unit):', SCRIPT.read_text())
 
     def test_setup_refuses_a_host_without_cgroup_v2(self):
         operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
@@ -789,9 +837,11 @@ class SelftestSocketTests(unittest.TestCase):
             work = Path(directory) / ("w" * 150)
             empty = {}
             with patch.object(EXPERIMENT, "AuthorityProcess", Process), \
-                    patch.object(EXPERIMENT, "run_controls", return_value=(empty, empty, empty, EXPERIMENT.NA)):
+                    patch.object(EXPERIMENT, "run_controls", return_value=(empty, empty, empty, EXPERIMENT.NA)), \
+                    patch.object(EXPERIMENT, "run_client", return_value={}):
                 result = EXPERIMENT.authority_selftest(work, binary="/bin/true")
-        self.assertEqual(len(bound), 2)
+        self.assertEqual(len(bound), 3)
+        self.assertFalse(result["retryNextDirectory"] or result["zombiePeerRefused"])
         self.assertFalse(result["passed"])
         for path in bound:
             self.assertLess(len(path.encode()), EXPERIMENT.UNIX_PATH_MAX)
@@ -1198,6 +1248,8 @@ class CommandClassificationTests(unittest.TestCase):
     def test_stderr_after_the_helper_is_reaped_is_kept(self):
         # The helper exits at once; a descendant writes the message later. The pipe is drained to end
         # of file after the reap, so the message is not lost.
+        if not Path("/bin/sleep").exists():
+            self.skipTest("needs /bin/sleep")
         sudo = "#!/bin/sh\n( /bin/sleep 0.3; echo 'sudo: a password is required' >&2 ) &\nexit 1\n"
         self.assertEqual(self.report("cmd-sudo", sudo=sudo)["sudo"], "password-required")
 

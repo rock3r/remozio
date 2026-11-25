@@ -167,6 +167,9 @@ final class Authority {
     /// Store directories are numbered by attempt, not by permit: a failed SUBMIT leaves its directory,
     /// and the next attempt must not collide with it.
     var attempts = 0
+    /// Mode slots are taken by issued permits only: a SUBMIT that fails, before or after its decision is
+    /// consumed, leaves the slot to the next request.
+    var issued = 0
 
     init(_ configuration: Configuration) throws {
         self.configuration = configuration
@@ -247,9 +250,11 @@ final class Authority {
             emit(["event": "submit", "result": "replay-refused", "ledger": ledger, "phase": phase(previous.store)])
             return "REFUSED"
         }
-        guard submissions.count < configuration.modes.count, attempts < 16 else { return refuse("no-more-requests") }
-        let mode = configuration.modes[submissions.count]
+        guard issued < configuration.modes.count, attempts < 16 else { return refuse("no-more-requests") }
+        let mode = configuration.modes[issued]
         attempts += 1
+        // A refused SUBMIT drops its only reference to the store, and FixtureStore closes its SQLite
+        // handle in deinit.
         do {
             let directory = configuration.storeRoot + "/request-\(attempts)"
             try require(mkdir(directory, 0o700) == 0, "storeDirectory")
@@ -261,9 +266,11 @@ final class Authority {
                 try require(decoded == retained, "retainedCaptureMismatch")
                 try require(live(generation, pidfd), "generationLost")
             }, now: clock.now) else { return refuse("declined") }
-            try store.dispatched(token)
-            // Recorded only once beginDispatch is durable: a SUBMIT that failed before it holds no slot.
+            // The decision is consumed in this store: from now on a replay of the nonce must reach this
+            // store's ledger, even when beginDispatch below fails and no permit goes out.
             submissions[nonce] = (store, material)
+            do { try store.dispatched(token) } catch { return refuse("store") }
+            issued += 1
             let permit = randomBytes(16).hex
             permits[permit] = Permit(generation: generation, store: store)
             emit(["event": "submit", "result": "permit", "phase": phase(store)])

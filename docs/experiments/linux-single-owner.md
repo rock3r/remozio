@@ -345,7 +345,7 @@ case except `unit-sudo-prompt` passes, with setup and cleanup complete.
 - The full Root capability sets of a set-user-ID child. `passwd -S` proves only
   that such a child starts with effective UID 0, without `no_new_privs`. An
   operator account in the `shadow` group could read `/etc/shadow` without it, so
-  setup requires an operator outside that group (`operatorOutsideShadowGroup`).
+  setup refuses to start when the operator is in that group.
 - A dispatch that ends without a command is recorded as `failed`, with the reason
   `notStarted` kept. A distinct outcome is a production requirement (design S4).
 - Two preparations at the same time. O is single-threaded and the case measures a

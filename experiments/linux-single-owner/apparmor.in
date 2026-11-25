@@ -32,6 +32,8 @@ profile rmzso-owner-@@TAG@@ flags=(enforce) {
   # ux alone grants no getattr: O's stat of /proc/<K>/exe, which resolves to the command image
   # once K has executed it (same_image() in owner.c), needs r. AppArmor checks the final path of
   # each access, not the directories on the way, so run/ and cases/ need no rule of their own.
+  # r is broader than stat needs (it also lets O open the images for reading), which is harmless:
+  # the images are world-readable, and the profile has no getattr-only file permission.
   @@BASE@@/run/cmd-* r,
   # The rendezvous, frontend and authority sockets and the restart log of each case.
   @@BASE@@/cases/** rw,

@@ -19,7 +19,8 @@ int csa_peer(int socket, unsigned *uid, int *pid, int *pidfd);
 int csa_pidfd_pid(int pidfd);
 
 /* 1 while the process of the pidfd runs, 0 once it has exited (a zombie too: the pidfd is
- * readable from the exit on), -1 on an error. */
+ * readable from the exit on), -1 on an error. The pidfd follows the thread-group leader; the
+ * authority relies on O being single-threaded, so the leader's exit is O's exit. */
 int csa_pidfd_alive(int pidfd);
 
 /* Field 22 of /proc/<pid>/stat. Returns 0, or -1 on an error and for a zombie or dead process. */
