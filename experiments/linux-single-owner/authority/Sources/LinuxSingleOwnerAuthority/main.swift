@@ -19,7 +19,8 @@ import RemozioProtocol
 // Each SUBMIT gets a new FixtureStore: the signed decision is verified and consumed, and the durable
 // beginDispatch is written, in the store's SQLite transaction, before the one-use permit goes out. The
 // capture is synthetic (the requester, streams and decision keys are fixture data); it binds the command
-// image, the directory and the target identity. Reports go to stdout as JSON lines of closed-set strings.
+// image, the directory, the target identity and O's submission nonce (its SHA-256 is the capture's
+// submission nonce, which the store's replay table reserves). Reports go to stdout as JSON lines of closed-set strings.
 // The authority ends at end of file on stdin.
 //
 // usage: LinuxSingleOwnerAuthority <listen-fd> <store-root> <owner-uid> <command> <frontend> <marker>
@@ -37,6 +38,15 @@ extension Data {
 
 func isHex32(_ text: Substring) -> Bool {
     text.utf8.count == 32 && text.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+}
+
+/// The 16 bytes of a 32-character lowercase hex word (checked with isHex32 first).
+func hexBytes(_ text: Substring) -> Data {
+    var bytes = Data()
+    var iterator = text.utf8.makeIterator()
+    func value(_ byte: UInt8) -> UInt8 { byte <= 57 ? byte - 48 : byte - 87 }
+    while let high = iterator.next(), let low = iterator.next() { bytes.append(value(high) << 4 | value(low)) }
+    return bytes
 }
 
 func emit(_ fields: [String: String]) {
@@ -91,6 +101,9 @@ struct Generation: Equatable {
     let pid: Int32
     let start: UInt64
     let random: String
+
+    /// The same process instance (boot, PID and start time); the random value names one HELLO of it.
+    func sameProcess(_ other: Generation) -> Bool { boot == other.boot && pid == other.pid && start == other.start }
 }
 
 final class Connection {
@@ -178,7 +191,7 @@ final class Authority {
 
     /// A synthetic capture: the command image, the directory and the target are bound; the requester,
     /// the streams (identities of pipes made here) and the decision keys are fixture data.
-    func capture(callerPID: UInt32, mode: String) throws -> LinuxCommandCapture {
+    func capture(callerPID: UInt32, mode: String, nonce: Data) throws -> LinuxCommandCapture {
         var pair: [Int32] = [-1, -1]
         try require(pipe(&pair) == 0, "pipe")
         defer { for fd in pair where fd >= 0 { _ = close(fd) } }
@@ -200,7 +213,7 @@ final class Authority {
                 executable: observeExecutable(c.frontend), credentials: credentials,
                 sessionID: nil, codePolicyDigest: digest(Data("synthetic single-owner policy".utf8))),
             unverifiedRationale: "Disposable single-owner fixture; synthetic requester, streams and keys",
-            submission: .init(id: randomBytes(16), nonce: randomBytes(32), callerBinding: randomBytes(16)),
+            submission: .init(id: randomBytes(16), nonce: digest(nonce), callerBinding: randomBytes(16)),
             stdioLayout: .init(input: .init(source: input, access: .readOnly, flags: []),
                 output: .init(source: output, access: .writeOnly, flags: []),
                 error: .init(source: error, access: .writeOnly, flags: []), terminal: nil, ptyMask: 0),
@@ -212,18 +225,19 @@ final class Authority {
         return Closed.phases.contains(value) ? value : "other"
     }
 
+    /// Each refusal names its reason, so a control can show that it failed for the property it tests.
     func hello(_ connection: Connection, _ words: [Substring]) -> String {
+        func refuse(_ reason: String) -> String {
+            emit(["event": "hello", "result": "refused", "reason": reason])
+            return "REFUSED"
+        }
         guard connection.generation == nil, words.count == 5, isHex32(words[4]), let pid = Int32(words[2]),
-              let start = UInt64(words[3]), let boot = bootID(), String(words[1]) == boot,
-              pid == connection.pid else {
-            emit(["event": "hello", "result": "refused"])
-            return "REFUSED"
-        }
+              let start = UInt64(words[3]), let boot = bootID() else { return refuse("malformed") }
+        guard String(words[1]) == boot else { return refuse("boot-mismatch") }
+        guard pid == connection.pid else { return refuse("pid-mismatch") }
         let generation = Generation(boot: boot, pid: pid, start: start, random: String(words[4]))
-        guard live(generation, connection.pidfd) else {
-            emit(["event": "hello", "result": "refused"])
-            return "REFUSED"
-        }
+        // The peer's own PID with a start time that is not its current one: an earlier process with that PID.
+        guard live(generation, connection.pidfd) else { return refuse("stale-generation") }
         connection.generation = generation
         emit(["event": "hello", "result": "accepted"])
         return "OK"
@@ -241,13 +255,23 @@ final class Authority {
         guard live(generation, connection.pidfd) else { return refuse("generation-lost") }
         let nonce = String(words[1])
         if let previous = submissions[nonce] {
-            // A replay: the same signed decision goes to the same store again, and its ledger must refuse it.
-            // Only the ledger's own refusal counts; an expired decision or a store error is "error".
-            var ledger = "accepted"
+            // A replay. The ledger: the same signed decision goes to the same store again and must be refused
+            // as consumed. The binding: a new decision over a new capture with the same submission nonce must be
+            // refused by the store's replay table, which holds that nonce. Only those refusals count; any other
+            // error is "error".
+            var ledger = "accepted", binding = "accepted"
             do { _ = try previous.store.consume(previous.material, validate: { _ in }, now: clock.now) }
             catch ConsumptionJournalError.alreadyConsumed { ledger = "refused" }
             catch { ledger = "error" }
-            emit(["event": "submit", "result": "replay-refused", "ledger": ledger, "phase": phase(previous.store)])
+            do {
+                let fresh = try capture(callerPID: callerPID, mode: configuration.modes[0], nonce: hexBytes(words[1]))
+                let material = try FixtureProtocol.make(capture: fresh.canonicalBytes, clock: clock)
+                _ = try previous.store.consume(material, validate: { _ in }, now: clock.now)
+            }
+            catch CommandSubmissionReplayError.alreadyReserved { binding = "reserved" }
+            catch { binding = "error" }
+            emit(["event": "submit", "result": "replay-refused", "ledger": ledger, "binding": binding,
+                  "phase": phase(previous.store)])
             return "REFUSED"
         }
         guard issued < configuration.modes.count, attempts < 16 else { return refuse("no-more-requests") }
@@ -259,7 +283,7 @@ final class Authority {
             let directory = configuration.storeRoot + "/request-\(attempts)"
             try require(mkdir(directory, 0o700) == 0, "storeDirectory")
             let store = try FixtureStore(directory: directory, reopening: false)
-            let retained = try capture(callerPID: callerPID, mode: mode)
+            let retained = try capture(callerPID: callerPID, mode: mode, nonce: hexBytes(words[1]))
             let material = try FixtureProtocol.make(capture: retained.canonicalBytes, clock: clock)
             let pidfd = connection.pidfd
             guard let token = try store.consume(material, validate: { decoded in
@@ -287,8 +311,15 @@ final class Authority {
             emit(["event": "outcome", "result": "refused"])
             return "REFUSED"
         }
-        guard permit.generation == generation, live(generation, connection.pidfd) else {
-            emit(["event": "outcome", "result": "generation-refused"])
+        // earlier-generation: the permit belongs to another process instance (O was restarted); other-hello: the
+        // same process, another HELLO; generation-lost: the presenting peer itself is no longer live.
+        guard permit.generation == generation else {
+            emit(["event": "outcome", "result": "generation-refused",
+                  "reason": permit.generation.sameProcess(generation) ? "other-hello" : "earlier-generation"])
+            return "REFUSED"
+        }
+        guard live(generation, connection.pidfd) else {
+            emit(["event": "outcome", "result": "generation-refused", "reason": "generation-lost"])
             return "REFUSED"
         }
         let result = String(words[2]), lost = String(words[3])
