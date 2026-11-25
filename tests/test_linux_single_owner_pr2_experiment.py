@@ -1550,6 +1550,8 @@ class SweepTests(unittest.TestCase):
                     return 0, listed.encode()
                 if arguments[0] == "stop":
                     shutil.rmtree(cgroups / arguments[1], ignore_errors=True)
+                if arguments[0] == "show":
+                    return 0, b"LoadState=not-found\n"
                 return 0, b""
 
             real_open = open
@@ -1557,7 +1559,8 @@ class SweepTests(unittest.TestCase):
                     patch("builtins.open", side_effect=lambda path, *a, **k: Remove() if str(path).endswith(".remove")
                           else real_open(path, *a, **k)):
                 result = EXPERIMENT.sweep(systemctl, cgroups, apparmor, base_parent, userdb,
-                                          kill=lambda number: killed.append(number) or True)
+                                          kill=lambda number: killed.append(number) or True,
+                                          claimable=lambda number, proc, subids: True)
             self.assertTrue(result["clean"], result)
             self.assertEqual(result["units"], 2)
             self.assertIn(("stop", unit), calls)
@@ -1589,6 +1592,7 @@ class SweepTests(unittest.TestCase):
                 patch.object(EXPERIMENT.PL, "host_metadata", return_value={}), \
                 patch.object(EXPERIMENT.SO, "last_capability", return_value=40), \
                 patch.object(EXPERIMENT.os, "readlink", return_value="mnt:[1]"), \
+                patch.object(EXPERIMENT, "RUN_LOCK", LOCK_DIR / "measure.lock"), \
                 patch.object(EXPERIMENT.PL, "subreaper", contextlib.nullcontext):
             factory = unittest.mock.Mock()
             with self.assertRaises(RuntimeError):
@@ -1596,6 +1600,125 @@ class SweepTests(unittest.TestCase):
                                    sweep_factory=lambda systemctl: {"clean": False})
             factory.return_value.setup.assert_not_called()
             factory.return_value.cleanup.assert_not_called()
+
+
+LOCK_DIR = Path(tempfile.mkdtemp(prefix="rmzso-lock-test-"))
+
+
+class HostSafetyTests(unittest.TestCase):
+    """Toni's second review, item 1."""
+
+    def test_one_run_or_sweep_at_a_time(self):
+        path = LOCK_DIR / "one.lock"
+        with EXPERIMENT.run_lock(path):
+            with self.assertRaises(RuntimeError):
+                with EXPERIMENT.run_lock(path):
+                    pass
+        with EXPERIMENT.run_lock(path):  # released at the end of the block
+            pass
+        self.assertIn("with run_lock(), PL.subreaper():", SCRIPT.read_text())
+        self.assertEqual(SCRIPT.read_text().count("run_lock()"), 2)  # the run and --sweep
+
+    def test_a_user_namespace_mapping_claims_an_id(self):
+        number = EXPERIMENT.ID_BASE + 100
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / "5").mkdir()
+            (proc / "5/uid_map").write_text("         0          0 4294967295\n")  # identity: ignored
+            with patch.object(EXPERIMENT.pwd, "getpwuid", side_effect=KeyError(number)), \
+                    patch.object(EXPERIMENT.grp, "getgrgid", side_effect=KeyError(number)):
+                self.assertTrue(EXPERIMENT.id_unclaimed(number, proc))
+                (proc / "6").mkdir()
+                (proc / "6/gid_map").write_text(f"0 {EXPERIMENT.ID_BASE} 65536\n")
+                self.assertFalse(EXPERIMENT.id_unclaimed(number, proc))
+                self.assertFalse(EXPERIMENT.id_unused(number, proc))
+
+    def test_the_sweep_kills_a_recorded_id_only_while_it_is_unclaimed(self):
+        number = EXPERIMENT.ID_BASE + 7
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            own = SimpleNamespace(pw_name=f"rmzso{TAG}", gr_name=f"rmzso{TAG}")
+            with patch.object(EXPERIMENT.pwd, "getpwuid", return_value=own), \
+                    patch.object(EXPERIMENT.grp, "getgrgid", return_value=own):
+                self.assertTrue(EXPERIMENT.sweep_claimable(number, proc, []))  # its own drop-in record
+                self.assertFalse(EXPERIMENT.sweep_claimable(number, proc, [(number, 1)]))
+            other = SimpleNamespace(pw_name="alice", gr_name="alice")
+            with patch.object(EXPERIMENT.pwd, "getpwuid", return_value=other), \
+                    patch.object(EXPERIMENT.grp, "getgrgid", return_value=other):
+                self.assertFalse(EXPERIMENT.sweep_claimable(number, proc, []))
+            base_parent = proc / "lib"
+            run_dir = base_parent / (EXPERIMENT.BASE_PREFIX + TAG)
+            run_dir.mkdir(parents=True)
+            (run_dir / "ids").write_text(f"owner {number}\nauthority {number + 1}\n")
+            killed = []
+            with patch.object(EXPERIMENT, "root_owned_file", side_effect=lambda path: path.is_file()):
+                EXPERIMENT.sweep(lambda *arguments: (0, b""), proc / "cg", proc / "aa", base_parent, proc / "udb",
+                                 kill=lambda n: killed.append(n) or True,
+                                 claimable=lambda n, _proc, _subids: n == number + 1)
+            self.assertEqual(killed, [number + 1])
+
+    def test_the_sweep_removes_a_cgroup_only_after_its_unit_is_not_found(self):
+        unit = f"rmzso-{TAG}-x.service"
+        with tempfile.TemporaryDirectory() as directory:
+            cgroups = Path(directory) / "cg"
+            (cgroups / unit).mkdir(parents=True)
+            calls, loaded = [], {"value": 2}
+
+            def systemctl(*arguments):
+                calls.append(arguments[0])
+                if arguments[0] == "show":
+                    loaded["value"] -= 1
+                    state = "loaded" if loaded["value"] > 0 else "not-found"
+                    return 0, f"LoadState={state}\n".encode()
+                return 0, b""
+
+            removed = []
+            real_rmdir = os.rmdir
+            with patch.object(EXPERIMENT, "kill_cgroup", return_value=True), \
+                    patch.object(EXPERIMENT.os, "rmdir",
+                                 side_effect=lambda path: removed.append(len(calls)) or real_rmdir(path)):
+                result = EXPERIMENT.sweep(systemctl, cgroups, Path(directory) / "aa", Path(directory) / "lib",
+                                          Path(directory) / "udb", claimable=lambda *args: True)
+            self.assertTrue(result["clean"], result)
+            first_show = calls.index("show")
+            self.assertEqual(calls[first_show + 1:first_show + 3], ["stop", "reset-failed"])  # still loaded
+            self.assertEqual(calls[removed[0] - 1], "show")  # rmdir right after a not-found show
+
+    def test_userdb_paths_are_recorded_before_creation_and_never_taken_over(self):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
+        run.owner_uid = run.owner_gid = EXPERIMENT.ID_BASE + 1
+        with tempfile.TemporaryDirectory() as directory:
+            userdb = Path(directory) / "userdb"
+            seen = []
+
+            def write(path, data, mode):
+                seen.append(path in run.userdb_files)
+                path.write_bytes(data)
+
+            with patch.object(EXPERIMENT, "USERDB", userdb), \
+                    patch.object(EXPERIMENT, "stat_is_root_directory", return_value=True), \
+                    patch.object(EXPERIMENT.PL, "write_root_file", side_effect=write):
+                run._write_userdb()
+            self.assertEqual(seen, [True, True])
+            self.assertTrue(run.userdb_created)
+            self.assertEqual(len(run.userdb_files), 4)
+            self.assertIn("with PL.deferred_cancel():\n            if not os.path.lexists(USERDB):",
+                          SCRIPT.read_text())
+            other = EXPERIMENT.Run(operator, 30, "/bin/true", {})
+            other.owner_name, other.owner_uid = run.owner_name, run.owner_uid
+            with patch.object(EXPERIMENT, "USERDB", userdb), \
+                    patch.object(EXPERIMENT, "stat_is_root_directory", return_value=True), \
+                    self.assertRaises(RuntimeError):
+                other._write_userdb()
+            self.assertEqual(other.userdb_files, [])  # an existing record is never recorded as its own
+            self.assertFalse(other.userdb_created)
+            for path in reversed(run.userdb_files):
+                os.unlink(path)
+            run.ids_picked = False
+            with patch.object(EXPERIMENT, "USERDB", userdb):
+                run.cleanup()
+            self.assertFalse(userdb.exists())  # the empty directory that the run created
 
 
 class SelftestGateTests(unittest.TestCase):
@@ -1606,7 +1729,7 @@ class SelftestGateTests(unittest.TestCase):
                 patch.object(EXPERIMENT, "build_authority") as build:
             result = EXPERIMENT.authority_selftest("/nonexistent")
         build.assert_not_called()
-        self.assertEqual((result["status"], result["passed"]), ("not-run", True))
+        self.assertEqual((result["status"], result["passed"]), ("not-run", None))  # never a pass
 
     def test_the_host_check_no_longer_builds_the_authority(self):
         self.assertNotIn("single-owner", (ROOT / "scripts/check-linux-host.sh").read_text())

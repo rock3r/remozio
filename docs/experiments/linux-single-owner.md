@@ -328,17 +328,25 @@ when the name exists after a failed tool run (it was free before). Cleanup kills
 unit's cgroup through `cgroup.kill` (Linux 5.14 or later, checked at setup), not
 through PIDs read from `cgroup.procs`, then kills every process with one of the
 run's IDs. It reads with `O_NOFOLLOW`, runs in a `finally` block and reports each
-step. If the profile does not load (AppArmor 3.x cannot read `abi <abi/4.0>`),
+step. Each `/run/userdb` path is recorded before it is created, inside a block that
+defers `SIGTERM`, `SIGHUP` and `SIGINT`, and a path that already exists stops the run
+before it is recorded. Cleanup also removes `/run/userdb` when the run created it
+and it is empty. If the profile does not load (AppArmor 3.x cannot read `abi <abi/4.0>`),
 `unit-apparmor` is `not-run` and the rest of the run goes on.
 
-A run starts with a sweep, and stops when the sweep cannot remove everything.
+A run starts with a sweep, and stops when the sweep cannot remove everything. A
+`flock` on `/run/remozio-single-owner-pr2.lock`, held for the whole run and for
+`--sweep`, makes a second run or sweep refuse to start.
 `sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --sweep` runs the
 same sweep on its own after a run that was killed before its cleanup. By prefix,
-it kills each `rmzso-*.service` cgroup and stops the unit, kills the processes of
-the IDs in each run directory's `ids` file and in the drop-in records, removes the
-`rmzso-owner-*` profiles, the `/var/lib/remozio-single-owner-pr2-*` directories
-and the `/run/userdb/rmzso*` records with their numeric links. Run one experiment
-at a time: the sweep removes the state of any other run. A command in `sleep`
+it kills each `rmzso-*.service` cgroup and stops and resets the unit. It removes a
+cgroup with `rmdir` only after `systemctl show` reports its unit as `not-found`;
+a unit that is still loaded is stopped and reset again. It kills the processes of
+the IDs in each run directory's `ids` file and in the drop-in records, but only
+while the ID is still unclaimed: no passwd or group entry other than an
+`rmzso<tag>` record, no subordinate-ID range and no user namespace mapping. It
+removes the `rmzso-owner-*` profiles, the `/var/lib/remozio-single-owner-pr2-*`
+directories and the `/run/userdb/rmzso*` records with their numeric links. A command in `sleep`
 mode ends after 300 s, so a lost run leaves no command running until reboot.
 
 `--authority-selftest` runs the authority control cases as the current user,
@@ -346,7 +354,7 @@ without Root, and checks that the built authority loads only system libraries.
 Run it by hand. It is not part of `scripts/check-linux-host.sh` or
 `scripts/check-local.sh`, and this change adds no CI step for it: a separate CI
 change adds that step. Before Linux 6.5 (no `SO_PEERPIDFD`), it reports
-`not-run` and passes.
+`"status": "not-run"` and `"passed": null`, never `true`, and exits 0.
 
 ### PR2 cases
 
@@ -365,7 +373,7 @@ change adds that step. Before Linux 6.5 (no `SO_PEERPIDFD`), it reports
 | `kill-owner-at-s1` | O dies at S1: no command; the authority holds the permit and the request stays `executing` |
 | `kill-owner-after-fork` | O dies after the fork: no command; the request stays `executing` |
 | `kill-owner-before-go` | O dies before the go byte: no command; the request stays `executing` |
-| `authority-controls` | Each refusal must carry the reason that its control tests. A replayed `SUBMIT` is refused; the store's ledger refuses the same signed decision again (`replayLedger`), and the store's replay table refuses a new decision over a new capture with the same submission nonce (`replayBinding`: the capture's submission nonce is the SHA-256 of O's nonce). A second `OUTCOME` is refused. A `HELLO` with the generation of a client that has exited is refused on its PID (`pid-mismatch`). A live client that presents its own boot ID and PID with an earlier start time is refused as `stale-generation`. A later client presents the first client's permit: refused as `earlier-generation`, not as another `HELLO` of the same process. A peer that has exited and is not yet reaped, whose child still holds the connection, says `HELLO` and then `SUBMIT`: refused as `generation-lost`. Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`). The first `OUTCOME` reports `notStarted`: the authority records `failed` with the reason `notStarted` |
+| `authority-controls` | Each refusal must carry the reason that its control tests. A replayed `SUBMIT` is refused; the store's ledger refuses the same signed decision again (`replayLedger`), and the store's replay table refuses a new decision over a new capture with the same submission nonce (`replayBinding`: the capture's submission nonce is the SHA-256 of O's nonce; the second decision goes to the first request's store, prepared for this check, and the real replay refusal comes from the authority's in-memory table, see "PR2 not verified"). A second `OUTCOME` is refused. A `HELLO` with the generation of a client that has exited is refused on its PID (`pid-mismatch`). A live client that presents its own boot ID and PID with an earlier start time is refused as `stale-generation`. A later client presents the first client's permit: refused as `earlier-generation`, not as another `HELLO` of the same process. A peer that has exited and is not yet reaped, whose child still holds the connection, says `HELLO` and then `SUBMIT`: refused as `generation-lost`. Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`). The first `OUTCOME` reports `notStarted`: the authority records `failed` with the reason `notStarted` |
 
 Every owner case also records O's start line, the authority's events and O's
 restart log per dispatch. The report sets `strictAdmission` to true only when every
@@ -374,9 +382,16 @@ case except `unit-sudo-prompt` passes, with setup and cleanup complete.
 
 ### PR2 not verified
 
-- No Root run is recorded yet. CI builds the Swift package and runs the authority
-  control cases without Root, when their inputs change; it does not run systemd,
-  AppArmor or `sudo`.
+- No Root run is recorded yet. CI does not build the Swift package or run the
+  authority control cases yet: the CI change planned after this merge adds the
+  build and the self-test. Until then the self-test runs by hand. Neither runs
+  systemd, AppArmor or `sudo`.
+- Durable replay protection. `replayBinding` checks only that the capture binds
+  O's nonce: the authority sends the second decision to the store of the first
+  request, which already holds that nonce. A real replayed `SUBMIT` is refused by
+  the authority's in-memory `submissions` table, which an authority restart loses:
+  after a restart, a replayed nonce would get a new store and a `PERMIT`. The
+  production authority needs durable replay state.
 - The `sudo` password prompt without a controlling terminal (a known limit; the
   design leaves the terminal relay to a decision).
 - The full Root capability sets of a set-user-ID child. `passwd -S` proves only

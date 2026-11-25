@@ -418,7 +418,7 @@ a number with no record, so O's identity gets an nss-systemd drop-in record in
 - The authority alone, where each refusal must name the reason that its control
   tests: a replayed `SUBMIT`, refused by the store's ledger, and a new decision
   with the same submission nonce, refused by the store's replay table (O's nonce
-  is bound into the capture); a `HELLO` from a live process with its own PID and
+  is bound into the capture; the check uses the first request's store); a `HELLO` from a live process with its own PID and
   an earlier start time (`stale-generation`); a permit of an earlier generation
   presented by a later process (`earlier-generation`); a peer that has exited but
   is not yet reaped (`generation-lost`); and a wrong peer. Its first outcome is
@@ -464,6 +464,12 @@ Not verified by PR2 either:
   `executing` to a proved no-dispatch, so the PR2 authority records `failed` with
   the reason `notStarted`. Production needs a distinct outcome for it (see S4 in
   [Sequence](#sequence) and [Gate](#gate)).
+- Durable replay protection. `replayBinding` checks only that the capture binds
+  O's nonce: the authority sends the second decision to the store of the first
+  request, which already holds that nonce. A real replayed `SUBMIT` is refused by
+  the authority's in-memory `submissions` table, which an authority restart loses:
+  after a restart, a replayed nonce would get a new store and a `PERMIT`. The
+  production authority needs durable replay state.
 - A decision signed by a phone, and a capture of a real requester: PR2 uses
   fixture keys and a synthetic requester.
 

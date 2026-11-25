@@ -30,12 +30,16 @@ and no file under /etc. Before it loads a profile or starts a unit it checks tha
 and it records a name as its own only once the tool has run. Cleanup removes all of it in a finally
 block and reports each step.
 
-A run starts with the sweep, and stops if the sweep cannot remove everything. The sweep, also on its
-own with --sweep after a run that was killed before its cleanup, works by prefix: it kills each
+A run starts with the sweep, and stops if the sweep cannot remove everything. A flock on
+/run/remozio-single-owner-pr2.lock, held for the whole run and for --sweep, refuses a second run or
+sweep. The sweep, also on its own with --sweep after a run that was killed before its cleanup, works
+by prefix: it kills each
 rmzso-*.service cgroup through cgroup.kill, stops and resets the unit, kills the processes of the IDs
 in each run directory's ids file and in the drop-in records, removes the rmzso-owner-* profiles, the
 /var/lib/remozio-single-owner-pr2-* directories and the /run/userdb/rmzso* records with their
-numeric links. One run at a time: the sweep removes the state of any other run.
+numeric links. It kills a recorded ID only while it is still unclaimed (no entry other than an
+rmzso<tag> record, no subordinate-ID range, no user namespace mapping), and removes a unit's cgroup
+only after systemd reports the stopped unit as not-found.
 
 The report holds booleans, closed categories, errno names, settings and hashes only.
 strictAdmission is true only when every gating case passes; the sudo password prompt is a known
@@ -49,6 +53,7 @@ without a command as failed with the reason notStarted. productionAdmission is a
 import argparse
 import contextlib
 import datetime
+import fcntl
 import grp
 import hashlib
 import importlib.util
@@ -103,6 +108,9 @@ ID_BASE, ID_SPAN = 0x70000000, 0x0F000000
 # systemd resolves User= through NSS and refuses a number with no record (get_user_creds, v257), so O's
 # identity gets a volatile nss-systemd drop-in record here (tmpfs, not /etc). The authority needs none.
 USERDB = Path("/run/userdb")
+# Held (flock) for a whole run and for --sweep: one run or sweep at a time, because the sweep removes the state
+# of any run by prefix.
+RUN_LOCK = Path("/run/remozio-single-owner-pr2.lock")
 NSSWITCH = Path("/etc/nsswitch.conf")
 SUBID_FILES = (Path("/etc/subuid"), Path("/etc/subgid"))
 SYSTEM_LIBRARY_DIRS = ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")
@@ -222,19 +230,58 @@ def id_processes(number, proc):
     return found
 
 
-def id_unused(number, proc=Path("/proc"), subids=()):
-    """No passwd or group entry (any NSS source), no subordinate-ID range and no process uses number."""
+def namespace_mappings(proc):
+    """(outside start, count) of every user namespace's UID and GID map that is not an identity mapping."""
+    ranges = set()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        for name in ("uid_map", "gid_map"):
+            try:
+                text = (entry / name).read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for line in text.splitlines():
+                fields = line.split()
+                if len(fields) == 3 and all(field.isdigit() for field in fields) and fields[0] != fields[1]:
+                    ranges.add((int(fields[1]), int(fields[2])))
+    return ranges
+
+
+def id_unclaimed(number, proc=Path("/proc"), subids=(), own_record=None):
+    """In the disposable range, with no passwd or group entry (any NSS source; own_record(name) may accept
+    this experiment's own drop-in name), no subordinate-ID range and no user namespace that maps it."""
     if not ID_BASE <= number < ID_BASE + ID_SPAN:
         return False
-    for lookup in (pwd.getpwuid, grp.getgrgid):
+    for lookup, field in ((pwd.getpwuid, "pw_name"), (grp.getgrgid, "gr_name")):
         try:
-            lookup(number)
-            return False
+            entry = lookup(number)
         except KeyError:
-            pass
-    if any(start <= number < start + count for start, count in subids):
-        return False
-    return not id_processes(number, proc)
+            continue
+        if own_record is None or not own_record(getattr(entry, field)):
+            return False
+    ranges = list(subids) + sorted(namespace_mappings(proc))
+    return not any(start <= number < start + count for start, count in ranges)
+
+
+def id_unused(number, proc=Path("/proc"), subids=()):
+    """Unclaimed (see id_unclaimed, no own record accepted) and no process uses number."""
+    return id_unclaimed(number, proc, subids) and not id_processes(number, proc)
+
+
+@contextlib.contextmanager
+def run_lock(path=None):
+    """An exclusive flock on the lock file for the block; RuntimeError when another run or sweep holds it."""
+    path = Path(path) if path is not None else RUN_LOCK
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another single-owner run or sweep is active") from None
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def pick_ids(unused, randbelow=secrets.randbelow, attempts=32):
@@ -1009,7 +1056,8 @@ def authority_selftest(work_dir, binary=None, timeout=20):
     if os.geteuid() == 0:
         raise RuntimeError("the self-test runs without Root")
     if not peer_pidfd_supported():
-        return {"passed": True, "status": "not-run", "reason": "SO_PEERPIDFD unavailable (Linux before 6.5)"}
+        # passed is null, not true: a caller must not count a run that measured nothing as a pass.
+        return {"passed": None, "status": "not-run", "reason": "SO_PEERPIDFD unavailable (Linux before 6.5)"}
     work_dir = Path(work_dir).resolve()
     binary = Path(binary) if binary else build_authority(work_dir)
     root = work_dir / f"selftest-{secrets.token_hex(4)}"
@@ -1237,20 +1285,24 @@ class Run:
     def _write_userdb(self):
         """O's drop-in user and group records, with the numeric-name links that lookups by ID use. Each
         file is created with O_EXCL (a name that already exists stops the run) and recorded once it exists."""
-        if not USERDB.exists():
-            os.mkdir(USERDB, 0o755)
-            self.userdb_created = True
-        status = os.lstat(USERDB)
-        if not stat_is_root_directory(status):
-            raise RuntimeError("drop-in directory is not a root-owned directory")
         user, group = userdb_records(self.owner_name, self.owner_uid)
-        for suffix, data in ((".user", user), (".group", group)):
-            record = USERDB / f"{self.owner_name}{suffix}"
-            PL.write_root_file(record, data, 0o644)
-            self.userdb_files.append(record)
-            link = USERDB / f"{self.owner_uid}{suffix}"
-            os.symlink(record.name, link)
-            self.userdb_files.append(link)
+        # A signal cannot fall between creating a path and recording it: each path is recorded first, inside
+        # deferred_cancel. A path that already exists is refused before it is recorded, so cleanup never
+        # removes a file that this run did not create.
+        with PL.deferred_cancel():
+            if not os.path.lexists(USERDB):
+                self.userdb_created = True
+                os.mkdir(USERDB, 0o755)
+            if not stat_is_root_directory(os.lstat(USERDB)):
+                raise RuntimeError("drop-in directory is not a root-owned directory")
+            for suffix, data in ((".user", user), (".group", group)):
+                record, link = USERDB / f"{self.owner_name}{suffix}", USERDB / f"{self.owner_uid}{suffix}"
+                if os.path.lexists(record) or os.path.lexists(link):
+                    raise RuntimeError("drop-in record already exists")
+                self.userdb_files.append(record)
+                PL.write_root_file(record, data, 0o644)
+                self.userdb_files.append(link)
+                os.symlink(record.name, link)
 
     def _check_authority_start(self):
         """The copied authority as its own identity: the loader resolves every library from a system
@@ -1469,7 +1521,7 @@ class Run:
             PL._attempt(shutil.rmtree, self.base)
         for path in reversed(self.userdb_files):
             PL._attempt(os.unlink, path)
-        if self.userdb_created:
+        if self.userdb_created:  # only when empty: rmdir refuses a directory with other records
             PL._attempt(os.rmdir, USERDB)
         records = not any(os.path.lexists(path) for path in self.userdb_files) and \
             (not self.ids_picked or (PL._absent(pwd.getpwuid, self.owner_uid)
@@ -1586,8 +1638,16 @@ def sweep_profiles(apparmor):
     return sorted(name for name in names if re.fullmatch(re.escape(PROFILE_PREFIX) + "[0-9a-f]{8}", name))
 
 
+def own_record_name(name):
+    return re.fullmatch(r"rmzso[0-9a-f]{8}", name or "") is not None
+
+
+def sweep_claimable(number, proc, subids):
+    return id_unclaimed(number, proc, subids, own_record=own_record_name)
+
+
 def sweep(systemctl, cgroup_system=None, apparmor=None, base_parent=None, userdb=None, proc=Path("/proc"),
-          kill=None):
+          kill=None, claimable=None):
     """Removes, by prefix, every unit, process, profile, directory and drop-in record that an earlier
     run left: rmzso-<tag>-*.service, the processes of the IDs those runs recorded, rmzso-owner-<tag>
     profiles, /var/lib/remozio-single-owner-pr2-<tag> and /run/userdb/rmzso<tag>.* with their numeric
@@ -1597,7 +1657,13 @@ def sweep(systemctl, cgroup_system=None, apparmor=None, base_parent=None, userdb
     base_parent = Path(base_parent) if base_parent is not None else BASE_PARENT
     userdb = Path(userdb) if userdb is not None else USERDB
     kill = kill or (lambda number: kill_id(number, proc))
-    numbers = sweep_ids(base_parent, userdb)
+    claimable = claimable or sweep_claimable
+    # A recorded ID is killed only while it is still unclaimed (the selection check, with this experiment's
+    # own rmzso<tag> drop-in names accepted): a stale directory must not lead to the kill of a process of an
+    # account or user namespace that took the number since.
+    subids = parse_subids(path.read_text() for path in SUBID_FILES if path.exists())
+    numbers = {number for number in sweep_ids(base_parent, userdb)
+               if claimable(number, proc, subids)}
     units = sweep_units(systemctl, cgroup_system)
     clean = True
     for unit in units:
@@ -1615,16 +1681,22 @@ def sweep(systemctl, cgroup_system=None, apparmor=None, base_parent=None, userdb
         except OSError:
             clean = False
     clean = clean and not sweep_profiles(apparmor)
-    # systemd unloads a stopped unit and removes its cgroup a moment later; a cgroup that systemd no longer
-    # tracks is empty after the kill, so rmdir removes it. Nothing may be left under either name.
+    # systemd unloads a stopped unit and removes its cgroup a moment later. A unit that is still loaded is
+    # stopped and reset again; only a cgroup whose unit systemd reports as not-found (no longer tracked, and
+    # empty after the kill) is removed with rmdir. Nothing may be left under either name.
     deadline = time.monotonic() + 3
     while True:
         remaining = sweep_units(systemctl, cgroup_system)
         if not remaining or time.monotonic() >= deadline:
             break
         for unit in remaining:
-            with contextlib.suppress(OSError):
-                os.rmdir(cgroup_system / unit)
+            code, output = systemctl("show", "--property=LoadState", unit)
+            if code == 0 and output.decode("ascii", "replace").strip() == "LoadState=not-found":
+                with contextlib.suppress(OSError):
+                    os.rmdir(cgroup_system / unit)
+            else:
+                systemctl("stop", unit)
+                systemctl("reset-failed", unit)
         time.sleep(0.05)
     clean = clean and not remaining
     directories = [path for path in base_parent.glob(BASE_PREFIX + "*")
@@ -1941,9 +2013,9 @@ def measure(timeout=30, authority_binary=None, run_factory=Run, sweep_factory=No
                for path in (Path(__file__).resolve(), PR1_RUNNER, SO.PROTECTED_RUNNER, APPARMOR_TEMPLATE)}
     run = run_factory(operator, timeout, authority_binary, tools)
     setup, cases, cleanup = {}, {}, {}
-    with PL.subreaper():
+    with run_lock(), PL.subreaper():
         # An earlier run that was killed before its cleanup must not leave state that this run could take
-        # for its own, or that its by-prefix checks would meet. One run at a time.
+        # for its own, or that its by-prefix checks would meet. The lock makes it one run at a time.
         swept = sweep_factory(lambda *arguments: PL.run_owned([tools["systemctl"], *arguments], timeout))
         if not swept["clean"]:
             raise RuntimeError("state of an earlier run remains")
@@ -1999,6 +2071,9 @@ def main():
         except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
             parser.exit(2, f"Single-owner authority self-test failed: {type(error).__name__}.\n")
         print(json.dumps(result, indent=2, sort_keys=True))
+        if result["passed"] is None:  # not run (Linux before 6.5): reported, and not a failure
+            sys.stderr.write("Single-owner authority self-test not run: SO_PEERPIDFD needs Linux 6.5.\n")
+            return 0
         return 0 if result["passed"] else 1
     if args.sweep:
         if os.geteuid() != 0 or os.getuid() != 0:
@@ -2006,8 +2081,11 @@ def main():
         systemctl = shutil.which("systemctl", path=PL.TOOL_ENV["PATH"])
         if systemctl is None:
             parser.exit(2, "systemctl unavailable.\n")
-        with PL.subreaper():
-            result = sweep(lambda *arguments: PL.run_owned([systemctl, *arguments], 30))
+        try:
+            with run_lock(), PL.subreaper():
+                result = sweep(lambda *arguments: PL.run_owned([systemctl, *arguments], 30))
+        except RuntimeError:
+            parser.exit(2, "Another single-owner run or sweep is active.\n")
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["clean"] else 1
     previous = {number: signal.signal(number, _cancel) for number in (signal.SIGTERM, signal.SIGHUP)}
