@@ -138,6 +138,34 @@ PY
 
 The calculation checks the numeric thresholds only. Verify the workload, scope, instrumentation, real phone receipt, and shared-address result separately. [Approved LAN criteria](https://github.com/rock3r/remozio/issues/852#issuecomment-7148272028) · [Capacity measurements](https://github.com/rock3r/remozio/issues/852#issuecomment-7149371803) · [Proposed residual threshold](https://github.com/rock3r/remozio/issues/852#issuecomment-7151095535)
 
+## Physical LAN and iOS checks
+
+Use the selected artifacts and the same evidence rules. Include the merges cited for each check in the artifact manifest. Record the Android and iPhone builds separately. Use a fresh invitation for each independent attempt.
+
+### Darwin netmask on en0
+
+Open a scoped LAN v2 window on `en0`. Use a read-only `getifaddrs` observation to match the listener's bound address to one interface row. Record the interface index, address family, address and netmask `sa_len`, netmask family, and decoded prefix length. Exercise IPv4 and IPv6 where the fixture provides both. Record each family separately.
+
+**Pass** when the raw row matches the bound interface, the decoder reports the configured prefix, and an on-link phone reaches pairing. For the mask-change control, only the operator may change the network configuration. Use the preapproved isolated fixture. Agents perform read-only observations. Verify that the mask change closes the active pairing window and withdraws the advertisement. If the isolated fixture is unavailable, mark the mask-change control **Blocked**. [#982](https://github.com/rock3r/remozio/pull/982)
+
+### Android NSD with the R2- instance
+
+Open a fresh LAN v2 window. Import its invitation into the updated Android app and use normal NSD discovery. Observe the current `R2-` instance under `_remozio-pairing._tcp`. Close that window and open a second one. Check the old invitation against the newly advertised instance.
+
+**Pass** when Android resolves the exact current instance, reaches the expected Mac, and the old invitation cannot select the new instance. Record the three verdicts and keep instance tokens and invitations private. [#978](https://github.com/rock3r/remozio/pull/978)
+
+### IPv6 unique local addresses
+
+Start with a preconfigured IPv6 fixture that has a usable ULA and no usable global IPv6 on the approved interface. Use an Android phone in the same prefix. Confirm that the Mac binds and advertises the ULA. Complete the approved disposable pairing with normal consent, code comparison, and biometric proof.
+
+**Pass** when both endpoints report success and the phone verifies the receipt over ULA. On a second approved fixture with both address types, verify that a fresh window prefers usable global IPv6. A phone in another IPv6 prefix is refused even on the same link. Record that control separately when available. Record the address class and prefix length. [#980](https://github.com/rock3r/remozio/pull/980) · [#982](https://github.com/rock3r/remozio/pull/982)
+
+### Physical iPhone to Mac Test connection
+
+Use the approved legacy Mac test fixture for the iPhone connection test. In **Computers → Add computer**, import its invitation. Enter the approved test endpoint for the first run. Leave the address empty only when the fixture publishes the legacy `R-` Bonjour instance. Tap **Test connection**. This check ends at transcript and code comparison.
+
+**Pass** when the transcript and matching code arrive within 60 seconds, the physical iPhone reports the Secure Enclave transport-key check, and the attempt closes. Check that the iPhone saves no computer and the Mac records no enrollment. [#979](https://github.com/rock3r/remozio/pull/979) · [iOS app](../docs/ios-app.md)
+
 ## Close and report
 
 - [ ] Close the attended pairing window and fixtures through their supported controls. Verify the proof endpoint and listener retire and the original Authority remains healthy. Verify the intended retained enrollments. Preserve any unresolved receipt and its keys. Keep logs before any retry.
