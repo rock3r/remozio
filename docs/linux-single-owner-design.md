@@ -380,9 +380,12 @@ fixture's `dispatch-race-limitation` case and the `sudo` child.
 ### Cases in PR2
 
 `scripts/run-linux-single-owner-pr2-experiment.py` runs these rows with the Swift
-authority and O as the main process of a transient unit (`systemd-run`, no file
-under `/etc`). The [experiment document](experiments/linux-single-owner.md) lists
-each case.
+authority and O as the main process of a transient unit (`systemd-run`). It
+changes no file under `/etc`: O and the authority run as disposable numeric
+identities with no `/etc` entry. systemd resolves `User=` through NSS and refuses
+a number with no record, so O's identity gets an nss-systemd drop-in record in
+`/run/userdb` (tmpfs) for the run. The authority runs by number only. The
+[experiment document](experiments/linux-single-owner.md) lists each case.
 
 - The unit options from inside a command (`NoNewPrivs:` 0 and the host's mount
   namespace), with two negative controls (`NoNewPrivileges=yes`, `PrivateTmp=yes`)
@@ -412,9 +415,14 @@ each case.
 - `systemctl stop` and `systemctl restart` with `KillMode=process`, and a real
   out-of-memory kill under a case-only `MemoryMax=` with `OOMPolicy=continue`.
 - O killed at S1, after the fork and before the go byte, with the Swift authority.
-- The authority alone: a replayed permit, a permit of an earlier generation and a
-  wrong peer. Its first outcome is `notStarted`: the authority records `failed`
-  with the reason `notStarted`.
+- The authority alone, where each refusal must name the reason that its control
+  tests: a replayed `SUBMIT`, refused by the store's ledger, and a new decision
+  with the same submission nonce, refused by the store's replay table (O's nonce
+  is bound into the capture); a `HELLO` from a live process with its own PID and
+  an earlier start time (`stale-generation`); a permit of an earlier generation
+  presented by a later process (`earlier-generation`); a peer that has exited but
+  is not yet reaped (`generation-lost`); and a wrong peer. Its first outcome is
+  `notStarted`: the authority records `failed` with the reason `notStarted`.
 
 The report sets `strictAdmission` to true only when every case except the `sudo`
 password prompt passes. `productionAdmission` stays false.
@@ -445,6 +453,9 @@ Not verified by PR2 either:
 - `sudo -n true` on a host where PAM waits for a FIDO touch: the result is
   `inconclusive`. The `/etc/shadow` fields of `passwd -S` give the set-user-ID
   result instead.
+- The side files of `sudo` inside the command: it can create
+  `~/.sudo_as_admin_successful` and `/var/lib/sudo/lectured/<user>`, and it writes
+  to the authentication log. The runner does not record or remove them.
 - The full Root capability sets of a `sudo` child of the command.
 - Two dispatches prepared at the same time: O is single-threaded, and PR2 measures
   a second dispatch while the first command runs after S6.

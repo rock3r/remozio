@@ -23,6 +23,7 @@ PR2 adds:
 ```sh
 python3 scripts/run-linux-single-owner-pr2-experiment.py --build-authority --work-dir "$PWD/.build/linux-swift/single-owner"
 sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --authority <the printed path>
+sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --sweep   # after a run killed before its cleanup
 python3 -m unittest tests.test_linux_single_owner_pr2_experiment
 ```
 

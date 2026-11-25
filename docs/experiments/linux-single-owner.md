@@ -300,17 +300,55 @@ python3 scripts/run-linux-single-owner-pr2-experiment.py --build-authority --wor
 sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --authority <the printed path> [--timeout 30]
 ```
 
-The runner copies the authority and records its SHA-256. It creates two disposable
-system accounts (O's and the authority's), a directory under `/var/lib`, one
-transient unit per case and the AppArmor profile. It writes no sudoers file, no
-unit file and no sysctl. The unit has exactly the options of the design, plus
-`RemainAfterExit=yes`, so that `ExecMainCode` and `ExecMainStatus` stay readable.
-That option sets no `no_new_privs` and no mount namespace. The PR1 conditions
-apply: the runner refuses to continue when a new UID already has processes, it
-reads with `O_NOFOLLOW`, it cleans up in a `finally` block and reports each step.
+The runner copies the authority and records its SHA-256. It changes no file under
+`/etc`. O and the authority run as two disposable numeric identities from
+`0x70000000` up, with no account entry. Before use, each number has no passwd or
+group entry from any NSS source, no subordinate-ID range in `/etc/subuid` or
+`/etc/subgid`, and no process. systemd resolves `User=` through NSS and refuses a
+number with no record (`get_user_creds` in systemd 257), so O's identity gets an
+nss-systemd drop-in user and group record in `/run/userdb` (tmpfs), and setup
+refuses a host whose `nsswitch.conf` does not name `systemd` for `passwd` and
+`group`. The authority runs by number only. The runner also creates a directory
+under `/var/lib`, one transient unit per case and the AppArmor profile. It writes
+no sudoers file, no unit file and no sysctl. The unit has exactly the options of
+the design, plus `RemainAfterExit=yes`, so that `ExecMainCode` and
+`ExecMainStatus` stay readable. That option sets no `no_new_privs` and no mount
+namespace.
+
+The authority is built with `--static-swift-stdlib`, so it loads no Swift runtime
+from the operator's toolchain. Before the cases, setup runs the copied authority
+as its own identity twice: once with `LD_TRACE_LOADED_OBJECTS=1`, where every
+library must come from a system library directory and each one is hashed into the
+report, and once with no arguments, where it must start and exit 2 with its error
+event.
+
+Before it loads the profile or starts a unit, the runner checks that the name is
+not already in use. It records a name as its own only when the tool succeeds, or
+when the name exists after a failed tool run (it was free before). Cleanup kills a
+unit's cgroup through `cgroup.kill` (Linux 5.14 or later, checked at setup), not
+through PIDs read from `cgroup.procs`, then kills every process with one of the
+run's IDs. It reads with `O_NOFOLLOW`, runs in a `finally` block and reports each
+step. If the profile does not load (AppArmor 3.x cannot read `abi <abi/4.0>`),
+`unit-apparmor` is `not-run` and the rest of the run goes on.
+
+A run starts with a sweep, and stops when the sweep cannot remove everything.
+`sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --sweep` runs the
+same sweep on its own after a run that was killed before its cleanup. By prefix,
+it kills each `rmzso-*.service` cgroup and stops the unit, kills the processes of
+the IDs in each run directory's `ids` file and in the drop-in records, removes the
+`rmzso-owner-*` profiles, the `/var/lib/remozio-single-owner-pr2-*` directories
+and the `/run/userdb/rmzso*` records with their numeric links. Run one experiment
+at a time: the sweep removes the state of any other run. A command in `sleep`
+mode ends after 300 s, so a lost run leaves no command running until reboot.
 
 `--authority-selftest` runs the authority control cases as the current user,
-without Root. `scripts/check-linux-host.sh` runs it in CI, after the Swift build.
+without Root, and checks that the built authority loads only system libraries.
+In CI, the Linux job runs it as its own step only when a pull request changes one
+of its inputs (`single_owner` in `scripts/ci-pr-jobs.py`: the experiment, the
+authority's Swift packages and the three runners), and on every push to `main`
+and every nightly run. It is not part of `scripts/check-linux-host.sh` or
+`scripts/check-local.sh`. Before Linux 6.5 (no `SO_PEERPIDFD`), it reports
+`not-run` and passes.
 
 ### PR2 cases
 
@@ -329,7 +367,7 @@ without Root. `scripts/check-linux-host.sh` runs it in CI, after the Swift build
 | `kill-owner-at-s1` | O dies at S1: no command; the authority holds the permit and the request stays `executing` |
 | `kill-owner-after-fork` | O dies after the fork: no command; the request stays `executing` |
 | `kill-owner-before-go` | O dies before the go byte: no command; the request stays `executing` |
-| `authority-controls` | A replayed `SUBMIT` is refused, and the store's ledger refuses the same signed decision again; a second `OUTCOME` is refused; a `HELLO` with the generation of a client that has exited is refused; a permit of an earlier generation is refused; Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`). The first `OUTCOME` reports `notStarted`: the authority records `failed` with the reason `notStarted` |
+| `authority-controls` | Each refusal must carry the reason that its control tests. A replayed `SUBMIT` is refused; the store's ledger refuses the same signed decision again (`replayLedger`), and the store's replay table refuses a new decision over a new capture with the same submission nonce (`replayBinding`: the capture's submission nonce is the SHA-256 of O's nonce). A second `OUTCOME` is refused. A `HELLO` with the generation of a client that has exited is refused on its PID (`pid-mismatch`). A live client that presents its own boot ID and PID with an earlier start time is refused as `stale-generation`. A later client presents the first client's permit: refused as `earlier-generation`, not as another `HELLO` of the same process. A peer that has exited and is not yet reaped, whose child still holds the connection, says `HELLO` and then `SUBMIT`: refused as `generation-lost`. Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`). The first `OUTCOME` reports `notStarted`: the authority records `failed` with the reason `notStarted` |
 
 Every owner case also records O's start line, the authority's events and O's
 restart log per dispatch. The report sets `strictAdmission` to true only when every
@@ -339,13 +377,23 @@ case except `unit-sudo-prompt` passes, with setup and cleanup complete.
 ### PR2 not verified
 
 - No Root run is recorded yet. CI builds the Swift package and runs the authority
-  control cases without Root; it does not run systemd, AppArmor or `sudo`.
+  control cases without Root, when their inputs change; it does not run systemd,
+  AppArmor or `sudo`.
 - The `sudo` password prompt without a controlling terminal (a known limit; the
   design leaves the terminal relay to a decision).
 - The full Root capability sets of a set-user-ID child. `passwd -S` proves only
   that such a child starts with effective UID 0, without `no_new_privs`. An
-  operator account in the `shadow` group could read `/etc/shadow` without it, so
-  setup refuses to start when the operator is in that group.
+  operator who can read `/etc/shadow` without it (by group, ACL or mode) would make
+  the check prove nothing, so setup runs `access(R_OK)` on `/etc/shadow` as the
+  operator, with the operator's groups, and refuses to start when it succeeds.
+- The side files of `sudo` inside the command: `sudo` can create
+  `~/.sudo_as_admin_successful` in the operator's home and
+  `/var/lib/sudo/lectured/<user>`, and it writes to the authentication log. The
+  runner does not record or remove them.
+- The numeric identities: systemd 257's source refuses a `User=` number with no
+  record, which is why O's identity has a `/run/userdb` drop-in record. That a
+  transient unit starts with that record, through nss-systemd, is measured only by
+  the Root run.
 - A dispatch that ends without a command is recorded as `failed`, with the reason
   `notStarted` kept. A distinct outcome is a production requirement (design S4).
 - Two preparations at the same time. O is single-threaded and the case measures a
