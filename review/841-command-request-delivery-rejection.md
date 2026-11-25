@@ -1,0 +1,26 @@
+# #841 Keep the request connection open after a delivery rejection
+
+## Current behavior
+
+Android's live command connection binds `CommandRequestReceiver`. The receiver parses the envelope and calls `CommandRequestEnrollment.deliver` inside the receive loop. An exception from either step leaves the loop and closes the channel.
+
+`CommandRequestSession.open` checks the request signature, then decodes the request and its capture. `IssuedRequestPayload.decode` can fail while it checks the capture, before the session checks Mac and account scope. The capture parser can also fail after the scope check. The enrollment currently handles capacity and retired-request outcomes locally. A capture error reaches the receiver's connection-wide error handler. [Receiver](../phone/core/src/main/kotlin/dev/remozio/phone/requests/CommandRequestReceiver.kt#L68-L83), [session](../phone/core/src/main/kotlin/dev/remozio/phone/requests/CommandRequestSession.kt#L129-L149), [enrollment](../phone/core/src/main/kotlin/dev/remozio/phone/requests/CommandRequestInbox.kt#L175-L202)
+
+The Mac exchange rebuilds its ordered work list on connection and refresh. It sends each compatible request and then sends its status. The current capability check covers the frame size, schema and required features. The send does not confirm that the phone can present the capture. This explains the repeated delivery described in #841. A Swift-issued capture that fails Kotlin parsing remains unconfirmed. [Exchange loop](../macos/core/Sources/RemozioCore/DirectApprovalRequestExchangeLoop.swift#L42-L84), [capability check](../macos/core/Sources/RemozioCore/DirectApprovalTransportService.swift#L324-L345)
+
+## Proposed behavior
+
+1. Separate authenticated request metadata from capture parsing. Keep the existing envelope, canonical body, signature and size checks. Verify Mac and account scope, then bind the request ID to the digest of the exact authenticated signing input. Verify the capture digest before classifying a capture failure.
+2. Allow a request-level rejection for an unsupported capture or a capture that exceeds the local parse budget. Produce a typed internal result at that boundary. Keep authentication, framing, identity conflicts, stale enrollment and unclassified failures fatal. Keep capacity and retirement behavior separate.
+3. Send a small, versioned delivery result over the enrolled live channel when both peers negotiated support. Include the request ID, request digest and a fixed reason code. Authenticate the phone and enrollment from the channel. Use the receiver's existing serialized writer. The result carries no capture, free text or decision. The phone creates no actionable session for the rejected capture.
+4. Use a bounded record of rejected IDs and digests for the current connection. The Mac already sends status immediately after a request. The phone must verify and consume a matching signed status without creating a session or changing the capacity flag. Keep the existing failure for an unrelated or conflicting status. Older Macs receive no new frame. Updated phones can still isolate an authenticated capture refusal on those channels.
+5. On the Mac, accept a result only for an ID and digest sent to that enrollment on this connection. Keep the suppression in the exchange loop and bound it by the pending-request limit. Leave the request available to other phones and leave its authority state untouched. On reconnect, the phone can reject it again and receive later requests within the same session.
+
+The read-only pending snapshot shares the receiver. Keep its framing and completion rules. A snapshot with a rejected capture must report incomplete delivery and must never send the live-channel result. Handle authority-side decision rejection in a separate change. The current defect can be fixed without changing decision authorization or automatic retry.
+
+## Verification
+
+- **Phone core.** Extend `CommandRequestReceiverTest` with an injected typed capture refusal after authenticated admission for an ordinary fixture. Assert one delivery result, verified handling of its matching status, and delivery of a subsequent ordinary request on the same connection. Cover duplicate refusal, mismatched status, stale enrollment, and legacy negotiation. Separately test that an ordinary capture still parses within the current budgets.
+- **Android.** Use `CommandConnectionTest` to verify that refusal leaves the live connection owned and the later request available. Check that the refused request creates no approval controls and that the connection does not schedule a reconnect.
+- **Mac and interop.** Extend `DirectApprovalRequestDeliveryTests` to verify request-result correlation, same-session suppression, other-phone availability, and no authority mutation. Use the synthetic Kotlin–Swift TLS harness for two ordinary requests and an injected phone-side unsupported result. Prove that the second request and its status arrive on the same channel. Reconnect to verify that a fresh delivery attempt still allows subsequent requests.
+- **Snapshot and compatibility.** Verify incomplete snapshot reporting, no delivery result on legacy or snapshot channels, and unchanged outcomes for existing signed decisions.
