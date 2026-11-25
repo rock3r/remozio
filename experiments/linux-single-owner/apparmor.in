@@ -22,9 +22,17 @@ profile rmzso-owner-@@TAG@@ flags=(enforce) {
   signal (send, receive) peer=rmzso-owner-@@TAG@@,
   unix (create, connect, accept, send, receive, getattr, getopt, shutdown),
   # The shim, then the owner image in the same profile, then the command unconfined.
+  # AppArmorProfile= makes systemd call aa_change_onexec before it executes the shim, so the
+  # kernel checks that exec against systemd's own label, not this profile: the shim needs only
+  # mr here (the kernel maps the image under the new label). The owner image stays in the
+  # profile (ix); the command leaves it (ux).
   @@BASE@@/run/fdshim mr,
   @@BASE@@/run/owner mrix,
   @@BASE@@/run/cmd-* ux,
+  # ux alone grants no getattr: O's stat of /proc/<K>/exe, which resolves to the command image
+  # once K has executed it (same_image() in owner.c), needs r. AppArmor checks the final path of
+  # each access, not the directories on the way, so run/ and cases/ need no rule of their own.
+  @@BASE@@/run/cmd-* r,
   # The rendezvous, frontend and authority sockets and the restart log of each case.
   @@BASE@@/cases/** rw,
   # O's own and C's procfs entries: status, stat, limits, cwd, exe, fdinfo of its pidfds.

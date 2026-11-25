@@ -1,3 +1,5 @@
+import contextlib
+import fcntl
 import importlib.util
 import json
 import os
@@ -21,6 +23,7 @@ SPEC = importlib.util.spec_from_file_location("linux_single_owner_pr2_experiment
 EXPERIMENT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EXPERIMENT)
 ROOT = SCRIPT.parents[1]
+COMMAND_SOURCE = (ROOT / "experiments/linux-single-owner/command2.c").read_text()
 DESIGN = ROOT / "docs/linux-single-owner-design.md"
 EXPERIMENT_DOC = ROOT / "docs/experiments/linux-single-owner.md"
 TAG = "0123abcd"
@@ -50,7 +53,14 @@ class TemplateTests(unittest.TestCase):
         name, text = EXPERIMENT.render_profile(EXPERIMENT.APPARMOR_TEMPLATE.read_text(), TAG, EXPERIMENT.base_for(TAG))
         self.assertEqual(name, "rmzso-owner-" + TAG)
         self.assertTrue(text.startswith("abi <abi/4.0>,\n"))
-        self.assertIn(f"  {EXPERIMENT.base_for(TAG)}/run/cmd-* ux,", text)
+        base = EXPERIMENT.base_for(TAG)
+        lines = text.splitlines()
+        # The shim is entered through aa_change_onexec (checked against systemd's label), so it needs
+        # mr only; O stays in the profile (ix); the command leaves it (ux), and O's stat of
+        # /proc/<K>/exe needs getattr (r) on the command image.
+        for rule in (f"  {base}/run/fdshim mr,", f"  {base}/run/owner mrix,", f"  {base}/run/cmd-* ux,",
+                     f"  {base}/run/cmd-* r,", f"  {base}/cases/** rw,"):
+            self.assertIn(rule, lines)
         self.assertNotIn("@@", text)
         self.assertNotIn("include", text)
 
@@ -62,6 +72,8 @@ class TemplateTests(unittest.TestCase):
             EXPERIMENT.render_profile(template, TAG, Path("/tmp/elsewhere"))
         with self.assertRaises(ValueError):
             EXPERIMENT.render_profile(template.replace("cmd-* ux,", "cmd-* ix,"), TAG, EXPERIMENT.base_for(TAG))
+        with self.assertRaises(ValueError):
+            EXPERIMENT.render_profile(template.replace("cmd-* r,", "cmd-* m,"), TAG, EXPERIMENT.base_for(TAG))
         with self.assertRaises(ValueError):
             EXPERIMENT.render_profile(template + "\n@@OTHER@@\n", TAG, EXPERIMENT.base_for(TAG))
 
@@ -159,6 +171,8 @@ class CommandReportTests(unittest.TestCase):
                                                    TAG)["capsEmpty"], "no")
         self.assertEqual(EXPERIMENT.command_checks(command_report(fds="0 1 2 3"), 40, self.MNT, TAG)["commandFds"],
                          "other")
+        self.assertEqual(EXPERIMENT.command_checks(command_report(capBnd="000000ffffffffff"), 40, self.MNT,
+                                                   TAG)["boundingFull"], "no")
 
     def test_labels_and_sudo_categories(self):
         label = EXPERIMENT.command_checks(command_report(label=f"rmzso-owner-{TAG} (enforce)"), 40, self.MNT, TAG)
@@ -168,7 +182,7 @@ class CommandReportTests(unittest.TestCase):
         for category in ("password-required", "allowed", "no-new-privs", "inconclusive"):
             self.assertEqual(EXPERIMENT.command_checks(command_report(sudo=category), 40, self.MNT, TAG)["sudo"],
                              category)
-        for category in ("ok", "failed", "timeout", "no-user"):
+        for category in ("ok", "no-shadow", "failed", "timeout", "no-user"):
             self.assertEqual(EXPERIMENT.command_checks(command_report(passwd=category), 40, self.MNT,
                                                        TAG)["passwd"], category)
 
@@ -250,6 +264,9 @@ class OwnerAndAuthorityTests(unittest.TestCase):
         self.assertEqual(EXPERIMENT.restart_log_clean_all(log, 2), "yes")
         self.assertEqual(EXPERIMENT.restart_log_clean_all(log + b"8 2 DETACH\n9 2 GO\n", 2), "no")
         self.assertEqual(EXPERIMENT.restart_log_clean_all(b"1 3 SEIZE\n", 2), "no")
+        # A log that is missing a dispatch is not clean.
+        self.assertEqual(EXPERIMENT.restart_log_clean_all(b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 GO\n", 2), "no")
+        self.assertEqual(EXPERIMENT.restart_log_clean_all(b"5 2 SEIZE\n6 2 INTERRUPT\n7 2 GO\n", 2), "no")
         self.assertEqual(EXPERIMENT.restart_log_clean_all(b"", 2), EXPERIMENT.NA)
 
 
@@ -301,15 +318,20 @@ class CaseTableTests(unittest.TestCase):
         cases = EXPERIMENT.CASES
         # 1: a second dispatch while the first command runs, with the descriptor checks.
         self.assertEqual(cases["second-dispatch-fds"]["modes"], ("sleep", "normal"))
-        # 2: passwd -S of the caller is the decisive check, with NoNewPrivs 0; sudo -n true is password
-        # required, allowed or inconclusive (a FIDO touch through PAM); no sudoers change in the runner.
+        # 2: passwd -S of the caller with the /etc/shadow fields is the decisive check, with NoNewPrivs 0;
+        # sudo -n true is password required, allowed or inconclusive (a FIDO touch through PAM); no
+        # sudoers change in the runner.
         for case in ("unit-sudo", "unit-apparmor"):
             expected = cases[case]["expectDispatches"][0]
             self.assertEqual(expected["passwd"], {"ok"})
             self.assertEqual(expected["noNewPrivs"], {"0"})
+            self.assertEqual(expected["boundingFull"], {"yes"})
             self.assertEqual(set(expected["sudo"]), {"password-required", "allowed", "inconclusive"})
+        # The control asserts on the decisive check and NoNewPrivs, never on sudo's wording.
         control = cases["unit-nnp-control"]["expectDispatches"][0]
-        self.assertEqual((control["passwd"], control["noNewPrivs"]), ({"failed"}, {"1"}))
+        self.assertEqual((control["passwd"], control["noNewPrivs"]), ({"no-shadow", "failed"}, {"1"}))
+        self.assertNotIn("sudo", control)
+        self.assertNotIn("passwd -S root", COMMAND_SOURCE.replace("passwd -S root is no", ""))
         self.assertNotIn("/etc/sudoers", SCRIPT.read_text())
         self.assertNotIn("visudo", SCRIPT.read_text())
         # 3: a real out-of-memory kill under MemoryMax=, not SIGKILL to O.
@@ -363,6 +385,25 @@ class EvaluateTests(unittest.TestCase):
         observed = observed_for("unit-report")
         observed["dispatches"][0]["pid"] = "1234"
         self.assertEqual(EXPERIMENT.evaluate("unit-report", observed)["error_type"], "InvalidObservation")
+
+    def test_bounding_set_gates_the_command_cases(self):
+        for case in ("unit-report", "unit-sudo", "unit-apparmor"):
+            observed = observed_for(case)
+            self.assertTrue(EXPERIMENT.evaluate(case, observed)["passed"], case)
+            observed["dispatches"][0]["boundingFull"] = "no"
+            self.assertEqual(EXPERIMENT.evaluate(case, observed)["mismatches"], ["d1.boundingFull"], case)
+
+    def test_nnp_control_ignores_sudo_wording(self):
+        for sudo in ("other", "no-new-privs", "password-required", "inconclusive"):
+            observed = observed_for("unit-nnp-control")
+            observed["dispatches"][0]["sudo"] = sudo
+            self.assertTrue(EXPERIMENT.evaluate("unit-nnp-control", observed)["passed"], sudo)
+        observed = observed_for("unit-nnp-control")
+        observed["dispatches"][0]["passwd"] = "ok"
+        self.assertEqual(EXPERIMENT.evaluate("unit-nnp-control", observed)["mismatches"], ["d1.passwd"])
+        observed = observed_for("unit-nnp-control")
+        observed["dispatches"][0]["noNewPrivs"] = "0"
+        self.assertEqual(EXPERIMENT.evaluate("unit-nnp-control", observed)["mismatches"], ["d1.noNewPrivs"])
 
     def test_controls_case(self):
         observed = {**EXPERIMENT.CONTROL_EXPECT, "operatorConnect": EXPERIMENT.NA}
@@ -525,7 +566,8 @@ class StaticFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fakes = Path(directory) / "fakes"
             fakes.mkdir()
-            (fakes / "passwd").write_text('#!/bin/sh\n[ "$1" = "-S" ] && [ -n "$2" ] && exit 0\nexit 3\n')
+            (fakes / "passwd").write_text('#!/bin/sh\n[ "$1" = "-S" ] && [ -n "$2" ] && '
+                                          'echo "$2 P 2025-01-01 0 99999 7 -1" && exit 0\nexit 3\n')
             # A sudo that waits, as for a FIDO touch through PAM.
             (fakes / "sudo").write_text("#!/bin/sh\nexec /bin/sleep 30\n")
             for fake in fakes.iterdir():
@@ -605,6 +647,7 @@ class CleanupTests(unittest.TestCase):
             accounts = {run.owner_name: SimpleNamespace(pw_uid=5001, pw_gid=5001),
                         run.authority_name: SimpleNamespace(pw_uid=5002, pw_gid=5002)}
             with patch.object(EXPERIMENT, "BUILDS", {}), \
+                    patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=True), \
                     patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
                     patch.object(EXPERIMENT.PL, "write_root_file"), \
                     patch.object(EXPERIMENT.PL, "run_owned", return_value=(0, b"")), \
@@ -630,6 +673,564 @@ class CleanupTests(unittest.TestCase):
             retire.assert_called_once()
             sockets = retire.call_args[0][5]
             self.assertTrue(sockets and all(item.fileno() == -1 for item in sockets))
+
+
+class RetireUnitTests(unittest.TestCase):
+    """retire_unit reports a removal only on positive evidence; every failure counts as not removed."""
+
+    def retire(self, procs=None, read_error=None, show=None, stop_code=0):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {name: f"/usr/bin/{name}" for name in EXPERIMENT.TOOLS})
+        run.RETIRE_SECONDS = 0.1
+        unit = f"rmzso-{run.tag}-x.service"
+        calls, killed = [], []
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory)
+            if procs is not None:
+                (cgroup / unit).mkdir()
+                (cgroup / unit / "cgroup.procs").write_text(procs)
+            patches = [patch.object(EXPERIMENT, "CGROUP_SYSTEM", cgroup),
+                       patch.object(run, "systemctl", side_effect=lambda *args: calls.append(args) or stop_code),
+                       patch.object(run, "show", return_value=dict(show if show is not None
+                                                                   else {"LoadState": "not-found"})),
+                       patch.object(EXPERIMENT.os, "kill", side_effect=lambda pid, sig: killed.append(pid))]
+            if read_error is not None:
+                patches.append(patch.object(EXPERIMENT.SO, "read_bounded", side_effect=read_error))
+            for item in patches:
+                item.start()
+            try:
+                result = run.retire_unit(unit)
+            finally:
+                for item in reversed(patches):
+                    item.stop()
+        return result, calls, killed, unit
+
+    def test_a_gone_unit_with_no_cgroup_is_removed(self):
+        result, calls, killed, unit = self.retire()
+        self.assertTrue(result)
+        self.assertEqual(calls, [("stop", unit), ("reset-failed", unit)])
+        self.assertEqual(killed, [])
+
+    def test_an_unloaded_unit_counts_even_when_stop_fails(self):
+        # systemctl stop and reset-failed fail for a unit that systemd already unloaded.
+        self.assertTrue(self.retire(stop_code=5)[0])
+
+    def test_a_cgroup_read_error_is_not_removed(self):
+        self.assertFalse(self.retire(procs="", read_error=PermissionError())[0])
+
+    def test_a_failed_show_is_not_removed(self):
+        self.assertFalse(self.retire(show={})[0])
+
+    def test_a_loaded_unit_after_a_failed_stop_is_not_removed(self):
+        self.assertFalse(self.retire(stop_code=1, show={"LoadState": "loaded"})[0])
+
+    def test_a_surviving_process_is_not_removed(self):
+        result, _calls, killed, _unit = self.retire(procs="4242\n")
+        self.assertFalse(result)
+        self.assertIn(4242, killed)
+
+    def test_an_empty_cgroup_is_removed(self):
+        self.assertTrue(self.retire(procs="")[0])
+
+
+class CgroupTests(unittest.TestCase):
+    def test_cgroup_v2_needs_the_unified_root_and_system_slice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertFalse(EXPERIMENT.cgroup_v2_ready(root))
+            (root / "cgroup.controllers").write_text("cpu memory\n")
+            self.assertFalse(EXPERIMENT.cgroup_v2_ready(root))
+            (root / "system.slice").mkdir()
+            self.assertTrue(EXPERIMENT.cgroup_v2_ready(root))
+
+    def test_the_shadow_group_gid(self):
+        with patch.object(EXPERIMENT.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=42)):
+            self.assertEqual(EXPERIMENT.shadow_gid(), 42)
+        with patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("shadow")):
+            self.assertIsNone(EXPERIMENT.shadow_gid())
+        self.assertIn('"operatorOutsideShadowGroup": shadow_gid() not in operator_groups', SCRIPT.read_text())
+
+    def test_setup_refuses_a_host_without_cgroup_v2(self):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
+        with patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=False), \
+                patch.object(EXPERIMENT.os, "mkdir") as mkdir:
+            with self.assertRaises(RuntimeError):
+                run.setup()
+        mkdir.assert_not_called()
+        self.assertFalse(run.base_created)
+
+
+class SelftestSocketTests(unittest.TestCase):
+    def test_socket_directory_is_short(self):
+        directory = EXPERIMENT.selftest_socket_dir()
+        try:
+            self.assertLess(len(str(directory / "a.sock").encode()), EXPERIMENT.UNIX_PATH_MAX)
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        finally:
+            shutil.rmtree(directory)
+
+    @unittest.skipUnless(LINUX, "needs Unix sockets")
+    def test_a_long_work_dir_still_binds(self):
+        # The work directory is far beyond sun_path; the sockets must not live in it.
+        bound = []
+
+        class Process:
+            def __init__(self, binary, listener, *args, **options):
+                bound.append(listener.getsockname())
+
+            def stop(self):
+                return b""
+
+            def kill(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / ("w" * 150)
+            empty = {}
+            with patch.object(EXPERIMENT, "AuthorityProcess", Process), \
+                    patch.object(EXPERIMENT, "run_controls", return_value=(empty, empty, empty, EXPERIMENT.NA)):
+                result = EXPERIMENT.authority_selftest(work, binary="/bin/true")
+        self.assertEqual(len(bound), 2)
+        self.assertFalse(result["passed"])
+        for path in bound:
+            self.assertLess(len(path.encode()), EXPERIMENT.UNIX_PATH_MAX)
+            self.assertFalse(Path(path).parent.exists())
+
+
+AUTHORITY_OK = (b'{"event":"start"}\n{"event":"peer","result":"owner"}\n{"event":"hello","result":"accepted"}\n'
+                b'{"event":"submit","phase":"executing","result":"permit"}\n'
+                b'{"event":"outcome","phase":"succeeded","reason":"none","reported":"dispatched",'
+                b'"requesterLost":"no","result":"recorded"}\n{"event":"end"}\n')
+
+
+class FakeUnitOwner:
+    """O as a thread: it sends barriers over the control socket and writes its reports."""
+
+    def __init__(self, pid, unit, thread):
+        self.pid, self.unit, self.thread = pid, unit, thread
+        self.stdout, self.returncode, self.killed = None, None, False
+
+    def poll(self):
+        if self.returncode is None and not self.thread.is_alive():
+            self.returncode = 0
+        return self.returncode
+
+    def wait(self, timeout):
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            raise subprocess.TimeoutExpired("owner", timeout)
+        return self.poll()
+
+    def kill(self):
+        self.killed = True
+
+    def close(self):
+        if self.stdout is not None:
+            self.stdout.close()
+
+
+def fake_owner(stdout_fd, control_fd, log_fd, barriers, lines, log):
+    control = socket.socket(fileno=control_fd)
+    try:
+        for name, number, c_pid, k_pid in barriers:
+            control.send(f"BARRIER {name} {number} {c_pid} {k_pid}".encode())
+            if control.recv(16) != b"C":
+                break
+        os.write(log_fd, log)
+        os.write(stdout_fd, b"\n".join(lines) + b"\n")
+    finally:
+        control.close()
+        os.close(stdout_fd)
+        os.close(log_fd)
+
+
+class FakeAuthorityProcess:
+    def __init__(self, output):
+        self.output = output
+
+    def read_available(self):
+        pass
+
+    def stop(self):
+        return self.output
+
+    def kill(self):
+        return True
+
+
+@unittest.skipUnless(LINUX, "needs Linux procfs and Unix sockets")
+class DriveCaseTests(unittest.TestCase):
+    MNT = "mnt:[4026531832]"
+
+    def drive(self, report=None, case="unit-report"):
+        nr_open = int(Path("/proc/sys/fs/nr_open").read_text())
+        limits = ",".join(["inf/inf"] * 7 + [f"{nr_open}/{nr_open}"] + ["inf/inf"] * 8)
+        report = report if report is not None else command_report()
+        barriers = [("start", 1, 0, 0), ("k-ready", 1, 999991, 999992), ("after-s6", 1, 999991, 999992),
+                    ("end", 1, 0, 0)]
+        lines = [START, dispatch_line(1)]
+        log = b"1 1 SEIZE\n2 1 INTERRUPT\n3 1 GO\n4 1 DETACH\n"
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            markers = directory / "markers"
+            markers.mkdir()
+            (markers / case).write_text("ran\n")
+            (directory / "case").mkdir()
+            started = []
+
+            def start_owner(case_name, spec, case_directory, fds):
+                stdout_write, _listener, control_owner, log_fd = fds
+                thread = threading.Thread(target=fake_owner, daemon=True,
+                                          args=(os.dup(stdout_write), os.dup(control_owner), os.dup(log_fd),
+                                                barriers, lines, log))
+                owner = FakeUnitOwner(4242, f"rmzso-{TAG}-{case_name}.service", thread)
+                started.append(owner)
+                thread.start()
+                return owner
+
+            def show(unit, properties):
+                if tuple(properties) == ("MainPID",):
+                    return {"MainPID": "4242"}
+                if tuple(properties) == EXPERIMENT.SHOW_PROPERTIES:
+                    return dict(EXPERIMENT.SHOW_EXPECTED)
+                return {}
+
+            def start_frontend(_path):
+                # C ends with its command; the fake has ended before the runner reads its line.
+                frontend = subprocess.Popen([sys.executable, "-I", "-c",
+                                             f"import sys; sys.stdout.buffer.write({report!r})"],
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                frontend.wait(timeout=10)
+                return frontend
+
+            run = SimpleNamespace(timeout=10, operator=SimpleNamespace(pw_gid=os.getgid(), pw_uid=os.getuid()),
+                                  owner_gid=os.getgid(), owner_uid=os.getuid(), markers=markers, tag=TAG,
+                                  start_authority=lambda *args: FakeAuthorityProcess(AUTHORITY_OK),
+                                  start_owner=start_owner, show=show, start_frontend=start_frontend,
+                                  systemctl=lambda *args: 0, retire_unit=lambda unit: True)
+            ended = []
+            with patch.object(EXPERIMENT.SO, "read_limits", return_value=limits), \
+                    patch.object(EXPERIMENT.SO, "_end_session", side_effect=ended.append), \
+                    patch.object(EXPERIMENT.SO, "_reap", return_value=True), \
+                    patch.object(EXPERIMENT, "_wait_gone"):
+                result = EXPERIMENT.drive_case(case, run, directory / "case", 40, self.MNT)
+        self.assertTrue(started and started[0].killed)
+        self.assertEqual(ended, [999992])
+        return result
+
+    def test_happy_path_passes(self):
+        result = self.drive()
+        self.assertTrue(result["passed"], result)
+        self.assertTrue(result["cleanupReapedAllFixtureProcesses"])
+        observed = result["observed"]
+        self.assertEqual((observed["ownerExit"], observed["unitReadback"], observed["restartLogClean"],
+                          observed["markerLines"]), ("ok", "yes", "yes", "1"))
+        self.assertEqual(observed["dispatches"][0]["frontendExit"], "closed")
+        self.assertEqual(observed["dispatches"][0]["boundingFull"], "yes")
+
+    def test_a_reduced_bounding_set_fails(self):
+        result = self.drive(command_report(capBnd="000000ffffffffff"))
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["mismatches"], ["d1.boundingFull"])
+
+
+class ActTests(unittest.TestCase):
+    def owner(self, returncode):
+        owner = SimpleNamespace(unit=f"rmzso-{TAG}-x.service", pid=4242, returncode=None, killed=False)
+        owner.kill = lambda: setattr(owner, "killed", True)
+        owner.wait = lambda timeout: setattr(owner, "returncode", returncode) or returncode
+        owner.poll = lambda: owner.returncode
+        return owner
+
+    def run_fake(self, show=None):
+        calls = []
+        return SimpleNamespace(systemctl=lambda *args: calls.append(args) or 0,
+                               show=lambda unit, props: dict(show or {}), calls=calls)
+
+    def test_kill_owner_stops_the_barrier_loop(self):
+        owner, observed = self.owner(-9), {}
+        self.assertFalse(EXPERIMENT._act("kill-owner", self.run_fake(), owner, {"k": {}}, observed, time.monotonic() + 5))
+        self.assertTrue(owner.killed)
+        self.assertEqual(observed["ownerExit"], "SIGKILL")
+
+    def test_unit_stop_and_restart(self):
+        with patch.object(EXPERIMENT, "_alive", return_value=True):
+            observed, run = {}, self.run_fake()
+            self.assertFalse(EXPERIMENT._act("unit-stop", run, self.owner(-15), {"k": {1: 77}}, observed,
+                                             time.monotonic() + 5))
+            self.assertEqual(run.calls, [("stop", f"rmzso-{TAG}-x.service")])
+            self.assertEqual((observed["ownerExit"], observed["commandAliveAfterStop"],
+                              observed["ownerGoneAfterUnitAction"]), ("SIGTERM", "yes", "yes"))
+            observed = {}
+            EXPERIMENT._act("unit-restart", self.run_fake({"ExecMainPID": "5000"}), self.owner(-15), {"k": {1: 77}},
+                            observed, time.monotonic() + 5)
+            self.assertEqual((observed["unitRestarted"], observed["commandAliveAfterRestart"]), ("yes", "yes"))
+            observed = {}
+            EXPERIMENT._act("unit-restart", self.run_fake({"ExecMainPID": "4242"}), self.owner(-15), {"k": {1: 77}},
+                            observed, time.monotonic() + 5)
+            self.assertEqual(observed["unitRestarted"], "no")
+
+    def oom(self, events):
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory)
+            unit = f"rmzso-{TAG}-x.service"
+            if events is not None:
+                (cgroup / unit).mkdir()
+                (cgroup / unit / "memory.events").write_text(events)
+            observed = {}
+            with patch.object(EXPERIMENT, "CGROUP_SYSTEM", cgroup), patch.object(EXPERIMENT, "_wait_gone"), \
+                    patch.object(EXPERIMENT, "_alive", return_value=True):
+                resume = EXPERIMENT._act("oom-check", self.run_fake({"ActiveState": "active", "Result": "success"}),
+                                         self.owner(0), {"k": {1: 77, 2: 78}}, observed, time.monotonic() + 5)
+        self.assertTrue(resume)
+        return observed
+
+    def test_oom_check_parses_memory_events(self):
+        observed = self.oom("low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\noom_group_kill 0\n")
+        self.assertEqual((observed["oomKill"], observed["ownerAliveAfterOom"], observed["commandAliveAfterOom"],
+                          observed["unitActiveAfterOom"]), ("yes", "yes", "yes", "yes"))
+        self.assertEqual(self.oom("oom 1\noom_kill 0\n")["oomKill"], "no")
+        self.assertEqual(self.oom("oom_kill x\n")["oomKill"], "no")
+        self.assertEqual(self.oom(None)["oomKill"], "no")
+
+    def test_unknown_action(self):
+        with self.assertRaises(ValueError):
+            EXPERIMENT._act("reboot", None, None, {}, {}, 0)
+
+
+class UnitOwnerTests(unittest.TestCase):
+    def exit_code(self, values):
+        owner = EXPERIMENT.UnitOwner(4242, -1, None, f"rmzso-{TAG}-x.service", lambda unit, props: dict(values))
+        owner.EXIT_WAIT = 0.1
+        return owner._exit_code()
+
+    def test_exec_main_code_mapping(self):
+        # CLD_EXITED 1: the status is the exit code; CLD_KILLED 2 and CLD_DUMPED 3: the status is a signal.
+        self.assertEqual(self.exit_code({"ExecMainPID": "4242", "ExecMainCode": "1", "ExecMainStatus": "0"}), 0)
+        self.assertEqual(self.exit_code({"ExecMainPID": "4242", "ExecMainCode": "1", "ExecMainStatus": "3"}), 3)
+        self.assertEqual(self.exit_code({"ExecMainPID": "4242", "ExecMainCode": "2", "ExecMainStatus": "9"}), -9)
+        self.assertEqual(self.exit_code({"ExecMainPID": "4242", "ExecMainCode": "3", "ExecMainStatus": "6"}), -6)
+        # Another main PID, or no end recorded yet: 255 after the wait.
+        self.assertEqual(self.exit_code({"ExecMainPID": "5000", "ExecMainCode": "1", "ExecMainStatus": "0"}), 255)
+        self.assertEqual(self.exit_code({"ExecMainPID": "4242", "ExecMainCode": "0"}), 255)
+        self.assertEqual(self.exit_code({}), 255)
+
+    def test_exit_categories(self):
+        self.assertEqual([EXPERIMENT.exit_category(code) for code in (None, 0, 3, 4, -9, -15, -6, 255)],
+                         ["running", "ok", "refused", "usage", "SIGKILL", "SIGTERM", "other", "other"])
+
+    def test_close_without_stdout(self):
+        EXPERIMENT.UnitOwner(4242, -1, None, "u", lambda *args: {}).close()
+
+
+def compile_fixture(source, output, static=False):
+    compiler = shutil.which("cc")
+    if not LINUX or compiler is None:
+        raise unittest.SkipTest("needs a Linux C compiler")
+    subprocess.run([compiler, *EXPERIMENT.SO.CC_FLAGS, *(("-static",) if static else ()), "-o", str(output),
+                    str(source)], check=True, capture_output=True)
+
+
+SHIM_TARGET = r"""
+import json, os, sys
+fds = {}
+for name in os.listdir("/proc/self/fd"):
+    try:
+        fds[name] = os.readlink("/proc/self/fd/" + name)
+    except OSError:
+        pass
+environ = open("/proc/self/environ", "rb").read().decode()
+os.write(1, json.dumps({"fds": fds, "environ": environ, "argv": sys.argv[1:]}).encode())
+"""
+
+
+@unittest.skipUnless(LINUX, "needs Linux SEQPACKET sockets and close_range")
+class FdshimTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.shim = Path(cls.directory.name) / "fdshim"
+        compile_fixture(EXPERIMENT.FDSHIM, cls.shim)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def serve(self, path, message, fds):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        listener.bind(str(path))
+        listener.listen(1)
+        listener.settimeout(10)
+        hello = []
+
+        def accept():
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            with connection:
+                hello.append(connection.recv(16))
+                socket.send_fds(connection, [message], fds)
+                connection.recv(1)
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        return listener, thread, hello
+
+    def run_shim(self, arguments, pass_fds=()):
+        return subprocess.run([str(self.shim), *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, timeout=20, pass_fds=pass_fds)
+
+    def test_descriptors_land_on_1_3_4_5_with_an_empty_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            read_end, write_end = os.pipe()
+            stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            control, control_peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            log = open(directory / "restart.log", "wb")
+            extra = os.open(directory / "extra", os.O_WRONLY | os.O_CREAT, 0o600)
+            high = fcntl.fcntl(extra, fcntl.F_DUPFD, 200)
+            sent = [write_end, stream.fileno(), control.fileno(), log.fileno()]
+            expected = {str(target): os.readlink(f"/proc/self/fd/{fd}") for target, fd in zip((1, 3, 4, 5), sent)}
+            listener, thread, hello = self.serve(directory / "shim.sock", b"FDS\n", sent)
+            try:
+                result = self.run_shim([str(directory / "shim.sock"), sys.executable, "-I", "-c", SHIM_TARGET,
+                                        "argument"], pass_fds=(high,))
+                thread.join(10)
+                os.close(write_end)
+                output = b""
+                while chunk := os.read(read_end, 65536):
+                    output += chunk
+            finally:
+                listener.close()
+                for item in (stream, control, control_peer, log):
+                    item.close()
+                for fd in (read_end, extra, high):
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(hello, [b"SHIM\n"])
+            report = json.loads(output)
+            self.assertEqual(report["environ"], "")
+            self.assertEqual(report["argv"], ["argument"])
+            for target, link in expected.items():
+                self.assertEqual(report["fds"][target], link, target)
+            self.assertNotIn(str(high), report["fds"])
+            # Only 0-5 and the directory that listed them.
+            others = {name: link for name, link in report["fds"].items() if int(name) > 5}
+            self.assertTrue(all(link.endswith("/fd") for link in others.values()), others)
+
+    def test_failure_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            self.assertEqual(self.run_shim([]).returncode, 4)
+            self.assertEqual(self.run_shim(["x" * 200, "/bin/true"]).returncode, 4)
+            self.assertEqual(self.run_shim([str(directory / "missing.sock"), "/bin/true"]).returncode, 11)
+            fds = [os.open("/dev/null", os.O_RDONLY) for _ in range(4)]
+            try:
+                for name, message, sent, image, code in (
+                        ("wrong.sock", b"NOPE", fds, "/bin/true", 12),
+                        ("three.sock", b"FDS\n", fds[:3], "/bin/true", 12),
+                        ("exec.sock", b"FDS\n", fds, str(directory / "missing-image"), 14)):
+                    listener, thread, _hello = self.serve(directory / name, message, sent)
+                    try:
+                        self.assertEqual(self.run_shim([str(directory / name), image]).returncode, code, name)
+                        thread.join(10)
+                    finally:
+                        listener.close()
+            finally:
+                for fd in fds:
+                    os.close(fd)
+
+
+@unittest.skipUnless(LINUX, "needs Linux procfs")
+class CommandClassificationTests(unittest.TestCase):
+    """command2.c with fake passwd and sudo on PATH; the real sudo and passwd never run."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        root = Path(cls.directory.name)
+        compile_fixture(EXPERIMENT.COMMAND, root / "cmd-sudo")
+        for name in ("cmd-prompt", "cmd-report"):
+            shutil.copy(root / "cmd-sudo", root / name)
+        cls.root = root
+        cls.fakes = root / "fakes"
+        cls.fakes.mkdir()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def run_command(self, name, passwd="#!/bin/sh\nexit 1\n", sudo="#!/bin/sh\nexit 1\n", mode="normal",
+                    pass_fds=()):
+        (self.fakes / "passwd").write_text(passwd)
+        (self.fakes / "sudo").write_text(sudo)
+        for fake in self.fakes.iterdir():
+            fake.chmod(0o755)
+        marker = self.root / f"marker-{secrets.token_hex(4)}"
+        result = subprocess.run([str(self.root / name), mode, str(marker)], capture_output=True, timeout=20,
+                                stdin=subprocess.DEVNULL, env={"PATH": str(self.fakes)}, pass_fds=pass_fds)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(marker.read_text(), "ran\n")
+        return result.stdout
+
+    def report(self, name, **options):
+        return json.loads(self.run_command(name, **options))
+
+    def test_sudo_categories(self):
+        def says(text, code=1):
+            return f"#!/bin/sh\necho '{text}' >&2\nexit {code}\n"
+        cases = {
+            "sudo: a password is required": "password-required",
+            "sudo: The no new privileges flag is set, which prevents sudo from running as root.": "no-new-privs",
+            "sudo: effective uid is not 0, is /usr/bin/sudo on a file system with nosuid?": "not-setuid",
+            "sudo: a terminal is required to read the password": "terminal-required",
+            "sudo: no tty present and no askpass program specified": "terminal-required",
+            "operator is not in the sudoers file.": "not-permitted",
+            "sudo: an unexpected message about a tty-like terminal": "other",
+        }
+        for text, category in cases.items():
+            self.assertEqual(self.report("cmd-sudo", sudo=says(text))["sudo"], category, text)
+        self.assertEqual(self.report("cmd-sudo", sudo="#!/bin/sh\nexit 0\n")["sudo"], "allowed")
+
+    def test_stderr_after_the_helper_is_reaped_is_kept(self):
+        # The helper exits at once; a descendant writes the message later. The pipe is drained to end
+        # of file after the reap, so the message is not lost.
+        sudo = "#!/bin/sh\n( /bin/sleep 0.3; echo 'sudo: a password is required' >&2 ) &\nexit 1\n"
+        self.assertEqual(self.report("cmd-sudo", sudo=sudo)["sudo"], "password-required")
+
+    def test_passwd_needs_the_shadow_fields(self):
+        def prints(line):
+            return f'#!/bin/sh\necho "$2 {line}"\nexit 0\n'
+        self.assertEqual(self.report("cmd-sudo", passwd=prints("P 2025-01-01 0 99999 7 -1"))["passwd"], "ok")
+        self.assertEqual(self.report("cmd-sudo", passwd=prints("P"))["passwd"], "no-shadow")
+        self.assertEqual(self.report("cmd-sudo", passwd=prints("P 2025-01-01"))["passwd"], "other")
+        self.assertEqual(self.report("cmd-sudo", passwd="#!/bin/sh\necho other 1 2 3 4 5 6\nexit 0\n")["passwd"],
+                         "other")
+        self.assertEqual(self.report("cmd-sudo", passwd="#!/bin/sh\nexit 1\n")["passwd"], "failed")
+
+    def test_prompt_and_report_names(self):
+        prompt = self.report("cmd-prompt", sudo="#!/bin/sh\n[ \"$1\" = -n ] && exit 9\n"
+                                                "echo 'sudo: a terminal is required to read the password' >&2\nexit 1\n")
+        self.assertEqual((prompt["sudo"], prompt["passwd"]), ("terminal-required", "not-run"))
+        report = self.report("cmd-report")
+        self.assertEqual((report["sudo"], report["passwd"]), ("not-run", "not-run"))
+
+    def test_short_mode_reports_nothing(self):
+        self.assertEqual(self.run_command("cmd-report", mode="short"), b"")
+
+    def test_descriptors_are_listed_in_order(self):
+        low = os.open("/dev/null", os.O_RDONLY)
+        high = fcntl.fcntl(low, fcntl.F_DUPFD, 300)
+        middle = fcntl.fcntl(low, fcntl.F_DUPFD, 200)
+        try:
+            report = self.report("cmd-report", pass_fds=(high, middle))
+        finally:
+            for fd in (low, high, middle):
+                os.close(fd)
+        self.assertEqual(report["fds"], f"0 1 2 {middle} {high}")
 
 
 class DocumentTests(unittest.TestCase):

@@ -32,7 +32,9 @@ If a run is interrupted before cleanup, as Root: kill the processes in each
 The report holds booleans, closed categories, errno names, settings and hashes only.
 strictAdmission is true only when every gating case passes; the sudo password prompt is a known
 limit and does not gate it. Inside the command, passwd -S of the operator's own account is the
-decisive set-user-ID check; "sudo -n true" gets 5 s and is "inconclusive" when it does not end (sudo
+decisive set-user-ID check: shadow-utils prints the seven /etc/shadow fields only when the set-user-ID
+image started with euid 0 (it exits 0 for the caller's own account either way, and refuses another
+account, root included, by the real UID). "sudo -n true" gets 5 s and is "inconclusive" when it does not end (sudo
 can wait for a FIDO touch through PAM), which never fails a case. The authority records a dispatch
 without a command as failed with the reason notStarted. productionAdmission is always false.
 """
@@ -57,6 +59,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,7 +82,10 @@ BASE_PREFIX = "remozio-single-owner-pr2-"
 PROFILE_PREFIX = "rmzso-owner-"
 TAG_PATTERN = re.compile(r"[0-9a-f]{8}")
 ABI_LINE = "abi <abi/4.0>,"
-CGROUP_SYSTEM = Path("/sys/fs/cgroup/system.slice")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+CGROUP_SYSTEM = CGROUP_ROOT / "system.slice"
+SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)  # Linux 6.5; Python names it from 3.14 on
+UNIX_PATH_MAX = 108  # sizeof(sockaddr_un.sun_path) on Linux, the terminating zero included
 APPARMOR = Path("/sys/kernel/security/apparmor")
 TOOLS = ("systemd-run", "systemctl", "apparmor_parser", "useradd", "userdel", "groupdel", "cc")
 DEADLINE_MS = SO.DEADLINE_MS
@@ -115,9 +121,12 @@ SUDO = frozenset({"password-required", "allowed", "terminal-required", "no-new-p
 # same start. sudo can wait for a FIDO touch through PAM even with -n, so a sudo that does not end in
 # 5 s is "inconclusive": recorded, never a failure. passwd -S is the decisive check.
 SUDO_REACHED_POLICY = ("password-required", "allowed", "inconclusive")
-# passwd -S <caller> inside the command: "ok" only when the set-user-ID image started with euid 0 (no
-# no_new_privs) and needed no interaction.
-PASSWD = frozenset({"ok", "failed", "not-found", "timeout", "no-user", "other", "not-run", "not-reported"})
+# passwd -S <caller> inside the command: "ok" only with the seven /etc/shadow fields, which need the
+# set-user-ID start with euid 0 (no no_new_privs); "no-shadow" when it exited 0 with the /etc/passwd
+# fields only (no euid 0). passwd -S root is no check: shadow-utils refuses it by the real UID.
+PASSWD = frozenset({"ok", "no-shadow", "failed", "not-found", "timeout", "no-user", "other", "not-run",
+                    "not-reported"})
+PASSWD_NOT_SETUID = ("no-shadow", "failed")
 # The authority records a dispatch without a command as failed; the reason keeps the difference.
 OUTCOME_REASONS = frozenset({"none", "notStarted", "execFailed", "refused"})
 PHASES = frozenset({"queued", "presented", "authorized", "executing", "succeeded", "failed", "unknown", "declined",
@@ -129,7 +138,7 @@ OUTCOME_PHASE = {"dispatched": "succeeded", "unknown": "unknown", "execFailed": 
 KNOWN_LIMITS = ("sudo password prompt: no controlling terminal for the command (unit-sudo-prompt, "
                 "recorded, not gating)",
                 "sudo -n true may wait for a FIDO touch through PAM: after 5 s it is recorded as "
-                "inconclusive and does not gate; passwd -S is the decisive check",
+                "inconclusive and does not gate; passwd -S (the /etc/shadow fields) is the decisive check",
                 "a dispatch without a command (notStarted) is recorded as failed with the reason "
                 "notStarted; production needs a distinct outcome (design S4)")
 
@@ -166,7 +175,7 @@ CASE_KEYS = {
 }
 CONTROL_KEYS = {
     "firstHello": frozenset({"OK", "REFUSED", "error"}), "firstPermit": YES_NO,
-    "replaySubmit": frozenset({"REFUSED", "PERMIT", "error"}), "replayLedger": frozenset({"refused", "accepted", NA}),
+    "replaySubmit": frozenset({"REFUSED", "PERMIT", "error"}), "replayLedger": frozenset({"refused", "accepted", "error", NA}),
     "firstOutcome": frozenset({"OK", "REFUSED", "error"}),
     "firstOutcomePhase": PHASES | {"missing"}, "firstOutcomeReason": OUTCOME_REASONS | {"missing"},
     "replayOutcome": frozenset({"OK", "REFUSED", "error"}),
@@ -194,7 +203,8 @@ DISPATCHED = {"admitted": "yes", "permit": "yes", "finalCheck": "yes", "kSetup":
               "killedAtDeadline": "no", "reported": "yes", "restartLogComplete": "yes", "authorityPermit": "yes",
               "authorityPhaseAfterPermit": "executing", "authorityOutcome": "dispatched",
               "authorityOutcomeReason": "none", "authorityPhase": "succeeded", "frontendExit": "closed"}
-COMMAND_OK = {"capsEmpty": "yes", "noNewPrivs": "0", "hostMountNamespace": "yes", "commandFds": "exact"}
+COMMAND_OK = {"capsEmpty": "yes", "boundingFull": "yes", "noNewPrivs": "0", "hostMountNamespace": "yes",
+              "commandFds": "exact"}
 # O dies before it prints its dispatch line: the permit is seen at the authority only.
 KILLED_BEFORE_GO = {"authorityPermit": "yes",
                     "authorityPhaseAfterPermit": "executing", "authorityOutcome": "missing",
@@ -215,14 +225,14 @@ CASES = {
     "unit-report": _case(case={**STARTED, "ownerExit": "ok", "unitReadback": "yes", "ownerLimitsMax": "yes",
                                "markerLines": "1", "restartLogClean": "yes"},
                          dispatches=[{**DISPATCHED, **COMMAND_OK, "commandLabel": "unconfined"}]),
-    # The two negative controls: each proves that the check above can fail.
+    # The two negative controls: each proves that the check above can fail. Under NoNewPrivileges=yes
+    # the decisive passwd -S check must not pass; sudo's wording is recorded, never gated.
     "unit-nnp-control": _case("cmd-sudo", extra=("nnp",),
                               case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
-                              dispatches=[{**DISPATCHED, "noNewPrivs": "1", "passwd": "failed",
-                                           "sudo": ("no-new-privs", "not-setuid", "inconclusive")}]),
+                              dispatches=[{**DISPATCHED, "noNewPrivs": "1", "passwd": PASSWD_NOT_SETUID}]),
     "unit-privatetmp-control": _case(extra=("privatetmp",), case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
                                      dispatches=[{**DISPATCHED, "hostMountNamespace": "no"}]),
-    # passwd -S <caller> inside the command succeeds (set-user-ID start with euid 0, NoNewPrivs 0);
+    # passwd -S <caller> inside the command reads /etc/shadow (set-user-ID start with euid 0, NoNewPrivs 0);
     # sudo -n true is recorded, and an inconclusive sudo does not fail the case.
     "unit-sudo": _case("cmd-sudo", case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
                        dispatches=[{**DISPATCHED, **COMMAND_OK, "passwd": "ok", "sudo": SUDO_REACHED_POLICY}]),
@@ -230,7 +240,8 @@ CASES = {
     "unit-sudo-prompt": _case("cmd-prompt", case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
                               dispatches=[{**DISPATCHED, "sudo": ("terminal-required", "inconclusive", "other",
                                                                   "password-required")}], gating=False),
-    # O under its AppArmor profile; the command leaves it through the ux rule, and passwd -S works inside.
+    # O under its AppArmor profile; the command leaves it through the ux rule, and passwd -S reads
+    # /etc/shadow inside it.
     "unit-apparmor": _case("cmd-sudo", extra=("apparmor",),
                            case={**STARTED, "ownerExit": "ok", "ownerLabel": "profile", "markerLines": "1"},
                            dispatches=[{**DISPATCHED, **COMMAND_OK, "commandLabel": "unconfined",
@@ -290,8 +301,11 @@ def render_profile(template, tag, base):
     name = PROFILE_PREFIX + tag
     if abi != ABI_LINE or set(blocks) != {name}:
         raise ValueError("unexpected profile")
-    if f"  {base}/run/cmd-* ux," not in blocks[name].splitlines():
+    lines = blocks[name].splitlines()
+    if f"  {base}/run/cmd-* ux," not in lines:
         raise ValueError("missing ux rule")
+    if f"  {base}/run/cmd-* r," not in lines:
+        raise ValueError("missing getattr rule for the command images")
     return name, f"{abi}\n\n{blocks[name]}\n"
 
 
@@ -438,7 +452,7 @@ AUTHORITY_EVENTS = {
     "submit": {"result": frozenset({"permit", "refused", "replay-refused"}),
                "reason": frozenset({"no-generation", "malformed", "generation-lost", "no-more-requests", "declined",
                                     "store"}),
-               "ledger": frozenset({"refused", "accepted"}), "phase": PHASES},
+               "ledger": frozenset({"refused", "accepted", "error"}), "phase": PHASES},
     "outcome": {"result": frozenset({"recorded", "refused", "generation-refused", "replay-refused",
                                      "store-refused"}),
                 "reported": SO.RESULTS, "reason": OUTCOME_REASONS, "requesterLost": YES_NO, "phase": PHASES},
@@ -483,7 +497,8 @@ def authority_summary(events, dispatches):
 
 
 def restart_log_clean_all(raw, dispatches):
-    """PR1's check for each dispatch's lines of the shared log."""
+    """PR1's check for each dispatch's lines of the shared log. Every dispatch must have lines: a
+    log that is missing a dispatch is not clean."""
     if not raw:
         return NA
     by_dispatch = {}
@@ -492,6 +507,8 @@ def restart_log_clean_all(raw, dispatches):
         if not match or not 1 <= int(match[2]) <= dispatches:
             return "no"
         by_dispatch.setdefault(int(match[2]), []).append(f"{match[1]} 1 {match[3]}")
+    if set(by_dispatch) != set(range(1, dispatches + 1)):
+        return "no"
     return "yes" if all(SO.restart_log_clean(("\n".join(lines) + "\n").encode()) == "yes"
                         for lines in by_dispatch.values()) else "no"
 
@@ -752,6 +769,16 @@ def bind_listener(path, gid=None):
     return SO.Host._bind(socket.SOCK_SEQPACKET, path, gid)
 
 
+def selftest_socket_dir():
+    """A short private directory for the self-test's sockets. A Unix socket path must fit in
+    sun_path (108 bytes), and a build directory inside a checkout is often longer."""
+    directory = Path(tempfile.mkdtemp(prefix="rmzso-", dir="/tmp"))
+    if len(str(directory / "a.sock").encode()) >= UNIX_PATH_MAX:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise RuntimeError("socket directory path too long")
+    return directory
+
+
 def authority_selftest(work_dir, binary=None, timeout=20):
     """The authority control cases as the current user, without Root. Returns the case result."""
     if os.geteuid() == 0:
@@ -760,17 +787,18 @@ def authority_selftest(work_dir, binary=None, timeout=20):
     binary = Path(binary) if binary else build_authority(work_dir)
     root = work_dir / f"selftest-{secrets.token_hex(4)}"
     root.mkdir(mode=0o700, parents=True)
+    sockets = selftest_socket_dir()
     uid, gid = os.getuid(), os.getgid()
     groups = sorted(set(os.getgroups()) | {gid})[:64]
     processes, listeners = [], []
     try:
         for name, owner_uid in (("a", uid), ("b", uid + 1 if uid + 1 < 2**32 - 1 else uid - 1)):
             (root / f"store-{name}").mkdir(mode=0o700)
-            listener = bind_listener(root / f"{name}.sock")
+            listener = bind_listener(sockets / f"{name}.sock")
             listeners.append(listener)
             processes.append(AuthorityProcess(binary, listener, root / f"store-{name}", owner_uid, binary, binary,
                                               root / "marker", (uid, gid, groups), ("normal", "normal")))
-        first, later, wrong, _operator = run_controls(root / "a.sock", {}, {}, wrong_socket=root / "b.sock",
+        first, later, wrong, _operator = run_controls(sockets / "a.sock", {}, {}, wrong_socket=sockets / "b.sock",
                                                       timeout=timeout)
         events = authority_events(processes[0].stop()) + authority_events(processes[1].stop())
         observed = control_observations(first, later, wrong, events)
@@ -783,6 +811,7 @@ def authority_selftest(work_dir, binary=None, timeout=20):
             process.kill()
         for listener in listeners:
             listener.close()
+        shutil.rmtree(sockets, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -816,6 +845,8 @@ def _label(pid, tag):
 class UnitOwner:
     """O as the main process of a transient unit; a pidfd stands in for Popen."""
 
+    EXIT_WAIT = 2  # seconds for systemd to record the main process's end
+
     def __init__(self, pid, pidfd, stdout, unit, show):
         self.pid, self.pidfd, self.stdout, self.unit = pid, pidfd, stdout, unit
         self._show = show
@@ -840,7 +871,7 @@ class UnitOwner:
 
     def _exit_code(self):
         # systemd records the main process's end a moment after the pidfd turns readable.
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + self.EXIT_WAIT
         while True:
             values = self._show(self.unit, ("ExecMainCode", "ExecMainStatus", "ExecMainPID"))
             if values.get("ExecMainPID") == str(self.pid) and values.get("ExecMainCode") in ("1", "2", "3"):
@@ -853,8 +884,9 @@ class UnitOwner:
     def close(self):
         with contextlib.suppress(OSError):
             os.close(self.pidfd)
-        with contextlib.suppress(OSError):
-            self.stdout.close()
+        if self.stdout is not None:
+            with contextlib.suppress(OSError):
+                self.stdout.close()
 
 
 def exit_category(returncode):
@@ -881,6 +913,10 @@ class Run:
     # Setup ---------------------------------------------------------------------------------
 
     def setup(self):
+        # retire_unit reads the unit's cgroup under the unified (v2) hierarchy; without it, a missing
+        # cgroup.procs would look like an empty cgroup.
+        if not cgroup_v2_ready():
+            raise RuntimeError("cgroup v2 unified hierarchy unavailable")
         self.groups = os.getgrouplist(self.operator.pw_name, self.operator.pw_gid)
         if len(self.groups) > SO.MAX_GROUPS:
             raise RuntimeError("too many operator groups")
@@ -930,6 +966,8 @@ class Run:
         apparmor = self._load_profile()
         operator_groups = set(self.groups)
         return {"serviceIdentitiesUnprivileged": True,
+                # passwd -S proves euid 0 by reading /etc/shadow; the shadow group could read it without.
+                "operatorOutsideShadowGroup": shadow_gid() not in operator_groups,
                 "serviceOutsideOperatorGroups": self.owner_gid not in operator_groups
                 and self.authority_gid not in operator_groups,
                 "operatorUnprivileged": self.operator.pw_uid != 0 and 0 not in operator_groups,
@@ -1002,7 +1040,7 @@ class Run:
             connection, _ = rendezvous.accept()
             connection.settimeout(self.timeout)
             with connection:
-                pidfd = connection.getsockopt(socket.SOL_SOCKET, 77)
+                pidfd = connection.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD)
                 credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
                 pid, uid, _gid = (int.from_bytes(credentials[i:i + 4], sys.byteorder) for i in (0, 4, 8))
                 if uid != self.owner_uid or SO._pidfd_pid(pidfd) != pid or connection.recv(16) != b"SHIM\n":
@@ -1013,27 +1051,45 @@ class Run:
             rendezvous.close()
         return UnitOwner(pid, pidfd, None, unit, self.show)
 
+    RETIRE_SECONDS = 3
+
+    @staticmethod
+    def cgroup_pids(unit):
+        """The PIDs in the unit's cgroup: [] once the cgroup is gone, None when it cannot be read."""
+        try:
+            return [int(item) for item in SO.read_bounded(CGROUP_SYSTEM / unit / "cgroup.procs", 65536).split()]
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError):
+            return None
+
     def retire_unit(self, unit):
         """Every process of the unit's cgroup is killed (KillMode=process leaves commands there), then
-        the unit is stopped and its failed state reset. True once the unit is gone."""
-        procs = CGROUP_SYSTEM / unit / "cgroup.procs"
-        deadline = time.monotonic() + 3
+        the unit is stopped and its failed state reset. True only on positive evidence that the unit is
+        gone: a successful systemctl show reports LoadState=not-found and the cgroup holds no process.
+        A read error, a failed show or a surviving process counts as not removed. The exit codes of
+        stop and reset-failed do not decide: both fail for a unit that systemd already unloaded."""
+        deadline = time.monotonic() + self.RETIRE_SECONDS
         while True:
-            try:
-                pids = [int(item) for item in SO.read_bounded(procs, 65536).split()]
-            except FileNotFoundError:
-                pids = []
-            except (OSError, ValueError):
-                pids = []
-            for pid in pids:
+            pids = self.cgroup_pids(unit)
+            if pids == []:
+                break
+            for pid in pids or ():
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGKILL)
-            if not pids or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 break
             time.sleep(0.02)
         self.systemctl("stop", unit)
         self.systemctl("reset-failed", unit)
-        return self.show(unit, ("LoadState",)).get("LoadState") in ("not-found", None)
+        # systemd unloads a stopped transient unit from its garbage-collection queue, a moment later.
+        deadline = time.monotonic() + self.RETIRE_SECONDS
+        while True:
+            if self.show(unit, ("LoadState",)).get("LoadState") == "not-found" and self.cgroup_pids(unit) == []:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
 
     def start_frontend(self, socket_path):
         """C as the operator; three distinct pipes, so every stream has its own identity."""
@@ -1114,6 +1170,20 @@ class Run:
                        for n in (self.owner_name, self.authority_name))
         return {"unitsRemoved": units, "profileRemoved": profile, "filesRemoved": not self.base.exists(),
                 "serviceUsersRemoved": accounts, "serviceProcessesGone": gone}
+
+
+def shadow_gid():
+    """The gid of the shadow group, or None where it does not exist."""
+    try:
+        return grp.getgrnam("shadow").gr_gid
+    except KeyError:
+        return None
+
+
+def cgroup_v2_ready(root=None):
+    """The unified hierarchy is mounted (cgroup.controllers exists at its root) with a system.slice."""
+    root = Path(root) if root is not None else CGROUP_ROOT
+    return (root / "cgroup.controllers").is_file() and (root / "system.slice").is_dir()
 
 
 def _step(action, *arguments):

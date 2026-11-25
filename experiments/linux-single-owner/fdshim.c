@@ -36,11 +36,15 @@ int main(int argc, char **argv) {
     if (send(fd, hello, sizeof hello - 1, MSG_NOSIGNAL) != (ssize_t)(sizeof hello - 1)) return 11;
 
     char text[8] = {0};
-    char control[CMSG_SPACE(RECEIVED * sizeof(int))];
-    memset(control, 0, sizeof control);
+    /* The union aligns the buffer for struct cmsghdr, as cmsg(3) asks. */
+    union {
+        char buffer[CMSG_SPACE(RECEIVED * sizeof(int))];
+        struct cmsghdr align;
+    } control;
+    memset(&control, 0, sizeof control);
     struct iovec iov = {text, sizeof text - 1};
-    struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control,
-                             .msg_controllen = sizeof control};
+    struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buffer,
+                             .msg_controllen = sizeof control.buffer};
     ssize_t got = recvmsg(fd, &message, MSG_CMSG_CLOEXEC);
     struct cmsghdr *header = got > 0 ? CMSG_FIRSTHDR(&message) : NULL;
     if (got != 4 || memcmp(text, "FDS\n", 4) || (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) || !header ||
