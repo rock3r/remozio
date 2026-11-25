@@ -271,16 +271,25 @@ byte-identical, and it uses `owner.c` and `frontend.c` without a change.
   PID is the unit's `MainPID`.
 - `command2.c` is the command. It writes one marker line and reports its
   capability sets, `NoNewPrivs:`, its mount namespace, its AppArmor label and its
-  descriptors. Under the name `cmd-sudo` it runs `passwd -S` of the caller's own
-  account (read from `/etc/passwd` by UID) and then `sudo -n true`, under
+  descriptors (sorted by number). Under the name `cmd-sudo` it runs `passwd -S`
+  of the caller's own account (read from `/etc/passwd` by UID) and then
+  `sudo -n true`, under
   `cmd-prompt` it runs `sudo true`, and under `cmd-hog` it allocates memory until the kernel
   kills it (in `sleep` mode it sleeps). Each helper gets 5 s. A `sudo` that does
   not end in that time is `inconclusive`; a `passwd` that does not end is
-  `timeout`. The runner publishes closed categories only.
+  `timeout`. `passwd -S` is `ok` only when it prints the seven `/etc/shadow`
+  fields, and `no-shadow` when it exits 0 with the two `/etc/passwd` fields:
+  shadow-utils exits 0 for the caller's own account either way, and reads
+  `/etc/shadow` only with effective UID 0. The runner publishes closed
+  categories only.
 - `apparmor.in` is the profile of O, rendered with the run's tag and directory and
   loaded with `apparmor_parser -a -K` (kernel only). It allows ptrace of the
-  unconfined frontend and runs the commands with `ux`. Every image is static, so
-  the profile has no loader rule. The runner removes the profile by name.
+  unconfined frontend and runs the commands with `ux`, with `r` on the command
+  images for O's `stat` of `/proc/<K>/exe` (`ux` grants no `getattr`). The shim
+  needs only `mr`: `AppArmorProfile=` makes systemd change the profile on exec,
+  and the kernel checks that exec against systemd's own label. Every image is
+  static, so the profile has no loader rule. The runner removes the profile by
+  name.
 
 ### PR2 run
 
@@ -307,12 +316,12 @@ without Root. `scripts/check-linux-host.sh` runs it in CI, after the Swift build
 
 | Case | Expected result |
 | --- | --- |
-| `unit-report` | Dispatched; inside the command `CapPrm`, `CapEff`, `CapInh` and `CapAmb` are empty, `NoNewPrivs:` is 0, the mount namespace is PID 1's, the label is `unconfined` and the command holds only 0, 1 and 2. `systemctl show` reports the unit options, and O's limits in `/proc` are at the maximum |
-| `unit-nnp-control` | Negative control with `NoNewPrivileges=yes`: `NoNewPrivs:` is 1 and `passwd -S` fails, because the set-user-ID image does not get effective UID 0. `sudo -n true` fails because of it (or is `inconclusive`) |
+| `unit-report` | Dispatched; inside the command `CapPrm`, `CapEff`, `CapInh` and `CapAmb` are empty, `CapBnd` is the full system set, `NoNewPrivs:` is 0, the mount namespace is PID 1's, the label is `unconfined` and the command holds only 0, 1 and 2. `systemctl show` reports the unit options, and O's limits in `/proc` are at the maximum |
+| `unit-nnp-control` | Negative control with `NoNewPrivileges=yes`: `NoNewPrivs:` is 1 and `passwd -S` does not print the `/etc/shadow` fields (`no-shadow` or `failed`), because the set-user-ID image does not get effective UID 0. The `sudo -n true` result is recorded; its wording does not decide the case |
 | `unit-privatetmp-control` | Negative control with `PrivateTmp=yes`: the command's mount namespace is not the host's |
-| `unit-sudo` | Inside the command, `NoNewPrivs:` is 0 and `passwd -S <caller>` succeeds: the decisive check that a set-user-ID image starts with effective UID 0 and needs no interaction. `sudo -n true` ends with "a password is required", succeeds (an operator rule without a password), or is `inconclusive` after 5 s (PAM can wait for a FIDO touch even with `-n`); `inconclusive` does not fail the case |
+| `unit-sudo` | Inside the command, `NoNewPrivs:` is 0 and `passwd -S <caller>` prints the seven `/etc/shadow` fields: the decisive check that a set-user-ID image starts with effective UID 0 and needs no interaction. `sudo -n true` ends with "a password is required", succeeds (an operator rule without a password), or is `inconclusive` after 5 s (PAM can wait for a FIDO touch even with `-n`); `inconclusive` does not fail the case |
 | `unit-sudo-prompt` | `sudo true` (a password prompt) without a controlling terminal. A known limit: recorded, does not gate `strictAdmission` |
-| `unit-apparmor` | O runs under `rmzso-owner-<tag>`; the command is `unconfined` through `ux`; `NoNewPrivs:` is 0 and `passwd -S <caller>` succeeds; `sudo -n true` as in `unit-sudo` |
+| `unit-apparmor` | O runs under `rmzso-owner-<tag>`; the command is `unconfined` through `ux`; `NoNewPrivs:` is 0 and `passwd -S <caller>` prints the `/etc/shadow` fields; `sudo -n true` as in `unit-sudo` |
 | `second-dispatch-fds` | A second dispatch while the first command runs after S6. At the second `k-ready`, K2 holds exactly 0 to 4, its 0 to 2 are C2's streams, its pipe ends are O's other ends; O holds nothing of the first dispatch and the same number of descriptors; the first command holds only its own streams |
 | `unit-stop` | `systemctl stop` with `KillMode=process` ends O; the command keeps running. O's end is read from its pidfd, because systemd can unload a stopped transient unit with its exit status |
 | `unit-restart` | `systemctl restart` ends O and starts a new main process; the command keeps running |
@@ -334,7 +343,9 @@ case except `unit-sudo-prompt` passes, with setup and cleanup complete.
 - The `sudo` password prompt without a controlling terminal (a known limit; the
   design leaves the terminal relay to a decision).
 - The full Root capability sets of a set-user-ID child. `passwd -S` proves only
-  that such a child starts with effective UID 0, without `no_new_privs`.
+  that such a child starts with effective UID 0, without `no_new_privs`. An
+  operator account in the `shadow` group could read `/etc/shadow` without it, so
+  setup requires an operator outside that group (`operatorOutsideShadowGroup`).
 - A dispatch that ends without a command is recorded as `failed`, with the reason
   `notStarted` kept. A distinct outcome is a production requirement (design S4).
 - Two preparations at the same time. O is single-threaded and the case measures a

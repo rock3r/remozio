@@ -389,10 +389,14 @@ each case.
   that must change the result, and the unit's settings and O's limits read back.
 - The command's capability sets under the unit.
 - `passwd -S` of the caller's own account inside the command, and `NoNewPrivs:` 0
-  from the command's `/proc/self/status`. `passwd -S` succeeds only when the
-  set-user-ID image starts with effective UID 0 (so without `no_new_privs`) and asks
-  for nothing, so it is the decisive set-user-ID check. Expected: it succeeds. The
-  `NoNewPrivileges=yes` control expects it to fail.
+  from the command's `/proc/self/status`. shadow-utils exits 0 for the caller's
+  own account with or without effective UID 0, so the exit code proves nothing.
+  It prints the seven `/etc/shadow` fields only when it can read `/etc/shadow`,
+  which needs the set-user-ID start with effective UID 0 (so without
+  `no_new_privs`). The seven fields are the decisive set-user-ID check. Expected:
+  seven fields. The `NoNewPrivileges=yes` control expects the two `/etc/passwd`
+  fields or a failure. `passwd -S root` is no check: shadow-utils refuses another
+  account by the real UID, with or without effective UID 0.
 - `sudo -n true` inside the command, with a 5 s limit: "a password is required" or
   "allowed" shows that `sudo` reached its policy. On a host where `sudo` waits for
   a FIDO touch through PAM, `-n` does not stop the wait, so a `sudo` that does not
@@ -400,7 +404,9 @@ each case.
   child's full Root sets stay not verified.
 - `sudo true` with a password prompt: recorded as a known limit, not gating.
 - AppArmor: O under its profile, the command `unconfined` through `ux`, and
-  `passwd -S` and `sudo -n` inside it.
+  `passwd -S` and `sudo -n` inside it. The profile also gives `r` on the command
+  images: `ux` grants no `getattr`, and O's `stat` of `/proc/<K>/exe` resolves to
+  the command image once K has executed it.
 - A second dispatch while the first command runs after S6, with the descriptor
   checks of [Pipes](#pipes). Two preparations at the same time stay not verified.
 - `systemctl stop` and `systemctl restart` with `KillMode=process`, and a real
@@ -414,10 +420,10 @@ The report sets `strictAdmission` to true only when every case except the `sudo`
 password prompt passes. `productionAdmission` stays false.
 
 O's restart log is the evidence that C never left its stop between S0 and the go
-byte: the check requires no restart call for C in that interval. A `/proc` sample
-cannot prove "never". The tracer PID, when the experiment reads it as a second
-check, comes from `TracerPid:` in `/proc/<pid>/status`. The report sets
-`strictAdmission` to true only when every case passes.
+byte: the check requires no restart call for C in that interval, and a log that
+is missing a dispatch is not clean. A `/proc` sample cannot prove "never". The
+tracer PID, when the experiment reads it as a second check, comes from
+`TracerPid:` in `/proc/<pid>/status`.
 
 ## Not verified
 
@@ -437,7 +443,8 @@ Not verified by PR2 either:
 - `sudo` with a password prompt, and the controlling terminal: a known limit (see
   [Gate](#gate)).
 - `sudo -n true` on a host where PAM waits for a FIDO touch: the result is
-  `inconclusive`. `passwd -S` gives the set-user-ID result instead.
+  `inconclusive`. The `/etc/shadow` fields of `passwd -S` give the set-user-ID
+  result instead.
 - The full Root capability sets of a `sudo` child of the command.
 - Two dispatches prepared at the same time: O is single-threaded, and PR2 measures
   a second dispatch while the first command runs after S6.
@@ -452,7 +459,9 @@ Not verified by PR2 either:
 Also not verified, in either pull request:
 
 - Every result comes from one host and one kernel until a second host repeats it.
-- The `ux` rule in the AppArmor profile and the stacked label under systemd.
+- An AppArmor profile installed under `/etc/apparmor.d` and loaded at boot: PR2
+  loads its profile into the kernel only, for one run, and attaches it with
+  `AppArmorProfile=` on a transient unit.
 - An installed systemd unit, the installer setting and upgrade from an older unit.
 - `KillMode=process` and `OOMPolicy=continue` with real commands that run for a
   long time, and the left-over process warnings on restart.
