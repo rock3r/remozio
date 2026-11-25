@@ -16,6 +16,8 @@ From the time Darwin unlocks the slave, an unrelated process with access through
 
 With the proposed `0600` mode, the target UID gets read/write access when ownership transfers. Other processes under the same UID share that permission from then on, including before release. An independent UID gets no access through the mode bits. Changing mode controls future opens. Existing descriptors keep their access. The master stays inside the controller.
 
+Mode `0600` is stricter than the usual login terminal mode `0620`. It intentionally prevents group-based message delivery from `write` and `wall` to the private terminal.
+
 ## Proposed change
 
 1. Pass `capture.target.uid` and its primary `gid` from the checked command capture into private PTY preparation. These are the same values the private launch frame supplies to the launcher. Keep the current account and release checks. [Target recheck](../macos/core/Sources/RemozioCore/CommandExecution.swift#L69-L84) · [Launch frame](../macos/core/Sources/RemozioCore/CommandChildLaunchSpecification.swift#L69-L78)
@@ -35,3 +37,5 @@ Allocation under the target account would require a separate credential-bound he
 | Pipe mode and caller terminal | Pipe mode allocates no PTY. In PTY mode the caller terminal supplies geometry and attributes while its metadata stays the same. |
 
 Extend the [PTY tests](../macos/core/Tests/RemozioCoreTests/CommandPTYTests.swift#L30-L49) and [native process tests](../macos/core/Tests/RemozioCoreTests/CommandProcessTests.swift#L288-L386). Run fault and lifecycle checks with ordinary fixtures. Verify the actual UID and GID transfer and the Root baseline in attended macOS fixtures with the required privileges. This review branch records source findings and proposed checks. Runtime validation is pending.
+
+The existing [privileged credential job](../.github/workflows/command-filesystem-credentials.yml) can reuse its built XCTest bundle for one PTY test. The test needs no additional compilation or device. The [last successful job](https://github.com/rock3r/remozio/actions/runs/45347402661/job/138285199053) spent 17 minutes and 35 seconds building the bundle and three seconds in the privileged test step. Verify the additional selector on the existing runner after [#990](https://github.com/rock3r/remozio/pull/990) lands. Keep the job’s existing trust conditions. If the job cannot cover this case within its budget, record it as an attended fixture in the PR.
