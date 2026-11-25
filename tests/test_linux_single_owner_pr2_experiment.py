@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+import unittest.mock
 from unittest.mock import patch
 
 
@@ -414,11 +415,33 @@ class EvaluateTests(unittest.TestCase):
         observed = EXPERIMENT.control_observations(first, {"earlierGenerationHello": "REFUSED",
                                                            "earlierGenerationOutcome": "REFUSED"},
                                                    {"wrongPeer": "REFUSED"}, events)
-        self.assertEqual(observed["replayLedger"], "error")
-        observed.update(firstOutcomePhase="failed", firstOutcomeReason="notStarted",
-                        earlierGenerationEvent="generation-refused", wrongPeerEvent="wrong-peer")
-        result = EXPERIMENT.evaluate("authority-controls", observed)
+        self.assertEqual((observed["replayLedger"], observed["replayBinding"]), ("error", EXPERIMENT.NA))
+        expect = EXPERIMENT.CONTROL_EXPECT
+        observed.update({key: expect[key] for key in expect if key not in ("replayLedger",)})
+        result = EXPERIMENT.evaluate("authority-controls", {**observed, "operatorConnect": EXPERIMENT.NA})
         self.assertEqual(result["mismatches"], ["replayLedger"])
+
+    def test_each_refusal_must_carry_the_reason_its_control_tests(self):
+        # The refusal alone is no evidence: a stale HELLO refused on the PID, an earlier permit refused as
+        # another HELLO of the same process, or a replay that the store accepts fails its control.
+        events = EXPERIMENT.authority_events(
+            b'{"event":"submit","phase":"executing","result":"permit"}\n'
+            b'{"event":"submit","binding":"accepted","ledger":"refused","phase":"executing",'
+            b'"result":"replay-refused"}\n'
+            b'{"event":"hello","reason":"pid-mismatch","result":"refused"}\n'
+            b'{"event":"outcome","reason":"other-hello","result":"generation-refused"}\n'
+            b'{"event":"hello","reason":"pid-mismatch","result":"refused"}\n'
+            b'{"event":"submit","reason":"no-generation","result":"refused"}\n')
+        first = {"firstHello": "OK", "firstPermit": "yes", "replaySubmit": "REFUSED", "firstOutcome": "OK",
+                 "replayOutcome": "REFUSED"}
+        later = {"earlierGenerationHello": "REFUSED", "earlierGenerationOutcome": "REFUSED",
+                 "staleGenerationHello": "REFUSED"}
+        zombie = {"zombieHello": "OK", "zombieSubmit": "REFUSED"}
+        observed = EXPERIMENT.control_observations(first, later, {"wrongPeer": "REFUSED"}, events, zombie=zombie)
+        observed.update(firstOutcomePhase="failed", firstOutcomeReason="notStarted", wrongPeerEvent="wrong-peer")
+        result = EXPERIMENT.evaluate("authority-controls", observed)
+        self.assertEqual(sorted(result["mismatches"]),
+                         ["earlierGenerationEvent", "replayBinding", "staleGenerationReason", "zombieEvent"])
 
     def test_controls_case(self):
         observed = {**EXPERIMENT.CONTROL_EXPECT, "operatorConnect": EXPERIMENT.NA}
@@ -464,6 +487,14 @@ class FakeAuthority:
         text = Path(f"/proc/{pid}/stat").read_text()
         return int(text[text.rindex(")") + 2:].split()[19])
 
+    @staticmethod
+    def live(pid):
+        try:
+            text = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return False
+        return text[text.rindex(")") + 2] not in "ZX"
+
     def serve(self):
         while True:
             try:
@@ -486,11 +517,18 @@ class FakeAuthority:
                 if uid != self.owner_uid:
                     self.events.append({"event": "message", "result": "wrong-peer"})
                 elif words[0] == "HELLO" and generation is None:
-                    if int(words[2]) == pid and int(words[3]) == self.start_time(pid):
+                    if int(words[2]) != pid:
+                        self.events.append({"event": "hello", "result": "refused", "reason": "pid-mismatch"})
+                    elif int(words[3]) != self.start_time(pid):
+                        self.events.append({"event": "hello", "result": "refused", "reason": "stale-generation"})
+                    else:
                         generation, reply = tuple(words[1:4]), "OK"
                 elif words[0] == "SUBMIT" and generation:
-                    if words[1] in self.nonces:
-                        self.events.append({"event": "submit", "result": "replay-refused", "ledger": "refused"})
+                    if not self.live(pid):
+                        self.events.append({"event": "submit", "result": "refused", "reason": "generation-lost"})
+                    elif words[1] in self.nonces:
+                        self.events.append({"event": "submit", "result": "replay-refused", "ledger": "refused",
+                                            "binding": "reserved"})
                     else:
                         self.nonces.add(words[1])
                         token = secrets.token_hex(16)
@@ -499,7 +537,8 @@ class FakeAuthority:
                 elif words[0] == "OUTCOME" and generation and words[1] in self.permits:
                     permit = self.permits[words[1]]
                     if permit[0] != generation:
-                        self.events.append({"event": "outcome", "result": "generation-refused"})
+                        self.events.append({"event": "outcome", "result": "generation-refused",
+                                            "reason": "earlier-generation"})
                     elif not permit[1]:
                         permit[1], reply = True, "OK"
                         reason = "none" if words[2] in ("dispatched", "unknown") else words[2]
@@ -519,12 +558,13 @@ class ClientTests(unittest.TestCase):
             good, wrong = FakeAuthority(Path(directory) / "a.sock", os.getuid()), \
                 FakeAuthority(Path(directory) / "b.sock", os.getuid() + 1)
             try:
-                first, later, wrong_reply, operator = EXPERIMENT.run_controls(
+                first, later, wrong_reply, zombie, operator = EXPERIMENT.run_controls(
                     Path(directory) / "a.sock", {}, {}, wrong_socket=Path(directory) / "b.sock")
             finally:
                 good.close()
                 wrong.close()
-            observed = EXPERIMENT.control_observations(first, later, wrong_reply, good.events + wrong.events)
+            observed = EXPERIMENT.control_observations(first, later, wrong_reply, good.events + wrong.events,
+                                                       zombie=zombie)
             result = EXPERIMENT.evaluate("authority-controls", observed)
             self.assertTrue(result["passed"], result)
             self.assertEqual(operator, EXPERIMENT.NA)
@@ -623,60 +663,64 @@ class CleanupTests(unittest.TestCase):
     def test_every_cleanup_step_runs_when_an_earlier_one_fails(self):
         run = self.make_run()
         run.units = [f"rmzso-{run.tag}-a.service", f"rmzso-{run.tag}-b.service"]
-        run.owner_created = run.authority_created = True
+        run.ids_picked, run.owner_uid, run.owner_gid, run.authority_uid = True, 0x70000001, 0x70000001, 0x70000002
         calls = []
 
         def retire(unit):
             calls.append(("retire", unit))
             raise RuntimeError("systemctl failed")
 
-        with patch.object(run, "retire_unit", side_effect=retire), \
-                patch.object(run, "_remove_profile", side_effect=lambda: calls.append(("profile",)) or True), \
-                patch.object(EXPERIMENT.SO, "_kill_user",
-                             side_effect=lambda uid: calls.append(("kill", uid)) or True), \
-                patch.object(EXPERIMENT.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=4242)), \
-                patch.object(EXPERIMENT.PL, "_absent", return_value=False), \
-                patch.object(EXPERIMENT.PL, "run_owned", side_effect=lambda args, timeout: calls.append(
-                    ("tool", args[0].rsplit("/", 1)[-1])) or (0, b"")):
-            result = run.cleanup()
+        with tempfile.TemporaryDirectory() as directory:
+            records = [Path(directory) / name for name in ("a.user", "1.user")]
+            for path in records:
+                path.write_text("{}")
+            run.userdb_files = list(records)
+            with patch.object(run, "retire_unit", side_effect=retire), \
+                    patch.object(run, "_remove_profile", side_effect=lambda: calls.append(("profile",)) or True), \
+                    patch.object(EXPERIMENT, "kill_id", side_effect=lambda number: calls.append(("kill", number))
+                                 or True), \
+                    patch.object(EXPERIMENT.PL, "_absent", return_value=True):
+                result = run.cleanup()
+            self.assertFalse(any(path.exists() for path in records))
         self.assertEqual([call[0] for call in calls[:3]], ["retire", "retire", "profile"])
-        self.assertEqual([call for call in calls if call[0] == "kill"], [("kill", 4242), ("kill", 4242)])
-        self.assertIn(("tool", "userdel"), calls)
-        self.assertIn(("tool", "groupdel"), calls)
+        self.assertEqual([call for call in calls if call[0] == "kill"], [("kill", 0x70000001), ("kill", 0x70000002)])
         self.assertFalse(result["unitsRemoved"])
+        self.assertTrue(result["identityRecordsRemoved"])
+        self.assertNotIn("userdel", SCRIPT.read_text())
+        self.assertNotIn("useradd", SCRIPT.read_text())
 
-    def test_a_shared_uid_is_never_killed(self):
+    def test_ids_never_picked_are_never_killed(self):
         run = self.make_run()
-        run.owner_created = run.authority_created = True
-        run.uid_shared = True
-        with patch.object(EXPERIMENT.SO, "_kill_user") as kill, \
-                patch.object(EXPERIMENT.PL, "_absent", return_value=True):
+        with patch.object(EXPERIMENT, "kill_id") as kill:
             result = run.cleanup()
         kill.assert_not_called()
-        self.assertFalse(result["serviceProcessesGone"])
+        self.assertTrue(result["serviceProcessesGone"])
 
-    def test_setup_refuses_a_uid_that_already_has_processes(self):
+    def test_kill_id_refuses_a_number_outside_the_disposable_range(self):
+        for number in (0, 1000, EXPERIMENT.ID_BASE - 1, EXPERIMENT.ID_BASE + EXPERIMENT.ID_SPAN):
+            with self.assertRaises(ValueError):
+                EXPERIMENT.kill_id(number)
+
+    def test_setup_refuses_an_operator_who_can_read_shadow(self):
         run = self.make_run()
-        with tempfile.TemporaryDirectory() as directory:
-            run.base = Path(directory) / "base"
-            accounts = {run.owner_name: SimpleNamespace(pw_uid=5001, pw_gid=5001),
-                        run.authority_name: SimpleNamespace(pw_uid=5002, pw_gid=5002)}
-            with patch.object(EXPERIMENT, "BUILDS", {}), \
-                    patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=True), \
-                    patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
-                    patch.object(EXPERIMENT.PL, "write_root_file"), \
-                    patch.object(EXPERIMENT.PL, "run_owned", return_value=(0, b"")), \
-                    patch.object(EXPERIMENT.SO, "read_bounded", return_value=b"authority"), \
-                    patch.object(EXPERIMENT.PL.Run, "_create",
-                                 side_effect=lambda self, flag, args, names: setattr(self, flag, True)), \
-                    patch.object(EXPERIMENT.pwd, "getpwnam", side_effect=lambda name: accounts[name]), \
-                    patch.object(EXPERIMENT.SO, "_user_processes",
-                                 side_effect=lambda uid, proc: [123] if uid == 5002 else []), \
-                    patch.object(EXPERIMENT.sys, "stderr"):
-                with self.assertRaises(RuntimeError):
-                    run.setup()
-            self.assertTrue(run.uid_shared)
-            self.assertTrue(run.owner_created and run.authority_created)
+        with patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=True), \
+                patch.object(EXPERIMENT, "nss_systemd_enabled", return_value=True), \
+                patch.object(EXPERIMENT.NSSWITCH.__class__, "read_text", return_value=""), \
+                patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000]), \
+                patch.object(run, "operator_reads_shadow", return_value=True), \
+                patch.object(EXPERIMENT.os, "mkdir") as mkdir:
+            with self.assertRaises(RuntimeError):
+                run.setup()
+        mkdir.assert_not_called()
+
+    def test_setup_refuses_a_host_without_nss_systemd(self):
+        run = self.make_run()
+        with patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=True), \
+                patch.object(EXPERIMENT.NSSWITCH.__class__, "read_text", return_value="passwd: files\ngroup: files\n"), \
+                patch.object(EXPERIMENT.os, "mkdir") as mkdir:
+            with self.assertRaises(RuntimeError):
+                run.setup()
+        mkdir.assert_not_called()
 
     def test_a_failed_case_still_retires_what_it_started(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -704,6 +748,7 @@ class RetireUnitTests(unittest.TestCase):
             if procs is not None:
                 (cgroup / unit).mkdir()
                 (cgroup / unit / "cgroup.procs").write_text(procs)
+                (cgroup / unit / "cgroup.kill").write_text("")
             patches = [patch.object(EXPERIMENT, "CGROUP_SYSTEM", cgroup),
                        patch.object(run, "systemctl", side_effect=lambda *args: calls.append(args) or stop_code),
                        patch.object(run, "show", return_value=dict(show if show is not None
@@ -715,6 +760,8 @@ class RetireUnitTests(unittest.TestCase):
                 item.start()
             try:
                 result = run.retire_unit(unit)
+                if procs is not None:
+                    killed.extend(["cgroup.kill"] if (cgroup / unit / "cgroup.kill").read_text() == "1" else [])
             finally:
                 for item in reversed(patches):
                     item.stop()
@@ -733,20 +780,21 @@ class RetireUnitTests(unittest.TestCase):
     def test_a_cgroup_read_error_is_not_removed(self):
         result, _calls, killed, _unit = self.retire(procs="", read_error=PermissionError())
         self.assertFalse(result)
-        self.assertEqual(killed, [])
+        self.assertEqual(killed, ["cgroup.kill"])  # the kernel kills; no PID is signalled from a read
 
     def test_a_read_error_stops_the_kill_loop_at_once(self):
-        # Unreadable cgroup: the kill loop reads once and goes straight to systemctl; the readback fails.
+        # Unreadable cgroup: the wait reads once and goes straight to systemctl; the readback fails.
         operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
         run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
         run.RETIRE_SECONDS = 0.05
         events = []
-        with patch.object(run, "cgroup_pids", side_effect=lambda unit: events.append("read")), \
+        with patch.object(EXPERIMENT, "kill_cgroup", side_effect=lambda path: events.append("kill") or True), \
+                patch.object(run, "cgroup_pids", side_effect=lambda unit: events.append("read")), \
                 patch.object(run, "systemctl", side_effect=lambda *args: events.append("systemctl") or 0), \
                 patch.object(run, "show", return_value={"LoadState": "not-found"}), \
                 patch.object(EXPERIMENT.time, "sleep", side_effect=lambda seconds: events.append("sleep")):
             self.assertFalse(run.retire_unit("u"))
-        self.assertEqual(events[:3], ["read", "systemctl", "systemctl"])
+        self.assertEqual(events[:4], ["kill", "read", "systemctl", "systemctl"])
 
     def test_a_failed_show_is_not_removed(self):
         self.assertFalse(self.retire(show={})[0])
@@ -757,7 +805,7 @@ class RetireUnitTests(unittest.TestCase):
     def test_a_surviving_process_is_not_removed(self):
         result, _calls, killed, _unit = self.retire(procs="4242\n")
         self.assertFalse(result)
-        self.assertIn(4242, killed)
+        self.assertEqual(killed, ["cgroup.kill"])  # killed through cgroup.kill, never by a PID read from procs
 
     def test_an_empty_cgroup_is_removed(self):
         self.assertTrue(self.retire(procs="")[0])
@@ -771,25 +819,21 @@ class CgroupTests(unittest.TestCase):
             (root / "cgroup.controllers").write_text("cpu memory\n")
             self.assertFalse(EXPERIMENT.cgroup_v2_ready(root))
             (root / "system.slice").mkdir()
+            self.assertFalse(EXPERIMENT.cgroup_v2_ready(root))  # no cgroup.kill: before Linux 5.14
+            (root / "system.slice/cgroup.kill").write_text("")
             self.assertTrue(EXPERIMENT.cgroup_v2_ready(root))
 
-    def test_the_shadow_group_gid(self):
-        with patch.object(EXPERIMENT.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=42)):
-            self.assertEqual(EXPERIMENT.shadow_gid(), 42)
-        with patch.object(EXPERIMENT.grp, "getgrnam", side_effect=KeyError("shadow")):
-            self.assertIsNone(EXPERIMENT.shadow_gid())
-
-    def test_setup_refuses_an_operator_in_the_shadow_group(self):
-        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
-        run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
-        with patch.object(EXPERIMENT, "cgroup_v2_ready", return_value=True), \
-                patch.object(EXPERIMENT.os, "getgrouplist", return_value=[1000, 42]), \
-                patch.object(EXPERIMENT, "shadow_gid", return_value=42), \
-                patch.object(EXPERIMENT.os, "mkdir") as mkdir:
-            with self.assertRaises(RuntimeError):
-                run.setup()
-        mkdir.assert_not_called()
-        self.assertFalse(run.base_created)
+    def test_kill_cgroup_writes_one_and_treats_a_gone_cgroup_as_killed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory) / "u.service"
+            self.assertTrue(EXPERIMENT.kill_cgroup(cgroup))
+            cgroup.mkdir()
+            (cgroup / "cgroup.kill").write_text("")
+            self.assertTrue(EXPERIMENT.kill_cgroup(cgroup))
+            self.assertEqual((cgroup / "cgroup.kill").read_text(), "1")
+            (cgroup / "cgroup.kill").chmod(0o400)
+            if os.geteuid() != 0:
+                self.assertFalse(EXPERIMENT.kill_cgroup(cgroup))
 
     def test_the_unit_cgroup_must_be_under_system_slice(self):
         unit = f"rmzso-{TAG}-x.service"
@@ -837,11 +881,13 @@ class SelftestSocketTests(unittest.TestCase):
             work = Path(directory) / ("w" * 150)
             empty = {}
             with patch.object(EXPERIMENT, "AuthorityProcess", Process), \
-                    patch.object(EXPERIMENT, "run_controls", return_value=(empty, empty, empty, EXPERIMENT.NA)), \
+                    patch.object(EXPERIMENT, "run_controls",
+                                 return_value=(empty, empty, empty, empty, EXPERIMENT.NA)), \
                     patch.object(EXPERIMENT, "run_client", return_value={}):
                 result = EXPERIMENT.authority_selftest(work, binary="/bin/true")
         self.assertEqual(len(bound), 3)
-        self.assertFalse(result["retryNextDirectory"] or result["zombiePeerRefused"])
+        self.assertFalse(result["retryNextDirectory"])
+        self.assertTrue(result["runtimeSystemOnly"])  # /bin/true loads only system libraries
         self.assertFalse(result["passed"])
         for path in bound:
             self.assertLess(len(path.encode()), EXPERIMENT.UNIX_PATH_MAX)
@@ -1283,6 +1329,287 @@ class CommandClassificationTests(unittest.TestCase):
             for fd in (low, high, middle):
                 os.close(fd)
         self.assertEqual(report["fds"], f"0 1 2 {middle} {high}")
+
+
+class IdentityTests(unittest.TestCase):
+    """Numeric disposable identities with no /etc entry (Toni's item 2)."""
+
+    def test_subordinate_ranges(self):
+        self.assertEqual(EXPERIMENT.parse_subids(["a:100000:65536\n# x\nbad\n", "b:200000:10\n"]),
+                         [(100000, 65536), (200000, 10)])
+
+    def test_an_id_is_unused_only_without_entry_range_or_process(self):
+        number = EXPERIMENT.ID_BASE + 5
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            missing = patch.object(EXPERIMENT.pwd, "getpwuid", side_effect=KeyError(number))
+            missing_group = patch.object(EXPERIMENT.grp, "getgrgid", side_effect=KeyError(number))
+            with missing, missing_group:
+                self.assertTrue(EXPERIMENT.id_unused(number, proc))
+                self.assertFalse(EXPERIMENT.id_unused(1000, proc))  # outside the range
+                self.assertFalse(EXPERIMENT.id_unused(number, proc, [(EXPERIMENT.ID_BASE, 10)]))
+                (proc / "77").mkdir()
+                (proc / "77/status").write_text(f"Name:\tx\nUid:\t1\t1\t1\t1\nGid:\t2\t2\t{number}\t2\n")
+                self.assertFalse(EXPERIMENT.id_unused(number, proc))  # a saved GID counts
+            with patch.object(EXPERIMENT.pwd, "getpwuid", return_value=object()), missing_group:
+                self.assertFalse(EXPERIMENT.id_unused(number, Path(directory) / "none"))
+
+    def test_pick_ids_gives_two_distinct_unused_numbers(self):
+        values = iter([3, 3, 4, 9])
+        picked = EXPERIMENT.pick_ids(lambda number: number != EXPERIMENT.ID_BASE + 4, randbelow=lambda span: next(values))
+        self.assertEqual(picked, (EXPERIMENT.ID_BASE + 3, EXPERIMENT.ID_BASE + 9))
+        with self.assertRaises(RuntimeError):
+            EXPERIMENT.pick_ids(lambda number: False, attempts=3)
+
+    def test_nss_systemd_must_serve_passwd_and_group(self):
+        self.assertTrue(EXPERIMENT.nss_systemd_enabled("passwd: files systemd sss\ngroup: files systemd\n"))
+        self.assertFalse(EXPERIMENT.nss_systemd_enabled("passwd: files systemd\ngroup: files\n"))
+        self.assertFalse(EXPERIMENT.nss_systemd_enabled("passwd: files # systemd\ngroup: files systemd\n"))
+
+    def test_drop_in_records(self):
+        user, group = EXPERIMENT.userdb_records(f"rmzso{TAG}", EXPERIMENT.ID_BASE + 1)
+        self.assertEqual(json.loads(user), {"userName": f"rmzso{TAG}", "uid": EXPERIMENT.ID_BASE + 1,
+                                            "gid": EXPERIMENT.ID_BASE + 1, "homeDirectory": "/",
+                                            "shell": "/usr/sbin/nologin", "locked": True})
+        self.assertEqual(json.loads(group), {"groupName": f"rmzso{TAG}", "gid": EXPERIMENT.ID_BASE + 1})
+
+    def test_the_unit_runs_as_the_number(self):
+        properties = EXPERIMENT.unit_properties(EXPERIMENT.ID_BASE + 1, EXPERIMENT.ID_BASE + 1)
+        self.assertEqual(properties[:2], [f"User={EXPERIMENT.ID_BASE + 1}", f"Group={EXPERIMENT.ID_BASE + 1}"])
+        self.assertIn("unit_properties(self.owner_uid, self.owner_gid,", SCRIPT.read_text())
+
+
+class LoaderTests(unittest.TestCase):
+    """The authority must start as its own identity (Toni's item 3)."""
+
+    TRACE = ("\tlinux-vdso.so.1 (0x00007ffd00000000)\n"
+             "\tlibsqlite3.so.0 => /lib/x86_64-linux-gnu/libsqlite3.so.0 (0x00007f0000000000)\n"
+             "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f0000100000)\n"
+             "\t/lib64/ld-linux-x86-64.so.2 (0x00007f0000200000)\n")
+
+    def test_the_trace_names_every_library(self):
+        self.assertEqual(EXPERIMENT.loader_libraries(self.TRACE),
+                         ["/lib/x86_64-linux-gnu/libsqlite3.so.0", "/lib/x86_64-linux-gnu/libc.so.6",
+                          "/lib64/ld-linux-x86-64.so.2"])
+        for bad in ("\tlibswiftCore.so => not found\n", "statically linked\n", ""):
+            with self.assertRaises(ValueError):
+                EXPERIMENT.loader_libraries(bad)
+
+    def test_only_system_libraries_and_no_swift_runtime(self):
+        self.assertTrue(EXPERIMENT.runtime_system_only(EXPERIMENT.loader_libraries(self.TRACE)))
+        self.assertFalse(EXPERIMENT.runtime_system_only(["/home/u/toolchain/usr/lib/swift/linux/libswiftCore.so"]))
+        self.assertFalse(EXPERIMENT.runtime_system_only(["/usr/lib/swift/linux/libswiftCore.so"]))
+        self.assertFalse(EXPERIMENT.runtime_system_only(["/opt/lib/libsqlite3.so.0"]))
+        self.assertFalse(EXPERIMENT.runtime_system_only([]))
+
+    def test_the_build_links_the_swift_runtime_statically(self):
+        self.assertIn('"--static-swift-stdlib"', SCRIPT.read_text())
+
+    def test_the_start_check_runs_as_the_authority_identity(self):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {})
+        run.authority_uid = run.authority_gid = EXPERIMENT.ID_BASE + 2
+        calls = []
+
+        def fake_run(arguments, **options):
+            calls.append(options)
+            if options["env"]:
+                return SimpleNamespace(returncode=0, stdout=self.TRACE.encode())
+            return SimpleNamespace(returncode=2, stdout=b'{"event":"error"}\n')
+
+        with patch.object(EXPERIMENT.subprocess, "run", side_effect=fake_run), \
+                patch.object(EXPERIMENT.SO, "read_bounded", return_value=b"library"):
+            run._check_authority_start()
+        self.assertEqual(len(run.build_hashes["authorityLibraries"]), 3)
+        self.assertTrue(all(call["user"] == EXPERIMENT.ID_BASE + 2 and call["extra_groups"] == [] for call in calls))
+        with patch.object(EXPERIMENT.subprocess, "run",
+                          return_value=SimpleNamespace(returncode=127, stdout=b"")), self.assertRaises(RuntimeError):
+            run._check_authority_start()
+
+
+APPARMOR_DIR = Path(tempfile.mkdtemp(prefix="rmzso-aa-test-"))
+(APPARMOR_DIR / "profiles").write_text("")
+
+
+class OwnershipTests(unittest.TestCase):
+    """Only what this run created is cleaned up (Toni's items 5 and 6)."""
+
+    def make_run(self):
+        operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
+        run = EXPERIMENT.Run(operator, 30, "/bin/true", {name: f"/usr/bin/{name}" for name in EXPERIMENT.TOOLS})
+        run.owner_uid = run.owner_gid = EXPERIMENT.ID_BASE + 1
+        run.markers = run.base / "markers"
+        return run
+
+    def start(self, run, states, code):
+        spec = EXPERIMENT.CASES["unit-report"]
+        with tempfile.TemporaryDirectory() as directory:
+            states = iter(states)
+            with patch.object(run, "show", side_effect=lambda unit, properties: {"LoadState": next(states)}), \
+                    patch.object(EXPERIMENT, "bind_listener", return_value=unittest.mock.MagicMock()), \
+                    patch.object(EXPERIMENT.PL, "run_owned", return_value=(code, b"")):
+                try:
+                    run.start_owner("unit-report", spec, Path(directory), (0, 0, 0, 0))
+                except RuntimeError as error:
+                    return str(error)
+        return "started"
+
+    def test_a_unit_name_in_use_is_never_started_or_recorded(self):
+        run = self.make_run()
+        with patch.object(EXPERIMENT.PL, "run_owned") as tool, \
+                patch.object(EXPERIMENT, "bind_listener", return_value=unittest.mock.MagicMock()):
+            self.assertEqual(self.start(run, ["loaded"], 0), "unit name already in use")
+        tool.assert_not_called()
+        self.assertEqual(run.units, [])
+
+    def test_a_failed_start_is_recorded_only_when_a_unit_exists(self):
+        run = self.make_run()
+        self.assertEqual(self.start(run, ["not-found", "not-found"], 1), "unit start failed")
+        self.assertEqual(run.units, [])
+        self.assertEqual(self.start(run, ["not-found", "failed"], 1), "unit start failed")
+        self.assertEqual(run.units, [run.unit_name("unit-report")])
+
+    def test_a_profile_name_already_loaded_is_refused(self):
+        run = self.make_run()
+        run.tools["apparmor_parser"] = "/usr/sbin/apparmor_parser"
+        name = EXPERIMENT.PROFILE_PREFIX + run.tag
+        with patch.object(EXPERIMENT, "APPARMOR", APPARMOR_DIR), \
+                patch.object(EXPERIMENT, "render_profile", return_value=(name, "text")), \
+                patch.object(EXPERIMENT.Run, "_loaded_profiles", return_value={name}), \
+                patch.object(EXPERIMENT.PL, "run_owned") as tool, self.assertRaises(RuntimeError):
+            run._load_profile()
+        tool.assert_not_called()
+        self.assertFalse(run.profile_loaded)
+
+    def test_a_failed_profile_load_leaves_the_apparmor_case_not_run(self):
+        # AppArmor 3.x cannot read abi 4.0: the load fails, the run goes on, unit-apparmor is not run.
+        run = self.make_run()
+        run.tools["apparmor_parser"] = "/usr/sbin/apparmor_parser"
+        name = EXPERIMENT.PROFILE_PREFIX + run.tag
+        with patch.object(EXPERIMENT, "APPARMOR", APPARMOR_DIR), \
+                patch.object(EXPERIMENT, "render_profile", return_value=(name, "text")), \
+                patch.object(EXPERIMENT.Run, "_loaded_profiles", return_value=set()), \
+                patch.object(EXPERIMENT.PL, "write_root_file"), \
+                patch.object(EXPERIMENT.PL, "run_owned", return_value=(1, b"")):
+            self.assertFalse(run._load_profile())
+        self.assertFalse(run.profile_loaded or run.apparmor_ready)
+        with tempfile.TemporaryDirectory() as directory:
+            run.base = Path(directory)
+            (run.base / "cases").mkdir()
+            self.assertEqual(run.run_case("unit-apparmor", 40, "mnt"),
+                             {"passed": False, "status": "not-run", "reason": "apparmor-unavailable"})
+
+
+class SweepTests(unittest.TestCase):
+    """--sweep and the sweep at the start of a run (Toni's item 4)."""
+
+    def test_the_sweep_removes_every_prefixed_item_and_nothing_else(self):
+        tag, other = "0123abcd", "feedbeef"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cgroups, apparmor, base_parent, userdb = (root / name for name in ("cg", "aa", "lib", "userdb"))
+            for path in (cgroups, apparmor, base_parent, userdb):
+                path.mkdir()
+            unit = f"rmzso-{tag}-unit-report.service"
+            (cgroups / unit).mkdir()
+            (cgroups / unit / "cgroup.kill").write_text("")
+            (cgroups / "ssh.service").mkdir()
+            (apparmor / "profiles").write_text(f"{EXPERIMENT.PROFILE_PREFIX}{tag} (enforce)\nother (enforce)\n")
+            removed = []
+
+            class Remove:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def write(self, name):
+                    removed.append(name)
+                    (apparmor / "profiles").write_text("other (enforce)\n")
+
+            run_dir = base_parent / (EXPERIMENT.BASE_PREFIX + tag)
+            run_dir.mkdir()
+            (run_dir / "ids").write_text(f"owner {EXPERIMENT.ID_BASE + 7}\nauthority {EXPERIMENT.ID_BASE + 8}\n")
+            (base_parent / "unrelated").mkdir()
+            (userdb / f"rmzso{tag}.user").write_text(json.dumps({"uid": EXPERIMENT.ID_BASE + 7,
+                                                                  "gid": EXPERIMENT.ID_BASE + 7}))
+            (userdb / f"{EXPERIMENT.ID_BASE + 7}.user").symlink_to(f"rmzso{tag}.user")
+            (userdb / "alice.user").write_text("{}")
+            (userdb / "4711.user").symlink_to("alice.user")
+            calls, killed = [], []
+
+            def systemctl(*arguments):
+                calls.append(arguments)
+                if arguments[0] == "list-units":
+                    listed = f"{unit} loaded failed failed x\nrmzso-{other}-x.service loaded active running x\n" \
+                        if not any(call[0] == "stop" for call in calls) else ""
+                    return 0, listed.encode()
+                if arguments[0] == "stop":
+                    shutil.rmtree(cgroups / arguments[1], ignore_errors=True)
+                return 0, b""
+
+            real_open = open
+            with patch.object(EXPERIMENT, "root_owned_file", side_effect=lambda path: path.is_file()), \
+                    patch("builtins.open", side_effect=lambda path, *a, **k: Remove() if str(path).endswith(".remove")
+                          else real_open(path, *a, **k)):
+                result = EXPERIMENT.sweep(systemctl, cgroups, apparmor, base_parent, userdb,
+                                          kill=lambda number: killed.append(number) or True)
+            self.assertTrue(result["clean"], result)
+            self.assertEqual(result["units"], 2)
+            self.assertIn(("stop", unit), calls)
+            self.assertIn(("stop", f"rmzso-{other}-x.service"), calls)
+            self.assertEqual((cgroups / "ssh.service").is_dir(), True)
+            self.assertEqual(sorted(killed), [EXPERIMENT.ID_BASE + 7, EXPERIMENT.ID_BASE + 8])
+            self.assertEqual(removed, [f"{EXPERIMENT.PROFILE_PREFIX}{tag}"])
+            self.assertFalse(run_dir.exists())
+            self.assertTrue((base_parent / "unrelated").is_dir())
+            self.assertEqual(sorted(path.name for path in userdb.iterdir()), ["4711.user", "alice.user"])
+
+    def test_an_id_outside_the_range_is_never_swept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base_parent = Path(directory)
+            run_dir = base_parent / (EXPERIMENT.BASE_PREFIX + TAG)
+            run_dir.mkdir()
+            (run_dir / "ids").write_text("owner 1000\nauthority 0\n")
+            with patch.object(EXPERIMENT, "root_owned_file", side_effect=lambda path: path.is_file()):
+                self.assertEqual(EXPERIMENT.sweep_ids(base_parent, Path(directory) / "none"), set())
+
+    def test_a_run_stops_when_the_sweep_leaves_state(self):
+        if os.geteuid() == 0:
+            self.skipTest("runs as Root")
+        with patch.object(EXPERIMENT.os, "geteuid", return_value=0), \
+                patch.object(EXPERIMENT.os, "getuid", return_value=0), \
+                patch.object(EXPERIMENT.shutil, "which", return_value="/usr/bin/tool"), \
+                patch.object(EXPERIMENT.PL, "operator_account", return_value=SimpleNamespace()), \
+                patch.object(EXPERIMENT.PL, "root_owned_ancestry", return_value=True), \
+                patch.object(EXPERIMENT.PL, "host_metadata", return_value={}), \
+                patch.object(EXPERIMENT.SO, "last_capability", return_value=40), \
+                patch.object(EXPERIMENT.os, "readlink", return_value="mnt:[1]"), \
+                patch.object(EXPERIMENT.PL, "subreaper", contextlib.nullcontext):
+            factory = unittest.mock.Mock()
+            with self.assertRaises(RuntimeError):
+                EXPERIMENT.measure(30, "/bin/true", run_factory=factory,
+                                   sweep_factory=lambda systemctl: {"clean": False})
+            factory.return_value.setup.assert_not_called()
+            factory.return_value.cleanup.assert_not_called()
+
+
+class SelftestGateTests(unittest.TestCase):
+    def test_the_self_test_is_not_run_before_linux_6_5(self):
+        if os.geteuid() == 0:
+            self.skipTest("runs as Root")
+        with patch.object(EXPERIMENT, "peer_pidfd_supported", return_value=False), \
+                patch.object(EXPERIMENT, "build_authority") as build:
+            result = EXPERIMENT.authority_selftest("/nonexistent")
+        build.assert_not_called()
+        self.assertEqual((result["status"], result["passed"]), ("not-run", True))
+
+    def test_the_host_check_no_longer_builds_the_authority(self):
+        self.assertNotIn("single-owner", (ROOT / "scripts/check-linux-host.sh").read_text())
 
 
 class DocumentTests(unittest.TestCase):

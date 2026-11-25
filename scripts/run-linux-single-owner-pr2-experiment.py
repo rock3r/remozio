@@ -4,30 +4,38 @@
 PR1 (run-linux-single-owner-experiment.py) measured the owner O with a stub authority and setpriv.
 This runner composes the unchanged owner.c with the Swift authority of the composed fixture
 (experiments/linux-single-owner/authority) and starts O in a transient systemd unit, with the unit
-options of docs/linux-single-owner-design.md. It adds no production executor, no installer and no
-file under /etc.
+options of docs/linux-single-owner-design.md. It adds no production executor, no installer and
+changes no file under /etc.
 
-Three modes:
+Four modes:
 
   --build-authority --work-dir DIR   builds the Swift authority as the current user (no root)
   --authority-selftest --work-dir DIR
-                                     builds it, then runs the authority control cases (replay,
-                                     earlier generation, wrong peer) as the current user (no root)
+                                     builds it, then runs the authority control cases (replay and
+                                     its nonce binding, earlier and stale generations, an exited
+                                     peer, wrong peer) as the current user (no root); not run, and
+                                     not failed, before Linux 6.5
   --authority PATH                   the supervised Root run, through sudo, from the operator's
                                      session: PATH is the authority that the operator built with
                                      --build-authority; the runner copies it and records its hash
+  --sweep                            as Root: removes what earlier runs left (see below)
 
-The Root run creates two disposable system accounts (O's service user and the authority's user),
-a directory under /var/lib, transient units named rmzso-<tag>-<case>.service and one AppArmor
-profile rmzso-owner-<tag> in the kernel only (apparmor_parser -a -K). It changes no sysctl, no
-sudoers file and nothing under /etc except the two accounts. Cleanup removes all of it in a finally
+The Root run uses two disposable numeric identities with no /etc entry (O's and the authority's,
+from 0x70000000 up, each checked unused: no passwd or group entry, no subordinate-ID range, no
+process). systemd resolves User= through NSS, so O's identity gets an nss-systemd drop-in record in
+/run/userdb (tmpfs); the authority runs by number only. The run also creates a directory under
+/var/lib, transient units named rmzso-<tag>-<case>.service and one AppArmor profile
+rmzso-owner-<tag> in the kernel only (apparmor_parser -a -K). It changes no sysctl, no sudoers file
+and no file under /etc. Before it loads a profile or starts a unit it checks that the name is free,
+and it records a name as its own only once the tool has run. Cleanup removes all of it in a finally
 block and reports each step.
 
-If a run is interrupted before cleanup, as Root: kill the processes in each
-/sys/fs/cgroup/system.slice/rmzso-*.service/cgroup.procs, run "systemctl stop" and
-"systemctl reset-failed" for each rmzso-*.service, write each rmzso-owner- name in
-/sys/kernel/security/apparmor/profiles to /sys/kernel/security/apparmor/.remove, remove
-/var/lib/remozio-single-owner-pr2-*, and delete the rmzso* and rmzsa* system accounts.
+A run starts with the sweep, and stops if the sweep cannot remove everything. The sweep, also on its
+own with --sweep after a run that was killed before its cleanup, works by prefix: it kills each
+rmzso-*.service cgroup through cgroup.kill, stops and resets the unit, kills the processes of the IDs
+in each run directory's ids file and in the drop-in records, removes the rmzso-owner-* profiles, the
+/var/lib/remozio-single-owner-pr2-* directories and the /run/userdb/rmzso* records with their
+numeric links. One run at a time: the sweep removes the state of any other run.
 
 The report holds booleans, closed categories, errno names, settings and hashes only.
 strictAdmission is true only when every gating case passes; the sudo password prompt is a known
@@ -57,6 +65,7 @@ import selectors
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -87,7 +96,18 @@ CGROUP_SYSTEM = CGROUP_ROOT / "system.slice"
 SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)  # Linux 6.5; Python names it from 3.14 on
 UNIX_PATH_MAX = 108  # sizeof(sockaddr_un.sun_path) on Linux, the terminating zero included
 APPARMOR = Path("/sys/kernel/security/apparmor")
-TOOLS = ("systemd-run", "systemctl", "apparmor_parser", "useradd", "userdel", "groupdel", "cc")
+TOOLS = ("systemd-run", "systemctl", "apparmor_parser", "cc")
+# The disposable identities are numbers in this range, with no /etc entry. systemd assigns nothing here: its
+# container range ends at 0x6FFFFFFF and its foreign range starts at 0x7FFE0000.
+ID_BASE, ID_SPAN = 0x70000000, 0x0F000000
+# systemd resolves User= through NSS and refuses a number with no record (get_user_creds, v257), so O's
+# identity gets a volatile nss-systemd drop-in record here (tmpfs, not /etc). The authority needs none.
+USERDB = Path("/run/userdb")
+NSSWITCH = Path("/etc/nsswitch.conf")
+SUBID_FILES = (Path("/etc/subuid"), Path("/etc/subgid"))
+SYSTEM_LIBRARY_DIRS = ("/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")
+UNIT_PATTERN = re.compile(r"rmzso-[0-9a-f]{8}-[a-z0-9-]{1,40}\.service")
+RECORD_PATTERN = re.compile(r"rmzso[0-9a-f]{8}\.(user|group)")
 DEADLINE_MS = SO.DEADLINE_MS
 MAX_OUTPUT_BYTES = SO.MAX_OUTPUT_BYTES
 NA, YES_NO = SO.NA, SO.YES_NO
@@ -173,22 +193,139 @@ CASE_KEYS = {
     "ownerHoldsNothingOfDispatch1": YES_NO | {NA}, "ownerFdCountStable": YES_NO | {NA},
     "command1HoldsOnlyItsStreams": YES_NO | {NA},
 }
+def parse_subids(texts):
+    """(start, count) ranges from /etc/subuid and /etc/subgid lines (name:start:count)."""
+    ranges = []
+    for text in texts:
+        for line in text.splitlines():
+            fields = line.strip().split(":")
+            if len(fields) == 3 and fields[1].isdigit() and fields[2].isdigit():
+                ranges.append((int(fields[1]), int(fields[2])))
+    return ranges
+
+
+def id_processes(number, proc):
+    """PIDs whose real, effective, saved or file-system UID or GID is number."""
+    found = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / "status").read_bytes()
+        except OSError:
+            continue
+        for key in (rb"Uid", rb"Gid"):
+            match = re.search(rb"^" + key + rb":\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)", text, re.MULTILINE)
+            if match and number in (int(value) for value in match.groups()):
+                found.append(int(entry.name))
+                break
+    return found
+
+
+def id_unused(number, proc=Path("/proc"), subids=()):
+    """No passwd or group entry (any NSS source), no subordinate-ID range and no process uses number."""
+    if not ID_BASE <= number < ID_BASE + ID_SPAN:
+        return False
+    for lookup in (pwd.getpwuid, grp.getgrgid):
+        try:
+            lookup(number)
+            return False
+        except KeyError:
+            pass
+    if any(start <= number < start + count for start, count in subids):
+        return False
+    return not id_processes(number, proc)
+
+
+def pick_ids(unused, randbelow=secrets.randbelow, attempts=32):
+    """Two distinct unused numbers, one for O (UID and GID) and one for the authority."""
+    picked = []
+    for _ in range(attempts):
+        number = ID_BASE + randbelow(ID_SPAN)
+        if number not in picked and unused(number):
+            picked.append(number)
+            if len(picked) == 2:
+                return tuple(picked)
+    raise RuntimeError("no unused disposable ID")
+
+
+def nss_systemd_enabled(text):
+    """The passwd and group lines of nsswitch.conf name nss-systemd, which reads the drop-in records."""
+    sources = {}
+    for line in text.splitlines():
+        key, _, value = line.partition("#")[0].partition(":")
+        sources[key.strip()] = value.split()
+    return all("systemd" in sources.get(database, ()) for database in ("passwd", "group"))
+
+
+def userdb_records(name, number):
+    """The nss-systemd drop-in user and group records for O's identity: no password, no home, no shell."""
+    user = {"userName": name, "uid": number, "gid": number, "homeDirectory": "/", "shell": "/usr/sbin/nologin",
+            "locked": True}
+    group = {"groupName": name, "gid": number}
+    return (json.dumps(user, sort_keys=True) + "\n").encode(), (json.dumps(group, sort_keys=True) + "\n").encode()
+
+
+def loader_libraries(text):
+    """The paths in the dynamic loader's trace (LD_TRACE_LOADED_OBJECTS=1); ValueError on a missing one."""
+    paths = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "=>" in line:
+            _name, _, target = line.partition("=>")
+            target = target.strip()
+            if target.startswith("not found") or not target.startswith("/"):
+                raise ValueError("library not found")
+            paths.append(target.split(" (")[0])
+        elif line.startswith("/"):
+            paths.append(line.split(" (")[0])
+        elif not line.startswith("linux-vdso.so"):
+            raise ValueError("unexpected loader line")
+    if not paths:
+        raise ValueError("no loader trace")
+    return paths
+
+
+def runtime_system_only(paths):
+    """Every loaded library comes from a system library directory, and none is a Swift runtime."""
+    return bool(paths) and all(path.startswith(SYSTEM_LIBRARY_DIRS) and "swift" not in path.lower()
+                               and "Foundation" not in path for path in paths)
+
+
+REASON = frozenset({"malformed", "boot-mismatch", "pid-mismatch", "stale-generation", "earlier-generation",
+                    "other-hello", "generation-lost", "missing"})
 CONTROL_KEYS = {
     "firstHello": frozenset({"OK", "REFUSED", "error"}), "firstPermit": YES_NO,
     "replaySubmit": frozenset({"REFUSED", "PERMIT", "error"}), "replayLedger": frozenset({"refused", "accepted", "error", NA}),
     "firstOutcome": frozenset({"OK", "REFUSED", "error"}),
     "firstOutcomePhase": PHASES | {"missing"}, "firstOutcomeReason": OUTCOME_REASONS | {"missing"},
     "replayOutcome": frozenset({"OK", "REFUSED", "error"}),
-    "earlierGenerationHello": frozenset({"OK", "REFUSED", "error"}),
-    "earlierGenerationOutcome": frozenset({"OK", "REFUSED", "error"}),
-    "earlierGenerationEvent": frozenset({"generation-refused", "other", "missing"}),
+    "replayBinding": frozenset({"reserved", "accepted", "error", NA}),
+    "earlierGenerationHello": frozenset({"OK", "REFUSED", "error"}), "earlierGenerationHelloReason": REASON,
+    "staleGenerationHello": frozenset({"OK", "REFUSED", "error"}), "staleGenerationReason": REASON,
+    "earlierGenerationOutcome": frozenset({"OK", "REFUSED", "error"}), "earlierGenerationEvent": REASON,
+    "zombieHello": frozenset({"OK", "REFUSED", "error"}), "zombieSubmit": frozenset({"REFUSED", "PERMIT", "error"}),
+    "zombieEvent": REASON,
     "wrongPeer": frozenset({"OK", "REFUSED", "error"}), "wrongPeerEvent": frozenset({"wrong-peer", "other", "missing"}),
     "operatorConnect": frozenset({"EACCES", "connected", "other", NA}),
 }
+# Each refusal must come with the reason that its control tests:
+# - replayBinding: a new decision over a capture with the replayed submission nonce is refused by the store's
+#   replay table (the nonce is bound into the capture);
+# - earlierGenerationHello: a new process presents an exited process's generation (refused on its PID);
+# - staleGenerationHello: a live process presents its own PID with an earlier start time (refused on liveness);
+# - earlierGenerationEvent: a restarted O presents the earlier O's permit (refused as another process instance);
+# - zombie*: an exited, unreaped peer whose connection is still held by its child (refused as not live).
 CONTROL_EXPECT = {"firstHello": "OK", "firstPermit": "yes", "replaySubmit": "REFUSED", "replayLedger": "refused",
+                  "replayBinding": "reserved",
                   "firstOutcome": "OK", "firstOutcomePhase": "failed", "firstOutcomeReason": "notStarted",
                   "replayOutcome": "REFUSED", "earlierGenerationHello": "REFUSED",
-                  "earlierGenerationOutcome": "REFUSED", "earlierGenerationEvent": "generation-refused",
+                  "earlierGenerationHelloReason": "pid-mismatch", "staleGenerationHello": "REFUSED",
+                  "staleGenerationReason": "stale-generation",
+                  "earlierGenerationOutcome": "REFUSED", "earlierGenerationEvent": "earlier-generation",
+                  "zombieHello": "OK", "zombieSubmit": "REFUSED", "zombieEvent": "generation-lost",
                   "wrongPeer": "REFUSED", "wrongPeerEvent": "wrong-peer"}
 
 
@@ -346,7 +483,7 @@ def unit_properties(user, group, extra=(), profile=None):
 
 def unit_command(systemd_run, unit, properties, arguments):
     """No --collect: a failed unit stays loaded, so its exit status can be read, and cleanup stops it."""
-    if not re.fullmatch(r"rmzso-[0-9a-f]{8}-[a-z0-9-]{1,40}\.service", unit):
+    if not UNIT_PATTERN.fullmatch(unit):
         raise ValueError("unexpected unit name")
     return [systemd_run, f"--unit={unit}", "--quiet", "--service-type=exec",
             *(f"--property={item}" for item in properties), "--", *arguments]
@@ -447,15 +584,19 @@ def owner_reports(raw, dispatches):
 AUTHORITY_EVENTS = {
     "start": {}, "end": {}, "error": {},
     "peer": {"result": frozenset({"owner", "wrong-uid", "refused"})},
-    "hello": {"result": frozenset({"accepted", "refused"})},
+    "hello": {"result": frozenset({"accepted", "refused"}),
+              "reason": frozenset({"malformed", "boot-mismatch", "pid-mismatch", "stale-generation"})},
     "message": {"result": frozenset({"refused", "wrong-peer"})},
     "submit": {"result": frozenset({"permit", "refused", "replay-refused"}),
                "reason": frozenset({"no-generation", "malformed", "generation-lost", "no-more-requests", "declined",
                                     "store"}),
-               "ledger": frozenset({"refused", "accepted", "error"}), "phase": PHASES},
+               "ledger": frozenset({"refused", "accepted", "error"}),
+               "binding": frozenset({"reserved", "accepted", "error"}), "phase": PHASES},
     "outcome": {"result": frozenset({"recorded", "refused", "generation-refused", "replay-refused",
                                      "store-refused"}),
-                "reported": SO.RESULTS, "reason": OUTCOME_REASONS, "requesterLost": YES_NO, "phase": PHASES},
+                "reported": SO.RESULTS,
+                "reason": OUTCOME_REASONS | {"earlier-generation", "other-hello", "generation-lost"},
+                "requesterLost": YES_NO, "phase": PHASES},
 }
 
 
@@ -622,6 +763,9 @@ elif step == "later":
     b, p, t = generation()
     ask(s, f"HELLO {b} {p} {t} {secrets.token_hex(16)}")
     out["earlierGenerationOutcome"] = category(ask(s, f"OUTCOME {token} notStarted no"))
+    # A live process with its own boot ID and PID, but an earlier start time: an earlier process with this PID.
+    s = connect()
+    out["staleGenerationHello"] = category(ask(s, f"HELLO {b} {p} {t - 1 if t > 0 else t + 1} {secrets.token_hex(16)}"))
 elif step == "wrong":
     s = connect()
     b, p, t = generation()
@@ -696,12 +840,18 @@ def run_client(step, socket_path, extra=(), timeout=20, **options):
     return value
 
 
-def control_observations(first, later, wrong, events, operator_connect=NA):
-    """The authority-controls case from the three client runs and the authority's events."""
-    ledger = next((e.get("ledger", NA) for e in events if e["event"] == "submit"
-                   and e["result"] == "replay-refused"), NA)
-    generation_event = ("generation-refused" if any(e["event"] == "outcome" and e["result"] == "generation-refused"
-                                                    for e in events) else "missing")
+def control_observations(first, later, wrong, events, operator_connect=NA, zombie=None):
+    """The authority-controls case from the client runs and the authority's events, in their order:
+    first, later (an earlier generation's HELLO, a valid HELLO and its OUTCOME, a stale HELLO), the
+    wrong peer, then the zombie peer."""
+    zombie = zombie or {}
+    replay = next((e for e in events if e["event"] == "submit" and e["result"] == "replay-refused"), {})
+    ledger, binding = replay.get("ledger", NA), replay.get("binding", NA)
+    hello_refusals = [e.get("reason", "missing") for e in events if e["event"] == "hello" and e["result"] == "refused"]
+    generation_event = next((e.get("reason", "missing") for e in events if e["event"] == "outcome"
+                             and e["result"] == "generation-refused"), "missing")
+    zombie_event = next((e.get("reason", "missing") for e in events if e["event"] == "submit"
+                         and e["result"] == "refused" and e.get("reason") == "generation-lost"), "missing")
     wrong_event = "wrong-peer" if any(e["event"] == "message" and e["result"] == "wrong-peer"
                                       for e in events) else "missing"
     observed = {key: first.get(key, "error") for key in ("firstHello", "replaySubmit", "firstOutcome",
@@ -711,9 +861,15 @@ def control_observations(first, later, wrong, events, operator_connect=NA):
     recorded = next((e for e in events if e["event"] == "outcome" and e["result"] == "recorded"), None)
     observed["firstOutcomePhase"] = recorded.get("phase", "missing") if recorded else "missing"
     observed["firstOutcomeReason"] = recorded.get("reason", "missing") if recorded else "missing"
-    observed.update(replayLedger=ledger, earlierGenerationHello=later.get("earlierGenerationHello", "error"),
+    observed.update(replayLedger=ledger, replayBinding=binding,
+                    earlierGenerationHello=later.get("earlierGenerationHello", "error"),
+                    earlierGenerationHelloReason=hello_refusals[0] if hello_refusals else "missing",
+                    staleGenerationHello=later.get("staleGenerationHello", "error"),
+                    staleGenerationReason=hello_refusals[1] if len(hello_refusals) > 1 else "missing",
                     earlierGenerationOutcome=later.get("earlierGenerationOutcome", "error"),
-                    earlierGenerationEvent=generation_event, wrongPeer=wrong.get("wrongPeer", "error"),
+                    earlierGenerationEvent=generation_event if generation_event in REASON else "missing",
+                    zombieHello=zombie.get("zombieHello", "error"), zombieSubmit=zombie.get("zombieSubmit", "error"),
+                    zombieEvent=zombie_event, wrongPeer=wrong.get("wrongPeer", "error"),
                     wrongPeerEvent=wrong_event, operatorConnect=operator_connect)
     return observed
 
@@ -724,7 +880,7 @@ def _hex_ok(value):
 
 def run_controls(socket_path, client_options, wrong_options, wrong_socket=None, operator_options=None, timeout=20):
     """Drives the client steps against a running authority: first, later (after the first client has
-    exited), the wrong peer and, in the Root run, the operator's connect."""
+    exited), the wrong peer, the zombie peer and, in the Root run, the operator's connect."""
     first = run_client("first", socket_path, timeout=timeout, **client_options)
     kept, generation = first.pop("kept", ""), first.pop("generation", "").split(" ")
     if not _hex_ok(kept) or len(generation) != 3:
@@ -732,9 +888,10 @@ def run_controls(socket_path, client_options, wrong_options, wrong_socket=None, 
     # The first client has exited: its generation is now an earlier one.
     later = run_client("later", socket_path, (kept, *generation), timeout=timeout, **client_options)
     wrong = run_client("wrong", wrong_socket or socket_path, timeout=timeout, **wrong_options)
+    zombie = run_client("zombie", socket_path, timeout=timeout, **client_options)
     operator = (run_client("connect", socket_path, timeout=timeout, **operator_options)["operatorConnect"]
                 if operator_options is not None else NA)
-    return first, later, wrong, operator
+    return first, later, wrong, zombie, operator
 
 
 # --- Non-root modes: build and self-test --------------------------------------------------------
@@ -749,7 +906,10 @@ def build_authority(work_dir, timeout=900):
     arguments = [swift, "build", "--package-path", str(AUTHORITY_PACKAGE), "--product", AUTHORITY_PRODUCT,
                  "--cache-path", str(work_dir / "cache"), "--config-path", str(work_dir / "config"),
                  "--security-path", str(work_dir / "security"), "--scratch-path", str(work_dir / "build"),
-                 "--disable-keychain", "--disable-netrc", "--force-resolved-versions", "--jobs", "4"]
+                 "--disable-keychain", "--disable-netrc", "--force-resolved-versions", "--jobs", "4",
+                 # The authority runs as its own UID, which cannot read a toolchain under the operator's home:
+                 # no Swift runtime may come from a RUNPATH into that toolchain.
+                 "--static-swift-stdlib"]
     environment = {**os.environ, "CLANG_MODULE_CACHE_PATH": str(work_dir / "module-cache"),
                    "SWIFTPM_MODULECACHE_OVERRIDE": str(work_dir / "module-cache")}
     subprocess.run(arguments, stdin=subprocess.DEVNULL, check=True, timeout=timeout, env=environment)
@@ -811,6 +971,19 @@ class AuthorityProcess:
         return self.process.returncode is not None
 
 
+def peer_pidfd_supported():
+    """SO_PEERPIDFD works on this kernel (Linux 6.5 or later)."""
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        os.close(left.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD))
+        return True
+    except OSError:
+        return False
+    finally:
+        left.close()
+        right.close()
+
+
 def bind_listener(path, gid=None):
     """PR1's bind: 0600 first, the group, and only then 0660."""
     return SO.Host._bind(socket.SOCK_SEQPACKET, path, gid)
@@ -827,14 +1000,16 @@ def selftest_socket_dir():
 
 
 RETRY_EXPECT = {"retryFirst": "REFUSED", "retrySecond": "PERMIT", "retryMode": "short"}
-ZOMBIE_EXPECT = {"zombieHello": "OK", "zombieSubmit": "REFUSED"}
 
 
 def authority_selftest(work_dir, binary=None, timeout=20):
-    """The authority control cases as the current user, without Root, and two self-test rows: a SUBMIT
-    that fails after its store directory exists, then a retry; and an exited, unreaped peer."""
+    """The authority control cases as the current user, without Root, and one self-test row: a SUBMIT
+    that fails after its store directory exists, then a retry. Not run before Linux 6.5 (no
+    SO_PEERPIDFD): the result says so and does not fail."""
     if os.geteuid() == 0:
         raise RuntimeError("the self-test runs without Root")
+    if not peer_pidfd_supported():
+        return {"passed": True, "status": "not-run", "reason": "SO_PEERPIDFD unavailable (Linux before 6.5)"}
     work_dir = Path(work_dir).resolve()
     binary = Path(binary) if binary else build_authority(work_dir)
     root = work_dir / f"selftest-{secrets.token_hex(4)}"
@@ -854,22 +1029,27 @@ def authority_selftest(work_dir, binary=None, timeout=20):
             processes.append(AuthorityProcess(binary, listener, root / f"store-{name}", owner_uid, binary, binary,
                                               root / "marker", (uid, gid, groups), modes))
         (root / "store-c/request-1").mkdir(mode=0o700)  # the first SUBMIT on c fails at its directory
-        first, later, wrong, _operator = run_controls(sockets / "a.sock", {}, {}, wrong_socket=sockets / "b.sock",
-                                                      timeout=timeout)
+        first, later, wrong, zombie, _operator = run_controls(sockets / "a.sock", {}, {},
+                                                              wrong_socket=sockets / "b.sock", timeout=timeout)
         retry = run_client("retry", sockets / "c.sock", timeout=timeout)
-        zombie = run_client("zombie", sockets / "c.sock", timeout=timeout)
+        processes[2].stop()
         events = authority_events(processes[0].stop()) + authority_events(processes[1].stop())
-        events_c = authority_events(processes[2].stop())
-        observed = control_observations(first, later, wrong, events)
+        observed = control_observations(first, later, wrong, events, zombie=zombie)
         result = evaluate("authority-controls", observed)
         result["storeWritten"] = (root / "store-a/request-1/fixture.sqlite").is_file()
         result["retryNextDirectory"] = retry == RETRY_EXPECT and \
             (root / "store-c/request-2/fixture.sqlite").is_file()
-        result["zombiePeerRefused"] = zombie == ZOMBIE_EXPECT and any(
-            e["event"] == "submit" and e["result"] == "refused" and e.get("reason") == "generation-lost"
-            for e in events_c)
+        # The Root run starts the authority as its own UID, which may not read the toolchain: the build must
+        # load no Swift runtime from it (--static-swift-stdlib).
+        trace = subprocess.run([str(binary)], stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
+                               env={"LD_TRACE_LOADED_OBJECTS": "1"}, cwd="/")
+        try:
+            result["runtimeSystemOnly"] = trace.returncode == 0 and runtime_system_only(
+                loader_libraries(trace.stdout.decode("utf-8", "replace")))
+        except ValueError:
+            result["runtimeSystemOnly"] = False
         result["passed"] = result["passed"] and result["storeWritten"] and result["retryNextDirectory"] and \
-            result["zombiePeerRefused"]
+            result["runtimeSystemOnly"]
         return result
     finally:
         for process in processes:
@@ -970,10 +1150,10 @@ class Run:
         self.authority_source = Path(authority_binary)
         self.tag = secrets.token_hex(4)
         self.base = base_for(self.tag)
-        self.owner_name, self.authority_name = f"rmzso{self.tag}", f"rmzsa{self.tag}"
-        self.base_created = self.owner_created = self.authority_created = False
-        self.uid_shared = False
-        self.units, self.profile, self.profile_loaded = [], None, False
+        self.owner_name = f"rmzso{self.tag}"
+        self.base_created = self.ids_picked = self.userdb_created = False
+        self.userdb_files = []
+        self.units, self.profile, self.profile_loaded, self.apparmor_ready = [], None, False, False
         self.build_hashes = {}
 
     # Setup ---------------------------------------------------------------------------------
@@ -982,14 +1162,16 @@ class Run:
         # retire_unit reads the unit's cgroup under the unified (v2) hierarchy; without it, a missing
         # cgroup.procs would look like an empty cgroup.
         if not cgroup_v2_ready():
-            raise RuntimeError("cgroup v2 unified hierarchy unavailable")
+            raise RuntimeError("cgroup v2 unified hierarchy with cgroup.kill unavailable")
+        if not nss_systemd_enabled(NSSWITCH.read_text()):
+            raise RuntimeError("nss-systemd is not a passwd and group source")
         self.groups = os.getgrouplist(self.operator.pw_name, self.operator.pw_gid)
         if len(self.groups) > SO.MAX_GROUPS:
             raise RuntimeError("too many operator groups")
-        # passwd -S proves euid 0 by reading /etc/shadow; an operator in the shadow group could read it
-        # without euid 0, so unit-sudo and unit-apparmor would prove nothing.
-        if shadow_gid() in self.groups:
-            raise RuntimeError("operator is in the shadow group")
+        # passwd -S proves euid 0 by reading /etc/shadow; an operator who can read it without euid 0 (by
+        # group, ACL or mode) would make unit-sudo and unit-apparmor prove nothing.
+        if self.operator_reads_shadow():
+            raise RuntimeError("the operator can read /etc/shadow")
         os.mkdir(self.base, 0o755)
         self.base_created = True
         os.chmod(self.base, 0o755)
@@ -1015,44 +1197,97 @@ class Run:
         authority = SO.read_bounded(self.authority_source, 256 * 1024 * 1024)
         self.build_hashes["binaries"]["authority"] = hashlib.sha256(authority).hexdigest()
         PL.write_root_file(self.base / "run" / "authority", authority, 0o755)
-        for flag, name in (("owner_created", self.owner_name), ("authority_created", self.authority_name)):
-            PL.Run._create(self, flag, [self.tools["useradd"], "--system", "--no-create-home", "--home-dir", "/",
-                                        "--shell", "/usr/sbin/nologin", "--user-group", name], (name,))
-        owner, authority_account = pwd.getpwnam(self.owner_name), pwd.getpwnam(self.authority_name)
-        self.owner_uid, self.owner_gid = owner.pw_uid, owner.pw_gid
-        self.authority_uid, self.authority_gid = authority_account.pw_uid, authority_account.pw_gid
-        if 0 in (self.owner_uid, self.owner_gid, self.authority_uid, self.authority_gid):
-            raise RuntimeError("disposable identity is privileged")
-        # PR1's condition: cleanup kills by UID, so it must never start from a UID already in use.
-        if SO._user_processes(self.owner_uid, Path("/proc")) or SO._user_processes(self.authority_uid, Path("/proc")):
-            self.uid_shared = True
-            sys.stderr.write("A new disposable UID already has running processes. The run stops and kills "
-                             "nothing by UID.\n")
-            raise RuntimeError("disposable UID already in use")
+        # Numeric identities with no /etc entry. Cleanup kills by these numbers, so each must be unused: no
+        # passwd or group entry, no subordinate-ID range and no process.
+        subids = parse_subids(path.read_text() for path in SUBID_FILES if path.exists())
+        owner_id, authority_id = pick_ids(lambda number: id_unused(number, Path("/proc"), subids))
+        self.owner_uid = self.owner_gid = owner_id
+        self.authority_uid = self.authority_gid = authority_id
+        self.ids_picked = True
+        # The sweep reads this file to find the processes of a run that died before its cleanup.
+        PL.write_root_file(self.base / "ids", f"owner {owner_id}\nauthority {authority_id}\n".encode(), 0o600)
+        self._write_userdb()
+        if pwd.getpwuid(owner_id).pw_name != self.owner_name or grp.getgrgid(owner_id).gr_name != self.owner_name:
+            raise RuntimeError("drop-in record not resolved")
+        self._check_authority_start()
         markers = self.base / "markers"
         os.mkdir(markers, 0o700)
         os.chown(markers, self.operator.pw_uid, self.operator.pw_gid)
         self.markers = markers
         apparmor = self._load_profile()
         operator_groups = set(self.groups)
-        return {"serviceIdentitiesUnprivileged": True,
+        return {"serviceIdentitiesUnprivileged": 0 not in (self.owner_uid, self.authority_uid),
                 "serviceOutsideOperatorGroups": self.owner_gid not in operator_groups
                 and self.authority_gid not in operator_groups,
                 "operatorUnprivileged": self.operator.pw_uid != 0 and 0 not in operator_groups,
                 "apparmorProfileLoaded": apparmor}
 
+    def operator_reads_shadow(self):
+        """access(R_OK) on /etc/shadow as the operator, with the operator's groups: the kernel applies the
+        mode, the group and any ACL."""
+        result = subprocess.run([sys.executable, "-I", "-c",
+                                 "import os, sys; sys.exit(0 if os.access('/etc/shadow', os.R_OK) else 1)"],
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=self.timeout,
+                                user=self.operator.pw_uid, group=self.operator.pw_gid, extra_groups=self.groups,
+                                env={}, cwd="/")
+        if result.returncode not in (0, 1):
+            raise RuntimeError("shadow access check failed")
+        return result.returncode == 0
+
+    def _write_userdb(self):
+        """O's drop-in user and group records, with the numeric-name links that lookups by ID use. Each
+        file is created with O_EXCL (a name that already exists stops the run) and recorded once it exists."""
+        if not USERDB.exists():
+            os.mkdir(USERDB, 0o755)
+            self.userdb_created = True
+        status = os.lstat(USERDB)
+        if not stat_is_root_directory(status):
+            raise RuntimeError("drop-in directory is not a root-owned directory")
+        user, group = userdb_records(self.owner_name, self.owner_uid)
+        for suffix, data in ((".user", user), (".group", group)):
+            record = USERDB / f"{self.owner_name}{suffix}"
+            PL.write_root_file(record, data, 0o644)
+            self.userdb_files.append(record)
+            link = USERDB / f"{self.owner_uid}{suffix}"
+            os.symlink(record.name, link)
+            self.userdb_files.append(link)
+
+    def _check_authority_start(self):
+        """The copied authority as its own identity: the loader resolves every library from a system
+        directory (no Swift runtime), each library is hashed, and the authority starts and refuses empty
+        arguments with its error event and exit status 2."""
+        binary = self.base / "run/authority"
+        identity = {"user": self.authority_uid, "group": self.authority_gid, "extra_groups": [], "cwd": "/",
+                    "stdin": subprocess.DEVNULL, "capture_output": True, "timeout": self.timeout}
+        trace = subprocess.run([str(binary)], env={"LD_TRACE_LOADED_OBJECTS": "1"}, **identity)
+        if trace.returncode != 0:
+            raise RuntimeError("authority loader check failed")
+        paths = loader_libraries(trace.stdout.decode("utf-8", "replace"))
+        if not runtime_system_only(paths):
+            raise RuntimeError("authority loads a library outside the system directories")
+        self.build_hashes["authorityLibraries"] = {
+            path: hashlib.sha256(SO.read_bounded(Path(path), 256 * 1024 * 1024)).hexdigest() for path in paths}
+        start = subprocess.run([str(binary)], env={}, **identity)
+        if start.returncode != 2 or start.stdout != b'{"event":"error"}\n':
+            raise RuntimeError("authority did not start as its own identity")
+
     def _load_profile(self):
-        """Kernel only (-K: no cache); -a refuses an existing name. Recorded before the tool runs."""
+        """Kernel only (-K: no cache). The name must not be loaded before; it is recorded as this run's once
+        the tool succeeds, or when it is loaded after a failed tool run (it was absent before). A failed load
+        (AppArmor 3.x cannot read abi 4.0) leaves the AppArmor case not run and the rest of the run going."""
         if self.tools.get("apparmor_parser") is None or not (APPARMOR / "profiles").exists():
             return False
         self.profile, text = render_profile(APPARMOR_TEMPLATE.read_text(), self.tag, self.base)
+        if self.profile in self._loaded_profiles():
+            raise RuntimeError("profile name already loaded")
         path = self.base / "profiles" / self.profile
         PL.write_root_file(path, text.encode(), 0o600)
         self.build_hashes["profile"] = hashlib.sha256(text.encode()).hexdigest()
-        self.profile_loaded = True
-        if PL.run_owned([self.tools["apparmor_parser"], "-a", "-K", str(path)], self.timeout)[0] != 0:
-            raise RuntimeError("profile load failed")
-        return self.profile in self._loaded_profiles()
+        code = PL.run_owned([self.tools["apparmor_parser"], "-a", "-K", str(path)], self.timeout)[0]
+        present = self.profile in self._loaded_profiles()
+        self.profile_loaded = code == 0 or present
+        self.apparmor_ready = code == 0 and present
+        return self.apparmor_ready
 
     @staticmethod
     def _loaded_profiles():
@@ -1095,13 +1330,19 @@ class Run:
         unit = self.unit_name(case)
         rendezvous = bind_listener(directory / "shim.sock", self.owner_gid)
         try:
-            properties = unit_properties(self.owner_name, self.owner_name, spec["extra"], self.profile)
+            properties = unit_properties(self.owner_uid, self.owner_gid, spec["extra"], self.profile)
             arguments = [str(self.base / "run/fdshim"), str(directory / "shim.sock"), str(self.base / "run/owner"),
                          "3", str(directory / "authority.sock"), "4", "5", str(len(spec["modes"])),
                          str(DEADLINE_MS), str(self.base / "run" / spec["command"]), str(self.markers / case)]
-            self.units.append(unit)  # recorded before the tool runs, so cleanup reaches it
-            if PL.run_owned(unit_command(self.tools["systemd-run"], unit, properties, arguments),
-                            self.timeout)[0] != 0:
+            if self.show(unit, ("LoadState",)).get("LoadState") != "not-found":
+                raise RuntimeError("unit name already in use")
+            code = PL.run_owned(unit_command(self.tools["systemd-run"], unit, properties, arguments),
+                                self.timeout)[0]
+            # The name was free before the tool ran, so a unit under it now is this run's: recorded when
+            # the tool succeeds, and after a failure unless show proves that no unit exists.
+            if code == 0 or self.show(unit, ("LoadState",)).get("LoadState") != "not-found":
+                self.units.append(unit)
+            if code != 0:
                 raise RuntimeError("unit start failed")
             # retire_unit reads the unit's cgroup under system.slice: fail closed if it lives elsewhere.
             if not unit_cgroup_ok(self.show(unit, ("ControlGroup",)), unit):
@@ -1135,21 +1376,15 @@ class Run:
             return None
 
     def retire_unit(self, unit):
-        """Every process of the unit's cgroup is killed (KillMode=process leaves commands there), then
-        the unit is stopped and its failed state reset. True only on positive evidence that the unit is
-        gone: a successful systemctl show reports LoadState=not-found and the cgroup holds no process.
-        A read error, a failed show or a surviving process counts as not removed. The exit codes of
-        stop and reset-failed do not decide: both fail for a unit that systemd already unloaded."""
+        """The unit's cgroup is killed through cgroup.kill (KillMode=process leaves commands there; the
+        kernel kills every member, also one forked after a read of cgroup.procs), then the unit is stopped
+        and its failed state reset. True only on positive evidence that the unit is gone: a successful
+        systemctl show reports LoadState=not-found and the cgroup holds no process. A read error, a failed
+        show or a surviving process counts as not removed. The exit codes of stop and reset-failed do not
+        decide: both fail for a unit that systemd already unloaded."""
+        kill_cgroup(CGROUP_SYSTEM / unit)
         deadline = time.monotonic() + self.RETIRE_SECONDS
-        while True:
-            pids = self.cgroup_pids(unit)
-            if pids is None or pids == []:
-                break  # gone, or unreadable: the readback below decides, and an unreadable cgroup fails it
-            for pid in pids:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
-            if time.monotonic() >= deadline:
-                break
+        while self.cgroup_pids(unit) not in (None, []) and time.monotonic() < deadline:
             time.sleep(0.02)
         self.systemctl("stop", unit)
         self.systemctl("reset-failed", unit)
@@ -1186,7 +1421,7 @@ class Run:
         os.mkdir(directory, 0o755)
         if CASES[case]["kind"] == "controls":
             return self.controls_case(case, directory)
-        if "apparmor" in CASES[case]["extra"] and not self.profile_loaded:
+        if "apparmor" in CASES[case]["extra"] and not self.apparmor_ready:
             return {"passed": False, "status": "not-run", "reason": "apparmor-unavailable"}
         return drive_case(case, self, directory, last_cap, host_mnt)
 
@@ -1199,11 +1434,12 @@ class Run:
             operator = {"user": self.operator.pw_uid, "group": self.operator.pw_gid, "extra_groups": self.groups,
                         "env": {}, "cwd": "/"}
             # The wrong peer is Root: the socket mode lets it connect, the authority's UID check refuses it.
-            first, later, wrong, operator_connect = run_controls(directory / "authority.sock", service,
-                                                                 {"env": {}, "cwd": "/"},
-                                                                 operator_options=operator, timeout=self.timeout)
+            first, later, wrong, zombie, operator_connect = run_controls(directory / "authority.sock", service,
+                                                                         {"env": {}, "cwd": "/"},
+                                                                         operator_options=operator,
+                                                                         timeout=self.timeout)
             events = authority_events(authority.stop())
-            observed = control_observations(first, later, wrong, events, operator_connect)
+            observed = control_observations(first, later, wrong, events, operator_connect, zombie=zombie)
             result = evaluate(case, observed)
             if operator_connect != "EACCES":
                 result["passed"] = False
@@ -1222,25 +1458,24 @@ class Run:
         """Each step runs even when an earlier one fails; only state this run created is touched."""
         units = all([_step(self.retire_unit, unit) for unit in self.units])
         profile = _step(self._remove_profile)
-        gone = not self.uid_shared
-        for created, name in ((self.owner_created, self.owner_name), (self.authority_created, self.authority_name)):
-            if created and not self.uid_shared:
-                with contextlib.suppress(KeyError):
-                    try:
-                        gone = SO._kill_user(pwd.getpwnam(name).pw_uid) and gone
-                    except OSError:
-                        gone = False
+        gone = True
+        if self.ids_picked:  # unused when picked, so every process with these IDs is this run's
+            for number in (self.owner_uid, self.authority_uid):
+                try:
+                    gone = kill_id(number) and gone
+                except OSError:
+                    gone = False
         if self.base_created:
             PL._attempt(shutil.rmtree, self.base)
-        for created, name in ((self.owner_created, self.owner_name), (self.authority_created, self.authority_name)):
-            if created and not PL._absent(pwd.getpwnam, name):
-                PL._attempt(PL.run_owned, [self.tools["userdel"], name], self.timeout)
-            if created and not PL._absent(grp.getgrnam, name):
-                PL._attempt(PL.run_owned, [self.tools["groupdel"], name], self.timeout)
-        accounts = all(PL._absent(pwd.getpwnam, n) and PL._absent(grp.getgrnam, n)
-                       for n in (self.owner_name, self.authority_name))
+        for path in reversed(self.userdb_files):
+            PL._attempt(os.unlink, path)
+        if self.userdb_created:
+            PL._attempt(os.rmdir, USERDB)
+        records = not any(os.path.lexists(path) for path in self.userdb_files) and \
+            (not self.ids_picked or (PL._absent(pwd.getpwuid, self.owner_uid)
+                                     and PL._absent(grp.getgrgid, self.owner_gid)))
         return {"unitsRemoved": units, "profileRemoved": profile, "filesRemoved": not self.base.exists(),
-                "serviceUsersRemoved": accounts, "serviceProcessesGone": gone}
+                "identityRecordsRemoved": records, "serviceProcessesGone": gone}
 
 
 def unit_cgroup_ok(values, unit):
@@ -1248,18 +1483,165 @@ def unit_cgroup_ok(values, unit):
     return values.get("ControlGroup") == f"/system.slice/{unit}"
 
 
-def shadow_gid():
-    """The gid of the shadow group, or None where it does not exist."""
-    try:
-        return grp.getgrnam("shadow").gr_gid
-    except KeyError:
-        return None
+def stat_is_root_directory(status):
+    """A real directory owned by Root that no one else can write."""
+    return stat.S_ISDIR(status.st_mode) and status.st_uid == 0 and not status.st_mode & 0o022
 
 
 def cgroup_v2_ready(root=None):
-    """The unified hierarchy is mounted (cgroup.controllers exists at its root) with a system.slice."""
+    """The unified hierarchy is mounted (cgroup.controllers exists at its root) with a system.slice that
+    has cgroup.kill (Linux 5.14)."""
     root = Path(root) if root is not None else CGROUP_ROOT
-    return (root / "cgroup.controllers").is_file() and (root / "system.slice").is_dir()
+    return (root / "cgroup.controllers").is_file() and (root / "system.slice/cgroup.kill").is_file()
+
+
+def kill_cgroup(directory):
+    """Writes 1 to cgroup.kill: the kernel SIGKILLs every process in the cgroup and its children. True when
+    written or when the cgroup is already gone."""
+    try:
+        with open(Path(directory) / "cgroup.kill", "w") as stream:
+            stream.write("1")
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def kill_id(number, proc=Path("/proc"), timeout=3):
+    """SIGKILL every process that uses number as a UID or GID, until none is left (True) or the timeout."""
+    if not ID_BASE <= number < ID_BASE + ID_SPAN:
+        raise ValueError("not a disposable ID")
+    deadline = time.monotonic() + timeout
+    while True:
+        found = id_processes(number, proc)
+        for pid in found:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ChildProcessError):
+            while os.waitpid(-1, os.WNOHANG)[0] != 0:
+                pass
+        if not found:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
+# --- Sweep: the state of earlier runs that died before their cleanup -----------------------------
+
+def root_owned_file(path):
+    """A regular file (not a link) owned by Root."""
+    status = os.lstat(path)
+    return stat.S_ISREG(status.st_mode) and status.st_uid == 0
+
+
+def sweep_ids(base_parent, userdb):
+    """The disposable IDs named by earlier runs: the ids files in their directories and O's drop-in
+    records. Only root-owned regular files count, and only numbers in the disposable range."""
+    numbers = set()
+    candidates = [path / "ids" for path in base_parent.glob(BASE_PREFIX + "*")
+                  if re.fullmatch(re.escape(BASE_PREFIX) + "[0-9a-f]{8}", path.name)]
+    candidates += [path for path in userdb.glob("rmzso*") if RECORD_PATTERN.fullmatch(path.name)] \
+        if userdb.is_dir() else []
+    for path in candidates:
+        try:
+            if not root_owned_file(path):
+                continue
+            text = SO.read_bounded(path, 4096).decode("utf-8", "replace")
+        except (OSError, ValueError):
+            continue
+        if path.name == "ids":
+            values = re.findall(r"^(?:owner|authority) ([0-9]+)$", text, re.MULTILINE)
+        else:
+            try:
+                record = json.loads(text)
+            except ValueError:
+                continue
+            values = [record.get(key) for key in ("uid", "gid") if type(record.get(key)) is int]
+        numbers.update(int(value) for value in values if ID_BASE <= int(value) < ID_BASE + ID_SPAN)
+    return numbers
+
+
+def sweep_units(systemctl, cgroup_system):
+    """rmzso-*.service names from systemd's unit list and from the cgroup tree."""
+    names = set()
+    code, output = systemctl("list-units", "--all", "--plain", "--no-legend", "--full", "rmzso-*.service")
+    if code == 0:
+        for line in output.decode("utf-8", "replace").splitlines():
+            words = line.split()
+            if words and UNIT_PATTERN.fullmatch(words[0]):
+                names.add(words[0])
+    if cgroup_system.is_dir():
+        names.update(path.name for path in cgroup_system.iterdir() if UNIT_PATTERN.fullmatch(path.name))
+    return sorted(names)
+
+
+def sweep_profiles(apparmor):
+    """Loaded rmzso-owner-<tag> profile names."""
+    if not (apparmor / "profiles").exists():
+        return []
+    text = SO.read_bounded(apparmor / "profiles", 4 * 1024 * 1024).decode("utf-8", "replace")
+    names = {line.rpartition(" (")[0] for line in text.splitlines()}
+    return sorted(name for name in names if re.fullmatch(re.escape(PROFILE_PREFIX) + "[0-9a-f]{8}", name))
+
+
+def sweep(systemctl, cgroup_system=None, apparmor=None, base_parent=None, userdb=None, proc=Path("/proc"),
+          kill=None):
+    """Removes, by prefix, every unit, process, profile, directory and drop-in record that an earlier
+    run left: rmzso-<tag>-*.service, the processes of the IDs those runs recorded, rmzso-owner-<tag>
+    profiles, /var/lib/remozio-single-owner-pr2-<tag> and /run/userdb/rmzso<tag>.* with their numeric
+    links. It touches no /etc file. Returns the counts and whether nothing is left."""
+    cgroup_system = Path(cgroup_system) if cgroup_system is not None else CGROUP_SYSTEM
+    apparmor = Path(apparmor) if apparmor is not None else APPARMOR
+    base_parent = Path(base_parent) if base_parent is not None else BASE_PARENT
+    userdb = Path(userdb) if userdb is not None else USERDB
+    kill = kill or (lambda number: kill_id(number, proc))
+    numbers = sweep_ids(base_parent, userdb)
+    units = sweep_units(systemctl, cgroup_system)
+    clean = True
+    for unit in units:
+        clean = kill_cgroup(cgroup_system / unit) and clean
+        systemctl("stop", unit)
+        systemctl("reset-failed", unit)
+    for number in sorted(numbers):
+        clean = _step(kill, number) and clean
+    profiles = []
+    profiles = sweep_profiles(apparmor)
+    for name in profiles:
+        try:
+            with open(apparmor / ".remove", "w") as stream:
+                stream.write(name)
+        except OSError:
+            clean = False
+    clean = clean and not sweep_profiles(apparmor)
+    # systemd unloads a stopped unit and removes its cgroup a moment later; a cgroup that systemd no longer
+    # tracks is empty after the kill, so rmdir removes it. Nothing may be left under either name.
+    deadline = time.monotonic() + 3
+    while True:
+        remaining = sweep_units(systemctl, cgroup_system)
+        if not remaining or time.monotonic() >= deadline:
+            break
+        for unit in remaining:
+            with contextlib.suppress(OSError):
+                os.rmdir(cgroup_system / unit)
+        time.sleep(0.05)
+    clean = clean and not remaining
+    directories = [path for path in base_parent.glob(BASE_PREFIX + "*")
+                   if re.fullmatch(re.escape(BASE_PREFIX) + "[0-9a-f]{8}", path.name) and not path.is_symlink()]
+    for path in directories:
+        PL._attempt(shutil.rmtree, path)
+        clean = clean and not path.exists()
+    records = []
+    if userdb.is_dir():
+        records = [path for path in userdb.iterdir() if RECORD_PATTERN.fullmatch(path.name)
+                   or (path.is_symlink() and re.fullmatch(r"[0-9]+\.(user|group)", path.name)
+                       and RECORD_PATTERN.fullmatch(os.readlink(path)))]
+        for path in records:
+            PL._attempt(os.unlink, path)
+            clean = clean and not os.path.lexists(path)
+    return {"units": len(units), "identities": len(numbers), "profiles": len(profiles),
+            "directories": len(directories), "records": len(records), "clean": clean}
 
 
 def _step(action, *arguments):
@@ -1535,7 +1917,8 @@ def _retire_case(run, owner, authority, frontends, pids, sockets):
     return clean
 
 
-def measure(timeout=30, authority_binary=None, run_factory=Run):
+def measure(timeout=30, authority_binary=None, run_factory=Run, sweep_factory=None):
+    sweep_factory = sweep_factory or sweep
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("requires Linux x86_64")
     if os.geteuid() != 0 or os.getuid() != 0:
@@ -1559,6 +1942,11 @@ def measure(timeout=30, authority_binary=None, run_factory=Run):
     run = run_factory(operator, timeout, authority_binary, tools)
     setup, cases, cleanup = {}, {}, {}
     with PL.subreaper():
+        # An earlier run that was killed before its cleanup must not leave state that this run could take
+        # for its own, or that its by-prefix checks would meet. One run at a time.
+        swept = sweep_factory(lambda *arguments: PL.run_owned([tools["systemctl"], *arguments], timeout))
+        if not swept["clean"]:
+            raise RuntimeError("state of an earlier run remains")
         try:
             setup = run.setup()
             required = {key: value for key, value in setup.items() if key != "apparmorProfileLoaded"}
@@ -1573,7 +1961,8 @@ def measure(timeout=30, authority_binary=None, run_factory=Run):
     return {"experiment": "linux-single-owner-v2",
             "measuredAtUTC": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "supervised": True, "trustedCode": False, "strictAdmission": strict, "productionAdmission": False,
-            "host": host, "scripts": scripts, "builds": run.build_hashes, "setup": setup, "cases": cases,
+            "host": host, "scripts": scripts, "builds": run.build_hashes, "sweep": swept, "setup": setup,
+            "cases": cases,
             "cleanup": cleanup, "passed": passed,
             "knownLimits": list(KNOWN_LIMITS),
             "limits": ["transient units through systemd-run, not an installed unit or installer setting",
@@ -1594,6 +1983,8 @@ def main():
     mode.add_argument("--authority-selftest", action="store_true",
                       help="build the authority and run its control cases (no root)")
     mode.add_argument("--authority", help="the supervised Root run with this authority binary")
+    mode.add_argument("--sweep", action="store_true",
+                      help="as Root: remove what earlier runs left (units, processes, profiles, directories, records)")
     parser.add_argument("--work-dir", help="build directory for the two non-root modes (absolute)")
     parser.add_argument("--timeout", type=float, default=30, help="seconds per case (20 <= timeout <= 120)")
     args = parser.parse_args()
@@ -1609,6 +2000,16 @@ def main():
             parser.exit(2, f"Single-owner authority self-test failed: {type(error).__name__}.\n")
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["passed"] else 1
+    if args.sweep:
+        if os.geteuid() != 0 or os.getuid() != 0:
+            parser.exit(2, "The sweep requires Root.\n")
+        systemctl = shutil.which("systemctl", path=PL.TOOL_ENV["PATH"])
+        if systemctl is None:
+            parser.exit(2, "systemctl unavailable.\n")
+        with PL.subreaper():
+            result = sweep(lambda *arguments: PL.run_owned([systemctl, *arguments], 30))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["clean"] else 1
     previous = {number: signal.signal(number, _cancel) for number in (signal.SIGTERM, signal.SIGHUP)}
     try:
         try:
