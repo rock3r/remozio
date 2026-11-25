@@ -343,11 +343,9 @@ mode ends after 300 s, so a lost run leaves no command running until reboot.
 
 `--authority-selftest` runs the authority control cases as the current user,
 without Root, and checks that the built authority loads only system libraries.
-In CI, the Linux job runs it as its own step only when a pull request changes one
-of its inputs (`single_owner` in `scripts/ci-pr-jobs.py`: the experiment, the
-authority's Swift packages and the three runners), and on every push to `main`
-and every nightly run. It is not part of `scripts/check-linux-host.sh` or
-`scripts/check-local.sh`. Before Linux 6.5 (no `SO_PEERPIDFD`), it reports
+Run it by hand. It is not part of `scripts/check-linux-host.sh` or
+`scripts/check-local.sh`, and this change adds no CI step for it: a separate CI
+change adds that step. Before Linux 6.5 (no `SO_PEERPIDFD`), it reports
 `not-run` and passes.
 
 ### PR2 cases
