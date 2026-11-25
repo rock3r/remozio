@@ -140,31 +140,41 @@ The calculation checks the numeric thresholds only. Verify the workload, scope, 
 
 ## Physical LAN and iOS checks
 
-Use the selected artifacts and the same evidence rules. Include the merges cited for each check in the artifact manifest. Record the Android and iPhone builds separately. Use a fresh invitation for each independent attempt.
+Use the selected artifacts and the same evidence rules. Include the merges cited for each check in the artifact manifest. Record the Android and iPhone builds separately. Use a fresh invitation for each independent attempt. Mark a missing required fixture or observation **Blocked**. Mark an ambiguous observed result **Unknown**.
 
 ### Darwin netmask on en0
 
-Open a scoped LAN v2 window on `en0`. Use a read-only `getifaddrs` observation to match the listener's bound address to one interface row. Record the interface index, address family, address and netmask `sa_len`, netmask family, and decoded prefix length. Exercise IPv4 and IPv6 where the fixture provides both. Record each family separately.
+Open a scoped LAN v2 window on `en0`. Use a read-only `getifaddrs` observation to match the bound address to one interface row. Compare the row with the configured test prefix. Exercise IPv4 and IPv6 where the fixture provides both. For each family, share only the address family, both `sa_len` values, the netmask family, the decoded prefix length, and the binding class. Keep addresses and mask bytes in private evidence.
 
-**Pass** when the raw row matches the bound interface, the decoder reports the configured prefix, and an on-link phone reaches pairing. For the mask-change control, only the operator may change the network configuration. Use the preapproved isolated fixture. Agents perform read-only observations. Verify that the mask change closes the active pairing window and withdraws the advertisement. If the isolated fixture is unavailable, mark the mask-change control **Blocked**. [#982](https://github.com/rock3r/remozio/pull/982)
+For the mask-change control, only the operator may change the network configuration, and only on the preapproved isolated fixture. Agents perform read-only observations. Mark the control **Blocked** if the fixture is unavailable.
+
+**Pass** when the row matches the bound interface, the decoder reports the configured prefix, and an on-link phone reaches pairing. For the mask-change control, observe that the window closes and withdraws its advertisement.
+
+**Fail** if the decoder rejects a valid row, reports the wrong prefix, or the mask-change control leaves the window open or advertised. A netmask family other than `AF_UNSPEC` or the bind family prevents the window from opening with `unavailableInterface`. Record **Fail** and the observed cause for that fixture. [#982](https://github.com/rock3r/remozio/pull/982)
 
 ### Android NSD with the R2- instance
 
-Open a fresh LAN v2 window. Import its invitation into the updated Android app and use normal NSD discovery. Observe the current `R2-` instance under `_remozio-pairing._tcp`. Close that window and open a second one. Check the old invitation against the newly advertised instance.
+Open a fresh LAN v2 window. Import its invitation into the updated Android app and use normal NSD discovery. Verify that the client resolves the exact `R2-` instance under `_remozio-pairing._tcp` and that TLS verifies the Transport key against the invitation pin. Record the pin-match verdict. Close the window, verify its advertisement has been withdrawn, and open a second one. Record the stale-invitation observation interval from the selected client's discovery bound or the approved session plan. Keep the second window open and visible for that interval.
 
-**Pass** when Android resolves the exact current instance, reaches the expected Mac, and the old invitation cannot select the new instance. Record the three verdicts and keep instance tokens and invitations private. [#978](https://github.com/rock3r/remozio/pull/978)
+**Pass** when the current instance resolves and the Transport pin matches. With the old invitation, observe either zero resolved routes for the full recorded interval or the expired-invitation state. Retain the sanitized discovery or expiry log for that verdict.
+
+**Fail** if the current invitation resolves the wrong instance, cannot resolve its live instance within the recorded interval, or the Transport pin differs. Any route resolved using the stale invitation also fails. Record the public `R2-` instance name if needed. Exclude invitation text and the secret. [#978](https://github.com/rock3r/remozio/pull/978)
 
 ### IPv6 unique local addresses
 
-Start with a preconfigured IPv6 fixture that has a usable ULA and no usable global IPv6 on the approved interface. Use an Android phone in the same prefix. Confirm that the Mac binds and advertises the ULA. Complete the approved disposable pairing with normal consent, code comparison, and biometric proof.
+Start with a preconfigured IPv6 fixture that has a usable ULA and no usable global IPv6 on the approved interface. Use an Android phone in the same prefix. Verify the bound ULA with the live listener observation, such as `lsof`. Verify the advertisement with its AAAA record. Correlate the two in private evidence and share only the address class and prefix length.
 
-**Pass** when both endpoints report success and the phone verifies the receipt over ULA. On a second approved fixture with both address types, verify that a fresh window prefers usable global IPv6. A phone in another IPv6 prefix is refused even on the same link. Record that control separately when available. Record the address class and prefix length. [#980](https://github.com/rock3r/remozio/pull/980) · [#982](https://github.com/rock3r/remozio/pull/982)
+**Pass** when both endpoints report successful disposable pairing and the phone verifies the receipt over ULA. On the separate approved mixed-address fixture, a fresh window prefers usable global IPv6. For the different-prefix control, prove that the attempt reached the scoped listener, the phone did not reach TLS, and the Mac allocated zero channels and published zero candidates. Use approved stage logs or ingress counters for these observations. Record the controls separately.
+
+**Fail** if the ULA fixture binds or advertises the wrong address class, the on-link pairing fails, or a usable global address loses preference on the mixed fixture. The different-prefix control fails if the phone reaches TLS or the Mac allocates a channel or publishes a candidate. [#980](https://github.com/rock3r/remozio/pull/980) · [#982](https://github.com/rock3r/remozio/pull/982)
 
 ### Physical iPhone to Mac Test connection
 
-Use the approved legacy Mac test fixture for the iPhone connection test. In **Computers → Add computer**, import its invitation. Enter the approved test endpoint for the first run. Leave the address empty only when the fixture publishes the legacy `R-` Bonjour instance. Tap **Test connection**. This check ends at transcript and code comparison.
+Use the approved legacy Mac test fixture. Open **Paired phones…** on the Mac and record the starting enrollment count. In **Computers → Add computer** on the iPhone, import the invitation. Enter the approved test endpoint for the first run. Leave the address empty only when the fixture publishes the legacy `R-` Bonjour instance. Tap **Test connection**. After the attempt closes, refresh **Paired phones…** and verify that the disposable scope has no new enrollment.
 
-**Pass** when the transcript and matching code arrive within 60 seconds, the physical iPhone reports the Secure Enclave transport-key check, and the attempt closes. Check that the iPhone saves no computer and the Mac records no enrollment. [#979](https://github.com/rock3r/remozio/pull/979) · [iOS app](../docs/ios-app.md)
+**Pass** when the transcript and matching code arrive within 60 seconds. In the physical iPhone's unified log, check subsystem `dev.remozio.pairing`, category `transport`, for `transport key: in the Secure Enclave, export refused` from the attempt. Verify that the phone saves no computer and the Mac enrollment count stays unchanged.
+
+**Fail** if an observable attempt times out before the transcript, the codes differ, key creation or Secure Enclave validation fails, or either device retains a new enrollment. A missing key or enrollment observation leaves that criterion **Blocked**. Keep only stage verdicts, elapsed times, and the enrollment count comparison. Exclude the comparison code, transcript bytes, and invitation text. [#979](https://github.com/rock3r/remozio/pull/979) · [iOS app](../docs/ios-app.md)
 
 ## Close and report
 
