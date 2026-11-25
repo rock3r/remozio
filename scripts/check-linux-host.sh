@@ -40,3 +40,8 @@ python3 scripts/run-linux-placement-validator-experiment.py
 
 python3 scripts/run-linux-os-capture-experiment.py \
     --work-dir "$work_root/os-capture"
+
+# Builds the single-owner Swift authority and runs its control cases (replay, earlier generation, wrong
+# peer) as the current user. The systemd, AppArmor and sudo cases need the supervised Root run.
+python3 scripts/run-linux-single-owner-pr2-experiment.py --authority-selftest \
+    --work-dir "$work_root/single-owner-authority"

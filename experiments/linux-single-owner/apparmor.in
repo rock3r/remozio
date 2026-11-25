@@ -1,0 +1,33 @@
+# Remozio single-owner experiment (issue #988, PR2): the AppArmor profile of the owner O.
+#
+# The runner renders this file once per run. @@TAG@@ becomes a random 8-hex tag and @@BASE@@ the
+# run's root-owned directory. It loads the profile into the kernel only (apparmor_parser -a -K: no
+# cache, nothing under /etc/apparmor.d) and removes it by name at the end. The transient unit
+# attaches it with AppArmorProfile=, which sets no no_new_privs and no mount namespace. No rule
+# includes an abstraction; every image is static, so no loader rule is needed.
+#
+# The measurement is the ux rule: the command leaves O's profile at execve and runs unconfined,
+# so sudo inside the command is not limited by O's profile.
+abi <abi/4.0>,
+
+profile rmzso-owner-@@TAG@@ flags=(enforce) {
+  capability sys_ptrace,
+  capability setuid,
+  capability setgid,
+  # C is unconfined in this experiment; K runs under this profile until its execve.
+  ptrace (read, trace) peer=unconfined,
+  ptrace (read, trace, readby, tracedby) peer=rmzso-owner-@@TAG@@,
+  signal (send) peer=unconfined,
+  signal (receive) set=(kill, term, int, hup) peer=unconfined,
+  signal (send, receive) peer=rmzso-owner-@@TAG@@,
+  unix (create, connect, accept, send, receive, getattr, getopt, shutdown),
+  # The shim, then the owner image in the same profile, then the command unconfined.
+  @@BASE@@/run/fdshim mr,
+  @@BASE@@/run/owner mrix,
+  @@BASE@@/run/cmd-* ux,
+  # The rendezvous, frontend and authority sockets and the restart log of each case.
+  @@BASE@@/cases/** rw,
+  # O's own and C's procfs entries: status, stat, limits, cwd, exe, fdinfo of its pidfds.
+  /proc/ r,
+  /proc/** r,
+}

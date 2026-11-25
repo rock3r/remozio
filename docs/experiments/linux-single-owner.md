@@ -12,6 +12,10 @@ on production execution. Its report keeps `strictAdmission` and
 [Recorded result](#recorded-result)). CI compiles the fixtures and runs the tests
 that need no Root.
 
+[PR2](#pr2-swift-authority-unit-apparmor-and-sudo) adds the Swift authority, the
+transient systemd unit, the AppArmor profile and `sudo`. It has no recorded Root
+run yet.
+
 ## Fixtures
 
 The fixtures are in `experiments/linux-single-owner/`:
@@ -231,10 +235,115 @@ the task is not dumpable. The recorded evidence is the second run.
 - The report publishes booleans, categories and errno names only. PIDs, UIDs and
   paths go only between O and the runner.
 
+## PR2: Swift authority, unit, AppArmor and sudo
+
+`scripts/run-linux-single-owner-pr2-experiment.py` runs the rows that the design
+leaves to PR2. It loads the PR1 runner as a module, so the PR1 runner stays
+byte-identical, and it uses `owner.c` and `frontend.c` without a change.
+
+### PR2 fixtures
+
+- `authority/` is a Swift 6.2 package with the same dependencies as the composed
+  fixture. It speaks the line protocol of `owner.c` (`HELLO`, `SUBMIT`, `OUTCOME`)
+  on a listener that the runner passes to it. For each `SUBMIT` it makes a new
+  `FixtureStore`, verifies and consumes a signed decision with
+  `FixtureStore.consume(...)`, writes the durable `beginDispatch` with
+  `FixtureStore.dispatched(_:)`, and only then sends the one-use permit. The permit
+  is bound to O's generation, which the authority checks through `SO_PEERPIDFD`
+  and the start time, and it refuses a peer whose UID is not O's service UID. The
+  capture is synthetic: it binds the command image, the directory `/` and the
+  target identity; the requester, the streams and the decision keys are fixture
+  data. The authority runs as its own disposable user with no capabilities.
+- The outcome is mapped as follows: `dispatched` to `succeeded()`, `unknown` to
+  `lostOutcome()`, and `execFailed`, `notStarted` and `refused` to `failed()`. The
+  lifecycle has no transition from `executing` to a proved no-dispatch, and
+  `beginDispatch` is already durable at S1, so a dispatch that ended without a
+  command is recorded as `failed`. See the design's "Not verified".
+- `fdshim.c` is the unit's `ExecStart`. A transient unit cannot inherit the
+  runner's descriptors, so the shim connects to a rendezvous socket of the run,
+  receives O's stdout, listener, control socket and restart log through
+  `SCM_RIGHTS`, puts them at 1, 3, 4 and 5, and replaces itself with the owner
+  image. The PID, the cgroup and the ambient capabilities stay those of the unit's
+  main process. The runner checks that the peer has O's service UID and that O's
+  PID is the unit's `MainPID`.
+- `command2.c` is the command. It writes one marker line and reports its
+  capability sets, `NoNewPrivs:`, its mount namespace, its AppArmor label and its
+  descriptors. Under the name `cmd-sudo` it runs `sudo -n true`, under `cmd-prompt`
+  it runs `sudo true`, and under `cmd-hog` it allocates memory until the kernel
+  kills it (in `sleep` mode it sleeps). The runner publishes closed categories
+  only.
+- `apparmor.in` is the profile of O, rendered with the run's tag and directory and
+  loaded with `apparmor_parser -a -K` (kernel only). It allows ptrace of the
+  unconfined frontend and runs the commands with `ux`. Every image is static, so
+  the profile has no loader rule. The runner removes the profile by name.
+
+### PR2 run
+
+The operator builds the authority without Root, then starts the supervised run:
+
+```sh
+python3 scripts/run-linux-single-owner-pr2-experiment.py --build-authority --work-dir "$PWD/.build/linux-swift/single-owner"
+sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --authority <the printed path> [--timeout 30]
+```
+
+The runner copies the authority and records its SHA-256. It creates two disposable
+system accounts (O's and the authority's), a directory under `/var/lib`, one
+transient unit per case and the AppArmor profile. It writes no sudoers file, no
+unit file and no sysctl. The unit has exactly the options of the design, plus
+`RemainAfterExit=yes`, so that `ExecMainCode` and `ExecMainStatus` stay readable.
+That option sets no `no_new_privs` and no mount namespace. The PR1 conditions
+apply: the runner refuses to continue when a new UID already has processes, it
+reads with `O_NOFOLLOW`, it cleans up in a `finally` block and reports each step.
+
+`--authority-selftest` runs the authority control cases as the current user,
+without Root. `scripts/check-linux-host.sh` runs it in CI, after the Swift build.
+
+### PR2 cases
+
+| Case | Expected result |
+| --- | --- |
+| `unit-report` | Dispatched; inside the command `CapPrm`, `CapEff`, `CapInh` and `CapAmb` are empty, `NoNewPrivs:` is 0, the mount namespace is PID 1's, the label is `unconfined` and the command holds only 0, 1 and 2. `systemctl show` reports the unit options, and O's limits in `/proc` are at the maximum |
+| `unit-nnp-control` | Negative control with `NoNewPrivileges=yes`: `NoNewPrivs:` is 1 and `sudo -n true` fails because of it |
+| `unit-privatetmp-control` | Negative control with `PrivateTmp=yes`: the command's mount namespace is not the host's |
+| `unit-sudo` | `sudo -n true` inside the command ends with "a password is required" (or succeeds when the operator has a rule without a password): `sudo` started set-user-ID and reached its policy |
+| `unit-sudo-prompt` | `sudo true` (a password prompt) without a controlling terminal. A known limit: recorded, does not gate `strictAdmission` |
+| `unit-apparmor` | O runs under `rmzso-owner-<tag>`; the command is `unconfined` through `ux`; `sudo -n true` reaches its policy |
+| `second-dispatch-fds` | A second dispatch while the first command runs after S6. At the second `k-ready`, K2 holds exactly 0 to 4, its 0 to 2 are C2's streams, its pipe ends are O's other ends; O holds nothing of the first dispatch and the same number of descriptors; the first command holds only its own streams |
+| `unit-stop` | `systemctl stop` with `KillMode=process` ends O; the command keeps running. O's end is read from its pidfd, because systemd can unload a stopped transient unit with its exit status |
+| `unit-restart` | `systemctl restart` ends O and starts a new main process; the command keeps running |
+| `unit-oom` | `MemoryMax=64M` and `MemorySwapMax=0` for this case only. The second command allocates until the kernel kills it: `memory.events` counts an `oom_kill`, O and the first command keep running, and with `OOMPolicy=continue` the unit stays active |
+| `kill-owner-at-s1` | O dies at S1: no command; the authority holds the permit and the request stays `executing` |
+| `kill-owner-after-fork` | O dies after the fork: no command; the request stays `executing` |
+| `kill-owner-before-go` | O dies before the go byte: no command; the request stays `executing` |
+| `authority-controls` | A replayed `SUBMIT` is refused, and the store's ledger refuses the same signed decision again; a second `OUTCOME` is refused; a `HELLO` with the generation of a client that has exited is refused; a permit of an earlier generation is refused; Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`) |
+
+Every owner case also records O's start line, the authority's events and O's
+restart log per dispatch. The report sets `strictAdmission` to true only when every
+case except `unit-sudo-prompt` passes, with setup and cleanup complete.
+`productionAdmission` is always false.
+
+### PR2 not verified
+
+- No Root run is recorded yet. CI builds the Swift package and runs the authority
+  control cases without Root; it does not run systemd, AppArmor or `sudo`.
+- The `sudo` password prompt without a controlling terminal (a known limit; the
+  design leaves the terminal relay to a decision).
+- The full Root capability sets of the `sudo` child. The case proves only that
+  `sudo` started set-user-ID, without `no_new_privs`, and reached its policy.
+- Two preparations at the same time. O is single-threaded and the case measures a
+  second dispatch while the first command runs after S6.
+- An installed unit, the installer setting and upgrade from an older unit. The
+  units here are transient.
+- The decision is signed with fixture software keys, and the requester and the
+  streams in the capture are synthetic.
+- `command2.c` matches the messages of both `sudo` (sudo.ws) and `sudo-rs`, which
+  Ubuntu 25.10 installs as `sudo`. On the measured host, one `sudo -n true` from a
+  context without a terminal did not end within 10 s, so `unit-sudo` can record
+  `timeout` there; the cause is not known.
+
 ## Not verified
 
-- Every item that the design lists for PR2: the Swift authority, the systemd unit,
-  AppArmor, `sudo` and the controlling terminal.
+- The PR2 items above, until the PR2 Root run is recorded.
 - One Root run on one host and one kernel. Other kernels and distributions are not
   measured.
 - Cleanup also kills by session ID (K's and O's), after a pidfd kill of K. If the
