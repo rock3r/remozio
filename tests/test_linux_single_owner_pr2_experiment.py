@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -38,7 +39,8 @@ def dispatch_line(number, result="dispatched"):
 def command_report(**changes):
     report = {"capPrm": "0000000000000000", "capEff": "0000000000000000", "capInh": "0000000000000000",
               "capAmb": "0000000000000000", "capBnd": "000001ffffffffff", "noNewPrivs": "0",
-              "mntNs": "mnt:[4026531832]", "label": "unconfined", "fds": "0 1 2", "sudo": "not-run"}
+              "mntNs": "mnt:[4026531832]", "label": "unconfined", "fds": "0 1 2", "sudo": "not-run",
+              "passwd": "not-run"}
     report.update(changes)
     return json.dumps(report, separators=(",", ":")).encode() + b"\n"
 
@@ -146,7 +148,7 @@ class CommandReportTests(unittest.TestCase):
         checks = EXPERIMENT.command_checks(command_report(), 40, self.MNT, TAG)
         self.assertEqual(checks, {"capsEmpty": "yes", "boundingFull": "yes", "noNewPrivs": "0",
                                   "hostMountNamespace": "yes", "commandLabel": "unconfined", "commandFds": "exact",
-                                  "sudo": "not-run"})
+                                  "sudo": "not-run", "passwd": "not-run"})
 
     def test_negative_controls_change_the_values(self):
         self.assertEqual(EXPERIMENT.command_checks(command_report(noNewPrivs="1"), 40, self.MNT, TAG)["noNewPrivs"],
@@ -163,13 +165,17 @@ class CommandReportTests(unittest.TestCase):
         self.assertEqual(label["commandLabel"], "owner-profile")
         self.assertEqual(EXPERIMENT.command_checks(command_report(label="snap.x (enforce)"), 40, self.MNT,
                                                    TAG)["commandLabel"], "other")
-        for category in ("password-required", "allowed", "no-new-privs", "timeout"):
+        for category in ("password-required", "allowed", "no-new-privs", "inconclusive"):
             self.assertEqual(EXPERIMENT.command_checks(command_report(sudo=category), 40, self.MNT, TAG)["sudo"],
                              category)
+        for category in ("ok", "failed", "timeout", "no-user"):
+            self.assertEqual(EXPERIMENT.command_checks(command_report(passwd=category), 40, self.MNT,
+                                                       TAG)["passwd"], category)
 
     def test_missing_and_invalid_reports(self):
         self.assertEqual(set(EXPERIMENT.command_checks(b"", 40, self.MNT, TAG).values()), {"not-reported"})
-        for raw in (command_report(sudo="maybe"), command_report(noNewPrivs="2"), command_report() * 2,
+        for raw in (command_report(sudo="maybe"), command_report(sudo="timeout"), command_report(passwd="maybe"),
+                    command_report(noNewPrivs="2"), command_report() * 2,
                     command_report(capPrm="xyz"), command_report().replace(b'"fds"', b'"extra"')):
             with self.assertRaises(ValueError):
                 EXPERIMENT.command_checks(raw, 40, self.MNT, TAG)
@@ -189,15 +195,17 @@ class OwnerAndAuthorityTests(unittest.TestCase):
     def test_authority_events_are_a_closed_vocabulary(self):
         raw = (b'{"event":"start"}\n{"event":"peer","result":"owner"}\n{"event":"hello","result":"accepted"}\n'
                b'{"event":"submit","phase":"executing","result":"permit"}\n'
-               b'{"event":"outcome","phase":"succeeded","reported":"dispatched","requesterLost":"no",'
-               b'"result":"recorded"}\n{"event":"end"}\n')
+               b'{"event":"outcome","phase":"succeeded","reason":"none","reported":"dispatched",'
+               b'"requesterLost":"no","result":"recorded"}\n{"event":"end"}\n')
         events = EXPERIMENT.authority_events(raw)
         summary, per_dispatch = EXPERIMENT.authority_summary(events, 1)
         self.assertEqual(summary, {"authorityHello": "accepted"})
         self.assertEqual(per_dispatch, [{"authorityPermit": "yes", "authorityPhaseAfterPermit": "executing",
-                                         "authorityOutcome": "dispatched", "authorityPhase": "succeeded"}])
+                                         "authorityOutcome": "dispatched", "authorityOutcomeReason": "none",
+                                         "authorityPhase": "succeeded"}])
         for bad in (b'{"event":"other"}', b'{"event":"hello","result":"maybe"}',
-                    b'{"event":"submit","result":"permit","token":"00"}', b'{"event":"hello","result":1}'):
+                    b'{"event":"submit","result":"permit","token":"00"}', b'{"event":"hello","result":1}',
+                    b'{"event":"outcome","result":"recorded","reason":"lost"}'):
             with self.assertRaises(ValueError):
                 EXPERIMENT.authority_events(bad)
 
@@ -207,6 +215,21 @@ class OwnerAndAuthorityTests(unittest.TestCase):
         _summary, per_dispatch = EXPERIMENT.authority_summary(events, 1)
         self.assertEqual(per_dispatch[0]["authorityOutcome"], "missing")
         self.assertEqual(per_dispatch[0]["authorityPhase"], "executing")
+        self.assertEqual(per_dispatch[0]["authorityOutcomeReason"], EXPERIMENT.NA)
+
+    def test_a_dispatch_without_a_command_keeps_its_reason(self):
+        # Recorded as failed for the experiment; the report keeps notStarted apart from execFailed.
+        events = EXPERIMENT.authority_events(
+            b'{"event":"hello","result":"accepted"}\n{"event":"submit","phase":"executing","result":"permit"}\n'
+            b'{"event":"outcome","phase":"failed","reason":"notStarted","reported":"notStarted",'
+            b'"requesterLost":"no","result":"recorded"}\n')
+        _summary, per_dispatch = EXPERIMENT.authority_summary(events, 1)
+        self.assertEqual((per_dispatch[0]["authorityPhase"], per_dispatch[0]["authorityOutcomeReason"]),
+                         ("failed", "notStarted"))
+        self.assertEqual(EXPERIMENT.CONTROL_EXPECT["firstOutcomePhase"], "failed")
+        self.assertEqual(EXPERIMENT.CONTROL_EXPECT["firstOutcomeReason"], "notStarted")
+        self.assertTrue(any("notStarted" in limit and "distinct outcome" in limit
+                            for limit in EXPERIMENT.KNOWN_LIMITS))
 
     def test_outcome_phases_follow_the_lifecycle(self):
         # beginDispatch is durable before the permit, so a dispatch without a command can only fail.
@@ -218,6 +241,8 @@ class OwnerAndAuthorityTests(unittest.TestCase):
         self.assertIn('case "dispatched": try permit.store.succeeded()', text)
         self.assertIn('case "unknown": try permit.store.lostOutcome()', text)
         self.assertIn("default: try permit.store.failed()", text)
+        self.assertIn('let reason = result == "dispatched" || result == "unknown" ? "none" : result', text)
+        self.assertIn('"reason": reason', text)
         self.assertIn("try store.dispatched(token)", text)
 
     def test_restart_log_per_dispatch(self):
@@ -276,8 +301,15 @@ class CaseTableTests(unittest.TestCase):
         cases = EXPERIMENT.CASES
         # 1: a second dispatch while the first command runs, with the descriptor checks.
         self.assertEqual(cases["second-dispatch-fds"]["modes"], ("sleep", "normal"))
-        # 2: sudo -n true, password required (or allowed); no sudoers change anywhere in the runner.
-        self.assertEqual(set(cases["unit-sudo"]["expectDispatches"][0]["sudo"]), {"password-required", "allowed"})
+        # 2: passwd -S of the caller is the decisive check, with NoNewPrivs 0; sudo -n true is password
+        # required, allowed or inconclusive (a FIDO touch through PAM); no sudoers change in the runner.
+        for case in ("unit-sudo", "unit-apparmor"):
+            expected = cases[case]["expectDispatches"][0]
+            self.assertEqual(expected["passwd"], {"ok"})
+            self.assertEqual(expected["noNewPrivs"], {"0"})
+            self.assertEqual(set(expected["sudo"]), {"password-required", "allowed", "inconclusive"})
+        control = cases["unit-nnp-control"]["expectDispatches"][0]
+        self.assertEqual((control["passwd"], control["noNewPrivs"]), ({"failed"}, {"1"}))
         self.assertNotIn("/etc/sudoers", SCRIPT.read_text())
         self.assertNotIn("visudo", SCRIPT.read_text())
         # 3: a real out-of-memory kill under MemoryMax=, not SIGKILL to O.
@@ -414,6 +446,10 @@ class FakeAuthority:
                         self.events.append({"event": "outcome", "result": "generation-refused"})
                     elif not permit[1]:
                         permit[1], reply = True, "OK"
+                        reason = "none" if words[2] in ("dispatched", "unknown") else words[2]
+                        self.events.append({"event": "outcome", "result": "recorded", "reported": words[2],
+                                            "reason": reason, "requesterLost": words[3],
+                                            "phase": "failed" if reason != "none" else "succeeded"})
                 connection.send(reply.encode())
 
     def close(self):
@@ -476,9 +512,44 @@ class StaticFixtureTests(unittest.TestCase):
             last_cap = int(Path("/proc/sys/kernel/cap_last_cap").read_text())
             checks = EXPERIMENT.command_checks(result.stdout, last_cap, mnt, TAG)
             self.assertEqual(checks["sudo"], "not-run")
+            self.assertEqual(checks["passwd"], "not-run")
             self.assertEqual(checks["hostMountNamespace"], "yes")
             # The command's own reserved-free exit codes: never 120-123.
             self.assertIsNone(re.search(r"return 12[0-3]|_exit\(12[0-3]\)", EXPERIMENT.COMMAND.read_text()))
+
+    def test_command_fixture_with_fake_passwd_and_sudo(self):
+        # Fakes only: PATH holds just the fake directory, so the real sudo and passwd never run.
+        compiler = shutil.which("cc")
+        if not LINUX or compiler is None or not Path("/bin/sleep").exists():
+            self.skipTest("needs a Linux C compiler")
+        with tempfile.TemporaryDirectory() as directory:
+            fakes = Path(directory) / "fakes"
+            fakes.mkdir()
+            (fakes / "passwd").write_text('#!/bin/sh\n[ "$1" = "-S" ] && [ -n "$2" ] && exit 0\nexit 3\n')
+            # A sudo that waits, as for a FIDO touch through PAM.
+            (fakes / "sudo").write_text("#!/bin/sh\nexec /bin/sleep 30\n")
+            for fake in fakes.iterdir():
+                fake.chmod(0o755)
+            binary = Path(directory) / "cmd-sudo"
+            subprocess.run([compiler, *EXPERIMENT.SO.CC_FLAGS, "-o", str(binary), str(EXPERIMENT.COMMAND)],
+                           check=True, capture_output=True)
+            marker = Path(directory) / "marker"
+            started = time.monotonic()
+            result = subprocess.run([str(binary), "normal", str(marker)], capture_output=True, timeout=20,
+                                    stdin=subprocess.DEVNULL, env={"PATH": str(fakes)})
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 0)
+            checks = EXPERIMENT.command_checks(result.stdout, int(Path("/proc/sys/kernel/cap_last_cap").read_text()),
+                                               os.readlink("/proc/self/ns/mnt"), TAG)
+            self.assertEqual((checks["passwd"], checks["sudo"], checks["noNewPrivs"]), ("ok", "inconclusive", "0"))
+            self.assertGreaterEqual(elapsed, 5)
+            self.assertLess(elapsed, 15)
+            (fakes / "passwd").write_text("#!/bin/sh\nexit 1\n")
+            (fakes / "sudo").write_text("#!/bin/sh\necho 'sudo: a password is required' >&2\nexit 1\n")
+            result = subprocess.run([str(binary), "normal", str(marker)], capture_output=True, timeout=20,
+                                    stdin=subprocess.DEVNULL, env={"PATH": str(fakes)})
+            checks = EXPERIMENT.command_checks(result.stdout, 40, None, TAG)
+            self.assertEqual((checks["passwd"], checks["sudo"]), ("failed", "password-required"))
 
 
 class _Fake:

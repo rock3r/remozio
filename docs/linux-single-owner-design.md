@@ -303,6 +303,14 @@ row and does not let it gate its `strictAdmission`. Production execution must no
 turn on with this limit unstated: either a terminal decision fixes it, or the gate
 text names it.
 
+The gate must also require a distinct outcome for a dispatch that ends without a
+command. O reports `notStarted` at S4 (see [Sequence](#sequence)) when no command
+ran. The PR2 authority records that request as `failed`, because the lifecycle has
+no transition from `executing` to a proved no-dispatch, and it keeps the reason
+`notStarted` in its record and in the report. Production execution must not turn on
+until the authority records `notStarted` as its own outcome, apart from a command
+that failed.
+
 ## Measurement
 
 A new opt-in experiment, built from the composed fixture, with O written in C next
@@ -380,19 +388,27 @@ each case.
   namespace), with two negative controls (`NoNewPrivileges=yes`, `PrivateTmp=yes`)
   that must change the result, and the unit's settings and O's limits read back.
 - The command's capability sets under the unit.
-- `sudo -n true` inside the command: "a password is required" proves that `sudo`
-  started set-user-ID and reached its policy. The `sudo` child's full Root sets
-  stay not verified.
+- `passwd -S` of the caller's own account inside the command, and `NoNewPrivs:` 0
+  from the command's `/proc/self/status`. `passwd -S` succeeds only when the
+  set-user-ID image starts with effective UID 0 (so without `no_new_privs`) and asks
+  for nothing, so it is the decisive set-user-ID check. Expected: it succeeds. The
+  `NoNewPrivileges=yes` control expects it to fail.
+- `sudo -n true` inside the command, with a 5 s limit: "a password is required" or
+  "allowed" shows that `sudo` reached its policy. On a host where `sudo` waits for
+  a FIDO touch through PAM, `-n` does not stop the wait, so a `sudo` that does not
+  end in 5 s is recorded as `inconclusive` and does not fail the case. The `sudo`
+  child's full Root sets stay not verified.
 - `sudo true` with a password prompt: recorded as a known limit, not gating.
-- AppArmor: O under its profile, the command `unconfined` through `ux`, `sudo -n`
-  inside it.
+- AppArmor: O under its profile, the command `unconfined` through `ux`, and
+  `passwd -S` and `sudo -n` inside it.
 - A second dispatch while the first command runs after S6, with the descriptor
   checks of [Pipes](#pipes). Two preparations at the same time stay not verified.
 - `systemctl stop` and `systemctl restart` with `KillMode=process`, and a real
   out-of-memory kill under a case-only `MemoryMax=` with `OOMPolicy=continue`.
 - O killed at S1, after the fork and before the go byte, with the Swift authority.
 - The authority alone: a replayed permit, a permit of an earlier generation and a
-  wrong peer.
+  wrong peer. Its first outcome is `notStarted`: the authority records `failed`
+  with the reason `notStarted`.
 
 The report sets `strictAdmission` to true only when every case except the `sudo`
 password prompt passes. `productionAdmission` stays false.
@@ -420,13 +436,16 @@ Not verified by PR2 either:
 
 - `sudo` with a password prompt, and the controlling terminal: a known limit (see
   [Gate](#gate)).
+- `sudo -n true` on a host where PAM waits for a FIDO touch: the result is
+  `inconclusive`. `passwd -S` gives the set-user-ID result instead.
 - The full Root capability sets of a `sudo` child of the command.
 - Two dispatches prepared at the same time: O is single-threaded, and PR2 measures
   a second dispatch while the first command runs after S6.
 - The authority's record for a dispatch that ends without a command. The durable
   `beginDispatch` comes before the fork, and the lifecycle has no transition from
-  `executing` to a proved no-dispatch, so the PR2 authority records `failed`. A
-  production authority needs a decision on this record.
+  `executing` to a proved no-dispatch, so the PR2 authority records `failed` with
+  the reason `notStarted`. Production needs a distinct outcome for it (see S4 in
+  [Sequence](#sequence) and [Gate](#gate)).
 - A decision signed by a phone, and a capture of a real requester: PR2 uses
   fixture keys and a synthetic requester.
 

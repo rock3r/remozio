@@ -289,6 +289,7 @@ final class Authority {
         permit.used = true
         // beginDispatch is already durable, so the request is executing. The lifecycle has no transition
         // from executing to a proved no-dispatch, so a dispatch that ended without a command is a failure.
+        // The record keeps the reason: a production authority needs a distinct outcome for notStarted.
         do {
             switch result {
             case "dispatched": try permit.store.succeeded()
@@ -299,8 +300,9 @@ final class Authority {
             emit(["event": "outcome", "result": "store-refused", "reported": result, "phase": phase(permit.store)])
             return "REFUSED"
         }
-        emit(["event": "outcome", "result": "recorded", "reported": result, "requesterLost": lost,
-              "phase": phase(permit.store)])
+        let reason = result == "dispatched" || result == "unknown" ? "none" : result
+        emit(["event": "outcome", "result": "recorded", "reported": result, "reason": reason,
+              "requesterLost": lost, "phase": phase(permit.store)])
         return "OK"
     }
 

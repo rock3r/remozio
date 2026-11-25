@@ -258,7 +258,10 @@ byte-identical, and it uses `owner.c` and `frontend.c` without a change.
   `lostOutcome()`, and `execFailed`, `notStarted` and `refused` to `failed()`. The
   lifecycle has no transition from `executing` to a proved no-dispatch, and
   `beginDispatch` is already durable at S1, so a dispatch that ended without a
-  command is recorded as `failed`. See the design's "Not verified".
+  command is recorded as `failed`. The outcome event and the report keep the
+  reason: `authorityOutcomeReason` is `notStarted`, `execFailed` or `refused` for a
+  `failed` record, and `none` otherwise. Production needs a distinct outcome for
+  `notStarted` (design S4 and "Gate").
 - `fdshim.c` is the unit's `ExecStart`. A transient unit cannot inherit the
   runner's descriptors, so the shim connects to a rendezvous socket of the run,
   receives O's stdout, listener, control socket and restart log through
@@ -268,10 +271,12 @@ byte-identical, and it uses `owner.c` and `frontend.c` without a change.
   PID is the unit's `MainPID`.
 - `command2.c` is the command. It writes one marker line and reports its
   capability sets, `NoNewPrivs:`, its mount namespace, its AppArmor label and its
-  descriptors. Under the name `cmd-sudo` it runs `sudo -n true`, under `cmd-prompt`
-  it runs `sudo true`, and under `cmd-hog` it allocates memory until the kernel
-  kills it (in `sleep` mode it sleeps). The runner publishes closed categories
-  only.
+  descriptors. Under the name `cmd-sudo` it runs `passwd -S` of the caller's own
+  account (read from `/etc/passwd` by UID) and then `sudo -n true`, under
+  `cmd-prompt` it runs `sudo true`, and under `cmd-hog` it allocates memory until the kernel
+  kills it (in `sleep` mode it sleeps). Each helper gets 5 s. A `sudo` that does
+  not end in that time is `inconclusive`; a `passwd` that does not end is
+  `timeout`. The runner publishes closed categories only.
 - `apparmor.in` is the profile of O, rendered with the run's tag and directory and
   loaded with `apparmor_parser -a -K` (kernel only). It allows ptrace of the
   unconfined frontend and runs the commands with `ux`. Every image is static, so
@@ -303,11 +308,11 @@ without Root. `scripts/check-linux-host.sh` runs it in CI, after the Swift build
 | Case | Expected result |
 | --- | --- |
 | `unit-report` | Dispatched; inside the command `CapPrm`, `CapEff`, `CapInh` and `CapAmb` are empty, `NoNewPrivs:` is 0, the mount namespace is PID 1's, the label is `unconfined` and the command holds only 0, 1 and 2. `systemctl show` reports the unit options, and O's limits in `/proc` are at the maximum |
-| `unit-nnp-control` | Negative control with `NoNewPrivileges=yes`: `NoNewPrivs:` is 1 and `sudo -n true` fails because of it |
+| `unit-nnp-control` | Negative control with `NoNewPrivileges=yes`: `NoNewPrivs:` is 1 and `passwd -S` fails, because the set-user-ID image does not get effective UID 0. `sudo -n true` fails because of it (or is `inconclusive`) |
 | `unit-privatetmp-control` | Negative control with `PrivateTmp=yes`: the command's mount namespace is not the host's |
-| `unit-sudo` | `sudo -n true` inside the command ends with "a password is required" (or succeeds when the operator has a rule without a password): `sudo` started set-user-ID and reached its policy |
+| `unit-sudo` | Inside the command, `NoNewPrivs:` is 0 and `passwd -S <caller>` succeeds: the decisive check that a set-user-ID image starts with effective UID 0 and needs no interaction. `sudo -n true` ends with "a password is required", succeeds (an operator rule without a password), or is `inconclusive` after 5 s (PAM can wait for a FIDO touch even with `-n`); `inconclusive` does not fail the case |
 | `unit-sudo-prompt` | `sudo true` (a password prompt) without a controlling terminal. A known limit: recorded, does not gate `strictAdmission` |
-| `unit-apparmor` | O runs under `rmzso-owner-<tag>`; the command is `unconfined` through `ux`; `sudo -n true` reaches its policy |
+| `unit-apparmor` | O runs under `rmzso-owner-<tag>`; the command is `unconfined` through `ux`; `NoNewPrivs:` is 0 and `passwd -S <caller>` succeeds; `sudo -n true` as in `unit-sudo` |
 | `second-dispatch-fds` | A second dispatch while the first command runs after S6. At the second `k-ready`, K2 holds exactly 0 to 4, its 0 to 2 are C2's streams, its pipe ends are O's other ends; O holds nothing of the first dispatch and the same number of descriptors; the first command holds only its own streams |
 | `unit-stop` | `systemctl stop` with `KillMode=process` ends O; the command keeps running. O's end is read from its pidfd, because systemd can unload a stopped transient unit with its exit status |
 | `unit-restart` | `systemctl restart` ends O and starts a new main process; the command keeps running |
@@ -315,7 +320,7 @@ without Root. `scripts/check-linux-host.sh` runs it in CI, after the Swift build
 | `kill-owner-at-s1` | O dies at S1: no command; the authority holds the permit and the request stays `executing` |
 | `kill-owner-after-fork` | O dies after the fork: no command; the request stays `executing` |
 | `kill-owner-before-go` | O dies before the go byte: no command; the request stays `executing` |
-| `authority-controls` | A replayed `SUBMIT` is refused, and the store's ledger refuses the same signed decision again; a second `OUTCOME` is refused; a `HELLO` with the generation of a client that has exited is refused; a permit of an earlier generation is refused; Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`) |
+| `authority-controls` | A replayed `SUBMIT` is refused, and the store's ledger refuses the same signed decision again; a second `OUTCOME` is refused; a `HELLO` with the generation of a client that has exited is refused; a permit of an earlier generation is refused; Root as a peer is refused by the authority's UID check; the operator cannot connect (`EACCES`). The first `OUTCOME` reports `notStarted`: the authority records `failed` with the reason `notStarted` |
 
 Every owner case also records O's start line, the authority's events and O's
 restart log per dispatch. The report sets `strictAdmission` to true only when every
@@ -328,8 +333,10 @@ case except `unit-sudo-prompt` passes, with setup and cleanup complete.
   control cases without Root; it does not run systemd, AppArmor or `sudo`.
 - The `sudo` password prompt without a controlling terminal (a known limit; the
   design leaves the terminal relay to a decision).
-- The full Root capability sets of the `sudo` child. The case proves only that
-  `sudo` started set-user-ID, without `no_new_privs`, and reached its policy.
+- The full Root capability sets of a set-user-ID child. `passwd -S` proves only
+  that such a child starts with effective UID 0, without `no_new_privs`.
+- A dispatch that ends without a command is recorded as `failed`, with the reason
+  `notStarted` kept. A distinct outcome is a production requirement (design S4).
 - Two preparations at the same time. O is single-threaded and the case measures a
   second dispatch while the first command runs after S6.
 - An installed unit, the installer setting and upgrade from an older unit. The
@@ -338,8 +345,10 @@ case except `unit-sudo-prompt` passes, with setup and cleanup complete.
   streams in the capture are synthetic.
 - `command2.c` matches the messages of both `sudo` (sudo.ws) and `sudo-rs`, which
   Ubuntu 25.10 installs as `sudo`. On the measured host, one `sudo -n true` from a
-  context without a terminal did not end within 10 s, so `unit-sudo` can record
-  `timeout` there; the cause is not known.
+  context without a terminal did not end within 10 s. The likely cause is PAM
+  waiting for a FIDO touch, which `-n` does not stop, so `sudo -n true` proves
+  nothing there. The case records `inconclusive` after 5 s and relies on
+  `passwd -S`.
 
 ## Not verified
 

@@ -31,7 +31,10 @@ If a run is interrupted before cleanup, as Root: kill the processes in each
 
 The report holds booleans, closed categories, errno names, settings and hashes only.
 strictAdmission is true only when every gating case passes; the sudo password prompt is a known
-limit and does not gate it. productionAdmission is always false.
+limit and does not gate it. Inside the command, passwd -S of the operator's own account is the
+decisive set-user-ID check; "sudo -n true" gets 5 s and is "inconclusive" when it does not end (sudo
+can wait for a FIDO touch through PAM), which never fails a case. The authority records a dispatch
+without a command as failed with the reason notStarted. productionAdmission is always false.
 """
 import argparse
 import contextlib
@@ -106,15 +109,29 @@ SHOW_EXPECTED = {"KillMode": "process", "OOMPolicy": "continue", "TasksMax": "in
                  **{f"Limit{name}": "infinity" for name in LIMITS}}
 
 SUDO = frozenset({"password-required", "allowed", "terminal-required", "no-new-privs", "not-setuid",
-                  "not-permitted", "not-found", "timeout", "other", "not-run", "not-reported"})
+                  "not-permitted", "not-found", "inconclusive", "other", "not-run", "not-reported"})
 # sudo started set-user-ID and reached its policy, without no_new_privs: the plan review expects for the
 # sudo child is "a password is required"; "allowed" (an operator rule without a password) proves the
-# same start. The child's full Root capability sets stay not verified.
-SUDO_REACHED_POLICY = ("password-required", "allowed")
+# same start. sudo can wait for a FIDO touch through PAM even with -n, so a sudo that does not end in
+# 5 s is "inconclusive": recorded, never a failure. passwd -S is the decisive check.
+SUDO_REACHED_POLICY = ("password-required", "allowed", "inconclusive")
+# passwd -S <caller> inside the command: "ok" only when the set-user-ID image started with euid 0 (no
+# no_new_privs) and needed no interaction.
+PASSWD = frozenset({"ok", "failed", "not-found", "timeout", "no-user", "other", "not-run", "not-reported"})
+# The authority records a dispatch without a command as failed; the reason keeps the difference.
+OUTCOME_REASONS = frozenset({"none", "notStarted", "execFailed", "refused"})
 PHASES = frozenset({"queued", "presented", "authorized", "executing", "succeeded", "failed", "unknown", "declined",
                     "cancelled", "expired", "unreadable", "other"})
 OUTCOME_PHASE = {"dispatched": "succeeded", "unknown": "unknown", "execFailed": "failed", "notStarted": "failed",
                  "refused": "failed"}
+
+
+KNOWN_LIMITS = ("sudo password prompt: no controlling terminal for the command (unit-sudo-prompt, "
+                "recorded, not gating)",
+                "sudo -n true may wait for a FIDO touch through PAM: after 5 s it is recorded as "
+                "inconclusive and does not gate; passwd -S is the decisive check",
+                "a dispatch without a command (notStarted) is recorded as failed with the reason "
+                "notStarted; production needs a distinct outcome (design S4)")
 
 
 # --- Vocabulary ---------------------------------------------------------------------------------
@@ -122,12 +139,13 @@ OUTCOME_PHASE = {"dispatched": "succeeded", "unknown": "unknown", "execFailed": 
 DISPATCH_KEYS = {
     **{key: values | {NA} for key, values in SO.OWNER_DISPATCH_KEYS.items() if key != "dispatch"},
     "authorityPermit": YES_NO, "authorityPhaseAfterPermit": PHASES | {NA},
-    "authorityOutcome": SO.RESULTS | {"missing"}, "authorityPhase": PHASES | {NA},
+    "authorityOutcome": SO.RESULTS | {"missing"}, "authorityOutcomeReason": OUTCOME_REASONS | {NA},
+    "authorityPhase": PHASES | {NA},
     "frontendExit": frozenset({"closed", "SIGKILL", "other", "not-started", "running"}),
     "capsEmpty": YES_NO | {"not-reported"}, "boundingFull": YES_NO | {"not-reported"},
     "noNewPrivs": frozenset({"0", "1", "not-reported"}), "hostMountNamespace": YES_NO | {"not-reported"},
     "commandLabel": frozenset({"unconfined", "owner-profile", "other", "not-reported"}),
-    "commandFds": frozenset({"exact", "other", "not-reported"}), "sudo": SUDO,
+    "commandFds": frozenset({"exact", "other", "not-reported"}), "sudo": SUDO, "passwd": PASSWD,
 }
 CASE_KEYS = {
     **{key: values | {NA} for key, values in SO.OWNER_START_KEYS.items()},
@@ -149,7 +167,9 @@ CASE_KEYS = {
 CONTROL_KEYS = {
     "firstHello": frozenset({"OK", "REFUSED", "error"}), "firstPermit": YES_NO,
     "replaySubmit": frozenset({"REFUSED", "PERMIT", "error"}), "replayLedger": frozenset({"refused", "accepted", NA}),
-    "firstOutcome": frozenset({"OK", "REFUSED", "error"}), "replayOutcome": frozenset({"OK", "REFUSED", "error"}),
+    "firstOutcome": frozenset({"OK", "REFUSED", "error"}),
+    "firstOutcomePhase": PHASES | {"missing"}, "firstOutcomeReason": OUTCOME_REASONS | {"missing"},
+    "replayOutcome": frozenset({"OK", "REFUSED", "error"}),
     "earlierGenerationHello": frozenset({"OK", "REFUSED", "error"}),
     "earlierGenerationOutcome": frozenset({"OK", "REFUSED", "error"}),
     "earlierGenerationEvent": frozenset({"generation-refused", "other", "missing"}),
@@ -157,7 +177,8 @@ CONTROL_KEYS = {
     "operatorConnect": frozenset({"EACCES", "connected", "other", NA}),
 }
 CONTROL_EXPECT = {"firstHello": "OK", "firstPermit": "yes", "replaySubmit": "REFUSED", "replayLedger": "refused",
-                  "firstOutcome": "OK", "replayOutcome": "REFUSED", "earlierGenerationHello": "REFUSED",
+                  "firstOutcome": "OK", "firstOutcomePhase": "failed", "firstOutcomeReason": "notStarted",
+                  "replayOutcome": "REFUSED", "earlierGenerationHello": "REFUSED",
                   "earlierGenerationOutcome": "REFUSED", "earlierGenerationEvent": "generation-refused",
                   "wrongPeer": "REFUSED", "wrongPeerEvent": "wrong-peer"}
 
@@ -172,12 +193,12 @@ DISPATCHED = {"admitted": "yes", "permit": "yes", "finalCheck": "yes", "kSetup":
               "goWritten": "yes", "requesterLostBeforeCheck": "no", "requesterLostAfterCheck": "no",
               "killedAtDeadline": "no", "reported": "yes", "restartLogComplete": "yes", "authorityPermit": "yes",
               "authorityPhaseAfterPermit": "executing", "authorityOutcome": "dispatched",
-              "authorityPhase": "succeeded", "frontendExit": "closed"}
+              "authorityOutcomeReason": "none", "authorityPhase": "succeeded", "frontendExit": "closed"}
 COMMAND_OK = {"capsEmpty": "yes", "noNewPrivs": "0", "hostMountNamespace": "yes", "commandFds": "exact"}
 # O dies before it prints its dispatch line: the permit is seen at the authority only.
 KILLED_BEFORE_GO = {"authorityPermit": "yes",
                     "authorityPhaseAfterPermit": "executing", "authorityOutcome": "missing",
-                    "authorityPhase": "executing", "frontendExit": "SIGKILL"}
+                    "authorityOutcomeReason": NA, "authorityPhase": "executing", "frontendExit": "SIGKILL"}
 
 
 def _case(command="cmd-report", modes=("normal",), extra=(), actions=(), case=None, dispatches=None,
@@ -197,21 +218,23 @@ CASES = {
     # The two negative controls: each proves that the check above can fail.
     "unit-nnp-control": _case("cmd-sudo", extra=("nnp",),
                               case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
-                              dispatches=[{**DISPATCHED, "noNewPrivs": "1", "sudo": ("no-new-privs", "not-setuid")}]),
+                              dispatches=[{**DISPATCHED, "noNewPrivs": "1", "passwd": "failed",
+                                           "sudo": ("no-new-privs", "not-setuid", "inconclusive")}]),
     "unit-privatetmp-control": _case(extra=("privatetmp",), case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
                                      dispatches=[{**DISPATCHED, "hostMountNamespace": "no"}]),
-    # sudo -n true inside the command: sudo started set-user-ID and reached its policy.
+    # passwd -S <caller> inside the command succeeds (set-user-ID start with euid 0, NoNewPrivs 0);
+    # sudo -n true is recorded, and an inconclusive sudo does not fail the case.
     "unit-sudo": _case("cmd-sudo", case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
-                       dispatches=[{**DISPATCHED, **COMMAND_OK, "sudo": SUDO_REACHED_POLICY}]),
+                       dispatches=[{**DISPATCHED, **COMMAND_OK, "passwd": "ok", "sudo": SUDO_REACHED_POLICY}]),
     # Known limit: no controlling terminal for the password prompt. Recorded, not gating.
     "unit-sudo-prompt": _case("cmd-prompt", case={**STARTED, "ownerExit": "ok", "markerLines": "1"},
-                              dispatches=[{**DISPATCHED, "sudo": ("terminal-required", "timeout", "other",
+                              dispatches=[{**DISPATCHED, "sudo": ("terminal-required", "inconclusive", "other",
                                                                   "password-required")}], gating=False),
-    # O under its AppArmor profile; the command leaves it through the ux rule, and sudo works inside.
+    # O under its AppArmor profile; the command leaves it through the ux rule, and passwd -S works inside.
     "unit-apparmor": _case("cmd-sudo", extra=("apparmor",),
                            case={**STARTED, "ownerExit": "ok", "ownerLabel": "profile", "markerLines": "1"},
                            dispatches=[{**DISPATCHED, **COMMAND_OK, "commandLabel": "unconfined",
-                                        "sudo": SUDO_REACHED_POLICY}]),
+                                        "passwd": "ok", "sudo": SUDO_REACHED_POLICY}]),
     # A second dispatch while the first command still runs after S6 (plan review, answer 1).
     "second-dispatch-fds": _case(modes=("sleep", "normal"),
                                  case={**STARTED, "ownerExit": "ok", "markerLines": "2", "restartLogClean": "yes",
@@ -353,12 +376,13 @@ def limits_at_max(limits, nr_open):
 
 
 COMMAND_REPORT_KEYS = ("capPrm", "capEff", "capInh", "capAmb", "capBnd", "noNewPrivs", "mntNs", "label", "fds",
-                       "sudo")
+                       "sudo", "passwd")
 
 
 def command_checks(raw, last_cap, host_mnt, tag):
     """The command's report, reduced to closed values. raw is b"" when no report came."""
-    keys = ("capsEmpty", "boundingFull", "noNewPrivs", "hostMountNamespace", "commandLabel", "commandFds", "sudo")
+    keys = ("capsEmpty", "boundingFull", "noNewPrivs", "hostMountNamespace", "commandLabel", "commandFds", "sudo",
+            "passwd")
     if not raw:
         return {key: "not-reported" for key in keys}
     lines = [line for line in raw.split(b"\n") if line]
@@ -368,7 +392,7 @@ def command_checks(raw, last_cap, host_mnt, tag):
     if set(report) != set(COMMAND_REPORT_KEYS):
         raise ValueError("invalid command report")
     caps = {key: SO._hex_mask(report[key]) for key in ("capPrm", "capEff", "capInh", "capAmb", "capBnd")}
-    if report["noNewPrivs"] not in ("0", "1") or report["sudo"] not in SUDO:
+    if report["noNewPrivs"] not in ("0", "1") or report["sudo"] not in SUDO or report["passwd"] not in PASSWD:
         raise ValueError("invalid command report")
     label = report["label"]
     owner_profile = PROFILE_PREFIX + tag if tag else None
@@ -381,7 +405,7 @@ def command_checks(raw, last_cap, host_mnt, tag):
                              else "owner-profile" if owner_profile and label.split(" ")[0] == owner_profile
                              else "other"),
             "commandFds": "exact" if report["fds"] == "0 1 2" else "other",
-            "sudo": report["sudo"]}
+            "sudo": report["sudo"], "passwd": report["passwd"]}
 
 
 def owner_reports(raw, dispatches):
@@ -417,7 +441,7 @@ AUTHORITY_EVENTS = {
                "ledger": frozenset({"refused", "accepted"}), "phase": PHASES},
     "outcome": {"result": frozenset({"recorded", "refused", "generation-refused", "replay-refused",
                                      "store-refused"}),
-                "reported": SO.RESULTS, "requesterLost": YES_NO, "phase": PHASES},
+                "reported": SO.RESULTS, "reason": OUTCOME_REASONS, "requesterLost": YES_NO, "phase": PHASES},
 }
 
 
@@ -453,6 +477,7 @@ def authority_summary(events, dispatches):
             "authorityPermit": "yes" if permit else "no",
             "authorityPhaseAfterPermit": permit.get("phase", NA) if permit else NA,
             "authorityOutcome": outcome["reported"] if outcome else "missing",
+            "authorityOutcomeReason": outcome.get("reason", NA) if outcome else NA,
             "authorityPhase": outcome.get("phase", NA) if outcome else (permit.get("phase", NA) if permit else NA)})
     return summary, per_dispatch
 
@@ -618,6 +643,10 @@ def control_observations(first, later, wrong, events, operator_connect=NA):
     observed = {key: first.get(key, "error") for key in ("firstHello", "replaySubmit", "firstOutcome",
                                                          "replayOutcome")}
     observed["firstPermit"] = first.get("firstPermit", "no")
+    # The client reports notStarted for the first permit: the record is failed, with the reason kept.
+    recorded = next((e for e in events if e["event"] == "outcome" and e["result"] == "recorded"), None)
+    observed["firstOutcomePhase"] = recorded.get("phase", "missing") if recorded else "missing"
+    observed["firstOutcomeReason"] = recorded.get("reason", "missing") if recorded else "missing"
     observed.update(replayLedger=ledger, earlierGenerationHello=later.get("earlierGenerationHello", "error"),
                     earlierGenerationOutcome=later.get("earlierGenerationOutcome", "error"),
                     earlierGenerationEvent=generation_event, wrongPeer=wrong.get("wrongPeer", "error"),
@@ -1400,8 +1429,7 @@ def measure(timeout=30, authority_binary=None, run_factory=Run):
             "supervised": True, "trustedCode": False, "strictAdmission": strict, "productionAdmission": False,
             "host": host, "scripts": scripts, "builds": run.build_hashes, "setup": setup, "cases": cases,
             "cleanup": cleanup, "passed": passed,
-            "knownLimits": ["sudo password prompt: no controlling terminal for the command (unit-sudo-prompt, "
-                            "recorded, not gating)"],
+            "knownLimits": list(KNOWN_LIMITS),
             "limits": ["transient units through systemd-run, not an installed unit or installer setting",
                        "synthetic capture and software decision keys in the authority; no phone approval",
                        "a second dispatch while the first command runs, not two preparations at the same time",
