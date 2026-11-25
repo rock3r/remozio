@@ -18,7 +18,8 @@
  * check: shadow-utils refuses another account by the real UID, with or without euid 0. The
  * command reads its own NoNewPrivs from /proc/self/status.
  *
- * usage: <name> <normal|short|sleep> <marker>; sleep keeps the process alive after the report
+ * usage: <name> <normal|short|sleep> <marker>; sleep keeps the process alive after the report, for
+ * at most SLEEP_SECONDS
  * (for cmd-hog, sleep replaces the allocation, so one image gives the sleeper and the hog).
  * The values are raw for the runner, which publishes closed categories.
  * The exit codes avoid the owner's reserved range 120-123.
@@ -34,6 +35,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#define SLEEP_SECONDS 300
 
 static void copy_field(const char *status, const char *key, char *out, size_t size) {
     const char *line = strstr(status, key);
@@ -330,10 +333,12 @@ int main(int argc, char **argv) {
            prm, eff, inh, amb, bnd, nnp, mnt, label, fds, sudo, passwd);
     fflush(stdout);
     if (strcmp(name, "cmd-hog") == 0 && strcmp(argv[1], "sleep") != 0) hog();
+    /* At most SLEEP_SECONDS: a run that is killed before its cleanup leaves no sleeper until reboot.
+     * The limit is above the longest case (the runner's timeout is at most 120 s). */
     if (strcmp(argv[1], "sleep") == 0)
-        for (;;) {
-            struct timespec second = {1, 0};
-            nanosleep(&second, NULL);
+        for (int second = 0; second < SLEEP_SECONDS; second++) {
+            struct timespec pause_second = {1, 0};
+            nanosleep(&pause_second, NULL);
         }
     return 0;
 }
