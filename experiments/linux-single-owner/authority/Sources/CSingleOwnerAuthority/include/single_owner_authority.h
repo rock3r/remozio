@@ -18,7 +18,11 @@ int csa_peer(int socket, unsigned *uid, int *pid, int *pidfd);
 /* The PID that a pidfd names now (the Pid: line of its fdinfo); -1 when the process is gone. */
 int csa_pidfd_pid(int pidfd);
 
-/* Field 22 of /proc/<pid>/stat. Returns 0 or -1. */
+/* 1 while the process of the pidfd runs, 0 once it has exited (a zombie too: the pidfd is
+ * readable from the exit on), -1 on an error. */
+int csa_pidfd_alive(int pidfd);
+
+/* Field 22 of /proc/<pid>/stat. Returns 0, or -1 on an error and for a zombie or dead process. */
 int csa_start_time(int pid, unsigned long long *start);
 
 /* The 36 characters of /proc/sys/kernel/random/boot_id and a terminating zero. Returns 0 or -1. */

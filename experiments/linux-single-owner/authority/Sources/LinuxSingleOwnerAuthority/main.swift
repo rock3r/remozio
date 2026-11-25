@@ -135,10 +135,11 @@ func startTime(_ pid: Int32) -> UInt64? {
     return csa_start_time(pid, &value) == 0 ? value : nil
 }
 
-/// The pidfd still names the generation's PID, and that PID still has the generation's start time.
+/// The pidfd's process has not exited (a zombie has: its pidfd is readable), the pidfd still names the
+/// generation's PID, and that PID still has the generation's start time.
 func live(_ generation: Generation, _ pidfd: Int32) -> Bool {
-    generation.boot == bootID() && csa_pidfd_pid(pidfd) == generation.pid && startTime(generation.pid) == generation.start
-        && csa_pidfd_pid(pidfd) == generation.pid
+    generation.boot == bootID() && csa_pidfd_alive(pidfd) == 1 && csa_pidfd_pid(pidfd) == generation.pid
+        && startTime(generation.pid) == generation.start && csa_pidfd_pid(pidfd) == generation.pid
 }
 
 func identity(_ descriptor: Int32) throws -> CapturedFileIdentity {
@@ -148,7 +149,7 @@ func identity(_ descriptor: Int32) throws -> CapturedFileIdentity {
 }
 
 func identity(_ path: String) throws -> CapturedFileIdentity {
-    let descriptor = open(path, O_RDONLY | O_CLOEXEC)
+    let descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
     try require(descriptor >= 0, "openIdentity")
     defer { close(descriptor) }
     return try identity(descriptor)
@@ -163,6 +164,9 @@ final class Authority {
     let clock: LinuxAuthorityClock
     var permits: [String: Permit] = [:]
     var submissions: [String: (store: FixtureStore, material: FixtureApprovalMaterial)] = [:]
+    /// Store directories are numbered by attempt, not by permit: a failed SUBMIT leaves its directory,
+    /// and the next attempt must not collide with it.
+    var attempts = 0
 
     init(_ configuration: Configuration) throws {
         self.configuration = configuration
@@ -235,17 +239,19 @@ final class Authority {
         let nonce = String(words[1])
         if let previous = submissions[nonce] {
             // A replay: the same signed decision goes to the same store again, and its ledger must refuse it.
-            var ledgerRefused = false
+            // Only the ledger's own refusal counts; an expired decision or a store error is "error".
+            var ledger = "accepted"
             do { _ = try previous.store.consume(previous.material, validate: { _ in }, now: clock.now) }
-            catch { ledgerRefused = true }
-            emit(["event": "submit", "result": "replay-refused", "ledger": ledgerRefused ? "refused" : "accepted",
-                  "phase": phase(previous.store)])
+            catch ConsumptionJournalError.alreadyConsumed { ledger = "refused" }
+            catch { ledger = "error" }
+            emit(["event": "submit", "result": "replay-refused", "ledger": ledger, "phase": phase(previous.store)])
             return "REFUSED"
         }
-        guard submissions.count < configuration.modes.count else { return refuse("no-more-requests") }
+        guard submissions.count < configuration.modes.count, attempts < 16 else { return refuse("no-more-requests") }
         let mode = configuration.modes[submissions.count]
+        attempts += 1
         do {
-            let directory = configuration.storeRoot + "/request-\(submissions.count + 1)"
+            let directory = configuration.storeRoot + "/request-\(attempts)"
             try require(mkdir(directory, 0o700) == 0, "storeDirectory")
             let store = try FixtureStore(directory: directory, reopening: false)
             let retained = try capture(callerPID: callerPID, mode: mode)
@@ -255,8 +261,9 @@ final class Authority {
                 try require(decoded == retained, "retainedCaptureMismatch")
                 try require(live(generation, pidfd), "generationLost")
             }, now: clock.now) else { return refuse("declined") }
-            submissions[nonce] = (store, material)
             try store.dispatched(token)
+            // Recorded only once beginDispatch is durable: a SUBMIT that failed before it holds no slot.
+            submissions[nonce] = (store, material)
             let permit = randomBytes(16).hex
             permits[permit] = Permit(generation: generation, store: store)
             emit(["event": "submit", "result": "permit", "phase": phase(store)])
