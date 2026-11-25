@@ -12,7 +12,7 @@ The attended gate presupposes this slice. New and existing releases retain a dis
 
 ### Protected configuration and owner
 
-- Put one authoritative enable flag in a versioned extension of the Root-private pairing startup configuration. The current `AuthorityPairingSetupConfiguration` pins the Transport key and the window lifetime. Preserve the existing schema's bytes and disabled behavior for an absent flag. Refuse unknown versions, malformed enabled settings, mismatched pins and stale activation state.
+- Put one authoritative enable flag in a versioned extension of the Root-private pairing startup configuration. The current `AuthorityPairingSetupConfiguration` pins the Transport key and the window lifetime. Preserve the existing schema's bytes and disabled behavior for an absent flag. Refuse unknown versions, malformed enabled settings, mismatched pins and stale activation state. Bind the internal activation request to the current `AuthorityClock.epoch` and the SHA-256 digest of the exact canonical protected pairing configuration. A changed epoch or digest makes it stale. Check both before drain and before promotion. Refuse a stale request without changing the current mode.
 - The Root pairing owner consumes that setting before admitting a window. The installed app learns the effective mode from authenticated Root state. The Transport owner binds only for a current enabled Authority window on its authenticated proof link. Send Transport the public window projection through that path. Keep the full invitation with the signed app and the phone. User preferences, temporary environment flags and network clients cannot enable the path.
 - Bind the v2 listener to the approved LAN scope only when the same protected setting is enabled and the current proof link is ready. A disabled or invalid setting starts no v2 LAN listener. Preserve TLS identity pinning, TLS 1.3, the v2 application protocol, the three-second deadline, and all quotas. Verify the actual socket binding during the attended gate. [Protected pairing configuration](../macos/core/Sources/RemozioCore/AuthorityPairingSetup.swift) · [Transport owner](../macos/core/Sources/RemozioCore/TransportPairingSetupOwner.swift)
 
@@ -40,22 +40,41 @@ Apply disable through the supported protected configuration workflow. Close v2 a
 - [ ] For each native control, record the exact approved fixture action and its expected observation in the session plan. Record how the fixture reads the actual peer, process incarnation, and candidate timing. A fixture unable to expose that observation leaves the row **Blocked**.
 - [ ] Use the existing [ATC workflow](../AGENTS.md) for any approved build or device command. Use the installed app and phone UI for the attended actions. Confirm installed IPC and signing before connecting the physical phone to the approved pilot pairing listener. Leave optional ADB disabled unless the user approves it for this session.
 
-Run these read-only checks in `sh` from the repository root after selecting the actual artifact paths. Keep the output in the ignored evidence directory.
+Run these read-only checks in a dedicated `sh` shell from the repository root. Fill in the values from the approved artifact manifest before running the block. Keep the output in the ignored evidence directory.
 
 ```sh
+set -eu
+capacity_merge='REPLACE_WITH_VERIFIED_PR_967_MERGE_COMMIT'
+artifact_source='REPLACE_WITH_APPROVED_ARTIFACT_SOURCE_COMMIT'
+approved_pkg='REPLACE_WITH_APPROVED_PACKAGE_PATH'
+approved_apk='REPLACE_WITH_APPROVED_APK_PATH'
+installed_app='REPLACE_WITH_VERIFIED_INSTALLED_APP_PATH'
+signing_mode='REPLACE_WITH_notarized_OR_development'
+
+case "$signing_mode" in
+  notarized|development) ;;
+  *) printf '%s\n' 'Set the signing mode from the artifact manifest.' >&2; exit 2 ;;
+esac
+git merge-base --is-ancestor "$capacity_merge" "$artifact_source"
 umask 077
 mkdir -p experiment-results
 evidence_dir=$(mktemp -d experiment-results/pairing-v2-attended.XXXXXX)
 git rev-parse HEAD > "$evidence_dir/review-checkout.txt"
-git merge-base --is-ancestor "$capacity_merge" "$artifact_source"
 sw_vers > "$evidence_dir/macos-version.txt"
 shasum -a 256 "$approved_pkg" "$approved_apk" > "$evidence_dir/artifact-sha256.txt"
 codesign --verify --strict --verbose=2 "$installed_app"
 codesign -d --verbose=4 "$installed_app" 2> "$evidence_dir/app-signing.txt"
-spctl --assess --type execute --verbose=4 "$installed_app"
+if spctl --assess --type execute --verbose=4 "$installed_app" > "$evidence_dir/gatekeeper.txt" 2>&1; then
+  printf '%s\n' 'spctl exit 0' >> "$evidence_dir/gatekeeper.txt"
+else
+  status=$?
+  printf 'spctl exit %s\n' "$status" >> "$evidence_dir/gatekeeper.txt"
+  if [ "$signing_mode" = notarized ]; then exit "$status"; fi
+fi
+printf 'Private evidence directory: %s\n' "$evidence_dir"
 ```
 
-Set `capacity_merge` to the verified merge commit for PR #967 and `artifact_source` to the source from the signed artifact receipt. Use the recorded installer, APK, and installed app paths. Compare the checksums and public signing pins with the receipt. Record each command result. Stop if a prerequisite fails. Use the [initial package guide](../docs/macos-initial-package.md) for previously approved installation steps.
+Compare the checksums and public signing pins with the artifact receipt. A notarized candidate must pass the configured Gatekeeper assessment. For an approved development candidate, record an expected Gatekeeper refusal due to its signing mode. Count that expected result as a development control. Keep the notarization gate open for that candidate. Treat an unexpected refusal or a code signature mismatch as a failed prerequisite. Use the [initial package guide](../docs/macos-initial-package.md) for previously approved installation steps.
 
 At the before and after points below, use the documented live status surface of the selected build. When the service diagnostics are available without elevation, these read-only commands supplement that evidence. Set the service targets and PIDs from the selected installed inventory and live observations. Each launchd target includes its verified domain and job label. Review the command output privately before retaining it.
 
@@ -66,7 +85,7 @@ ps -p "$authority_pid,$transport_pid" -o pid=,uid=,lstart=
 lsof -nP -a -p "$transport_pid" -iTCP -sTCP:LISTEN
 ```
 
-A permission error, missing observation, or unrelated listener leaves that check unresolved. Record the pairing listener separately from other Transport listeners. Keep appearance, disappearance, binding class, and relevant process timing in the sanitized record.
+A permission error, missing observation, or unrelated listener leaves that check unresolved. Record the pairing listener separately from other Transport listeners. Keep appearance, disappearance, and relevant process timing in the sanitized record. For the binding itself, share only the class `loopback`, `LAN`, or `any`. Keep addresses and ports from `lsof` in private evidence.
 
 ## Installed positive and negative controls
 
@@ -78,7 +97,7 @@ A permission error, missing observation, or unrelated listener leaves that check
 | Second signed process | While the first link is live, use the approved cross-process fixture to present the proof endpoint from a separate correctly signed process. Record the expected original PID and the actual second PID in private evidence. | The second process cannot negotiate or allocate proof state. The first link stays usable, without replacement or eviction. A same-process XPC fixture counts only as local evidence. |
 | Bootstrap and slot isolation | Observe the signed Transport bootstrap, proof negotiation, window binding, and handoff. Use the approved fixture to check general admission counts before and after, and to try a second concurrent dedicated link. | The bootstrap releases its general slot after successful handoff and the proof exchange continues. The dedicated link uses its own slot. A concurrent or stale proof link is refused. Record slot counts, transition order, and a successful general connection after handoff. |
 | Restart a separate Transport | With an open v2 window, use the preapproved test control to end and restart its Transport process. Capture the old and new start times and the unchanged Authority process. Open a fresh window and complete a valid pairing attempt. | The original link and reservations retire. Its slot becomes reusable within the recovery bound recorded in the session plan. Late output from the old link cannot publish or retire the new slot. The Authority remains up. Record actual recovery time from observed death through successful new link reservation. |
-| Authority-wide version exclusion | In the approved two-connection fixture, try v1 staging through another signed app connection while v2 is open. Separately hold an admitted v1 attempt or its reply, then request v2. Let the existing v1 attempt settle or expire. | Each conflicting operation is refused across connections. A fresh v2 window opens after the admitted v1 work settles or expires. Legitimate v1 still works under the ordinary policy outside a v2 window. Record both connection roles and the refusal and recovery order. |
+| Authority-wide version exclusion | In the approved two-connection fixture, try v1 staging through another signed app connection while v2 is open. Separately hold an admitted v1 attempt or its reply, then request v2. Let the existing v1 attempt settle or expire. | Each conflicting operation is refused across connections. A fresh v2 window opens after the admitted v1 work settles or expires. Fresh v1 stays refused after the window closes while v2 mode stays active. Verify legitimate v1 under the approved disabled policy. Record both connection roles and the refusal and recovery order. |
 | Proof and publication | Use the valid phone invitation and an approved control with no valid invitation proof. Exercise the prepared wrong-binding and expired-candidate controls, including a late confirmation. | A verified proof precedes candidate publication. The valid peer uses the same live link and exact proposal from registration through confirmation. No-proof, wrong-binding, and expired controls publish no candidate and commit nothing. The original three-second deadline starts at TCP accept, includes TLS and queue time, and never extends at challenge or confirmation. |
 | Replay and registration budget | Use the approved bounded case for repeated bindings on the same link, including a retired candidate. Observe an approved temporary budget refusal and retry after credits return while the window is still live. Inspect the source and qualification evidence for the replay bound. | Repeated connection IDs and exporters remain refused for the link lifetime. The new valid request can proceed when credit and a slot are available. Record pending, drain, and budget outcomes separately. Confirm the 10,000-entry cap covers `16 + 32 × 300 = 9,616` registrations. A full-capacity fixture alone does not prove installed behavior. |
 | NSXPC input boundary | Record the signed Transport-only interface and the ordering of decode and validation in the reviewed source. Use the approved fixed-size and proposal-size controls if the installed fixture exposes them. | Authority checks the 65-byte peer point, 32-byte exporter and tag, 16-byte handles, and 66,128-byte prelude limit before application proposal decoding and proof verification. NSXPC has already decoded the `Data` arguments when the method starts. Record this residual boundary and the owner's disposition. Authority relies on the authenticated Transport for the TLS socket binding. Do not claim a pre-NSXPC envelope bound. |
@@ -92,26 +111,26 @@ Record the chosen restart bound before the session. It must cover the actual ins
 - [ ] Run only on the explicitly approved LAN and attended build after installed IPC, signing and the physical pairing control pass. Record the exact approved traffic harness and command, the authorized sources, valid-attempt count, load, run duration, capture points, and stop condition before the run. The issue sets outcome thresholds and leaves the reference workload to the session plan. If the workload or harness is missing, mark LAN **Blocked**.
 - [ ] Establish a no-load control with the real phone. Under the approved sustained reference workload, record every scheduled valid attempt. Use a fresh invitation for each attempt that spends a window. Keep independent trial windows and reuse policy in the record. Use exact monotonic accept and candidate-publication events on the same host. Include refused and expired valid attempts in the publication denominator.
 - [ ] Check a distinct-source phone, then the approved shared-address case. Record the normalized-key count, peak pending and drain occupancy, refusal reasons, elapsed times, and any visible pairing failure. IPv4-mapped IPv6 shares the IPv4 key. Full IPv6 addresses use separate keys with scope ignored. A real phone that stays excluded under the shared-key control leaves the LAN criterion open.
-- [ ] Record the successful publication fraction and p95 accept-to-candidate latency for each reference run. Pass requires at least 99% publication and p95 at or below 2.5 s under the approved load, with the real phone completing pairing. Report the sample count, missing timing observations, median, p95 and worst latency. Treat missing observations as unresolved.
+- [ ] Record the successful publication fraction and p95 accept-to-candidate latency for each reference run. Pass requires at least 99% publication and p95 at or below 2.5 s under the approved load, with the real phone completing pairing. Compute p95 across all valid attempts. Assign 3,000 ms to each failed or expired attempt, including refusals. Report the sample count, missing timing observations, median, p95 and maximum scored latency. Treat a missing timing observation for a published candidate as unresolved.
 - [ ] Check the report against the profile from PR #967. The listener has 16 pending slots, one per key, two admissions per source per second, four drain slots, and an 8-credit burst at 32/s. Authority has 16 pending reservations and a 16-credit burst at 32/s. The sustained listener threshold is `min(16, floor(32 / 2)) = 16` keys. Burst demand, drain occupancy, shared addresses, and IPv6 address rotation can lower available capacity. The localhost evidence cannot qualify LAN by itself.
 
-For a completed run, put the approved collector's sanitized valid-attempt records in one CSV with the columns `published` and `accept_to_candidate_ms`. Use `1` or `0` for publication and leave latency blank on failed attempts. Calculate the empirical thresholds offline. Run the command on each predeclared scenario separately.
+For a completed run, put the approved collector's sanitized valid-attempt records in one CSV with the columns `published` and `accept_to_candidate_ms`. Use `1` for publication before the proof deadline and `0` for failure or expiry. Leave latency blank on failed attempts. The calculation assigns those rows the 3,000 ms proof deadline. An observed publication at or after the deadline is a protocol failure. Calculate the empirical thresholds offline with Python 3.13 on each predeclared scenario separately.
 
 ```sh
-python3 - "$evidence_dir/valid-attempts.csv" <<'PY'
+python3.13 - "$evidence_dir/valid-attempts.csv" <<'PY'
 import csv, math, statistics, sys
 
 with open(sys.argv[1], newline="") as source:
     rows = list(csv.DictReader(source))
 assert rows and all(row["published"] in {"0", "1"} for row in rows)
+deadline_ms = 3000
 published = [row for row in rows if row["published"] == "1"]
-latencies = sorted(float(row["accept_to_candidate_ms"]) for row in published)
-assert all(math.isfinite(ms) and ms >= 0 for ms in latencies)
-if not latencies:
-    print(f"published=0/{len(rows)}; p95 unavailable")
-    raise SystemExit(1)
+observed = [float(row["accept_to_candidate_ms"]) for row in published]
+assert all(math.isfinite(ms) and 0 <= ms < deadline_ms for ms in observed)
+failures = len(rows) - len(published)
+latencies = sorted(observed + [deadline_ms] * failures)
 p95 = latencies[math.ceil(0.95 * len(latencies)) - 1]
-print(f"published={len(published)}/{len(rows)}")
+print(f"published={len(published)}/{len(rows)} scored_at_deadline={failures}")
 print(f"median_ms={statistics.median(latencies):.3f} p95_ms={p95:.3f} max_ms={latencies[-1]:.3f}")
 raise SystemExit(0 if 100 * len(published) >= 99 * len(rows) and p95 <= 2500 else 1)
 PY
