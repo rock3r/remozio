@@ -60,6 +60,17 @@ class TransportLeafRenewalTest {
         assertContentEquals(identity.public.encoded, renewed.single().publicKey.encoded)
     }
 
+    @Test fun onlyUnusableLeafIssuanceAfterExpiryRequiresRecovery() {
+        val renewalFailure: () -> ByteArray = { throw IOException("Signer unavailable") }
+        val before = expiry.minusSeconds(1)
+        assertSame(original, selectTransportLeaf(original, identity.public, before, { null }, renewalFailure,
+            { fail("Issuance failed before the write") }))
+        assertFailsWith<TransportCertificateRecoveryRequired> {
+            selectTransportLeaf(original, identity.public, expiry.plusSeconds(1), { null }, renewalFailure,
+                { fail("Issuance failed before the write") })
+        }
+    }
+
     @Test fun renewalWriteFailurePreservesValidOriginalAndFailsAfterExpiry() {
         val rejectedWrite: (ByteArray) -> Unit = { throw IOException("Synthetic persistence failure") }
         val before = expiry.minusSeconds(1)
@@ -78,6 +89,21 @@ class TransportLeafRenewalTest {
                 { fail("An invalid leaf was saved") })
             assertSame(original, chosen)
         }
+    }
+
+    @Test fun aSignedReplacementWithAnAdditionalNoncriticalExtensionIsRejected() {
+        fun fixture(name: String) = checkNotNull(javaClass.getResourceAsStream("/transport-leaf/$name")).use { it.readBytes() }
+        val original = arrayOf(parse(fixture("original.der")))
+        val additional = fixture("extra.der")
+        val cert = parse(additional)
+        val publicKey = original.single().publicKey
+        val now = cert.notBefore.toInstant().plusSeconds(300)
+        cert.verify(publicKey)
+        assertContentEquals(publicKey.encoded, cert.publicKey.encoded)
+        assertEquals(setOf("2.5.29.37", "1.3.6.1.4.1.32473.1"), cert.nonCriticalExtensionOIDs)
+        val fallback = selectTransportLeaf(original, publicKey, now, { additional }, { additional },
+            { fail("The extra extension was persisted") })
+        assertSame(original, fallback)
     }
 
     @Test fun rejectsRenewalWhenTheClockIsBeforeTheOriginalLeaf() {

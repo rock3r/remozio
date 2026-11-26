@@ -41,7 +41,9 @@ JVM tests check alias collisions, partial creation, the narrow fallback conditio
 
 On channel setup, Android renews the leaf when it has 30 days or less before expiry. It signs a new one-year leaf with the same hardware transport key. It keeps only the public leaf in private no-backup storage. It leaves the original Keystore entry intact. This works while the Mac is offline.
 
-A failed renewal uses a still-valid leaf when available. An expired leaf can be renewed locally if the original transport key can still sign. If renewal fails and no valid leaf remains, the channel refuses to connect. The explicit re-pair recovery entry point is a separate change.
+A failed renewal uses a still-valid leaf when available. An expired leaf can be renewed locally if the original transport key can still sign. If renewal fails and no valid leaf remains, the channel refuses to connect. Open the affected Mac’s Requests screen and select **Pair again**. On the Mac, open **Paired phones** and revoke the affected phone. Choose **Re-pair** on the Mac, then import that invitation on the phone and compare the codes.
+
+The recovery action accepts only an invitation for the selected predecessor. It preserves the existing row until it verifies the signed receipt. If the Mac is offline, keep the existing pairing until the owner can open the Mac and start re-pair.
 
 Leaf expiry is a certificate validity check. It is not the enrollment trust boundary, because the phone can renew the leaf with the existing key. The Mac still checks the enrolled public key, proof of possession, and revocation. Key rotation is separate.
 
