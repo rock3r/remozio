@@ -207,7 +207,7 @@ class CommandRequestEnrollment internal constructor(
     /** The identity check and state update share the enrollment monitor with replacement and removal. */
     @Synchronized
     internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant,
-        schemas: Set<ULong>, rejected: RejectedCommandCaptures,
+        schemas: Set<ULong>, rejected: RejectedCommandCaptures, clock: () -> ElapsedInstant,
     ): CommandDeliveryOutcome {
         if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
         val body = message.body.copyBytes()
@@ -243,7 +243,7 @@ class CommandRequestEnrollment internal constructor(
                 val key = CommandRequestIdentity(CborValue.Bytes(claim.macID), CborValue.Bytes(claim.accountID),
                     CborValue.Bytes(claim.requestID))
                 val session = requests[key]
-                if (session != null) session.observe(body, signature, receivedAt)
+                if (session != null) session.observe(body, signature, receivedAt, clock)
                 else {
                     val digest = rejected[key.requestID]
                         ?: retired?.lookup(claim.requestID)?.let { CborValue.Bytes(it) }

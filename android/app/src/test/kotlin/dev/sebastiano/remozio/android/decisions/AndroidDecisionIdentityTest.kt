@@ -59,7 +59,7 @@ class AndroidDecisionIdentityTest {
             val status = RequestStatusPayload(request.macID, request.accountID, request.requestID, request.requestDigest(bound, bound),
                 request.challenge, 1u, RequestPhase.PRESENTED, RequestStatusReason.NONE, id(20), 1000u, 59000u,
                 null, false, null, null).encode(bound)
-            session.observe(status, sign(status, ApprovalMessageType.STATUS, SigningPurpose.STATUS, signer), receivedAt)
+            session.observe(status, sign(status, ApprovalMessageType.STATUS, SigningPurpose.STATUS, signer), receivedAt) { receivedAt }
         }
         return session
     }
@@ -86,8 +86,8 @@ class AndroidDecisionIdentityTest {
             for ((schema, bytes) in captures) {
                 val request = request(schema = schema, bytes = bytes)
                 session(request).use { displayed ->
-                    assertEquals(schema, assertNotNull(displayed.snapshot(receivedAt).capture).schemaVersion)
-                    val carrier = signer.declineSession(displayed, receivedAt, limits)
+                    assertEquals(schema, assertNotNull(displayed.snapshot { receivedAt }.capture).schemaVersion)
+                    val carrier = signer.declineSession(displayed, { receivedAt }, limits)
                     val decision = DecisionPayload.decode(carrier.body.copyBytes(), bound)
                     assertEquals(ApprovalMessageType.DECISION, carrier.type)
                     assertEquals(SigningPurpose.CANCELLATION, carrier.purpose)
@@ -112,11 +112,11 @@ class AndroidDecisionIdentityTest {
         identity().use { signer ->
             for (request in listOf(request(mac = 99), request(account = 99))) {
                 session(request).use {
-                    assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+                    assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, { receivedAt }, limits) }
                 }
             }
             session(request(), signer = pair()).use {
-                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, { receivedAt }, limits) }
             }
         }
     }
@@ -124,14 +124,14 @@ class AndroidDecisionIdentityTest {
     @Test fun declineRequiresCurrentStatusAndAnAllowedDecline() {
         identity().use { signer ->
             session(request(), presented = false).use {
-                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, { receivedAt }, limits) }
             }
             session(request(actions = listOf(execute))).use {
-                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, receivedAt, limits) }
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, { receivedAt }, limits) }
             }
             session(request()).use {
                 val expiredAt = ElapsedInstant(0, 60_000u)
-                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, expiredAt, limits) }
+                assertFailsWith<DecisionIdentityUnavailable> { signer.declineSession(it, { expiredAt }, limits) }
             }
         }
     }
@@ -142,12 +142,12 @@ class AndroidDecisionIdentityTest {
             closed.close()
             closed.close()
             assertEquals("Decision identity unavailable", assertFailsWith<DecisionIdentityUnavailable> {
-                closed.declineSession(displayed, receivedAt, limits)
+                closed.declineSession(displayed, { receivedAt }, limits)
             }.message)
             assertEquals("AndroidDecisionIdentity(redacted)", closed.toString())
-            identity().use { assertEquals(SigningPurpose.CANCELLATION, it.declineSession(displayed, receivedAt, limits).purpose) }
+            identity().use { assertEquals(SigningPurpose.CANCELLATION, it.declineSession(displayed, { receivedAt }, limits).purpose) }
             AndroidDecisionIdentity(enrollment, pair().private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { wrong ->
-                assertFailsWith<DecisionIdentityUnavailable> { wrong.declineSession(displayed, receivedAt, limits) }
+                assertFailsWith<DecisionIdentityUnavailable> { wrong.declineSession(displayed, { receivedAt }, limits) }
             }
         }
     }
