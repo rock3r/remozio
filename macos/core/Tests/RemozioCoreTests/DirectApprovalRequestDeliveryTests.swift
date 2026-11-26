@@ -323,6 +323,8 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         var readReply: CheckedContinuation<Data?, Error>?
         var sentSequence: UInt64 = 0
         var expectations: [(Int, XCTestExpectation)] = []
+        var expectedPayload: (Data, XCTestExpectation)?
+        var stagedReplies: (Data, [Data])?
         init(scope: ChannelScope, requests: [ChannelRequestCapability], maximum: Int = 4096,
              failWrite: Bool = false, holdWrite: Bool = false, persistent: Bool = false, auditVersions: Set<UInt64> = []) throws {
             self.maximum = maximum; self.failWrite = failWrite; self.holdWrite = holdWrite; self.persistent = persistent
@@ -360,6 +362,14 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
                 XCTAssertEqual(envelope.sessionID, try owner.confirmed().sessionID)
                 XCTAssertEqual(envelope.sequence, UInt64(payloads.count))
                 payloads.append(envelope.payload)
+                if let (payload, expectation) = expectedPayload, envelope.payload == payload {
+                    expectedPayload = nil
+                    expectation.fulfill()
+                }
+                if let (trigger, replies) = stagedReplies, envelope.payload == trigger {
+                    stagedReplies = nil
+                    for reply in replies { try submit(reply) }
+                }
                 let ready = expectations.filter { payloads.count >= $0.0 }
                 expectations.removeAll { payloads.count >= $0.0 }
                 ready.forEach { $0.1.fulfill() }
@@ -384,6 +394,15 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
                 else { input.append(chunk) }
             }
         }
+        func replyOnce(to trigger: Data, payloads: [Data]) { stagedReplies = (trigger, payloads) }
+
+        func expectPayload(_ payload: Data) -> XCTestExpectation {
+            let expected = XCTestExpectation(description: "received the expected payload")
+            if payloads.contains(payload) { expected.fulfill() }
+            else { expectedPayload = (payload, expected) }
+            return expected
+        }
+
         func expectPayloads(_ count: Int) -> XCTestExpectation {
             let expected = XCTestExpectation(description: "received \(count) frames")
             if payloads.count >= count { expected.fulfill() } else { expectations.append((count, expected)) }
@@ -744,6 +763,104 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func wait(_ phone: Phone, _ count: Int) async {
         await fulfillment(of: [phone.expectPayloads(count)], timeout: 3)
+    }
+
+    private static func deliveryResult(_ frame: Data, requestID: Data? = nil,
+                                       requestDigest: Data? = nil) throws -> Data {
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 12, maxItems: 256)
+        let body = try ApprovalMessage.decode(frame, maximumBodyBytes: 3968).body
+        let request = try IssuedRequestPayload.decode(body, bodyLimits: limits, captureLimits: limits,
+            localCapabilities: ContractCapabilities(contracts: [try RequestContract(requestKind: .command,
+                wireVersion: 1, schemaVersion: 1): []]))
+        return try RequestDeliveryResult(requestID: requestID ?? request.requestID,
+            requestDigest: requestDigest ?? request.requestDigest(bodyLimits: limits, signingLimits: limits),
+            reason: .unreadableCapture).encode()
+    }
+
+    private func deliveryResultChannel(_ phone: Phone, peer: DirectApprovalPeer, enabled: Bool) async throws
+        -> NegotiatedNetworkChannel {
+        let requests = try DirectApprovalListener.requestCapabilities(peer.requests, purpose: .approvals,
+            enableDeliveryResults: enabled)
+        return try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: requests,
+            auditVersions: [], maximumPayloadBytes: peer.maximumPayloadBytes)
+    }
+
+    func testDeliveryResultSuppressesOnlyTheSentCaptureOnThisConnection() async throws {
+        let signingKey = P256.Signing.PrivateKey()
+        let frame = try Self.frame(8, signingKey: signingKey).0
+        let pending = try Self.status(frame, signingKey: signingKey)
+        let (service, _, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): frame],
+            exchangeSupported: true, statuses: [Self.id(8): pending], refreshMilliseconds: 250)
+        let requests = [try Self.capability(features: [RequestDeliveryResult.capability])]
+        let phone = try Phone(scope: peer.scope, requests: requests, persistent: true)
+        let channel = try await deliveryResultChannel(phone, peer: peer, enabled: true)
+        let result = try Self.deliveryResult(frame)
+        let query = try RequestStatusQuery(requestID: Self.id(8)).encode()
+        await phone.replyOnce(to: frame, payloads: [result, result, query])
+        let loop = Task { try await factory.run(peer, channel) }
+        await wait(phone, 5)
+        let output = await phone.payloads
+        XCTAssertEqual(Array(output.prefix(5)), [frame, pending, pending, pending, pending])
+        XCTAssertGreaterThanOrEqual(driver.discoveryCount, 3)
+        XCTAssertTrue(driver.exchangeQueries.allSatisfy { $0.decisionFrame == nil })
+        await phone.close(); try await loop.value
+
+        let reconnected = try Phone(scope: peer.scope, requests: requests, persistent: true)
+        let nextChannel = try await deliveryResultChannel(reconnected, peer: peer, enabled: true)
+        let nextLoop = Task { try await factory.run(peer, nextChannel) }
+        await wait(reconnected, 2)
+        let afterReconnect = await reconnected.payloads
+        XCTAssertEqual(Array(afterReconnect.prefix(2)), [frame, pending])
+        await reconnected.close(); try await nextLoop.value; await service.close()
+    }
+
+    func testDeliveryResultWithWrongDigestOrUnsentRequestCannotSuppressDelivery() async throws {
+        let signingKey = P256.Signing.PrivateKey()
+        let first = try Self.frame(8, signingKey: signingKey).0
+        let second = try Self.frame(9, signingKey: signingKey).0
+        let firstStatus = try Self.status(first, signingKey: signingKey)
+        let secondStatus = try Self.status(second, signingKey: signingKey)
+        let (service, _, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): first, Self.id(9): second],
+            exchangeSupported: true, statuses: [Self.id(8): firstStatus, Self.id(9): secondStatus], refreshMilliseconds: 250)
+        let requests = [try Self.capability(features: [RequestDeliveryResult.capability])]
+        let phone = try Phone(scope: peer.scope, requests: requests, persistent: true)
+        let channel = try await deliveryResultChannel(phone, peer: peer, enabled: true)
+        let loop = Task { try await factory.run(peer, channel) }
+        await wait(phone, 2)
+        try await phone.submit(Self.deliveryResult(first, requestDigest: Self.id(88, 32)))
+        try await phone.submit(Self.deliveryResult(second))
+        try await phone.submit(RequestStatusQuery(requestID: Self.id(8)).encode())
+        await wait(phone, 3)
+        let beforeRefresh = await phone.payloads.count
+        driver.setPending([Self.id(8), Self.id(9)])
+        await fulfillment(of: [phone.expectPayload(second)], timeout: 3)
+        let output = await phone.payloads
+        XCTAssertTrue(output.dropFirst(beforeRefresh).contains(first))
+        XCTAssertTrue(output.dropFirst(beforeRefresh).contains(second))
+        XCTAssertTrue(driver.exchangeQueries.allSatisfy { $0.decisionFrame == nil })
+        await phone.close(); try await loop.value; await service.close()
+    }
+
+    func testDeliveryResultRequiresMatchingLiveCapabilities() async throws {
+        let scope = try Self.scope()
+        let plain = [try Self.capability()]
+        let offered = try DirectApprovalListener.requestCapabilities(plain, purpose: .approvals, enableDeliveryResults: true)
+        for (purpose, local, remote, expected) in [
+            (EnrolledChannelPurpose.approvals, offered, offered, Set<UInt64>([1])),
+            (.approvals, offered, plain, []),
+            (.approvals, plain, offered, []),
+            (.pendingSnapshot, offered, offered, []),
+        ] {
+            let phone = try Phone(scope: scope, requests: remote)
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope, requests: local,
+                auditVersions: [], maximumPayloadBytes: 4096, purpose: purpose)
+            let actual = try await channel.requestDeliveryResultSchemas()
+            XCTAssertEqual(actual, expected)
+            await channel.closeAndWait()
+        }
+        let snapshot = try DirectApprovalListener.requestCapabilities(offered, purpose: .pendingSnapshot,
+            enableDeliveryResults: true)
+        XCTAssertEqual(snapshot.first?.features, [])
     }
 
     func testLiveChannelRoutesExactDecisionAndReturnsSignedRootOutcome() async throws {

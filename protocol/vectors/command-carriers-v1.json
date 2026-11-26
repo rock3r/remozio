@@ -136,5 +136,51 @@
         "hex": "a0"
       }
     ]
+  },
+  "requestDeliveryResult": {
+    "valid": [
+      {
+        "name": "unreadable-capture",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0401"
+      },
+      {
+        "name": "capture-limit",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0402"
+      }
+    ],
+    "invalid": [
+      {
+        "name": "unknown-version",
+        "hex": "a500020177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0401"
+      },
+      {
+        "name": "unknown-reason",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0403"
+      },
+      {
+        "name": "noncanonical-reason",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb041801"
+      },
+      {
+        "name": "short-request-id",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c74024faaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0401"
+      },
+      {
+        "name": "short-request-digest",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03581fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0401"
+      },
+      {
+        "name": "unknown-field",
+        "hex": "a600010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb04010501"
+      },
+      {
+        "name": "trailing-byte",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb040100"
+      },
+      {
+        "name": "oversize",
+        "hex": "a500010177726571756573742d64656c69766572792d726573756c740250aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa035820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb04010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
   }
 }

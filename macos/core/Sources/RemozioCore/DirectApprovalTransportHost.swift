@@ -45,6 +45,7 @@ public actor DirectApprovalTransportHost {
     private let phoneRoutingSupport = FeatureSupport()
     private let phoneAuditSupport = FeatureSupport()
     private let phoneUpdateSchedulingSupport = FeatureSupport()
+    private let requestDeliveryResultSupport = FeatureSupport()
     private var authority: AuthorityTrustLease?
     private var trust: DirectApprovalTrust?
     private var listener: (generation: UUID, value: any OwnedDirectListener)?
@@ -66,13 +67,16 @@ public actor DirectApprovalTransportHost {
         let connectionBudget = try AuthorityXPCWorkBudget(maximum: maximumConnections)
         let routingSupport = phoneRoutingSupport, auditSupport = phoneAuditSupport
         let updateSupport = phoneUpdateSchedulingSupport
+        let deliveryResultSupport = requestDeliveryResultSupport
         let pairingRecovery = pairingRecovery
         factory = { _, peers, event, handler in
             let recovery = pairingRecovery.configuration.withLock { $0 }
             return try DirectApprovalListener(identity: identity, peers: peers, binding: binding,
                 maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
                 enablePhoneRouting: routingSupport.value.withLock { $0 }, enablePhoneAudit: auditSupport.value.withLock { $0 },
-                enablePhoneUpdateScheduling: updateSupport.value.withLock { $0 }, event: event, handler: handler, sharedWorkBudget: connectionBudget,
+                enablePhoneUpdateScheduling: updateSupport.value.withLock { $0 },
+                enableRequestDeliveryResults: deliveryResultSupport.value.withLock { $0 },
+                event: event, handler: handler, sharedWorkBudget: connectionBudget,
                 recoveryMacID: recovery == nil ? nil : macID, sharedRecoveryBudget: recovery?.budget, recovery: recovery?.handler)
         }
     }
@@ -113,6 +117,11 @@ public actor DirectApprovalTransportHost {
     func configurePhoneUpdateSchedulingSupport(_ enabled: Bool) throws {
         guard !handlerSealed, !closed else { throw DirectHostError.stopped }
         phoneUpdateSchedulingSupport.value.withLock { $0 = enabled }
+    }
+
+    func configureRequestDeliveryResultSupport(_ enabled: Bool) throws {
+        guard !handlerSealed, !closed else { throw DirectHostError.stopped }
+        requestDeliveryResultSupport.value.withLock { $0 = enabled }
     }
 
     public func start() throws {

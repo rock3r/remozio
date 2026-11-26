@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import RemozioProtocol
 
@@ -7,6 +8,7 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
     let session: DirectApprovalSession
     let channel: NegotiatedNetworkChannel
     let remoteRequests: [ChannelRequestCapability]
+    let deliveryResultSchemas: Set<UInt64>
     let timeoutMilliseconds: UInt64
     let refreshMilliseconds: UInt64
 
@@ -39,7 +41,15 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
         }
     }
 
+    private struct DeliveryIdentity: Hashable {
+        let requestID: Data
+        let requestDigest: Data
+    }
+
+    private enum DeliveryState { case sent, refused }
+
     private func consume(_ events: RequestExchangeEvents) async throws {
+        var delivered: [DeliveryIdentity: DeliveryState] = [:]
         var watching = Set<Data>()
         var work: [Data] = [], position = 0
         while true {
@@ -55,6 +65,11 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
                 guard remaining.count <= AuthorityPendingRequests.maximumRequests else { throw ApprovalChannelError.invalidInput }
                 work = remaining.sorted { $0.lexicographicallyPrecedes($1) }; position = 0
             case .incoming(let bytes):
+                if !deliveryResultSchemas.isEmpty, let result = try? RequestDeliveryResult.decode(bytes) {
+                    let identity = DeliveryIdentity(requestID: result.requestID, requestDigest: result.requestDigest)
+                    if delivered[identity] != nil { delivered[identity] = .refused }
+                    continue
+                }
                 let requestID: Data, decision: Data?
                 if let query = try? RequestStatusQuery.decode(bytes) {
                     requestID = query.requestID; decision = nil
@@ -74,9 +89,23 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
             case .work:
                 let id = work[position]; position += 1
                 if let frame = try await service.requestFrame(for: session, requestID: id),
-                   try DirectApprovalTransportService.supports(frame, maximumBytes: session.peer.maximumPayloadBytes,
+                   let request = try DirectApprovalTransportService.supportedRequest(frame, maximumBytes: session.peer.maximumPayloadBytes,
                        local: session.peer.requests, remote: remoteRequests) {
-                    try await send(frame)
+                    let identity: DeliveryIdentity?
+                    if request.fields[5] == .unsigned(0), case .unsigned(let schema) = request.fields[6],
+                       deliveryResultSchemas.contains(schema) {
+                        guard request.fields[3] == .bytes(id) else { throw ApprovalChannelError.invalidInput }
+                        let input = try SigningInput.make(wireVersion: request.message.wireVersion, messageType: .request,
+                            purpose: .issuedRequest, canonicalPayload: request.message.body,
+                            payloadLimits: request.limits, inputLimits: request.limits)
+                        identity = .init(requestID: id, requestDigest: Data(SHA256.hash(data: input)))
+                    } else { identity = nil }
+                    if identity.flatMap({ delivered[$0] }) != .refused {
+                        try await send(frame)
+                        if let identity, delivered[identity] == nil, delivered.count < AuthorityPendingRequests.maximumRequests {
+                            delivered[identity] = .sent
+                        }
+                    }
                     try await sendStatus(for: id, watching: &watching)
                 } else if watching.contains(id) {
                     // Presence can suppress discovery and captures. It cannot hide the outcome of a retained request.
