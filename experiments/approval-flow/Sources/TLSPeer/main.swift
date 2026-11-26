@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback fixtures only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let commandCapture: String?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let commandCapture: String?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let pairingV2: Bool?; let decisionProof: Bool?; let legacyCommit: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
 
 private actor SyntheticPairingReceipt {
     private var committed: (setupID: Data, signature: Data)?
@@ -145,6 +145,11 @@ let identity = value as! SecIdentity
         throw ProbeError.invalidInput
     }
     return result
+}
+if setup.pairingV2 == true || setup.decisionProof == true {
+    try runDecisionPairingFixture(identity: identity, peer: peer,
+        directory: URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent().path,
+        rePair: setup.rePair == true, requiresDecisionProof: setup.decisionProof == true, legacyCommit: setup.legacyCommit == true)
 }
 if setup.pairing == true {
     // This fixture signs a synthetic receipt. It has no Root journal, enrollment, hardware key or administrator consent.
