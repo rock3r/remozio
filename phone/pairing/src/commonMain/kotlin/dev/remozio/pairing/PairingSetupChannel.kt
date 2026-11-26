@@ -36,6 +36,8 @@ class PairingSetupChannel private constructor(
         }
     }
     val transcript: PairingTranscript get() = checkNotNull(staged)
+    var requiresDecisionProof = false
+        private set
 
     /** Remaining setup budget for the selected channel, including time spent opening it. */
     fun remainingSetupMillis(): Long =
@@ -45,6 +47,7 @@ class PairingSetupChannel private constructor(
         check(state == State.OPENING)
         stream.awaitOpen(); active()
         if (stream is PairingV2ByteStream) {
+            requiresDecisionProof = stream.requiresDecisionProof
             challenge = PairingSetupPreludeV2.decode(readBytes(PairingSetupPreludeV2.MAXIMUM_BYTES))
                 as? PairingSetupPreludeV2.Challenge ?: throw IOException("Missing pairing challenge")
         } else {
@@ -96,16 +99,33 @@ class PairingSetupChannel private constructor(
     /** Call once after human confirmation, durable PREPARED storage and a fresh hardware biometric proof.
      * A lost reply is ambiguous. This method never repeats the submission or activates an enrollment. */
     suspend fun submitProof(confirmedDigest: ByteArray, biometricProof: ByteArray,
-        beforeProof: suspend () -> Unit = {}): ByteArray = operation {
-        check(state == State.STAGED)
+        beforeProof: suspend () -> Unit = {}): ByteArray = submit(confirmedDigest, biometricProof, null, beforeProof)
+
+    /** Submit both proofs on a connection that authenticated the decision-proof setup profile. */
+    suspend fun submitDualProof(confirmedDigest: ByteArray, biometricProof: ByteArray, decisionProof: ByteArray,
+        beforeProof: suspend () -> Unit = {}): ByteArray = submit(confirmedDigest, biometricProof, decisionProof, beforeProof)
+
+    private suspend fun submit(confirmedDigest: ByteArray, biometricProof: ByteArray, decisionProof: ByteArray?,
+        beforeProof: suspend () -> Unit): ByteArray = operation {
+        check(state == State.STAGED && requiresDecisionProof == (decisionProof != null))
         val transcript = checkNotNull(staged)
-        require(confirmedDigest.contentEquals(transcript.digest()))
-        require(transcript.verify(biometricProof, transcript.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+        val digest = transcript.digest()
+        require(confirmedDigest.contentEquals(digest))
+        val biometric = biometricProof.copyOf()
+        require(transcript.verify(biometric, transcript.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+        val setup = transcript.setupID.copyBytes()
+        val frame = if (decisionProof == null) {
+            PairingSetupFrame.Proof(setup, digest, biometric)
+        } else {
+            val decision = decisionProof.copyOf()
+            require(transcript.verify(decision, transcript.decisionKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_DECISION))
+            PairingSetupFrame.DualProof(setup, digest, biometric, decision)
+        }
         beforeProof()
         state = State.PROOF_SUBMITTED
-        write(PairingSetupFrame.Proof(transcript.setupID.copyBytes(), transcript.digest(), biometricProof))
+        write(frame)
         val receipt = read() as? PairingSetupFrame.Receipt ?: throw IOException("Missing pairing receipt")
-        require(receipt.setupID == transcript.setupID && receipt.digest == CborValue.Bytes(transcript.digest()))
+        require(receipt.setupID == transcript.setupID && receipt.digest == CborValue.Bytes(digest))
         require(transcript.verify(receipt.signature.copyBytes(), invitation.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
         state = State.FINISHED; deadline.cancel()
         receipt.signature.copyBytes()

@@ -14,5 +14,7 @@ interface PairingByteStream : AutoCloseable {
 
 /** Supplies the v2 exporter from the same authenticated stream that carries the challenge and proof. */
 interface PairingV2ByteStream : PairingByteStream {
+    /** Set only when the pinned TLS connection negotiated the decision-proof setup profile. */
+    val requiresDecisionProof: Boolean get() = false
     fun pairingExporter(): ByteArray
 }

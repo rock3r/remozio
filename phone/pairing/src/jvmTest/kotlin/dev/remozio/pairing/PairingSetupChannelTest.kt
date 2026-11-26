@@ -37,6 +37,9 @@ class PairingSetupChannelTest {
             point(authority), point(macTransport), claims.transportKey, claims.decisionKey, claims.biometricKey,
             ByteArray(32) { 12 }, null, ByteArray(16) { 13 }, 1000u, 2000u)
         fun proof() = sign(biometric, transcript.signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
+        fun decisionProof() = sign(decision, transcript.signingInput(PairingProofPurpose.PHONE_DECISION))
+        fun v2Invitation() = PairingInvitationV2(invitation, ByteArray(16) { 19 }, ByteArray(32) { 20 },
+            lifetimeMilliseconds = 10_000u)
         fun receipt() = sign(authority, transcript.signingInput(PairingProofPurpose.MAC_COMMIT))
     }
     private fun wire(frame: PairingSetupFrame): ByteArray = frame.encode().let { ByteBuffer.allocate(it.size + 4).putInt(it.size).put(it).array() }
@@ -181,6 +184,8 @@ class PairingSetupChannelTest {
 
     private inner class V2Stream(val fixture: Fixture, challenge: ByteArray = ByteArray(32) { 21 },
         val material: ByteArray = ByteArray(32) { 22 }, reply: PairingTranscript? = fixture.transcript,
+        override val requiresDecisionProof: Boolean = false,
+        receipt: ByteArray? = null,
     ) : PairingV2ByteStream {
         private val inbound = ArrayDeque<ByteArray>()
         val sent = ByteArrayOutputStream()
@@ -190,6 +195,8 @@ class PairingSetupChannelTest {
             val encoded = PairingSetupPreludeV2.Challenge(challenge).encode()
             inbound.add(ByteBuffer.allocate(4 + encoded.size).putInt(encoded.size).put(encoded).array())
             reply?.let { inbound.add(wire(PairingSetupFrame.Transcript(it))) }
+            receipt?.let { inbound.add(wire(PairingSetupFrame.Receipt(
+                fixture.transcript.setupID.copyBytes(), fixture.transcript.digest(), it))) }
         }
 
         override fun pairingExporter() = material.copyOf()
@@ -224,6 +231,83 @@ class PairingSetupChannelTest {
             assertContentEquals(credentials.proof(f.proposal, ByteArray(32) { 21 }, stream.material), proof.tag.copyBytes())
             assertFails { channel.awaitTranscriptV2(credentials) }
             assertEquals(size + 4, stream.sent.size())
+        } finally {
+            channel.closeAndJoin()
+        }
+    }
+
+    @Test fun decisionProofProfileSendsBothVerifiedSignaturesAfterTheCheckpoint(): Unit = runBlocking {
+        val f = Fixture()
+        val receipt = f.receipt()
+        val stream = V2Stream(f, requiresDecisionProof = true, receipt = receipt)
+        val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+        try {
+            assertTrue(channel.requiresDecisionProof)
+            val transcript = channel.awaitTranscriptV2(f.v2Invitation())
+            val before = stream.sent.size()
+            val biometric = f.proof()
+            val decision = f.decisionProof()
+            var checkpoints = 0
+            assertContentEquals(receipt, channel.submitDualProof(transcript.digest(), biometric, decision) {
+                assertEquals(before, stream.sent.size())
+                checkpoints++
+                biometric.fill(0)
+                decision.fill(0)
+            })
+            val bytes = ByteBuffer.wrap(stream.sent.toByteArray(), before, stream.sent.size() - before)
+            val length = bytes.int
+            assertEquals(length, bytes.remaining())
+            val frame = assertIs<PairingSetupFrame.DualProof>(
+                PairingSetupFrame.decode(ByteArray(length).also { bytes.get(it) }))
+            assertEquals(transcript.setupID, frame.setupID)
+            assertContentEquals(transcript.digest(), frame.digest.copyBytes())
+            assertTrue(transcript.verify(frame.biometricSignature.copyBytes(), point(f.biometric), PairingProofPurpose.PHONE_BIOMETRIC))
+            assertTrue(transcript.verify(frame.decisionSignature.copyBytes(), point(f.decision), PairingProofPurpose.PHONE_DECISION))
+            assertEquals(1, checkpoints)
+            val after = stream.sent.size()
+            assertFails { channel.submitDualProof(transcript.digest(), f.proof(), f.decisionProof()) }
+            assertEquals(after, stream.sent.size())
+        } finally {
+            channel.closeAndJoin()
+        }
+    }
+
+    @Test fun decisionProofProfileRejectsMissingOrWrongSignaturesBeforeTheCheckpoint(): Unit = runBlocking {
+        val f = Fixture()
+        for (decision in listOf(null, ByteArray(64), f.proof())) {
+            val stream = V2Stream(f, requiresDecisionProof = true)
+            val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+            try {
+                val transcript = channel.awaitTranscriptV2(f.v2Invitation())
+                val before = stream.sent.size()
+                var checkpoints = 0
+                val checkpoint: suspend () -> Unit = { checkpoints++ }
+                assertFails {
+                    if (decision == null) channel.submitProof(transcript.digest(), f.proof(), checkpoint)
+                    else channel.submitDualProof(transcript.digest(), f.proof(), decision, checkpoint)
+                }
+                assertEquals(0, checkpoints)
+                assertEquals(before, stream.sent.size())
+            } finally {
+                channel.closeAndJoin()
+            }
+        }
+    }
+
+    @Test fun decisionProofFramesCannotBeSentOnTheLegacyV2Profile(): Unit = runBlocking {
+        val f = Fixture()
+        val stream = V2Stream(f)
+        val channel = PairingSetupChannel.authenticate(this, stream, f.invitation, f.proposal)
+        try {
+            assertFalse(channel.requiresDecisionProof)
+            val transcript = channel.awaitTranscriptV2(f.v2Invitation())
+            val before = stream.sent.size()
+            var checkpoints = 0
+            assertFails {
+                channel.submitDualProof(transcript.digest(), f.proof(), f.decisionProof()) { checkpoints++ }
+            }
+            assertEquals(0, checkpoints)
+            assertEquals(before, stream.sent.size())
         } finally {
             channel.closeAndJoin()
         }
