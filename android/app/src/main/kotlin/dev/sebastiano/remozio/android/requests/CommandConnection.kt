@@ -20,6 +20,7 @@ internal class CommandDecisionNotSent : IOException("Command decision was not se
 internal interface CommandConnectionWire : AutoCloseable {
     suspend fun receive()
     suspend fun send(bytes: ByteArray)
+    suspend fun sendWithRefusal(bytes: ByteArray, onRefusal: (DecisionRefusalFrame.Reason) -> Unit) = send(bytes)
 }
 
 /** One trusted enrollment incarnation. The setup owner must close it before changing or removing trust. */
@@ -132,10 +133,13 @@ internal class CommandConnection(
     }
 
     fun approval(session: CommandRequestSession, onRepair: (() -> Unit)? = null, reconnect: () -> Unit = {}) =
-        CommandApprovalContext(record, limits, connectionState, reconnect, onRepair) { send(session, it) }
+        CommandApprovalContext(record, limits, connectionState, reconnect, onRepair) { message, onRefusal ->
+            send(session, message, onRefusal)
+        }
 
     /** Rechecks the retained request and enrolled signing role before writing on this incarnation. */
-    internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage) = withContext(dispatcher) {
+    internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage,
+                              onRefusal: ((DecisionRefusalFrame.Reason, () -> Boolean) -> Unit)? = null) = withContext(dispatcher) {
         sending.withLock {
             var writeStarted = false
             try {
@@ -162,7 +166,11 @@ internal class CommandConnection(
                 ensureActive()
                 synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
                 writeStarted = true
-                active.send(bytes)
+                fun isCurrent() = synchronized(monitor) { !closed && attempt === owner && owner.wire === active }
+                if (onRefusal == null) active.send(bytes)
+                else active.sendWithRefusal(bytes) { reason ->
+                    if (isCurrent()) onRefusal(reason, ::isCurrent)
+                }
                 ensureActive()
                 synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
             } catch (cancelled: CancellationException) {

@@ -402,6 +402,8 @@
     <string name="command_action_sending">Sending your decision…</string>
     <string name="command_action_awaiting">Waiting for the host to confirm your decision.</string>
     <string name="command_action_unavailable">This decision is unavailable. You can try again.</string>
+    <string name="command_action_refused_request_changed">The host refused this decision because the request changed.</string>
+    <string name="command_action_refused_action_unavailable">The host refused this decision because the action is unavailable.</string>
     <string name="command_action_uncertain">Delivery is uncertain. The host may have received your decision.</string>
     <string name="commands_open">View requests</string>
     <string name="commands_back">Back</string>

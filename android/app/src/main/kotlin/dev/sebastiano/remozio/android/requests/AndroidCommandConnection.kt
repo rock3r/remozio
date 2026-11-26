@@ -15,8 +15,11 @@ import dev.remozio.phone.requests.CommandRequestReceiver
 import dev.remozio.phone.requests.RequestLimits
 import dev.remozio.phone.transport.*
 import dev.remozio.protocol.ApprovalMessage
+import dev.remozio.protocol.ChannelRequestCapability
 import dev.remozio.protocol.ChannelScope
+import dev.remozio.protocol.DecisionRefusalFrame
 import dev.remozio.protocol.PendingRequestSnapshotFrame
+import dev.remozio.protocol.RequestDeliveryResult
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,11 +36,12 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
             var channel: NegotiatedTLSChannel? = null
             try {
                 identity = AndroidTransportIdentities.load(context, e.transportKey)
+                val maximumPayloadBytes = if (snapshot) CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)
+                else maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES
+                val capabilities = if (snapshot) commandInspectionCapabilities() else liveCommandCapabilities(maximumPayloadBytes)
                 val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), e.transportPublicKey.copyBytes(),
                     ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
-                    commandInspectionCapabilities(), emptySet(),
-                    if (snapshot) CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)
-                    else maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES,
+                    capabilities, emptySet(), maximumPayloadBytes,
                     trustedMinimum = record.pairing?.minimumEnvelopeVersion ?: 1u,
                     purpose = if (snapshot) EnrolledChannelPurpose.PENDING_SNAPSHOT else EnrolledChannelPurpose.APPROVALS)
                 val relay = e.relayCredential?.let { credential -> ApprovalCarrierRoute { parent -> RelayConnector().connect(parent, credential) } }
@@ -60,6 +64,16 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
     } catch (failure: Throwable) { retired.close(); throw failure }
 }
 
+internal fun liveCommandCapabilities(maximumPayloadBytes: Int): List<ChannelRequestCapability> {
+    val features = buildSet {
+        if (maximumPayloadBytes >= RequestDeliveryResult.MAXIMUM_BYTES) add(RequestDeliveryResult.CAPABILITY)
+        if (maximumPayloadBytes >= DecisionRefusalFrame.MAXIMUM_BYTES) add(DecisionRefusalFrame.CAPABILITY)
+    }
+    return commandInspectionCapabilities().map {
+        ChannelRequestCapability(it.kind, it.wireVersion, it.schemaVersion, it.features + features)
+    }
+}
+
 private class NativeCommandWire(
     private val receiver: CommandRequestReceiver,
     private val identity: AndroidTransportIdentity,
@@ -67,6 +81,8 @@ private class NativeCommandWire(
     private val closed = AtomicBoolean(false)
     override suspend fun receive() = receiver.run()
     override suspend fun send(bytes: ByteArray) = receiver.sendDecision(bytes)
+    override suspend fun sendWithRefusal(bytes: ByteArray, onRefusal: (DecisionRefusalFrame.Reason) -> Unit) =
+        receiver.sendDecision(bytes, onRefusal)
     override fun close() {
         if (closed.compareAndSet(false, true)) {
             try { receiver.close() } finally { identity.close() }

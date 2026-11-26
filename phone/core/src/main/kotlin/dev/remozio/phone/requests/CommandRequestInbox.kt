@@ -10,7 +10,11 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST, UNKNOWN_REQUEST, RETIRED_REQUEST, REJECTION_LIMIT }
 class InboxException(val reason: InboxRejection) : IllegalStateException(reason.name)
 
-internal enum class CommandDeliveryOutcome { DELIVERED, CAPACITY_OMITTED, CAPTURE_OMITTED }
+internal sealed interface CommandDeliveryOutcome {
+    data object Delivered : CommandDeliveryOutcome
+    data object CapacityOmitted : CommandDeliveryOutcome
+    data class CaptureOmitted(val schemaVersion: ULong, val result: RequestDeliveryResult?) : CommandDeliveryOutcome
+}
 
 /** One receiver owns these digests. They are retained only for the life of its connection. */
 internal class RejectedCommandCaptures(private val maximum: Int = 128) {
@@ -204,6 +208,12 @@ class CommandRequestEnrollment internal constructor(
     @Synchronized
     internal fun detach(owner: AutoCloseable) { if (receiver === owner) receiver = null }
 
+    @Synchronized
+    internal fun verifyDecisionRefusal(owner: AutoCloseable, frame: DecisionRefusalFrame) {
+        if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
+        require(frame.verify(authorityKey))
+    }
+
     /** The identity check and state update share the enrollment monitor with replacement and removal. */
     @Synchronized
     internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant,
@@ -221,18 +231,19 @@ class CommandRequestEnrollment internal constructor(
                     ?: retired?.lookup(id.copyBytes())?.let { CborValue.Bytes(it) }
                 if (known != null) {
                     if (known != failure.requestDigest) reject(InboxRejection.CONFLICTING_REQUEST)
-                    return CommandDeliveryOutcome.DELIVERED
+                    return CommandDeliveryOutcome.Delivered
                 }
-                if (rejected.remember(id, failure.requestDigest)) {
+                val result = if (rejected.remember(id, failure.requestDigest)) {
                     logger.warning("Command capture refused: requestId=${id.copyBytes().toHexString()} " +
                         "digest=${failure.requestDigest.copyBytes().toHexString()} reason=${failure.reasonCode}")
-                }
-                return CommandDeliveryOutcome.CAPTURE_OMITTED
+                    RequestDeliveryResult(id.copyBytes(), failure.requestDigest.copyBytes(), failure.reason)
+                } else null
+                return CommandDeliveryOutcome.CaptureOmitted(failure.schemaVersion, result)
             } catch (failure: InboxException) {
                 when (failure.reason) {
                     InboxRejection.CAPACITY -> {
                         limited.value = true
-                        return CommandDeliveryOutcome.CAPACITY_OMITTED
+                        return CommandDeliveryOutcome.CapacityOmitted
                     }
                     InboxRejection.RETIRED_REQUEST -> Unit
                     else -> throw failure
@@ -257,7 +268,7 @@ class CommandRequestEnrollment internal constructor(
             }
             ApprovalMessageType.DECISION -> throw IllegalArgumentException("Unexpected inbound decision")
         }
-        return CommandDeliveryOutcome.DELIVERED
+        return CommandDeliveryOutcome.Delivered
     }
 
     /** Snapshot of owned handles, including terminal tombstones. Capture contents remain owned by each session. */

@@ -8,7 +8,9 @@ enum class IssuedRequestFailure {
     INVALID_BYTES, INVALID_TIMES, INVALID_FEATURES, INVALID_ACTIONS, INVALID_CAPTURE, CAPTURE_DIGEST_MISMATCH, WRONG_SCOPE,
 }
 class IssuedRequestException(val reason: IssuedRequestFailure) : IllegalArgumentException(reason.name)
-class IssuedCaptureBudgetException internal constructor(val requestID: CborValue.Bytes, val reason: CborFailure) :
+class IssuedCaptureBudgetException internal constructor(
+    val requestID: CborValue.Bytes, val schemaVersion: ULong, val reason: CborFailure,
+) :
     IllegalArgumentException(reason.name)
 
 /** Common wrapper only. Capture semantics, authority identity, and current validity remain separate checks. */
@@ -75,7 +77,7 @@ class IssuedRequestPayload private constructor(
             ensure(DeterministicCbor.decode(capture.copyBytes(), captureLimits) is CborValue.Fields, IssuedRequestFailure.INVALID_CAPTURE)
         } catch (failure: CborException) {
             if (scope != null && failure.reason in CAPTURE_BUDGET_FAILURES) {
-                throw IssuedCaptureBudgetException(identities[2], failure.reason)
+                throw IssuedCaptureBudgetException(identities[2], contract.schemaVersion, failure.reason)
             }
             throw failure
         }
