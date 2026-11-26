@@ -36,14 +36,20 @@ internal fun selectTransportLeaf(
     val current = if (retained != null && retained.notAfter.after(initial.notAfter)) arrayOf(retained) else original
     val cutoff = now.plus(RENEWAL_WINDOW_DAYS, ChronoUnit.DAYS)
     if (current.first().notAfter.toInstant().isAfter(cutoff)) return current
+    val expired = now.isAfter(current.first().notAfter.toInstant())
+    val encoded: ByteArray
+    val leaf = try {
+        encoded = issue()
+        validatedTransportLeaf(encoded, enrolledKey, now).also { require(it.notAfter.after(current.first().notAfter)) }
+    } catch (_: Exception) {
+        if (expired) throw TransportCertificateRecoveryRequired()
+        return current
+    }
     return try {
-        val encoded = issue()
-        val leaf = validatedTransportLeaf(encoded, enrolledKey, now)
-        require(leaf.notAfter.after(current.first().notAfter))
         write(encoded)
         arrayOf(leaf)
     } catch (failure: Exception) {
-        if (now.isAfter(current.first().notAfter.toInstant())) throw failure
+        if (expired) throw failure
         current
     }
 }
@@ -58,6 +64,7 @@ private fun validatedTransportLeaf(bytes: ByteArray, key: PublicKey, now: Instan
     require(usage.firstOrNull() == true && usage.drop(1).none { it })
     require(cert.extendedKeyUsage == listOf("1.3.6.1.5.5.7.3.2"))
     require(cert.criticalExtensionOIDs == setOf("2.5.29.19", "2.5.29.15"))
+    require(cert.nonCriticalExtensionOIDs == setOf("2.5.29.37"))
     require(cert.sigAlgOID == "1.2.840.10045.4.3.2")
     cert.checkValidity(Date.from(now))
     cert.verify(key)

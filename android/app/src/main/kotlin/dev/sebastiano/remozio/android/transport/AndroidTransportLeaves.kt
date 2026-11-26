@@ -44,7 +44,8 @@ internal object AndroidTransportLeaves {
                         }
                     })
             }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            if (failure is TransportCertificateRecoveryRequired) throw failure
             original.checkValidity(Date.from(now))
             chain
         }

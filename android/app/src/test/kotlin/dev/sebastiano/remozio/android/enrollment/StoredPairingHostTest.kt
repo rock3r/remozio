@@ -177,6 +177,23 @@ class StoredPairingHostTest {
         return RePairProposalMaterial(proposal, keys) to transcript
     }
 
+    @Test fun recoveryInvitationCanReserveOnlyTheSelectedPredecessor() = runBlocking {
+        val h = rePairHost(RePairKeys())
+        val old = record(1)
+        activatePredecessor(h, old)
+        val invitation = envelope(old)
+        val other = CborValue.Bytes(id(55))
+        val newKeys = List(3) { CborValue.Bytes(id(92 + it)) }
+        assertFailsWith<IllegalArgumentException> { h.inspectRePair(invitation, other) }
+        assertFailsWith<IllegalArgumentException> {
+            h.reserveRePair(invitation, id(30), id(60), newKeys, other)
+        }
+        open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+        assertEquals(old.recordID, h.inspectRePair(invitation, old.recordID).enrollment.recordID)
+        h.reserveRePair(invitation, id(30), id(60), newKeys, old.recordID)
+        open().use { assertEquals(1, it.snapshot().rePairReservations.size) }
+    }
+
     @Test fun rePairRequiresExactRetainedPinsAndSerializesBeforeKeyAllocation() = runBlocking {
         val keys = RePairKeys()
         val h = rePairHost(keys)

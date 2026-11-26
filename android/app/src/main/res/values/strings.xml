@@ -410,6 +410,9 @@
     <string name="commands_connected">Connected to the paired host</string>
     <string name="commands_disconnected">Disconnected. Retained requests may have changed on the host.</string>
     <string name="commands_reconnect">Reconnect</string>
+    <string name="commands_certificate_recovery">This Mac’s connection certificate expired and could not be renewed.</string>
+    <string name="commands_pair_again">Pair again</string>
+    <string name="pairing_certificate_recovery_intro">On the Mac, open Paired phones in Remozio. Revoke this phone, then choose Re-pair. Import the new invitation here.</string>
     <string name="commands_enrollment_unavailable">This pairing is no longer active. Return to the host list.</string>
     <string name="commands_storage_unavailable">Request storage is unavailable. Unlock the phone and retry. Your pairing has not been reset.</string>
     <string name="commands_connection_failed">The connection stopped. Check the host and network, then reconnect. No decision is resent automatically.</string>

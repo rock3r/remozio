@@ -64,20 +64,22 @@ internal class AndroidPairingAttempt(
     val phoneSuffix: String get() = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
     val transcript: PairingTranscript get() = checkNotNull(channel).transcript
 
-    suspend fun connect(text: String): PairingTranscript {
+    suspend fun connect(text: String, recoveryRecordID: CborValue.Bytes? = null): PairingTranscript {
         val imported = text.trim()
         val rePair = if (imported.startsWith("remozio-repair:")) RePairInvitation.importText(imported) else null
-        return connect(rePair?.invitation ?: PairingInvitation.importText(imported), rePair, null)
+        return connect(rePair?.invitation ?: PairingInvitation.importText(imported), rePair, null, recoveryRecordID)
     }
 
-    suspend fun connectV2(invitation: PairingInvitationV2): PairingTranscript = connect(
-        invitation.invitation, invitation.replacement?.let { RePairInvitation(invitation.invitation, it) }, invitation,
+    suspend fun connectV2(invitation: PairingInvitationV2, recoveryRecordID: CborValue.Bytes? = null): PairingTranscript = connect(
+        invitation.invitation, invitation.replacement?.let { RePairInvitation(invitation.invitation, it) },
+        invitation, recoveryRecordID,
     )
 
     private suspend fun connect(selected: PairingInvitation, rePair: RePairInvitation?,
-        v2: PairingInvitationV2?,
+        v2: PairingInvitationV2?, recoveryRecordID: CborValue.Bytes?,
     ): PairingTranscript = operation {
         check(invitation == null)
+        require(recoveryRecordID == null || rePair != null)
         val keyIDs = EnrollmentKeyRole.entries.map { CborValue.Bytes(randomID()) }
         if (rePair == null) {
             val snapshot = store.setupSnapshot()
@@ -93,7 +95,7 @@ internal class AndroidPairingAttempt(
             phoneID = rePair.predecessor.phoneID.copyBytes()
             val recordID = randomID()
             withContext(NonCancellable) {
-                val reserved = store.reserveRePair(rePair, recordID, epoch, keyIDs)
+                val reserved = store.reserveRePair(rePair, recordID, epoch, keyIDs, recoveryRecordID)
                 rePairRecordID = reserved.recordID
             }
         }

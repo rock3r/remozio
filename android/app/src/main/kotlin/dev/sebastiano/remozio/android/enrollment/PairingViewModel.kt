@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import dev.sebastiano.remozio.android.RemozioApplication
 import dev.sebastiano.remozio.android.biometrics.AndroidPairingBiometrics
 import dev.sebastiano.remozio.android.biometrics.PairingBiometricResult
+import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.PairingInvitationV2
 import dev.remozio.protocol.PairingTranscript
 import dev.remozio.protocol.RePairInvitation
@@ -24,6 +25,7 @@ internal data class PairingScreenState(
     val clockSkewAdvisory: Boolean = false,
     val signer: AndroidPairingBiometrics? = null,
     val mayHaveSavedSetup: Boolean = false,
+    val recoveryRecordID: CborValue.Bytes? = null,
 )
 
 /** Retains one setup owner across rotation. Activity and biometric prompts are never retained here. */
@@ -40,6 +42,12 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
     fun open() {
         if (mutable.value.phase == PairingPhase.CLOSED) mutable.value = PairingScreenState(PairingPhase.INPUT)
     }
+    fun openRecovery(recordID: CborValue.Bytes) {
+        if (mutable.value.phase == PairingPhase.CLOSED) {
+            mutable.value = PairingScreenState(PairingPhase.INPUT, recoveryRecordID = recordID)
+        }
+    }
+
     fun foreground(value: Boolean) {
         foreground = value
         if (!value) foregroundRevision++
@@ -52,7 +60,7 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
 
     private suspend fun inspectRePair(invitation: () -> RePairInvitation): RePairAvailability {
         return try {
-            app.pairing.inspectRePair(invitation())
+            app.pairing.inspectRePair(invitation(), mutable.value.recoveryRecordID)
             RePairAvailability.ELIGIBLE
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -67,11 +75,16 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         val rePairSuffix = if (text.trim().startsWith("remozio-repair:")) runCatching {
             RePairInvitation.importText(text.trim()).predecessor.phoneID.copyBytes().suffix()
         }.getOrDefault("") else null
-        return connect(rePairSuffix) { it.connect(text) }
+        val target = mutable.value.recoveryRecordID
+        if (target != null && rePairSuffix == null) return false
+        return connect(rePairSuffix) { it.connect(text, target) }
     }
 
-    fun connectV2(invitation: PairingInvitationV2) =
-        connect(invitation.replacement?.phoneID?.copyBytes()?.suffix()) { it.connectV2(invitation) }
+    fun connectV2(invitation: PairingInvitationV2): Boolean {
+        val target = mutable.value.recoveryRecordID
+        if (target != null && invitation.replacement == null) return false
+        return connect(invitation.replacement?.phoneID?.copyBytes()?.suffix()) { it.connectV2(invitation, target) }
+    }
 
     private fun ByteArray.suffix() = takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
 
@@ -80,7 +93,7 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         val owner = AndroidPairingAttempt(app, scope, app.pairing)
         attempt = owner
         val suffix = rePairSuffix ?: owner.phoneSuffix
-        mutable.value = PairingScreenState(PairingPhase.CONNECTING, suffix)
+        mutable.value = PairingScreenState(PairingPhase.CONNECTING, suffix, recoveryRecordID = mutable.value.recoveryRecordID)
         operation = scope.launch {
             try {
                 val transcript = open(owner)
