@@ -104,7 +104,7 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
             }
         }
     }
-    if (renderInspection) CommandInspectionHost(navigation, owners, onReconnect)
+    if (renderInspection) CommandInspectionHost(navigation, owners, onReconnect, onRepair)
 }
 
 @Composable

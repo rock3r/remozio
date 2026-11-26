@@ -36,6 +36,14 @@ class AndroidCommandBiometricsTest {
         EnrollmentKeyReference(EnrollmentKeyRole.DECISION, id(11), "remozio.decision.v1.${"b".repeat(32)}",
             decisionPublicPoint(decisionKey.public as ECPublicKey)), EnrollmentKeyReference(EnrollmentKeyRole.BIOMETRIC, id(12), "remozio.biometric.v1.${"c".repeat(32)}",
             decisionPublicPoint(biometricKey.public as ECPublicKey)), id(6, 32), null)
+    @Test fun legacyApprovalKeyRequiresRecoveryBeforeOpeningTheProvider() {
+        val record = StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE)
+        val failure = assertFailsWith<BiometricRecoveryRequired> {
+            AndroidCommandBiometrics.load(record, session(), limits) { time }
+        }
+        assertEquals(BiometricRecoveryReason.LEGACY_POLICY, failure.reason)
+    }
+
     private val decline = CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)
     private val execute = CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)
     private fun request(mac: Int = 2, account: Int = 3, requestID: Int = 7, actions: List<CapturedAction> = listOf(decline, execute),

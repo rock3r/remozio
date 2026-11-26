@@ -49,6 +49,7 @@ internal class CommandApprovalContext(
     val limits: RequestLimits,
     val connectionState: StateFlow<CommandConnectionState>,
     val reconnect: () -> Unit,
+    val onRepair: (() -> Unit)?,
     val send: suspend (ApprovalMessage) -> Unit,
 )
 
@@ -65,6 +66,11 @@ internal fun commandActionAvailability(session: CommandRequestSession, record: S
         allowed(ActionChoice.DECLINE, enrollment.decisionKey))
 }
 
+internal fun biometricRecoveryMessage(reason: BiometricRecoveryReason): Int = when (reason) {
+    BiometricRecoveryReason.LEGACY_POLICY -> R.string.command_biometric_legacy_recovery
+    BiometricRecoveryReason.BIOMETRIC_CHANGED -> R.string.command_biometric_changed_recovery
+}
+
 internal enum class CommandActionStage { IDLE, PREPARING, BIOMETRIC, SENDING, AWAITING, UNAVAILABLE, UNCERTAIN }
 
 /** All state is in memory. Tickets reject work and callbacks from replaced or stopped views. */
@@ -79,7 +85,18 @@ internal class CommandApprovalViewState {
     val attempts = CommandActionAttempt()
     var stage by mutableStateOf(CommandActionStage.IDLE)
     var retained by mutableStateOf<ApprovalMessage?>(null)
-    fun clear() { attempts.invalidate(); retained = null; stage = CommandActionStage.IDLE }
+    var biometricRecovery by mutableStateOf<BiometricRecoveryReason?>(null)
+        private set
+
+    fun requireBiometricRecovery(ticket: Any, reason: BiometricRecoveryReason) {
+        if (!attempts.owns(ticket)) return
+        biometricRecovery = reason
+        stage = CommandActionStage.IDLE
+    }
+
+    fun clear() {
+        attempts.invalidate(); retained = null; biometricRecovery = null; stage = CommandActionStage.IDLE
+    }
 
     suspend fun deliver(ticket: Any, message: ApprovalMessage, send: suspend (ApprovalMessage) -> Unit) {
         if (!attempts.owns(ticket)) return
@@ -143,7 +160,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
         }
 
         fun decide(execute: Boolean) {
-            if (!foreground || activity == null || state.retained != null ||
+            if (!foreground || activity == null || state.retained != null || (execute && state.biometricRecovery != null) ||
                 context.connectionState.value != CommandConnectionState.CONNECTED ||
                 state.stage !in setOf(CommandActionStage.IDLE, CommandActionStage.UNAVAILABLE)) return
             val ticket = attempts.begin()
@@ -173,6 +190,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                                     is CommandBiometricResult.Signed -> deliver(ticket, result.message)
                                     CommandBiometricResult.Cancelled -> state.stage = CommandActionStage.IDLE
                                     CommandBiometricResult.Unavailable -> state.stage = CommandActionStage.UNAVAILABLE
+                                    is CommandBiometricResult.RecoveryRequired -> state.requireBiometricRecovery(ticket, result.reason)
                                 }
                             }
                         } finally { loaded?.close() }
@@ -187,6 +205,8 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                 } catch (cancelled: CancellationException) {
                     if (attempts.owns(ticket)) state.stage = CommandActionStage.UNAVAILABLE
                     throw cancelled
+                } catch (failure: BiometricRecoveryRequired) {
+                    state.requireBiometricRecovery(ticket, failure.reason)
                 } catch (_: Exception) { if (attempts.owns(ticket)) state.stage = CommandActionStage.UNAVAILABLE }
             }
         }
@@ -213,7 +233,16 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
             } else if (connectionState == CommandConnectionState.CONNECTING) {
                 Text(stringResource(R.string.commands_connecting), style = MaterialTheme.typography.bodyMedium)
             }
-            if (availability.execute) Button(onClick = { decide(true) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {
+            state.biometricRecovery?.let { reason ->
+                Text(stringResource(biometricRecoveryMessage(reason)), style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                context.onRepair?.let { onRepair ->
+                    TextButton(onClick = onRepair, enabled = foreground && !busy) {
+                        Text(stringResource(R.string.commands_pair_again))
+                    }
+                }
+            }
+            if (availability.execute && state.biometricRecovery == null) Button(onClick = { decide(true) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.command_action_approve))
             }
             if (availability.decline) OutlinedButton(onClick = { decide(false) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {

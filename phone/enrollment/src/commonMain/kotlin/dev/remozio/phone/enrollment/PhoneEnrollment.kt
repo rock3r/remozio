@@ -14,7 +14,19 @@ enum class EnrollmentKeyRole(val aliasPart: String) { TRANSPORT("transport"), DE
 class EnrollmentKeyReference(val role: EnrollmentKeyRole, keyID: ByteArray, val alias: String, publicKey: ByteArray) {
     val keyID = id(keyID)
     val publicKey = CborValue.Bytes(if (role == EnrollmentKeyRole.TRANSPORT) p256TransportPin(publicKey) else point(publicKey))
-    init { require(Regex("remozio\\.${role.aliasPart}\\.v1\\.[0-9a-f]{32}").matches(alias)) }
+    val hasBiometricEnrollmentInvalidationPolicy = role == EnrollmentKeyRole.BIOMETRIC &&
+        alias == biometricEnrollmentAlias(this.keyID.copyBytes())
+
+    init {
+        require(hasBiometricEnrollmentInvalidationPolicy || Regex("remozio\\.${role.aliasPart}\\.v1\\.[0-9a-f]{32}").matches(alias))
+    }
+
+    companion object {
+        fun biometricEnrollmentAlias(keyID: ByteArray): String {
+            require(keyID.size == 16)
+            return "remozio.biometric.v2.${keyID.toHexString()}"
+        }
+    }
     internal fun pointBytes() = publicKey.copyBytes().takeLast(65).toByteArray()
     override fun toString() = "EnrollmentKeyReference(redacted)"
 }

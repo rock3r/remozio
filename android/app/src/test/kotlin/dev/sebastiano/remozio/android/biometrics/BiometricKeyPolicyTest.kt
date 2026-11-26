@@ -8,7 +8,7 @@ import kotlin.test.*
 class BiometricKeyPolicyTest {
     private val facts = BiometricKeyFacts(KeyProperties.SECURITY_LEVEL_STRONGBOX, KeyProperties.ORIGIN_GENERATED,
         256, KeyProperties.PURPOSE_SIGN, setOf(KeyProperties.DIGEST_SHA256), true, true, KeyProperties.AUTH_BIOMETRIC_STRONG, 0, true, false, false)
-    private val alias = "remozio.biometric.v1.${"a".repeat(32)}"
+    private val alias = "remozio.biometric.v2.${"a".repeat(32)}"
 
     @Test fun acceptsHardwareSigningWithPerUseBiometrics() {
         assertEquals(BiometricKeySecurity.STRONGBOX, biometricKeySecurity(facts))
@@ -114,6 +114,7 @@ class BiometricKeyPolicyTest {
         assertTrue(existing.calls.isEmpty())
         val other = Backend()
         assertFails { createBiometricKey(other, alias.replace("biometric", "transport")) }
+        assertFails { createBiometricKey(other, alias.replace(".v2.", ".v1.")) }
         assertTrue(other.calls.isEmpty())
     }
 }

@@ -411,6 +411,8 @@
     <string name="commands_disconnected">Disconnected. Retained requests may have changed on the host.</string>
     <string name="commands_reconnect">Reconnect</string>
     <string name="commands_certificate_recovery">This Mac’s connection certificate expired and could not be renewed.</string>
+    <string name="command_biometric_legacy_recovery">Pair again to approve requests. This pairing uses an approval key from before the biometric security update.</string>
+    <string name="command_biometric_changed_recovery">Android disabled this approval key after a change to fingerprints or faces. This protects your Mac. Pair again to approve requests.</string>
     <string name="commands_pair_again">Pair again</string>
     <string name="pairing_certificate_recovery_intro">On the Mac, open Paired phones in Remozio. Revoke this phone, then choose Re-pair. Import the new invitation here.</string>
     <string name="commands_enrollment_unavailable">This pairing is no longer active. Return to the host list.</string>

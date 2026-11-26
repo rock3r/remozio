@@ -1,6 +1,8 @@
 package dev.sebastiano.remozio.android.requests
 
 import dev.remozio.protocol.ApprovalMessage
+import dev.sebastiano.remozio.android.R
+import dev.sebastiano.remozio.android.biometrics.BiometricRecoveryReason
 import dev.remozio.protocol.ApprovalMessageType
 import dev.remozio.protocol.SigningPurpose
 import java.io.IOException
@@ -45,6 +47,17 @@ class CommandApprovalDeliveryTest {
         }
         assertEquals(CommandActionStage.UNCERTAIN, state.stage)
         assertSame(approval, state.retained)
+    }
+
+    @Test fun onlyTheCurrentAttemptShowsTheAppropriateRecoveryMessage() {
+        val state = CommandApprovalViewState()
+        val previous = state.attempts.begin()
+        val current = state.attempts.begin()
+        state.requireBiometricRecovery(previous, BiometricRecoveryReason.LEGACY_POLICY)
+        assertNull(state.biometricRecovery)
+        state.requireBiometricRecovery(current, BiometricRecoveryReason.BIOMETRIC_CHANGED)
+        assertEquals(R.string.command_biometric_changed_recovery, biometricRecoveryMessage(checkNotNull(state.biometricRecovery)))
+        assertEquals(R.string.command_biometric_legacy_recovery, biometricRecoveryMessage(BiometricRecoveryReason.LEGACY_POLICY))
     }
 
     @Test fun anInvalidatedAttemptCannotPublishALateResult() = runBlocking<Unit> {

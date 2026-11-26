@@ -131,8 +131,8 @@ internal class CommandConnection(
         }
     }
 
-    fun approval(session: CommandRequestSession, reconnect: () -> Unit = {}) =
-        CommandApprovalContext(record, limits, connectionState, reconnect) { send(session, it) }
+    fun approval(session: CommandRequestSession, onRepair: (() -> Unit)? = null, reconnect: () -> Unit = {}) =
+        CommandApprovalContext(record, limits, connectionState, reconnect, onRepair) { send(session, it) }
 
     /** Rechecks the retained request and enrolled signing role before writing on this incarnation. */
     internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage) = withContext(dispatcher) {
@@ -147,7 +147,9 @@ internal class CommandConnection(
                 val body = message.body.copyBytes()
                 val claim = DecisionPayload.decode(body, limits.body)
                 val key = when (claim.action.choice) {
-                    ActionChoice.EXECUTE -> e.biometricKey.also { check(message.purpose == SigningPurpose.BIOMETRIC_AUTHORIZATION) }
+                    ActionChoice.EXECUTE -> e.biometricKey.also {
+                        check(it.hasBiometricEnrollmentInvalidationPolicy && message.purpose == SigningPurpose.BIOMETRIC_AUTHORIZATION)
+                    }
                     ActionChoice.DECLINE -> e.decisionKey.also { check(message.purpose == SigningPurpose.CANCELLATION) }
                     else -> throw IOException("Unsupported command decision")
                 }
