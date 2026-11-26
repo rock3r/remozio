@@ -14,14 +14,28 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
     static let maximumBytes = 131072
     let formatVersion: UInt64
     let id: UUID
-    private(set) var revision: UUID
+    let revision: UUID
     let sourceSchemaVersion: Int64
     let sourceMachineDigest: Data
     let activation: Data
     let epochs: MachineUpdatePolicyIntentRecord.EpochScope
     let sourceInventoryRevision: Data
     let targetInventory: Data
-    private(set) var accounts: [Account]
+    let accounts: [Account]
+    private let canonicalCache = CanonicalBytesCache()
+
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case id
+        case revision
+        case sourceSchemaVersion
+        case sourceMachineDigest
+        case activation
+        case epochs
+        case sourceInventoryRevision
+        case targetInventory
+        case accounts
+    }
     var description: String { "MachineUpdateCompletionIntentRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -54,6 +68,20 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
                 inInventory: context.inventory.accounts.contains { $0.accountID == account.accountID },
                 policyRecordID: policy?.id, policyRecordDigest: policy.map { try MachineUpdateActivationRecord.digest($0.encoded) })
         }
+        try validate()
+    }
+
+    private init(_ previous: Self, accounts: [Account]) throws {
+        formatVersion = previous.formatVersion
+        id = previous.id
+        revision = UUID()
+        sourceSchemaVersion = previous.sourceSchemaVersion
+        sourceMachineDigest = previous.sourceMachineDigest
+        activation = previous.activation
+        epochs = previous.epochs
+        sourceInventoryRevision = previous.sourceInventoryRevision
+        targetInventory = previous.targetInventory
+        self.accounts = accounts
         try validate()
     }
 
@@ -95,12 +123,12 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
     fileprivate func replacingPolicy(_ policy: MachineUpdatePolicyIntentRecord) throws -> Self {
         guard let index = accounts.firstIndex(where: { $0.accountID == policy.binding.accountID }),
               accounts[index].policyRecordID == policy.id else { throw PreparationStoreError.staleRevision }
-        var next = self; next.revision = UUID()
         let previous = accounts[index]
-        next.accounts[index] = try .init(accountID: previous.accountID, ownerUID: previous.ownerUID,
+        var updatedAccounts = accounts
+        updatedAccounts[index] = try .init(accountID: previous.accountID, ownerUID: previous.ownerUID,
             sourceDigest: previous.sourceDigest, inInventory: previous.inInventory,
             policyRecordID: policy.id, policyRecordDigest: MachineUpdateActivationRecord.digest(policy.encoded))
-        try next.validate(); return next
+        return try Self(self, accounts: updatedAccounts)
     }
 
     private func validate() throws {
@@ -126,13 +154,13 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
         }
     }
 
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw PreparationStoreError.capacity }
         return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw PreparationStoreError.corruptRecord }
