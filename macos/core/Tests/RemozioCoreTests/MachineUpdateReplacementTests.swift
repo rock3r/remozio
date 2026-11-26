@@ -7516,6 +7516,30 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    func testCompletionIntentReplacementEncodesNewRevisionAndPolicyDigest() throws {
+        try withCompletionFixture { fixture in
+            let archive = try fixture.intent()
+            let originalBytes = try archive.record.encoded
+            let updated = try archive.preparingWrite(accountID: fixture.boundary.accountID, expected: fixture.boundary)
+            let updatedBytes = try updated.record.encoded
+            let decoded = try MachineUpdateCompletionIntentRecord.decode(updatedBytes)
+            let policy = try XCTUnwrap(updated.policies.first)
+            let account = try XCTUnwrap(decoded.accounts.first { $0.accountID == policy.binding.accountID })
+
+            XCTAssertEqual(decoded, updated.record)
+            XCTAssertEqual(decoded.id, archive.record.id)
+            XCTAssertNotEqual(decoded.revision, archive.record.revision)
+            XCTAssertEqual(account.policyRecordID, policy.id)
+            XCTAssertEqual(account.policyRecordDigest, try MachineUpdateActivationRecord.digest(policy.encoded))
+            XCTAssertNotEqual(account.policyRecordDigest, archive.record.accounts.first {
+                $0.accountID == policy.binding.accountID
+            }?.policyRecordDigest)
+            XCTAssertEqual(try archive.record.encoded, originalBytes)
+            XCTAssertEqual(try MachineUpdateCompletionIntentRecord.decode(originalBytes), archive.record)
+            XCTAssertEqual(try updated.record.encoded, updatedBytes)
+        }
+    }
+
     func testCompletionIntentRejectsAnotherSnapshotCandidateAndTargetRevision() throws {
         try withCompletionFixture { fixture in
             let intent = try fixture.intent(), snapshot = fixture.snapshot

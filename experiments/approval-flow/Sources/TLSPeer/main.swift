@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback fixtures only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let commandCapture: String?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
 
 private actor SyntheticPairingReceipt {
     private var committed: (setupID: Data, signature: Data)?
@@ -231,21 +231,27 @@ if setup.pairing == true {
     }
     dispatchMain()
 }
-if setup.routing == true || setup.audit == true {
+if setup.routing == true || setup.audit == true || setup.commandCapture != nil {
+    let commandCapture = try setup.commandCapture.map { encoded in
+        guard let capture = Data(base64Encoded: encoded), !capture.isEmpty else { throw ProbeError.invalidInput }
+        return capture
+    }
     guard let decisionText = setup.decisionPublicKey, let decision = Data(base64Encoded: decisionText),
           let biometricText = setup.biometricPublicKey, let biometric = Data(base64Encoded: biometricText) else { throw ProbeError.invalidInput }
     let fixture = try RoutingFixture(directory: URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent().path,
         phoneTransport: peer, decision: decision, biometric: biometric,
         supported: setup.routing == true && setup.routingSupported != false,
         auditSupported: setup.audit == true && setup.auditSupported != false,
-        maximumPayloadBytes: setup.audit == true ? (setup.maximumPayloadBytes ?? 65_536) : 16_384)
+        maximumPayloadBytes: setup.audit == true ? (setup.maximumPayloadBytes ?? 65_536) : 16_384,
+        commandCapture: commandCapture)
     let feed = AuthorityTrustFeed(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), factory: { onClose in
         AuthorityXPCChannel(driver: try fixture.driver(), onClose: onClose)
     })
     let host = try DirectApprovalTransportHost(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
         identity: identity, binding: .loopback, maximumConnections: 4, timeoutMilliseconds: 4000,
         validatePeer: { try await feed.validatePeer($0, revision: $1) }, handler: { _, _ in throw ProbeError.invalidInput })
-    let service = DirectApprovalTransportService(feed: feed, host: host, useDefaultDelivery: true)
+    let service = DirectApprovalTransportService(feed: feed, host: host, useDefaultDelivery: true,
+        requestRefreshMilliseconds: commandCapture == nil ? 5000 : 60_000)
     Task {
         do {
             try await service.start()
