@@ -143,7 +143,7 @@ private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity
             else -> CombinedCommandInboxScreen(pairing::open, navigation)
         }
     }
-    CommandInspectionHost(navigation, owners)
+    CommandInspectionHost(navigation, owners, commands::reconnect)
     PairingSetupSheet(pairing, activity)
 }
 
