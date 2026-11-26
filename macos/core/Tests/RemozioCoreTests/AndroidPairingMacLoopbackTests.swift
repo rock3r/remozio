@@ -54,6 +54,91 @@ final class AndroidPairingMacLoopbackTests: XCTestCase, @unchecked Sendable {
         try await assertNativePairing(.rejectsUnprovedClient)
     }
 
+    private final class AdmissionDriver: ByteConnectionDriver, Sendable {
+        struct Calls: Sendable, Equatable {
+            var starts = 0
+            var cancellations = 0
+        }
+
+        private let calls = Mutex(Calls())
+
+        var observed: Calls { calls.withLock { $0 } }
+
+        func start(_ event: @escaping @Sendable (ByteConnectionEvent) -> Void) {
+            calls.withLock { $0.starts += 1 }
+        }
+
+        func cancel() { calls.withLock { $0.cancellations += 1 } }
+
+        func receive(_ result: @escaping @Sendable (Data?, Bool, Bool) -> Void) {
+            XCTFail("The accept fixture attempted to read bytes")
+            result(nil, false, true)
+        }
+
+        func send(_ data: Data, result: @escaping @Sendable (Bool) -> Void) {
+            XCTFail("The accept fixture attempted to write bytes")
+            result(true)
+        }
+    }
+
+    func testV2ListenerCancelsOverflowWithoutStartingItAndAdmitsAfterRelease() throws {
+        let transport = P256.Signing.PrivateKey()
+        let invitation = try PairingInvitation(macID: Data(repeating: 1, count: 16),
+            accountID: Data(repeating: 2, count: 16), label: "Pairing Test Mac",
+            authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            transportPublicKey: transport.publicKey.x963Representation, minimumEnvelopeVersion: 1)
+        let epoch = UUID()
+        let clock = Mutex<UInt64>(0)
+        let allocations = Mutex(0)
+        let interval = (1_000 + PairingRegistrationBudget.registrationsPerSecond - 1)
+            / PairingRegistrationBudget.registrationsPerSecond
+        let fixture = PairingSetupListener.IngressFixture(peerSubnet: try fixtureSubnet(), now: {
+            clock.withLock { milliseconds in
+                milliseconds += interval
+                return .init(epoch: epoch, milliseconds: milliseconds)
+            }
+        }, channelAllocated: { allocations.withLock { $0 += 1 } })
+        let listener = try PairingSetupListener(identity: AuthorityJournalSchema19MigrationTests.fixtureIdentity(transport),
+            invitation: invitation, binding: .loopback, maximumConnections: 4, handshakeTimeoutMilliseconds: 5_000,
+            setupTimeoutMilliseconds: 30_000,
+            v2: .init(windowID: Data(repeating: 3, count: 16), lifetimeMilliseconds: Self.lifetimeMilliseconds,
+                reserve: { _ in XCTFail("The accept fixture started proof verification") }, disconnect: { _ in }),
+            ingressFixture: fixture, event: { _ in }, handler: { _ in XCTFail("The accept fixture started a native session") })
+        try listener.start()
+        defer { listener.close() }
+
+        let accepted = ContinuousClock.now
+        func arrive(_ driver: AdmissionDriver, source: Int) throws -> UUID? {
+            let address = try XCTUnwrap(IPv4Address("192.0.2.\(source)"))
+            return listener.acceptFixtureConnection(driver, endpoint: .hostPort(host: .ipv4(address), port: 1), at: accepted)
+        }
+
+        let capacity = PairingSetupV2Admissions.maximumPending
+        XCTAssertEqual(capacity, 16)
+        let held = (0..<capacity).map { _ in AdmissionDriver() }
+        let slots = try held.enumerated().map { try XCTUnwrap(arrive($0.element, source: $0.offset + 2)) }
+        XCTAssertEqual(Set(slots).count, capacity)
+        XCTAssertEqual(allocations.withLock { $0 }, capacity)
+        XCTAssertTrue(held.allSatisfy { $0.observed == .init(starts: 1, cancellations: 0) })
+
+        let overflow = AdmissionDriver()
+        XCTAssertNil(try arrive(overflow, source: capacity + 2))
+        XCTAssertEqual(overflow.observed, .init(starts: 0, cancellations: 1))
+        XCTAssertEqual(allocations.withLock { $0 }, capacity)
+
+        listener.releaseFixtureConnection(try XCTUnwrap(slots.first))
+        let replacement = AdmissionDriver()
+        XCTAssertNotNil(try arrive(replacement, source: capacity + 3))
+        XCTAssertEqual(replacement.observed, .init(starts: 1, cancellations: 0))
+        XCTAssertEqual(allocations.withLock { $0 }, capacity + 1)
+
+        let stillFull = AdmissionDriver()
+        XCTAssertNil(try arrive(stillFull, source: capacity + 4))
+        XCTAssertEqual(stillFull.observed, .init(starts: 0, cancellations: 1))
+        XCTAssertEqual(allocations.withLock { $0 }, capacity + 1)
+        XCTAssertTrue(held.dropFirst().allSatisfy { $0.observed == .init(starts: 1, cancellations: 0) })
+    }
+
     private func fixtureSubnet() throws -> PairingLANSubnet {
         let address = PairingLANRoute.Address.ipv4(try XCTUnwrap(IPv4Address("192.0.2.1")))
         let offset = try XCTUnwrap(MemoryLayout<sockaddr_in>.offset(of: \.sin_addr))

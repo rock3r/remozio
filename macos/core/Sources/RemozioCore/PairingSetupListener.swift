@@ -57,6 +57,13 @@ public final class PairingSetupListener: @unchecked Sendable {
             self.source = source
         }
     }
+    private struct AcceptedSlot {
+        let id: UUID
+        let slot: Slot
+        let acceptedAt: AuthorityMoment?
+        let deadline: ContinuousClock.Instant
+    }
+
     private let listener: NWListener
     var requiredLocalEndpoint: NWEndpoint? { listener.parameters.requiredLocalEndpoint }
     private let queue = DispatchQueue(label: "dev.remozio.pairing-listener")
@@ -263,16 +270,26 @@ public final class PairingSetupListener: @unchecked Sendable {
         }
     }
     private func accept(_ connection: NWConnection) {
+        let applicationProtocol = applicationProtocol
+        routeConnection(endpoint: { connection.endpoint }, accepted: ContinuousClock.now, reject: { connection.cancel() },
+            makeChannel: {
+                NetworkByteChannel(connection: connection) {
+                    Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
+                        .flatMap { Self.candidatePoint(metadata: $0) } != nil
+                }
+            }, start: { beginSession($0, connection: connection) })
+    }
+
+    private func routeConnection(endpoint: () -> NWEndpoint, accepted: ContinuousClock.Instant,
+                                 reject: () -> Void, makeChannel: () -> NetworkByteChannel,
+                                 start: (AcceptedSlot) -> Void) {
         let id = UUID()
-        let accepted = ContinuousClock.now
         let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
         let acceptedAt: AuthorityMoment?
         do { acceptedAt = try intakeNow?() }
-        catch { connection.cancel(); return }
-        let source = v2 == nil ? nil : sourceKey(connection.endpoint)
+        catch { reject(); return }
+        let source = v2 == nil ? nil : sourceKey(endpoint())
         let peerIsOnLink = peerSubnet.map { subnet in source.map(subnet.contains) ?? false } ?? true
-        let applicationProtocol = applicationProtocol
-        let registrations = registrationLane
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
             guard started, !closed else { return nil }
@@ -291,17 +308,39 @@ public final class PairingSetupListener: @unchecked Sendable {
                     if let victim { evicted = retireProof(victim) }
                 }
             }
-            let channel = NetworkByteChannel(connection: connection) {
-                Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
-                    .flatMap { Self.candidatePoint(metadata: $0) } != nil
-            }
+            let channel = makeChannel()
             channelAllocated?()
             let value = Slot(channel, source: source)
             slots[id] = value
             return value
         }
         if let evicted { cancel(evicted) }
-        guard let slot else { connection.cancel(); return }
+        guard let slot else { reject(); return }
+        start(.init(id: id, slot: slot, acceptedAt: acceptedAt, deadline: deadline))
+    }
+
+    /// Uses the loopback ingress fixture with a fake driver and no session task or proof timer.
+    func acceptFixtureConnection(_ driver: any ByteConnectionDriver, endpoint: NWEndpoint,
+                                 at accepted: ContinuousClock.Instant) -> UUID? {
+        guard channelAllocated != nil else { return nil }
+        var id: UUID?
+        routeConnection(endpoint: { endpoint }, accepted: accepted, reject: { driver.cancel() },
+            makeChannel: { NetworkByteChannel(driver: driver) }, start: { admitted in
+                id = admitted.id
+                driver.start { _ in }
+            })
+        return id
+    }
+
+    func releaseFixtureConnection(_ id: UUID) {
+        guard channelAllocated != nil else { return }
+        release(id)
+    }
+
+    private func beginSession(_ accepted: AcceptedSlot, connection: NWConnection) {
+        let id = accepted.id, slot = accepted.slot, acceptedAt = accepted.acceptedAt, deadline = accepted.deadline
+        let applicationProtocol = applicationProtocol
+        let registrations = registrationLane
         let channel = slot.channel, invitation = invitation, timeout = setupTimeoutMilliseconds
         let windowV2 = self.v2
         let handshakeTimeout = windowV2 == nil ? handshakeTimeoutMilliseconds : 3_000
