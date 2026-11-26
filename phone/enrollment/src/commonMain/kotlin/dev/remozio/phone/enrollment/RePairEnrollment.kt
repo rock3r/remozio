@@ -15,6 +15,7 @@ class RePairReservation(
     val invitation: RePairInvitation,
     keyIDs: List<CborValue.Bytes>,
     val material: RePairProposalMaterial? = null,
+    val usesBiometricEnrollmentInvalidationPolicy: Boolean = true,
 ) {
     val recordID = id(recordID)
     val predecessorRecordID = id(predecessorRecordID)
@@ -39,13 +40,18 @@ class RePairReservation(
         }
     }
 
-    fun alias(role: EnrollmentKeyRole): String =
-        "remozio.${role.aliasPart}.v1." + keyIDs[role.ordinal].copyBytes().joinToString("") {
-            (it.toInt() and 255).toString(16).padStart(2, '0')
+    fun alias(role: EnrollmentKeyRole): String {
+        val keyID = keyIDs[role.ordinal].copyBytes()
+        return if (role == EnrollmentKeyRole.BIOMETRIC && usesBiometricEnrollmentInvalidationPolicy) {
+            EnrollmentKeyReference.biometricEnrollmentAlias(keyID)
+        } else {
+            "remozio.${role.aliasPart}.v1.${keyID.toHexString()}"
         }
+    }
 
     internal fun withMaterial(value: RePairProposalMaterial) =
-        RePairReservation(recordID.copyBytes(), predecessorRecordID.copyBytes(), epoch.copyBytes(), invitation, keyIDs, value)
+        RePairReservation(recordID.copyBytes(), predecessorRecordID.copyBytes(), epoch.copyBytes(), invitation, keyIDs,
+            value, usesBiometricEnrollmentInvalidationPolicy)
 
     override fun toString() = "RePairReservation(redacted)"
 }

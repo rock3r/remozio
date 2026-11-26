@@ -169,16 +169,22 @@ internal object EnrollmentEncoding {
             decodeKey(f.getValue(9u), EnrollmentKeyRole.DECISION), decodeKey(f.getValue(10u), EnrollmentKeyRole.BIOMETRIC),
             bytes(f, 11u), relay), phase, pairing, rePair, successor)
     }
-    fun encodeReservation(reservation: RePairReservation): CborValue = CborValue.Fields(mapOf(
-        0uL to reservation.recordID, 1uL to reservation.predecessorRecordID, 2uL to reservation.epoch,
-        3uL to CborValue.Bytes(reservation.invitation.encode()), 4uL to CborValue.ArrayValue(reservation.keyIDs),
-        5uL to (reservation.material?.let {
-            CborValue.ArrayValue(listOf(CborValue.Bytes(it.proposal.encode()), CborValue.ArrayValue(it.keys.map(::encodeKey))))
-        } ?: CborValue.Null),
-    ))
+    fun encodeReservation(reservation: RePairReservation): CborValue {
+        val fields = mutableMapOf<ULong, CborValue>(
+            0uL to reservation.recordID, 1uL to reservation.predecessorRecordID, 2uL to reservation.epoch,
+            3uL to CborValue.Bytes(reservation.invitation.encode()), 4uL to CborValue.ArrayValue(reservation.keyIDs),
+            5uL to (reservation.material?.let {
+                CborValue.ArrayValue(listOf(CborValue.Bytes(it.proposal.encode()), CborValue.ArrayValue(it.keys.map(::encodeKey))))
+            } ?: CborValue.Null),
+        )
+        if (reservation.usesBiometricEnrollmentInvalidationPolicy) fields[6uL] = CborValue.Unsigned(2u)
+        return CborValue.Fields(fields)
+    }
 
     fun decodeReservation(value: CborValue): RePairReservation {
-        val fields = fields(value, 5)
+        val hasBiometricPolicy = (value as? CborValue.Fields)?.values?.containsKey(6uL) == true
+        val fields = fields(value, if (hasBiometricPolicy) 6 else 5)
+        if (hasBiometricPolicy) require(uint(fields, 6u) == 2uL)
         val keyIDs = (fields.getValue(4u) as CborValue.ArrayValue).values.map { it as CborValue.Bytes }
         val material = if (fields[5u] == CborValue.Null) null else {
             val values = (fields.getValue(5u) as CborValue.ArrayValue).values
@@ -189,7 +195,8 @@ internal object EnrollmentEncoding {
                 EnrollmentKeyRole.entries.map { decodeKey(keys[it.ordinal], it) })
         }
         return RePairReservation(bytes(fields, 0u), bytes(fields, 1u), bytes(fields, 2u),
-            RePairInvitation.decode(bytes(fields, 3u)), keyIDs, material)
+            RePairInvitation.decode(bytes(fields, 3u)), keyIDs, material,
+            usesBiometricEnrollmentInvalidationPolicy = hasBiometricPolicy)
     }
 
     internal fun fields(value: CborValue, last: Int): Map<ULong, CborValue> {
