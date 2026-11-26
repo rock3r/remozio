@@ -45,6 +45,7 @@ public actor PairingSetupNetworkSession {
     private let stream: any ApprovalByteStream
     private let invitation: PairingInvitation
     private let peerPoint: Data
+    private let requiresDecisionProof: Bool
     private(set) var provedConnection: UUID?
     private(set) var proofPublicationDeadline: ContinuousClock.Instant?
     private let abortIO: @Sendable () -> Void
@@ -61,33 +62,37 @@ public actor PairingSetupNetworkSession {
     private var reader: Task<Void, Never>?
     private var inputWaiter: CheckedContinuation<Void, any Error>?
     private init(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data,
-                 abortIO: @escaping @Sendable () -> Void, underlyingClosed: @escaping @Sendable () async -> Bool,
+                 requiresDecisionProof: Bool, abortIO: @escaping @Sendable () -> Void, underlyingClosed: @escaping @Sendable () async -> Bool,
                  invalidateProofLink: @escaping @Sendable () -> Void) {
         self.stream = stream; self.invitation = invitation; self.peerPoint = peerPoint
+        self.requiresDecisionProof = requiresDecisionProof
         self.abortIO = abortIO; self.underlyingClosed = underlyingClosed
         self.invalidateProofLink = invalidateProofLink
     }
     deinit { timer?.cancel(); reader?.cancel() }
     static func acceptStarted(channel: NetworkByteChannel, invitation: PairingInvitation, peerPoint: Data,
-                              timeoutMilliseconds: UInt64, v2: PairingSetupV2Connection? = nil) async throws -> Self {
+                              timeoutMilliseconds: UInt64, v2: PairingSetupV2Connection? = nil,
+                              requiresDecisionProof: Bool = false) async throws -> Self {
         try await accept(stream: PairingNetworkStream(channel: channel), invitation: invitation, peerPoint: peerPoint,
-            timeoutMilliseconds: timeoutMilliseconds, v2: v2, abortIO: { channel.abort() }, underlyingClosed: { await channel.isClosed })
+            timeoutMilliseconds: timeoutMilliseconds, v2: v2, requiresDecisionProof: requiresDecisionProof, abortIO: { channel.abort() }, underlyingClosed: { await channel.isClosed })
     }
     // Injected streams prove state and framing only, never native peer identity.
     static func accept(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data,
                        timeoutMilliseconds: UInt64 = 300_000, v2: PairingSetupV2Connection? = nil,
-                       abortIO: @escaping @Sendable () -> Void = {},
+                       requiresDecisionProof: Bool = false, abortIO: @escaping @Sendable () -> Void = {},
                        underlyingClosed: @escaping @Sendable () async -> Bool = { false }) async throws -> Self {
         let invalidateProofLink: @Sendable () -> Void
         if let v2 { invalidateProofLink = v2.invalidateLink }
         else { invalidateProofLink = {} }
         let owner = Self(stream: stream, invitation: invitation, peerPoint: peerPoint,
-                         abortIO: abortIO, underlyingClosed: underlyingClosed, invalidateProofLink: invalidateProofLink)
+                         requiresDecisionProof: requiresDecisionProof, abortIO: abortIO, underlyingClosed: underlyingClosed,
+                         invalidateProofLink: invalidateProofLink)
         do { try await owner.open(timeoutMilliseconds: timeoutMilliseconds, v2: v2); return owner }
         catch { await owner.closeAndWait(); throw error }
     }
     private func open(timeoutMilliseconds: UInt64, v2: PairingSetupV2Connection?) async throws {
-        guard (1...300_000).contains(timeoutMilliseconds), peerPoint.count == 65 else { throw PairingSetupChannelError.rejected }
+        guard (1...300_000).contains(timeoutMilliseconds), peerPoint.count == 65,
+              !requiresDecisionProof || v2 != nil else { throw PairingSetupChannelError.rejected }
         timer = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(Int64(timeoutMilliseconds))) } catch { return }
             self?.abort()
@@ -154,15 +159,30 @@ public actor PairingSetupNetworkSession {
             try await write(.transcript(transcript))
         } catch { await close(); throw error }
     }
-    /// Verifies mathematical possession only. Root still checks the biometric proof, consent, current policy and elapsed deadline.
+    /// Legacy callers still receive the single proof on a legacy setup connection.
     public func receiveProof() async throws -> Data {
+        guard !requiresDecisionProof else { await close(); throw PairingSetupChannelError.rejected }
+        let proof = try await receivePhoneProof()
+        return proof.biometric
+    }
+
+    /// Verify the proofs for this TLS profile. Root rechecks them before changing trust.
+    func receivePhoneProof() async throws -> PairingPhoneProof {
         try active(); guard !busy, state == .staged, let staged else { throw PairingSetupChannelError.busy }
         busy = true; defer { busy = false }
         do {
-            guard case .proof(let id, let digest, let signature) = try await read(), id == staged.setupID,
-                  try digest == staged.digest(), try staged.verify(signature: signature,
-                    publicKey: staged.biometricKey.publicKey, purpose: .phoneBiometric) else { throw PairingSetupChannelError.rejected }
-            try active(); state = .proofReceived; return signature
+            let id: Data, digest: Data, proof: PairingPhoneProof
+            switch try await read() {
+            case .proof(let setupID, let confirmedDigest, let signature):
+                id = setupID; digest = confirmedDigest; proof = try .init(biometric: signature)
+            case .dualProof(let setupID, let confirmedDigest, let biometric, let decision):
+                id = setupID; digest = confirmedDigest; proof = try .init(biometric: biometric, decision: decision)
+            default: throw PairingSetupChannelError.rejected
+            }
+            guard id == staged.setupID, try digest == staged.digest() else { throw PairingSetupChannelError.rejected }
+            do { try proof.verify(in: staged, requiresDecisionProof: requiresDecisionProof) }
+            catch { throw PairingSetupChannelError.rejected }
+            try active(); state = .proofReceived; return proof
         } catch { await close(); throw error }
     }
     /// Call once with a receipt from the existing durable Root commit. A failed send is ambiguous and must not retry the commit.

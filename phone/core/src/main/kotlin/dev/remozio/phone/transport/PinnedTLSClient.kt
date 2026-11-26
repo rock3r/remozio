@@ -213,8 +213,13 @@ class PinnedTLSClient private constructor(
         private const val BUFFER_BYTES = 65_536
         private const val MAX_CHUNK_BYTES = 32_768
 
-        internal fun forPairingV2(keys: Array<KeyManager>, pin: ByteArray, provider: PairingV2TLSProvider) =
-            PinnedTLSClient(keys, pin, dev.remozio.protocol.PairingSetupPreludeV2.APPLICATION_PROTOCOL, 1_048_576, provider)
+        internal fun forPairingV2(keys: Array<KeyManager>, pin: ByteArray, provider: PairingV2TLSProvider,
+            requiresDecisionProof: Boolean = false,
+        ): PinnedTLSClient {
+            val protocol = if (requiresDecisionProof) dev.remozio.protocol.PairingSetupPreludeV2.DECISION_PROOF_APPLICATION_PROTOCOL
+                else dev.remozio.protocol.PairingSetupPreludeV2.APPLICATION_PROTOCOL
+            return PinnedTLSClient(keys, pin, protocol, 1_048_576, provider)
+        }
 
         internal fun forPairingRecovery(keys: Array<KeyManager>, pin: ByteArray,
             provider: PairingRecoveryTLSProvider,

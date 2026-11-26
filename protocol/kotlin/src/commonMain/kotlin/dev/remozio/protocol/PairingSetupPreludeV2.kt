@@ -26,6 +26,7 @@ sealed class PairingSetupPreludeV2 {
 
     companion object {
         const val APPLICATION_PROTOCOL = "remozio-pairing/2"
+        const val DECISION_PROOF_APPLICATION_PROTOCOL = "remozio-pairing/3"
         const val MAXIMUM_BYTES = 66_128
         private const val DOMAIN = "dev.remozio.pairing.exchange"
         private val LIMITS = CborLimits(MAXIMUM_BYTES, 2, 13)

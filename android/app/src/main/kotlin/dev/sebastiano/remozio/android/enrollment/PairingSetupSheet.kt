@@ -61,8 +61,8 @@ internal fun PairingSetupSheet(model: PairingViewModel, activity: ComponentActiv
         }
     }
     PairingSetupSurface(state, model::connect, model::confirmComparison, model::expire, model::close,
-        inspectRePair = model::inspectRePair, onConnectV2 = if (testV2) model::connectV2 else null,
-        inspectRePairV2 = if (testV2) model::inspectRePairV2 else null)
+        inspectRePair = model::inspectRePair, onConnectV2 = { model.connectV2(it, requiresDecisionProof = !testV2) },
+        inspectRePairV2 = model::inspectRePairV2, legacyInputEnabled = !testV2)
 }
 
 /** Display-only surface. Callback ownership remains with the retained setup host. */
@@ -73,18 +73,19 @@ internal fun PairingSetupSurface(state: PairingScreenState, onConnect: (String) 
     inspectRePair: (suspend (String) -> RePairAvailability)? = null,
     onConnectV2: ((PairingInvitationV2) -> Boolean)? = null,
     inspectRePairV2: (suspend (PairingInvitationV2) -> RePairAvailability)? = null,
+    legacyInputEnabled: Boolean = true,
 ) {
     BoxWithConstraints {
         if (maxWidth >= 600.dp) {
             Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
                 Surface(Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(24.dp), shape = MaterialTheme.shapes.extraLarge) {
-                    PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(24.dp), inspectRePair, onConnectV2, inspectRePairV2)
+                    PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(24.dp), inspectRePair, onConnectV2, inspectRePairV2, legacyInputEnabled)
                 }
             }
         } else {
             ModalBottomSheet(onDismissRequest = onClose,
                 sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))) {
-                PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp), inspectRePair, onConnectV2, inspectRePairV2)
+                PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp), inspectRePair, onConnectV2, inspectRePairV2, legacyInputEnabled)
             }
         }
     }
@@ -96,6 +97,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
     inspectRePair: (suspend (String) -> RePairAvailability)?,
     onConnectV2: ((PairingInvitationV2) -> Boolean)?,
     inspectRePairV2: (suspend (PairingInvitationV2) -> RePairAvailability)?,
+    legacyInputEnabled: Boolean,
 ) {
     val context = LocalContext.current
     var invitation by remember { mutableStateOf("") }
@@ -108,21 +110,22 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
     val input = invitation.trim()
     val isV1RePair = input.startsWith("remozio-repair:")
     val isV2RePair = invitationV2?.replacement != null
-    val rePairInput = isV1RePair || isV2RePair
+    val usesV2 = invitationV2 != null && onConnectV2 != null
+    val rePairInput = if (usesV2) isV2RePair else isV1RePair
     var v1Availability by remember(input) { mutableStateOf<RePairAvailability?>(null) }
     var v2Availability by remember(invitationV2) { mutableStateOf<RePairAvailability?>(null) }
-    val availability = if (isV2RePair) v2Availability else v1Availability
-    val hasInvitation = if (onConnectV2 != null) invitationV2 != null else input.isNotBlank()
+    val availability = if (usesV2) v2Availability else v1Availability
+    val hasInvitation = usesV2 || (legacyInputEnabled && input.isNotBlank())
     val recovery = state.recoveryRecordID != null
     val canConnect = hasInvitation && (!recovery || rePairInput) &&
         (!rePairInput || availability == RePairAvailability.ELIGIBLE)
 
     fun connect() {
         if (!canConnect) return
-        if (onConnectV2 != null) {
-            val parsed = invitationV2 ?: return
+        val parsed = invitationV2
+        if (parsed != null && onConnectV2 != null) {
             if (onConnectV2(parsed)) invitationV2 = null
-        } else if (onConnect(invitation)) {
+        } else if (legacyInputEnabled && onConnect(invitation)) {
             invitation = ""
         }
     }
@@ -172,17 +175,17 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                         .addOnSuccessListener { barcode ->
                             if (scannerLive.get()) {
                                 val text = barcode.rawValue
-                                if (onConnectV2 != null) {
-                                    invitationV2 = text?.let { runCatching { PairingInvitationV2.importText(it) }.getOrNull() }
-                                    scannerFailed = invitationV2 == null
-                                } else if (text?.trimStart()?.startsWith("remozio-pairing:v2:") == true) {
-                                    invitation = ""
-                                    wrongInvitationVersion = true
-                                } else if (text != null && runCatching {
-                                    if (text.startsWith("remozio-repair:")) RePairInvitation.importText(text)
-                                    else PairingInvitation.importText(text)
-                                }.isSuccess) invitation = text
-                                else scannerFailed = true
+                                invitation = ""
+                                invitationV2 = null
+                                if (text?.trimStart()?.startsWith("remozio-pairing:v2:") == true) {
+                                    if (onConnectV2 == null) wrongInvitationVersion = true
+                                    else {
+                                        invitationV2 = runCatching { PairingInvitationV2.importText(text.trim()) }.getOrNull()
+                                        scannerFailed = invitationV2 == null
+                                    }
+                                } else if (legacyInputEnabled && text != null && isLegacyPairingInvitation(text.trim())) {
+                                    invitation = text.trim()
+                                } else scannerFailed = true
                             }
                         }
                         .addOnFailureListener { if (scannerLive.get()) scannerFailed = true }
@@ -195,9 +198,16 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                 Text(stringResource(R.string.pairing_setup_v2_wrong_field), color = MaterialTheme.colorScheme.error)
             }
             if (onConnectV2 != null) {
-                AndroidView(factory = { viewContext -> PairingInvitationV2Editor(viewContext) { invitationV2 = it } },
-                    modifier = Modifier.fillMaxWidth())
-                if (invitationV2 != null) Text(stringResource(R.string.pairing_setup_invitation_ready))
+                AndroidView(factory = { viewContext ->
+                    val acceptLegacy: ((String) -> Unit)? = if (legacyInputEnabled) {
+                        { text -> invitationV2 = null; invitation = text }
+                    } else null
+                    PairingInvitationV2Editor(viewContext, onLegacyInvitation = acceptLegacy) { parsed ->
+                        invitation = ""
+                        invitationV2 = parsed
+                    }
+                }, modifier = Modifier.fillMaxWidth())
+                if (hasInvitation) Text(stringResource(R.string.pairing_setup_invitation_ready))
             } else {
                 OutlinedTextField(value = invitation, onValueChange = { text ->
                     val v2 = text.trimStart().startsWith("remozio-pairing:v2:")

@@ -80,14 +80,21 @@ public struct TransportPairingCandidate: Sendable, CustomStringConvertible {
     public let id: Data
     public let proposal: PairingPhoneProposal
     public let phase: TransportPairingPhase
-    public let biometricProof: Data?
+    let phoneProof: PairingPhoneProof?
+    public var biometricProof: Data? { phoneProof?.biometric }
     public var description: String { "TransportPairingCandidate(redacted)" }
     init(id: Data, proposal: PairingPhoneProposal, phase: TransportPairingPhase, biometricProof: Data?) throws {
-        guard id.count == 16, biometricProof.map({ $0.count == 64 }) ?? true,
-              (phase.rawValue >= TransportPairingPhase.proofReady.rawValue) == (biometricProof != nil) else {
+        let proof: PairingPhoneProof?
+        do { proof = try biometricProof.map { try .init(biometric: $0) } }
+        catch { throw TransportPairingControlError.invalidMessage }
+        try self.init(id: id, proposal: proposal, phase: phase, phoneProof: proof)
+    }
+    init(id: Data, proposal: PairingPhoneProposal, phase: TransportPairingPhase, phoneProof: PairingPhoneProof?) throws {
+        guard id.count == 16,
+              (phase.rawValue >= TransportPairingPhase.proofReady.rawValue) == (phoneProof != nil) else {
             throw TransportPairingControlError.invalidMessage
         }
-        self.id = id; self.proposal = proposal; self.phase = phase; self.biometricProof = biometricProof
+        self.id = id; self.proposal = proposal; self.phase = phase; self.phoneProof = phoneProof
     }
 }
 public struct TransportPairingSnapshot: Sendable, CustomStringConvertible {
@@ -96,28 +103,48 @@ public struct TransportPairingSnapshot: Sendable, CustomStringConvertible {
     public var description: String { "TransportPairingSnapshot(redacted)" }
     static let maximumBytes = 530_000
     init(port: UInt16, candidates: [TransportPairingCandidate]) throws {
-        guard port > 0, candidates.count <= 8, Set(candidates.map(\.id)).count == candidates.count else {
+        let profiles = Set(candidates.compactMap(\.phoneProof).map { $0.decision != nil })
+        guard port > 0, candidates.count <= 8, profiles.count <= 1,
+              Set(candidates.map(\.id)).count == candidates.count else {
             throw TransportPairingControlError.invalidMessage
         }
         self.port = port; self.candidates = candidates
     }
     func encode() throws -> Data {
-        try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .unsigned(UInt64(port)),
-            2: .array(candidates.map { candidate in .array([.bytes(candidate.id), .bytes(try candidate.proposal.encode()),
-                .unsigned(candidate.phase.rawValue), candidate.biometricProof.map(CBORValue.bytes) ?? .null]) })]), limits: Self.limits)
+        let dual = candidates.contains { $0.phoneProof?.decision != nil }
+        let rows: [CBORValue] = try candidates.map { candidate in
+            var fields: [CBORValue] = [.bytes(candidate.id), .bytes(try candidate.proposal.encode()),
+                .unsigned(candidate.phase.rawValue), candidate.biometricProof.map(CBORValue.bytes) ?? .null]
+            if dual {
+                fields.append(candidate.phoneProof.flatMap(\.decision).map(CBORValue.bytes) ?? .null)
+            }
+            return .array(fields)
+        }
+        return try DeterministicCBOR.encode(.map([0: .unsigned(dual ? 2 : 1), 1: .unsigned(UInt64(port)),
+            2: .array(rows)]), limits: Self.limits)
     }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...2),
-              f[0] == .unsigned(1), case .unsigned(let number) = f[1], let port = UInt16(exactly: number),
+              case .unsigned(let version) = f[0], version == 1 || version == 2,
+              case .unsigned(let number) = f[1], let port = UInt16(exactly: number),
               case .array(let rows) = f[2], rows.count <= 8 else { throw TransportPairingControlError.invalidMessage }
         let candidates = try rows.map { row -> TransportPairingCandidate in
-            guard case .array(let r) = row, r.count == 4, case .bytes(let id) = r[0], case .bytes(let proposal) = r[1],
+            guard case .array(let r) = row, r.count == (version == 1 ? 4 : 5),
+                  case .bytes(let id) = r[0], case .bytes(let proposal) = r[1],
                   case .unsigned(let raw) = r[2], let phase = TransportPairingPhase(rawValue: raw) else {
                 throw TransportPairingControlError.invalidMessage
             }
-            let proof: Data?
-            switch r[3] { case .null: proof = nil; case .bytes(let data): proof = data; default: throw TransportPairingControlError.invalidMessage }
-            return try .init(id: id, proposal: .decode(proposal), phase: phase, biometricProof: proof)
+            let decision = version == 1 ? .null : r[4]
+            let proof: PairingPhoneProof?
+            switch (r[3], decision) {
+            case (.null, .null): proof = nil
+            case (.bytes(let biometric), .null) where biometric.count == 64:
+                proof = try .init(biometric: biometric)
+            case (.bytes(let biometric), .bytes(let signature)) where biometric.count == 64 && signature.count == 64:
+                proof = try .init(biometric: biometric, decision: signature)
+            default: throw TransportPairingControlError.invalidMessage
+            }
+            return try .init(id: id, proposal: .decode(proposal), phase: phase, phoneProof: proof)
         }
         let value = try Self(port: port, candidates: candidates)
         guard try value.encode() == bytes else { throw TransportPairingControlError.invalidMessage }; return value

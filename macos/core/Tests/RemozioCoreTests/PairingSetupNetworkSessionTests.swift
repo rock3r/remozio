@@ -211,6 +211,33 @@ final class PairingSetupNetworkSessionTests: XCTestCase {
         await session.closeAndWait()
     }
 
+    func testDecisionProofProfileAcceptsDualProofAndRejectsEitherLegacyOrWrongPurpose() async throws {
+        for mode in 0...3 {
+            let fixture = try Fixture()
+            let (_, _, context, proposal) = try setupV2(fixture)
+            let signingPurpose: PairingProofPurpose = mode == 2 ? .phoneBiometric : .phoneDecision
+            let decision = try fixture.decision.signature(for: fixture.transcript.signingInput(purpose: signingPurpose)).rawRepresentation
+            let biometric = try fixture.proof()
+            let frame = mode == 1 ? try fixture.proofFrame() : try PairingSetupFrame.dualProof(setupID: fixture.transcript.setupID,
+                digest: fixture.transcript.digest(), biometricSignature: biometric, decisionSignature: decision)
+            let stream = Stream([try wire(proposal.encode()), try wire(frame)])
+            let session = try await PairingSetupNetworkSession.accept(stream: stream, invitation: fixture.invitation,
+                peerPoint: fixture.transport.publicKey.x963Representation, v2: context, requiresDecisionProof: mode != 3)
+            try await session.stage(fixture.transcript)
+            do {
+                let proof = try await session.receivePhoneProof()
+                XCTAssertEqual(mode, 0)
+                XCTAssertEqual(proof, try PairingPhoneProof(biometric: biometric, decision: decision))
+                try await session.sendReceipt(fixture.receipt())
+            } catch PairingSetupChannelError.rejected {
+                XCTAssertNotEqual(mode, 0)
+                let closed = await session.isClosed
+                XCTAssertTrue(closed)
+            }
+            await session.closeAndWait()
+        }
+    }
+
     func testV2RefusesLegacyProposalAndCannotReplaceAProvedProposal() async throws {
         let f = try Fixture()
         let (_, _, context, proposal) = try setupV2(f)

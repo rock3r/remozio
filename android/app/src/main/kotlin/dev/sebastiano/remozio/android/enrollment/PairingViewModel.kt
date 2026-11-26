@@ -80,10 +80,12 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         return connect(rePairSuffix) { it.connect(text, target) }
     }
 
-    fun connectV2(invitation: PairingInvitationV2): Boolean {
+    fun connectV2(invitation: PairingInvitationV2, requiresDecisionProof: Boolean): Boolean {
         val target = mutable.value.recoveryRecordID
         if (target != null && invitation.replacement == null) return false
-        return connect(invitation.replacement?.phoneID?.copyBytes()?.suffix()) { it.connectV2(invitation, target) }
+        return connect(invitation.replacement?.phoneID?.copyBytes()?.suffix()) {
+            it.connectV2(invitation, requiresDecisionProof, recoveryRecordID = target)
+        }
     }
 
     private fun ByteArray.suffix() = takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }

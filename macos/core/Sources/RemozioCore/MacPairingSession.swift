@@ -30,8 +30,18 @@ protocol MacPairingRootControl: Sendable {
     /// Call onSend immediately before submitting the commit to Root.
     func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
                 onSend: @Sendable () -> Void) async throws -> Data
+    func commit(confirmedDigest: Data, phoneProof: PairingPhoneProof, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data
     nonisolated func abort()
     func close() async
+}
+extension MacPairingRootControl {
+    func commit(confirmedDigest: Data, phoneProof: PairingPhoneProof, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data {
+        guard phoneProof.decision == nil else { throw AuthorityPairingChannelError.unsupportedVersion }
+        return try await commit(confirmedDigest: confirmedDigest, biometricProof: phoneProof.biometric,
+                                authorization: authorization, onSend: onSend)
+    }
 }
 protocol MacPairingTransportControl: Sendable {
     func start(invitation: PairingInvitation) async throws -> UInt16
@@ -87,6 +97,7 @@ public actor MacPairingSession {
     private let predecessor: PairedPhoneSelection?
     private var v2: MacPairingV2Control?
     private var installedLAN = false
+    private var requiresDecisionProof = false
     private let openInstalledRoot: (@Sendable () throws -> AuthorityPairingChannel)?
     private let installedTransport: TransportPairingChannel?
     private let cancellation = ChannelCancellation()
@@ -101,7 +112,7 @@ public actor MacPairingSession {
     private var selected: TransportPairingCandidate?
     private var transcript: PairingTranscript?
     private var deadline: UInt64?
-    private var proof: Data?
+    private var proof: PairingPhoneProof?
     private var busy = false
     private var commitAttempted = false
     private var humanConfirmed = false
@@ -170,10 +181,12 @@ public actor MacPairingSession {
         if let negotiation {
             let rendezvousID = negotiation.rendezvousID
             installedLAN = negotiation.requiresLAN
+            requiresDecisionProof = negotiation.requiresDecisionProof
             v2 = MacPairingV2Control(open: { label, predecessor in
                 try await transport.prepareV2(rendezvousID: rendezvousID)
                 return try await channel.openV2(label: label, predecessor: predecessor, rendezvousID: rendezvousID)
-            }, listen: { try await transport.beginV2($0, requiresLAN: negotiation.requiresLAN) }, stage: {
+            }, listen: { try await transport.beginV2($0, requiresLAN: negotiation.requiresLAN,
+                                                   requiresDecisionProof: negotiation.requiresDecisionProof) }, stage: {
                 try await channel.stageV2($0, connection: $1, authorization: $2)
             })
         }
@@ -234,11 +247,10 @@ public actor MacPairingSession {
             if let selected {
                 guard let candidate = candidates.first(where: { $0.id == selected.id }),
                       try candidate.proposal.encode() == selected.proposal.encode() else { throw MacPairingSessionError.changedCandidate }
-                if let signature = candidate.biometricProof, let transcript {
-                    guard try transcript.verify(signature: signature, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric) else {
-                        throw MacPairingSessionError.changedCandidate
-                    }
-                    proof = signature
+                if let phoneProof = candidate.phoneProof, let transcript {
+                    do { try phoneProof.verify(in: transcript, requiresDecisionProof: requiresDecisionProof) }
+                    catch { throw MacPairingSessionError.changedCandidate }
+                    proof = phoneProof
                 }
             }
             return snapshot()
@@ -317,16 +329,15 @@ public actor MacPairingSession {
             let authorization = try await administrator.authorization(); try active(); try checkDeadline()
             let current = try await transport.current(); try active(); try checkDeadline()
             guard let candidate = current.candidates.first(where: { $0.id == selected.id }),
-                  candidate.phase == .proofReady, candidate.biometricProof == proof,
+                  candidate.phase == .proofReady, candidate.phoneProof == proof,
                   try candidate.proposal.encode() == selected.proposal.encode() else { throw MacPairingSessionError.changedCandidate }
-            guard try transcript.verify(signature: proof, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric) else {
-                throw MacPairingSessionError.changedCandidate
-            }
+            do { try proof.verify(in: transcript, requiresDecisionProof: requiresDecisionProof) }
+            catch { throw MacPairingSessionError.changedCandidate }
             guard !closingForRePair else { throw MacPairingSessionError.closed }
             let digest = try transcript.digest()
             try checkDeadline()
             phase = .committing; commitAttempted = true
-            let receipt = try await root.commit(confirmedDigest: digest, biometricProof: proof, authorization: authorization,
+            let receipt = try await root.commit(confirmedDigest: digest, phoneProof: proof, authorization: authorization,
                 onSend: { submitted.withLock { $0 = true } })
             guard try transcript.verify(signature: receipt, publicKey: transcript.macAuthorityKey, purpose: .macCommit) else {
                 throw MacPairingSessionError.invalidState
