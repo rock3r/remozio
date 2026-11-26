@@ -648,6 +648,91 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun phoneBuiltDeclineReachesTheNativeRequestExchange() =
+        nativeCommandDecision(ActionChoice.DECLINE, RequestPhase.DECLINED)
+
+    @Test fun phoneBuiltExecuteAuthorizesWithoutDispatchInTheNativeRequestExchange() =
+        nativeCommandDecision(ActionChoice.EXECUTE, RequestPhase.AUTHORIZED)
+
+    @Test fun nativeRequestExchangeRejectsADecisionFromAnUnenrolledKey() =
+        nativeCommandDecision(ActionChoice.DECLINE, expectedPhase = null)
+
+    private fun nativeCommandDecision(choice: ActionChoice, expectedPhase: RequestPhase?): Unit =
+        Fixture(negotiate = true, commandExchange = true).use { fixture ->
+            fun id(byte: Byte) = ByteArray(16) { byte }
+            val scope = ChannelScope(id(1), id(2), id(3), id(4))
+            val bodyLimits = CborLimits(16_000, 12, 1024)
+            val limits = RequestLimits(bodyLimits, bodyLimits, bodyLimits, bodyLimits)
+            val connector = ApprovalChannelConnector(fixture.phone.keyManagers, fixture.mac.certificate.publicKey.encoded,
+                scope, listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 16_384)
+            val started = System.nanoTime()
+            fun clock() = ElapsedInstant(0, ((System.nanoTime() - started) / 1_000_000).toULong())
+            CommandRequestInbox(1, 2).use { inbox ->
+                val enrollment = inbox.add(id(1), id(2), requireNotNull(fixture.routingAuthorityPublicKey), limits)
+                runBlocking {
+                    withTimeout(15_000) {
+                        val channel = connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", fixture.port))
+                        }), null)
+                        try {
+                            val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4),
+                                queryRetainedOnStart = false, clock = ::clock)
+                            val receiving = async {
+                                try { receiver.run() }
+                                catch (failure: IOException) { if (expectedPhase != null) throw failure }
+                            }
+                            try {
+                                val session = enrollment.requestSessions.first { it.isNotEmpty() }.single()
+                                val initialRevision = session.revisions.first { it > 0uL }
+                                val requestID = session.identity.requestID.copyBytes()
+                                channel.send(RequestStatusQuery(requestID).encode())
+                                val queryRevision = session.revisions.first { it > initialRevision }
+                                val pending = requireNotNull(session.snapshot(clock()).status).status
+                                assertTrue(pending.phase in setOf(RequestPhase.QUEUED, RequestPhase.PRESENTED))
+
+                                val execute = choice == ActionChoice.EXECUTE
+                                val keyID: Byte = if (execute) 7 else 6
+                                val purpose = if (execute) SigningPurpose.BIOMETRIC_AUTHORIZATION else SigningPurpose.CANCELLATION
+                                val enrolledKey = requireNotNull(if (execute) fixture.routingBiometric else fixture.routingDecision)
+                                val signingKey = if (expectedPhase != null) enrolledKey.private else KeyPairGenerator.getInstance("EC")
+                                    .apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair().private
+                                val action = CapturedAction(choice, ActionScope.CurrentRequest)
+                                val message = session.withPendingDecision(clock(), id(3), id(keyID), action) { decision ->
+                                    val body = decision.encode(limits.body)
+                                    val signature = Signature.getInstance("SHA256withECDSA").run {
+                                        initSign(signingKey)
+                                        update(SigningInput.make(1u, ApprovalMessageType.DECISION, purpose, body, limits.body, limits.signing))
+                                        P256SignatureEncoding.fromDer(sign())
+                                    }
+                                    ApprovalMessage(1u, ApprovalMessageType.DECISION, purpose, body, signature)
+                                }
+                                receiver.sendDecision(message.encode(limits.body.maxBytes))
+
+                                if (expectedPhase == null) {
+                                    receiving.await()
+                                    assertEquals(queryRevision, session.revisions.value)
+                                } else {
+                                    session.revisions.first { it > queryRevision }
+                                    val observed = requireNotNull(session.snapshot(clock()).status).status
+                                    assertEquals(expectedPhase, observed.phase)
+                                    assertArrayEquals(requestID, observed.requestID)
+                                    assertArrayEquals(id(3), observed.decisionPhoneID)
+                                }
+                                val snapshot = fixture.routingControl("command-snapshot")
+                                val consumed = if (expectedPhase == null) 0 else 1
+                                assertEquals(consumed, snapshot.getValue("receipt").jsonPrimitive.int)
+                                assertEquals(consumed, snapshot.getValue("consumed").jsonPrimitive.int)
+                                assertEquals(0, snapshot.getValue("dispatched").jsonPrimitive.int)
+                            } finally {
+                                receiver.close()
+                                receiving.await()
+                            }
+                        } finally { channel.closeAndJoin() }
+                    }
+                }
+            }
+        }
+
     @Test fun negotiatedNativeHostRejectsWrongEnrollmentScope(): Unit = Fixture(negotiate = true).use { f ->
         runBlocking {
             withTimeout(8_000) {
@@ -1081,7 +1166,7 @@ class TLSInteropTest {
         }
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true, private val commandExchange: Boolean = false) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -1089,8 +1174,8 @@ class TLSInteropTest {
         private val process: Process
         val port: Int
         val routingAuthorityPublicKey: ByteArray?
-        val routingDecision = if (routing || audit) routingKey() else null
-        val routingBiometric = if (routing || audit) routingKey() else null
+        val routingDecision = if (routing || audit || commandExchange) routingKey() else null
+        val routingBiometric = if (routing || audit || commandExchange) routingKey() else null
         private val routingStarted = System.nanoTime()
         fun routingElapsedNanos(): Long = System.nanoTime() - routingStarted
         private lateinit var controllerReader: java.io.BufferedReader
@@ -1109,10 +1194,14 @@ class TLSInteropTest {
                 controllerReader = process.inputStream.bufferedReader()
                 controllerWriter.also {
                     val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
-                    val routingFields = if (routing || audit) ",\"routing\":" + routing + ",\"routingSupported\":" + routingSupported + ",\"decisionPublicKey\":\"" +
+                    val routingFields = if (routing || audit || commandExchange) ",\"routing\":" + routing + ",\"routingSupported\":" + routingSupported + ",\"decisionPublicKey\":\"" +
                         Base64.getEncoder().encodeToString(requireNotNull(routingDecision).public.encoded.takeLast(65).toByteArray()) +
                         "\",\"biometricPublicKey\":\"" + Base64.getEncoder().encodeToString(requireNotNull(routingBiometric).public.encoded.takeLast(65).toByteArray()) + "\"" else ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + "}\n")
+                    val commandField = if (commandExchange) {
+                        val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
+                        ",\"commandCapture\":\"" + Base64.getEncoder().encodeToString(capture) + "\""
+                    } else ""
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + commandField + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()
