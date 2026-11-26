@@ -15,6 +15,7 @@ import java.security.cert.X509Certificate
 
 enum class TransportKeySecurity { STRONGBOX, TRUSTED_ENVIRONMENT }
 class TransportIdentityUnavailable : IllegalStateException("Transport identity unavailable")
+internal class TransportCertificateRecoveryRequired : IllegalStateException("Transport certificate recovery required")
 
 /** Local custody evidence only. This does not establish remote attestation or enrollment authority. */
 class AndroidTransportIdentity internal constructor(
@@ -96,8 +97,9 @@ object AndroidTransportIdentities {
             } else AndroidTransportLeaves.load(context, alias, key, chain)
             manager = ClientTLSKeyManager(key, usable)
             return AndroidTransportIdentity(manager, security, info.isUnlockedDeviceRequired)
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
             manager?.close()
+            if (failure is TransportCertificateRecoveryRequired) throw failure
             throw TransportIdentityUnavailable()
         }
     }

@@ -4,6 +4,7 @@ import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
 import dev.remozio.phone.requests.*
 import dev.remozio.protocol.*
+import dev.sebastiano.remozio.android.transport.TransportCertificateRecoveryRequired
 import java.io.IOException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,7 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-internal enum class CommandConnectionState { DISCONNECTED, CONNECTING, CONNECTED, CLOSED }
+internal enum class CommandConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECOVERY_REQUIRED, CLOSED }
 
 internal interface CommandConnectionWire : AutoCloseable {
     suspend fun receive()
@@ -87,6 +88,7 @@ internal class CommandConnection(
         coroutineScope {
             val owner = Attempt(foreground, checkNotNull(coroutineContext[Job]))
             var candidate: CommandConnectionWire? = null
+            var needsRecovery = false
             try {
                 synchronized(monitor) {
                     check(!closed && (foreground || foregroundWaiters == 0))
@@ -105,14 +107,20 @@ internal class CommandConnection(
                 ensureActive()
                 synchronized(monitor) { check(!closed && attempt === owner) }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { throw IOException("Command connection unavailable") }
+            catch (failure: TransportCertificateRecoveryRequired) {
+                needsRecovery = true
+                throw failure
+            } catch (_: Exception) { throw IOException("Command connection unavailable") }
             finally {
                 try { candidate?.close() }
                 finally {
                     synchronized(monitor) {
                         if (attempt === owner) {
                             attempt = null
-                            if (!closed && foreground) state.value = CommandConnectionState.DISCONNECTED
+                            if (!closed && foreground) {
+                                state.value = if (needsRecovery) CommandConnectionState.RECOVERY_REQUIRED
+                                    else CommandConnectionState.DISCONNECTED
+                            }
                         }
                     }
                 }

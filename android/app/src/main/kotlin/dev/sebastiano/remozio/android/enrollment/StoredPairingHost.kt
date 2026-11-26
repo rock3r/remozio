@@ -46,25 +46,28 @@ internal class StoredPairingHost(
         enrollmentAccess.withLock { openForSetup().use { it.snapshot() } }
     }
 
-    suspend fun inspectRePair(invitation: RePairInvitation): StoredPhoneEnrollment = withContext(dispatcher) {
-        enrollmentAccess.withLock {
-            checkNotNull(openExisting()).use { store ->
-                reconcileRePairLocked(store)
-                val snapshot = store.snapshot()
-                val previous = rePairPredecessor(snapshot, invitation)
-                checkRePairSlot(snapshot, invitation)
-                previous
+    suspend fun inspectRePair(invitation: RePairInvitation, recoveryRecordID: CborValue.Bytes? = null): StoredPhoneEnrollment =
+        withContext(dispatcher) {
+            enrollmentAccess.withLock {
+                checkNotNull(openExisting()).use { store ->
+                    reconcileRePairLocked(store)
+                    val snapshot = store.snapshot()
+                    val previous = rePairPredecessor(snapshot, invitation)
+                    require(recoveryRecordID == null || previous.enrollment.recordID == recoveryRecordID)
+                    checkRePairSlot(snapshot, invitation)
+                    previous
+                }
             }
         }
-    }
 
     suspend fun reserveRePair(invitation: RePairInvitation, recordID: ByteArray, epoch: ByteArray,
-        keyIDs: List<CborValue.Bytes>): RePairReservation = withContext(dispatcher) {
+        keyIDs: List<CborValue.Bytes>, recoveryRecordID: CborValue.Bytes? = null): RePairReservation = withContext(dispatcher) {
         enrollmentAccess.withLock {
             checkNotNull(openExisting()).use { store ->
                 reconcileRePairLocked(store)
                 val snapshot = store.snapshot()
                 val previous = rePairPredecessor(snapshot, invitation)
+                require(recoveryRecordID == null || previous.enrollment.recordID == recoveryRecordID)
                 checkRePairSlot(snapshot, invitation)
                 val reservation = RePairReservation(recordID, previous.enrollment.recordID.copyBytes(), epoch, invitation, keyIDs)
                 require(EnrollmentKeyRole.entries.none { rePairKeys.contains(reservation.alias(it)) })

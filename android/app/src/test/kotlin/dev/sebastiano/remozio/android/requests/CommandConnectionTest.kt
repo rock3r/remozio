@@ -67,6 +67,21 @@ class CommandConnectionTest {
                       open: suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire) =
         CommandConnection(record, limits, open, { time }, dispatcher = Dispatchers.Unconfined, openSnapshot = snapshot)
 
+    @Test fun anUnrecoverableCertificateOffersPairingButAnOfflinePeerDoesNot() = runBlocking<Unit> {
+        val recovery = owner { _, _ ->
+            throw dev.sebastiano.remozio.android.transport.TransportCertificateRecoveryRequired()
+        }
+        recovery.use {
+            assertFailsWith<dev.sebastiano.remozio.android.transport.TransportCertificateRecoveryRequired> { recovery.run() }
+            assertEquals(CommandConnectionState.RECOVERY_REQUIRED, recovery.connectionState.value)
+        }
+        val offline = owner { _, _ -> throw java.io.IOException("Offline") }
+        offline.use {
+            assertFailsWith<java.io.IOException> { offline.run() }
+            assertEquals(CommandConnectionState.DISCONNECTED, offline.connectionState.value)
+        }
+    }
+
     @Test fun ordinaryCaptureWithAnExtraArgumentFitsTheProductionBudget() {
         val fields = (DeterministicCbor.decode(capture, bound) as CborValue.Fields).values
         val arguments = fields.getValue(2uL) as CborValue.ArrayValue

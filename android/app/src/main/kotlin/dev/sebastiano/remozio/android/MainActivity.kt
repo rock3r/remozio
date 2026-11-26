@@ -140,7 +140,7 @@ private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity
             1 -> MacsScreen(pairing, navigation)
             2 -> AuditScreen()
             3 -> NotificationSettingsScreen()
-            else -> CombinedCommandInboxScreen(pairing::open, navigation)
+            else -> CombinedCommandInboxScreen(pairing::open, navigation, pairing::openRecovery)
         }
     }
     CommandInspectionHost(navigation, owners)
@@ -214,7 +214,7 @@ private fun MacsScreen(pairing: PairingViewModel, navigation: CommandInboxNaviga
     var selected by remember { mutableStateOf<StoredMac?>(null) }
     selected?.let { mac ->
         BackHandler { selected = null }
-        CommandInboxScreen(mac, onBack = { selected = null }, navigation = navigation)
+        CommandInboxScreen(mac, onBack = { selected = null }, navigation = navigation, onRepair = pairing::openRecovery)
         return
     }
     Column(

@@ -113,7 +113,9 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
     var v2Availability by remember(invitationV2) { mutableStateOf<RePairAvailability?>(null) }
     val availability = if (isV2RePair) v2Availability else v1Availability
     val hasInvitation = if (onConnectV2 != null) invitationV2 != null else input.isNotBlank()
-    val canConnect = hasInvitation && (!rePairInput || availability == RePairAvailability.ELIGIBLE)
+    val recovery = state.recoveryRecordID != null
+    val canConnect = hasInvitation && (!recovery || rePairInput) &&
+        (!rePairInput || availability == RePairAvailability.ELIGIBLE)
 
     fun connect() {
         if (!canConnect) return
@@ -161,7 +163,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
         Text(stringResource(R.string.pairing_setup_title), style = MaterialTheme.typography.headlineMedium,
             modifier = Modifier.semantics { heading() })
         if (state.phase == PairingPhase.INPUT) {
-            Text(stringResource(R.string.pairing_setup_intro))
+            Text(stringResource(if (recovery) R.string.pairing_certificate_recovery_intro else R.string.pairing_setup_intro))
             OutlinedButton(onClick = {
                 scannerBusy = true; scannerFailed = false; wrongInvitationVersion = false
                 try {
