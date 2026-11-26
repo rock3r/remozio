@@ -20,7 +20,7 @@ internal suspend fun androidPairingReceiptWire(context: Context, parent: Corouti
     var identity: AndroidTransportIdentity? = null
     var channel: NegotiatedTLSChannel? = null
     try {
-        identity = AndroidTransportIdentities.load(enrollment.transportKey.alias, enrollment.transportKey.publicKey.copyBytes())
+        identity = AndroidTransportIdentities.load(context, enrollment.transportKey)
         val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), enrollment.transportPublicKey.copyBytes(),
             ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(), enrollment.phoneID.copyBytes(), enrollment.epoch.copyBytes()),
             emptyList(), emptySet(), PairingReceiptFrame.MAXIMUM_BYTES,

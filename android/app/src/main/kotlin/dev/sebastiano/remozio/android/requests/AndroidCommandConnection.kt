@@ -32,7 +32,7 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
             var identity: AndroidTransportIdentity? = null
             var channel: NegotiatedTLSChannel? = null
             try {
-                identity = AndroidTransportIdentities.load(e.transportKey.alias, e.transportKey.publicKey.copyBytes())
+                identity = AndroidTransportIdentities.load(context, e.transportKey)
                 val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), e.transportPublicKey.copyBytes(),
                     ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
                     commandInspectionCapabilities(), emptySet(),

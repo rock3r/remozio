@@ -34,7 +34,7 @@ internal class StoredPairingHost(
     private val invalidateConnectionsLocked: suspend (Set<CborValue.Bytes>) -> Unit,
     private val validateKeys: (PhoneEnrollment) -> Unit,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val rePairKeys: RePairKeyCleanup = AndroidRePairKeyCleanup,
+    private val rePairKeys: RePairKeyCleanup = AndroidRePairKeyCleanup(),
     private val onChanged: () -> Unit = {},
 ) {
     private val liveRePairs = mutableSetOf<CborValue.Bytes>()
@@ -449,7 +449,7 @@ internal interface RePairKeyCleanup {
     fun retire(alias: String, expectedPublicKey: CborValue.Bytes?)
 }
 
-private object AndroidRePairKeyCleanup : RePairKeyCleanup {
+internal class AndroidRePairKeyCleanup(private val onRetired: (String) -> Unit = {}) : RePairKeyCleanup {
     private fun keyStore() = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
     override fun contains(alias: String): Boolean = keyStore().containsAlias(alias)
@@ -464,5 +464,6 @@ private object AndroidRePairKeyCleanup : RePairKeyCleanup {
                 store.deleteEntry(alias)
             }
         }
+        if (!store.containsAlias(alias)) onRetired(alias)
     }
 }

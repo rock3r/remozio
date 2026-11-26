@@ -26,7 +26,7 @@ internal suspend fun androidAuditWire(context: Context, parent: CoroutineScope, 
     var identity: AndroidTransportIdentity? = null
     var channel: NegotiatedTLSChannel? = null
     try {
-        identity = AndroidTransportIdentities.load(enrollment.transportKey.alias, enrollment.transportKey.publicKey.copyBytes())
+        identity = AndroidTransportIdentities.load(context, enrollment.transportKey)
         val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), enrollment.transportPublicKey.copyBytes(),
             ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(), enrollment.phoneID.copyBytes(), enrollment.epoch.copyBytes()),
             emptyList(), setOf(1u), PhoneAuditFrame.MAXIMUM_BYTES,
