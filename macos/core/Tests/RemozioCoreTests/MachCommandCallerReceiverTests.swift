@@ -9243,6 +9243,18 @@ extension MachCommandCallerReceiverTests {
         XCTAssertFalse(worker.isRetired)
         XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0)
         XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+        failures.withLock { $0 = false }
+        let nextReply = try Endpoint(), nextResult = try Endpoint()
+        let next = try submit(id: 0xd0, reply: nextReply, result: nextResult)
+        try await waitForReceiveWorker { outcomes.withLock { $0 == 2 } }
+        guard case .admitted = try typedOutcome(nextReply, submission: next, profile: profile) else {
+            await worker.close()
+            return XCTFail("The new request was not admitted after output descriptor pressure")
+        }
+        XCTAssertNotNil(try fixture.reservation(next.binding.id))
+        XCTAssertNotNil(try fixture.reservation(original.binding.id))
+        XCTAssertEqual(worker.status, .running)
+        XCTAssertEqual(waits.withLock { $0.count }, 12)
         await worker.close()
     }
 
