@@ -18,6 +18,8 @@ import dev.sebastiano.remozio.android.audit.ForegroundAuditConnections
 import dev.sebastiano.remozio.android.enrollment.AndroidPairingAttempt
 import dev.sebastiano.remozio.android.enrollment.AndroidEnrollmentStore
 import dev.sebastiano.remozio.android.enrollment.validatePairingKeys
+import dev.sebastiano.remozio.android.enrollment.AndroidRePairKeyCleanup
+import dev.sebastiano.remozio.android.transport.AndroidTransportLeaves
 import dev.sebastiano.remozio.android.enrollment.StoredPairingHost
 import dev.sebastiano.remozio.android.enrollment.StoredMacReader
 import dev.sebastiano.remozio.android.enrollment.PairingReceiptRecovery
@@ -174,7 +176,9 @@ class RemozioApplication : Application() {
                     try { macUpdateScheduling.invalidateRecordsLocked(ids) }
                     finally { retireEnrollmentConnectionsLocked(ids) }
                 }
-            }, ::validatePairingKeys, onChanged = {
+            }, { validatePairingKeys(this, it) },
+            rePairKeys = AndroidRePairKeyCleanup { AndroidTransportLeaves.retire(this, it) },
+            onChanged = {
                 foregroundCommands.refresh()
                 foregroundRouting.refresh()
                 foregroundAudits.enrollmentsChanged()
