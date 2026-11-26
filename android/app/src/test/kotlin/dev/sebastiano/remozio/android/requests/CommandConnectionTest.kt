@@ -104,11 +104,11 @@ class CommandConnectionTest {
         val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         val otherInbox = CommandRequestInbox(1, 2)
         val other = issued(otherInbox.add(id(2), id(3), point(authority), limits))
-        assertFails { owner.approval(other).send(message(other)) }
-        assertFails { owner.approval(session).send(message(session, signingKey = biometric)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(other).send(message(other)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message(session, signingKey = biometric)) }
         val pending = message(session)
         time = ElapsedInstant(0, 60100u)
-        assertFails { owner.approval(session).send(pending) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(pending) }
         assertTrue(wire.sent.isEmpty())
         owner.close(); running.cancelAndJoin(); otherInbox.close()
     }
@@ -119,11 +119,12 @@ class CommandConnectionTest {
         val firstRun = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         val retained = session; val message = message(session)
         wires.single().write = { throw java.io.IOException("Synthetic uncertain write") }
-        assertFails { owner.approval(session).send(message) }
+        val failure = assertFailsWith<java.io.IOException> { owner.approval(session).send(message) }
+        assertFalse(failure is CommandDecisionNotSent)
         wires.single().end.complete(Unit); firstRun.await()
         assertEquals(CommandConnectionState.DISCONNECTED, owner.connectionState.value)
         assertFalse(retained.closed.value)
-        assertFails { owner.approval(session).send(message) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message) }
         val secondRun = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         assertSame(retained, session)
         assertTrue(wires.last().sent.isEmpty())
@@ -179,7 +180,7 @@ class CommandConnectionTest {
         }
         val fetch = async(start = CoroutineStart.UNDISPATCHED) { owner.fetchSnapshot() }
         assertEquals(CommandConnectionState.DISCONNECTED, owner.connectionState.value)
-        assertFails { owner.approval(captured).send(message(captured)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(captured).send(message(captured)) }
         assertTrue(background.sent.isEmpty())
         background.end.complete(Unit)
         assertTrue(fetch.await()); assertTrue(background.closed)

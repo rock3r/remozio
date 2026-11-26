@@ -13,6 +13,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.sebastiano.remozio.android.R
 import dev.sebastiano.remozio.android.biometrics.*
 import dev.sebastiano.remozio.android.decisions.AndroidDecisionIdentities
@@ -37,6 +39,7 @@ import dev.remozio.protocol.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -44,6 +47,8 @@ import kotlinx.coroutines.withContext
 internal class CommandApprovalContext(
     val record: StoredPhoneEnrollment,
     val limits: RequestLimits,
+    val connectionState: StateFlow<CommandConnectionState>,
+    val reconnect: () -> Unit,
     val send: suspend (ApprovalMessage) -> Unit,
 )
 
@@ -75,6 +80,30 @@ internal class CommandApprovalViewState {
     var stage by mutableStateOf(CommandActionStage.IDLE)
     var retained by mutableStateOf<ApprovalMessage?>(null)
     fun clear() { attempts.invalidate(); retained = null; stage = CommandActionStage.IDLE }
+
+    suspend fun deliver(ticket: Any, message: ApprovalMessage, send: suspend (ApprovalMessage) -> Unit) {
+        if (!attempts.owns(ticket)) return
+        val previouslyUncertain = retained != null
+        retained = message
+        stage = CommandActionStage.SENDING
+        try {
+            send(message)
+            if (attempts.owns(ticket)) stage = CommandActionStage.AWAITING
+        } catch (_: CommandDecisionNotSent) {
+            if (!attempts.owns(ticket)) return
+            if (previouslyUncertain) {
+                stage = CommandActionStage.UNCERTAIN
+            } else {
+                retained = null
+                stage = CommandActionStage.UNAVAILABLE
+            }
+        } catch (cancelled: CancellationException) {
+            if (attempts.owns(ticket)) stage = CommandActionStage.UNCERTAIN
+            throw cancelled
+        } catch (_: Exception) {
+            if (attempts.owns(ticket)) stage = CommandActionStage.UNCERTAIN
+        }
+    }
 }
 
 @Composable
@@ -85,6 +114,8 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
     val scope = rememberCoroutineScope()
     key(session, context.record, context.limits, lifecycle) {
         val sender by rememberUpdatedState(context.send)
+        val connectionState by context.connectionState.collectAsStateWithLifecycle()
+        val connected = connectionState == CommandConnectionState.CONNECTED
         val attempts = state.attempts
         var prompt by remember { mutableStateOf<CommandBiometricPrompt?>(null) }
         var job by remember { mutableStateOf<Job?>(null) }
@@ -108,21 +139,12 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
 
         fun deliver(ticket: Any, message: ApprovalMessage) {
             if (!attempts.owns(ticket)) return
-            state.retained = message
-            state.stage = CommandActionStage.SENDING
-            job = scope.launch {
-                try {
-                    sender(message)
-                    if (attempts.owns(ticket)) state.stage = CommandActionStage.AWAITING
-                } catch (cancelled: CancellationException) {
-                    if (attempts.owns(ticket)) state.stage = CommandActionStage.UNCERTAIN
-                    throw cancelled
-                } catch (_: Exception) { if (attempts.owns(ticket)) state.stage = CommandActionStage.UNCERTAIN }
-            }
+            job = scope.launch { state.deliver(ticket, message, sender) }
         }
 
         fun decide(execute: Boolean) {
             if (!foreground || activity == null || state.retained != null ||
+                context.connectionState.value != CommandConnectionState.CONNECTED ||
                 state.stage !in setOf(CommandActionStage.IDLE, CommandActionStage.UNAVAILABLE)) return
             val ticket = attempts.begin()
             state.stage = CommandActionStage.PREPARING
@@ -135,6 +157,10 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                                 loaded = AndroidCommandBiometrics.load(context.record, session, context.limits, RequestElapsedClock::now)
                             }
                             if (!attempts.owns(ticket)) return@launch
+                            if (context.connectionState.value != CommandConnectionState.CONNECTED) {
+                                state.stage = CommandActionStage.UNAVAILABLE
+                                return@launch
+                            }
                             val native = CommandBiometricPrompt(activity, checkNotNull(loaded))
                             loaded = null
                             prompt = native
@@ -166,7 +192,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
         }
 
         val busy = state.stage in setOf(CommandActionStage.PREPARING, CommandActionStage.BIOMETRIC, CommandActionStage.SENDING)
-        val mayChoose = !busy && state.retained == null && foreground && activity != null
+        val mayChoose = !busy && state.retained == null && foreground && activity != null && connected
         val height = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() / 2 }
         Column(Modifier.fillMaxWidth().heightIn(max = height).verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -181,6 +207,12 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
             }
             if (label != null) Text(stringResource(label), style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            if (connectionState == CommandConnectionState.DISCONNECTED) {
+                Text(stringResource(R.string.commands_disconnected), style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = context.reconnect, enabled = foreground) { Text(stringResource(R.string.commands_reconnect)) }
+            } else if (connectionState == CommandConnectionState.CONNECTING) {
+                Text(stringResource(R.string.commands_connecting), style = MaterialTheme.typography.bodyMedium)
+            }
             if (availability.execute) Button(onClick = { decide(true) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.command_action_approve))
             }
@@ -188,9 +220,12 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                 Text(stringResource(R.string.command_action_decline))
             }
             if (state.stage == CommandActionStage.UNCERTAIN && state.retained != null && (availability.execute || availability.decline)) {
-                OutlinedButton(onClick = { if (foreground && state.stage == CommandActionStage.UNCERTAIN)
-                    state.retained?.let { deliver(attempts.begin(), it) } },
-                    enabled = foreground, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.command_action_retry)) }
+                OutlinedButton(onClick = {
+                    if (foreground && state.stage == CommandActionStage.UNCERTAIN &&
+                        context.connectionState.value == CommandConnectionState.CONNECTED) {
+                        state.retained?.let { deliver(attempts.begin(), it) }
+                    }
+                }, enabled = foreground && connected, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.command_action_retry)) }
             }
         }
     }
