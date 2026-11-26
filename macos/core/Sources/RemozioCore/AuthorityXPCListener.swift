@@ -110,7 +110,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let validate: @Sendable (AuthorityPeerBinding) throws -> Bool
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
-    private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private let exchange: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
     private let pairingLookupHandler: AuthorityPairingLookupHandler?
     private let pairingLookupBudget: AuthorityXPCWorkBudget?
     private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
@@ -134,7 +134,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
                 requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                 pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
-                exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+                exchangeRequest: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)? = nil,
                 pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                 pairingLookup: AuthorityPairingLookupHandler? = nil,
                 phonePushRegistration: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)? = nil,
@@ -170,7 +170,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                             maximumOperations: Int = 8,
                             requestFrame: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pendingRequestIDs: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding) throws -> [Data])? = nil,
-                            exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+                            exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)? = nil,
                             pairingReceipt: AuthorityPairingReceiptProvider? = nil,
                             pairingLookup: AuthorityPairingLookupProvider? = nil,
                             phonePushRegistration: AuthorityPhonePushRegistrationProvider? = nil,
@@ -192,10 +192,10 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         if let pendingRequestIDs {
             pendingHandler = { binding in try access.pendingRequestIDs(binding: binding, handler: pendingRequestIDs) }
         } else { pendingHandler = nil }
-        let exchangeHandler: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+        let exchangeHandler: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
         if let exchangeRequest {
-            exchangeHandler = { binding, id, decision in
-                try access.exchangeRequest(binding: binding, requestID: id, decisionFrame: decision, handler: exchangeRequest,
+            exchangeHandler = { binding, query in
+                try access.exchangeRequest(binding: binding, query: query, handler: exchangeRequest,
                     onCommandAuthorized: onCommandAuthorized)
             }
         } else { exchangeHandler = nil }

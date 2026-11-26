@@ -58,7 +58,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         let exchangeSent = XCTestExpectation(description: "held exchange")
         var exchangeCount: Int { lock.withLock { exchanges } }
         func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
-            reply(.exchangeVersion(lock.withLock { version }))
+            reply(.exchangeVersion(lock.withLock { version == 1 ? AuthorityRequestExchange.version : version }))
         }
         func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
             lock.withLock { exchanges += 1; exchangeReply = reply }

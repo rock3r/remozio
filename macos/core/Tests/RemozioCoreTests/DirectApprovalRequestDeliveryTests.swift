@@ -48,6 +48,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         private var frames: [Data: Data]
         private var statuses: [Data: Data]
         private var decisions: [Data: Data]
+        private var refusals: [Data: Data] = [:]
         let exchangeSupported: Bool
         private var exchanges: [AuthorityRequestExchange.Query] = []
         private var exchangeHeld: (@Sendable (AuthorityXPCReply) -> Void)?
@@ -238,6 +239,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         }
         var exchangeQueries: [AuthorityRequestExchange.Query] { lock.withLock { exchanges } }
         func setPending(_ ids: [Data]) { lock.withLock { self.ids = ids } }
+        func setDecisionRefusal(_ id: Data, _ response: Data) { lock.withLock { refusals[id] = response } }
         func setStatus(_ id: Data, _ bytes: Data, retireCapture: Bool = true) {
             lock.withLock { statuses[id] = bytes; if retireCapture { frames[id] = nil; ids.removeAll { $0 == id } } }
         }
@@ -245,12 +247,13 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         func finishExchange(_ frame: Data) {
             lock.withLock { let callback = exchangeHeld; exchangeHeld = nil; return callback }?(.exchange(frame))
         }
-        func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.exchangeVersion(exchangeSupported ? 1 : 0)) }
+        func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.exchangeVersion(exchangeSupported ? AuthorityRequestExchange.version : 0)) }
         func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
             let claim = try! AuthorityRequestExchange.decode(query)
             let bytes: Data? = lock.withLock {
                 exchanges.append(claim)
                 if holdExchangeReply { exchangeHeld = reply; return nil }
+                if claim.refusalAttempt != nil, let refusal = refusals[claim.requestID] { return refusal }
                 if claim.decisionFrame != nil, let decision = decisions[claim.requestID] {
                     statuses[claim.requestID] = decision; frames[claim.requestID] = nil; ids.removeAll { $0 == claim.requestID }
                 }
@@ -894,6 +897,41 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         let limits = try CBORLimits(maxBytes: 4096, maxDepth: 12, maxItems: 256)
         XCTAssertTrue(try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey.x963Representation,
             wireVersion: 1, messageType: .status, purpose: .status, canonicalPayload: message.body, payloadLimits: limits, inputLimits: limits))
+        await phone.close(); try await loop.value; await service.close()
+    }
+
+    func testLiveRefusalUsesTheDecisionEnvelopeAndKeepsStatusExchangeOpen() async throws {
+        let authority = P256.Signing.PrivateKey(), phoneKey = P256.Signing.PrivateKey()
+        let id = Self.id(8)
+        let frame = try Self.frame(8, signingKey: authority).0
+        let pending = try Self.status(frame, signingKey: authority)
+        let (service, _, driver, factory, peer) = try await setup(ids: [id], frames: [id: frame],
+            exchangeSupported: true, statuses: [id: pending])
+        let requests = try DirectApprovalListener.requestCapabilities(peer.requests, purpose: .approvals,
+            enableDeliveryResults: false, enableDecisionRefusals: true)
+        let phone = try Phone(scope: peer.scope, requests: requests, persistent: true)
+        let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: requests,
+            auditVersions: [], maximumPayloadBytes: peer.maximumPayloadBytes)
+        let negotiated = try await channel.negotiated()
+        let attempt = try DecisionRefusalFrame.Attempt(sessionID: negotiated.sessionID, sequence: 0)
+        let decision = try Self.decision(frame, signingKey: phoneKey)
+        let message = try ApprovalMessage.decode(decision, maximumBodyBytes: 3968)
+        let claim = try DecisionPayload.decode(message.body, limits: .init(maxBytes: 3968, maxDepth: 4, maxItems: 64))
+        let payload = try DecisionRefusalFrame.Payload(scope: peer.scope, attempt: attempt, requestID: id,
+            requestDigest: claim.requestDigest, decisionFrameDigest: Data(SHA256.hash(data: decision)), reason: .actionUnavailable)
+        let refusal = try DecisionRefusalFrame(payload: payload, signature: authority.signature(for: payload.signingInput()).rawRepresentation)
+        let bytes = try refusal.encode()
+        driver.setDecisionRefusal(id, bytes)
+        let loop = Task { try await factory.run(peer, channel) }
+        await wait(phone, 2)
+        try await phone.submit(decision); await wait(phone, 3)
+        try await phone.submit(RequestStatusQuery(requestID: id).encode()); await wait(phone, 4)
+        let output = await phone.payloads
+        XCTAssertEqual(output, [frame, pending, bytes, pending])
+        let query = try XCTUnwrap(driver.exchangeQueries.first { $0.decisionFrame != nil })
+        XCTAssertEqual(query.decisionFrame, decision)
+        XCTAssertEqual(query.refusalAttempt, attempt)
+        XCTAssertTrue(try DecisionRefusalFrame.decode(output[2]).verify(authorityPublicKey: authority.publicKey.x963Representation))
         await phone.close(); try await loop.value; await service.close()
     }
 

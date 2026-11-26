@@ -35,7 +35,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let accountID: Data
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
-    private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private let exchange: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
     private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let routingExchange: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
     private let updateSchedulingExchange: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)?
@@ -71,7 +71,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                             validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
                             requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
-                            exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+                            exchangeRequest: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)? = nil,
                             pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pairingLookup: AuthorityPairingLookupHandler? = nil,
          pairingLookupBudget: AuthorityXPCWorkBudget? = nil,
@@ -104,7 +104,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
          requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
-         exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+         exchangeRequest: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)? = nil,
          pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          pairingLookup: AuthorityPairingLookupHandler? = nil,
          pairingLookupBudget: AuthorityXPCWorkBudget? = nil,
@@ -242,7 +242,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             let completed = try work {
                 let supported = exchange != nil
                 lock.withLock { exchangeReady = supported }
-                return supported ? UInt64(1) : UInt64(0)
+                return supported ? AuthorityRequestExchange.version : 0
             }
             defer { completed.activity?.close() }
             send { reply(completed.value) }
@@ -493,8 +493,9 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                 guard lock.withLock({ exchangeReady }), let exchange else { throw AuthorityXPCEndpointError.unavailable }
                 let peer = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
                 let request = try AuthorityRequestExchange.decode(query)
-                guard let result = try exchange(peer, request.requestID, request.decisionFrame) else { return Data() }
-                try AuthorityRequestExchange.validateResponse(result, binding: peer, requestID: request.requestID)
+                guard let result = try exchange(peer, request) else { return Data() }
+                try AuthorityRequestExchange.validateResponse(result, binding: peer, requestID: request.requestID,
+                    decisionFrame: request.decisionFrame, refusalAttempt: request.refusalAttempt)
                 return result
             }
             defer { completed.activity?.close() }

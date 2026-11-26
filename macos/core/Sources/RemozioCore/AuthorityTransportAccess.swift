@@ -75,14 +75,14 @@ final class AuthorityTransportAccess: Sendable {
         }, body: { try handler($0, binding) })
     }
 
-    func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data?,
-                         handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?,
+    func exchangeRequest(binding: AuthorityPeerBinding, query: AuthorityRequestExchange.Query,
+                         handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?,
                          onCommandAuthorized: @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> Data? {
-        try journal.withValidatedCommandExchange(requestID: requestID, decisionSupplied: decisionFrame != nil,
+        try journal.withValidatedCommandExchange(requestID: query.requestID, decisionSupplied: query.decisionFrame != nil,
             validate: { transaction in
                 try self.requireCurrent(transaction)
                 try transaction.requireDirectApprovalBinding(binding)
-            }, body: { try handler($0, binding, requestID, decisionFrame) }, onCommandAuthorized: onCommandAuthorized)
+            }, body: { try handler($0, binding, query) }, onCommandAuthorized: onCommandAuthorized)
     }
 
     func pairingReceipt(binding: AuthorityPeerBinding, setupID: Data,
