@@ -38,15 +38,30 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
     static let maximumBytes = 262144
     let formatVersion: UInt64
     let id: UUID
-    private(set) var revision: UUID
+    let revision: UUID
     let binding: RuntimeReleaseBinding
     let epochs: EpochScope
     let sourcePolicy: StoredPolicy
     let sourceCheckpoint: Data
     let completionPolicy: Data
-    private(set) var phase: Phase
-    private(set) var committedPolicy: StoredPolicy?
-    private(set) var committedCheckpoint: Data?
+    let phase: Phase
+    let committedPolicy: StoredPolicy?
+    let committedCheckpoint: Data?
+    private let canonicalCache = CanonicalBytesCache()
+
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case id
+        case revision
+        case binding
+        case epochs
+        case sourcePolicy
+        case sourceCheckpoint
+        case completionPolicy
+        case phase
+        case committedPolicy
+        case committedCheckpoint
+    }
     var policyRecorded: Bool { phase == .recorded }
     var description: String { "MachineUpdatePolicyIntentRecord(redacted)" }
     var debugDescription: String { description }
@@ -64,6 +79,22 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
         sourcePolicy = try .init(source.policy); sourceCheckpoint = try source.checkpoint.bytes
         completionPolicy = try plan.completionPolicy.bytes; phase = .prepared
         committedPolicy = nil; committedCheckpoint = nil
+        try validate()
+    }
+
+    private init(_ previous: Self, phase: Phase, committedPolicy: StoredPolicy? = nil,
+                 committedCheckpoint: Data? = nil) throws {
+        formatVersion = previous.formatVersion
+        id = previous.id
+        revision = UUID()
+        binding = previous.binding
+        epochs = previous.epochs
+        sourcePolicy = previous.sourcePolicy
+        sourceCheckpoint = previous.sourceCheckpoint
+        completionPolicy = previous.completionPolicy
+        self.phase = phase
+        self.committedPolicy = committedPolicy
+        self.committedCheckpoint = committedCheckpoint
         try validate()
     }
 
@@ -94,17 +125,15 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
     func preparingWrite(expected: AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Self {
         guard phase == .prepared else { throw PreparationStoreError.invalidTransition }
         try requireSource(expected)
-        var next = self; next.revision = UUID(); next.phase = .writing
-        try next.validate(); return next
+        return try Self(self, phase: .writing)
     }
 
     /// Proposes retained receipt facts only. The machine owner must independently persist this transition.
     func recording(_ receipt: AuthorityJournal.MachineUpdatePolicyCommitReceipt) throws -> Self {
         guard phase == .writing else { throw PreparationStoreError.invalidTransition }
         try requireSource(receipt.source)
-        var next = self; next.revision = UUID(); next.phase = .recorded
-        next.committedPolicy = try StoredPolicy(receipt.policy); next.committedCheckpoint = try receipt.checkpoint.bytes
-        try next.validate(); return next
+        return try Self(self, phase: .recorded, committedPolicy: StoredPolicy(receipt.policy),
+            committedCheckpoint: receipt.checkpoint.bytes)
     }
 
     /// Classifies a fresh paired read. An unchanged source grants no retry or writer authority.
@@ -117,10 +146,8 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
             return .sourceUnchanged
         }
         try requireReceipt(policy: current.policy, checkpoint: current.checkpoint, source: source, target: target)
-        var next = self; next.revision = UUID(); next.phase = .recorded
-        next.committedPolicy = try StoredPolicy(current.policy); next.committedCheckpoint = try current.checkpoint.bytes
-        try next.validate()
-        return .recorded(next)
+        return try .recorded(Self(self, phase: .recorded, committedPolicy: StoredPolicy(current.policy),
+            committedCheckpoint: current.checkpoint.bytes))
     }
 
     private func validate() throws {
@@ -181,13 +208,13 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
         }
     }
 
-    var encoded: Data { get throws {
+    var encoded: Data { get throws { try canonicalCache.bytes {
         try validate()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let bytes = try encoder.encode(self)
         guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else { throw PreparationStoreError.capacity }
         return bytes
-    } }
+    } } }
     static func decode(_ bytes: Data) throws -> Self {
         do {
             guard !bytes.isEmpty, bytes.count <= maximumBytes else { throw PreparationStoreError.corruptRecord }

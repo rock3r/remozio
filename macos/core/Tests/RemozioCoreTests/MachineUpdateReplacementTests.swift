@@ -2250,6 +2250,62 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    func testPolicyIntentTransitionsEncodeNewRevisionPhaseAndReceipt() throws {
+        try withCompletionFixture(actualPolicyPair: true) { fixture in
+            let archive = try fixture.intent()
+            let initial = try XCTUnwrap(archive.policies.first)
+            let initialBytes = try initial.encoded
+            let machine = fixture.machine
+            let snapshot = fixture.snapshot, candidate = fixture.candidate
+            let directory = fixture.directory, restart = fixture.restart
+            _ = try machine.retainMachineUpdateCompletionIntent(archive, snapshot: snapshot, candidate: candidate,
+                directory: directory, restart: restart) { _, scope in _ = try scope.read() }
+            let authorized = try machine.authorizeMachineUpdatePolicyWrite(expected: archive, accountID: fixture.boundary.accountID,
+                boundary: fixture.boundary, snapshot: snapshot, candidate: candidate, directory: directory, restart: restart,
+                readBoundary: { _ in
+                    let reader = try fixture.openPolicyPair(readOnly: true)
+                    defer { try? reader.close() }
+                    return try reader.captureMachineUpdatePolicyBoundaryForRecoveryRead()
+                }) { _, scope in _ = try scope.read() }
+            let writing = try XCTUnwrap(authorized.archive.policies.first)
+            let writingBytes = try writing.encoded
+            XCTAssertEqual(try MachineUpdatePolicyIntentRecord.decode(writingBytes), writing)
+            XCTAssertEqual(writing.id, initial.id)
+            XCTAssertNotEqual(writing.revision, initial.revision)
+            XCTAssertEqual(writing.phase, .writing)
+            XCTAssertNil(writing.committedPolicy)
+            XCTAssertNil(writing.committedCheckpoint)
+            XCTAssertEqual(try writing.reconciling(fixture.boundary), .sourceUnchanged)
+
+            let writer = try fixture.openPolicyPair(readOnly: false)
+            defer { try? writer.close() }
+            let receipt = try machine.withCurrentMachineUpdateCompletionSnapshot(expected: authorized.archive,
+                restartSnapshot: snapshot, candidate: candidate, directory: directory, restart: restart) { scope in
+                    try writer.commitMachineUpdateCompletionPolicy(authorized.permit, scope: scope, candidate: candidate,
+                        verifyNative: { _ in _ = try scope.read() })
+                }
+            let recorded = try writing.recording(receipt)
+            let boundary = AuthorityJournal.MachineUpdatePolicyBoundary(macID: receipt.source.macID,
+                accountID: receipt.source.accountID, policy: receipt.policy, checkpoint: receipt.checkpoint)
+            guard case .recorded(let recovered) = try writing.reconciling(boundary) else {
+                return XCTFail("A committed boundary did not produce a recorded policy intent")
+            }
+            for next in [recorded, recovered] {
+                let bytes = try next.encoded
+                let decoded = try MachineUpdatePolicyIntentRecord.decode(bytes)
+                XCTAssertEqual(decoded, next)
+                XCTAssertEqual(decoded.id, initial.id)
+                XCTAssertNotEqual(decoded.revision, writing.revision)
+                XCTAssertEqual(decoded.phase, .recorded)
+                XCTAssertEqual(decoded.committedPolicy, try MachineUpdatePolicyIntentRecord.StoredPolicy(receipt.policy))
+                XCTAssertEqual(decoded.committedCheckpoint, try receipt.checkpoint.bytes)
+                XCTAssertEqual(try next.encoded, bytes)
+            }
+            XCTAssertEqual(try initial.encoded, initialBytes)
+            XCTAssertEqual(try writing.encoded, writingBytes)
+        }
+    }
+
     func testCompletionRecoveryReopensBothStoresAfterTheWriterLosesItsReceipt() throws {
         try withCompletionFixture(actualPolicyPair: true) { fixture in
             let archive = try fixture.intent()
