@@ -7,6 +7,8 @@ import dev.sebastiano.remozio.android.decisions.AndroidDecisionKeyCreation
 import dev.sebastiano.remozio.android.requests.RequestElapsedClock
 import dev.sebastiano.remozio.android.requests.commandInspectionCapabilities
 import dev.sebastiano.remozio.android.transport.AndroidTransportKeyCreation
+import dev.sebastiano.remozio.android.transport.AndroidTransportLeaves
+import dev.sebastiano.remozio.android.transport.TRANSPORT_LEAF_LIFETIME_DAYS
 import dev.sebastiano.remozio.android.transport.CreatedTransportIdentity
 import dev.sebastiano.remozio.android.transport.LocalNetworkSettings
 import dev.sebastiano.remozio.android.transport.androidPairingRoutes
@@ -33,7 +35,7 @@ internal class AndroidPairingAttempt(
     constructor(context: Context, parent: CoroutineScope, store: StoredPairingHost) : this(
         parent, store, { context.applicationContext }, { now, keyID ->
             AndroidTransportKeyCreation.createForEnrollment(context.applicationContext,
-                now.minusSeconds(300), now.plusSeconds(31_536_000), keyID)
+                now.minusSeconds(300), now.plus(TRANSPORT_LEAF_LIFETIME_DAYS, java.time.temporal.ChronoUnit.DAYS), keyID)
         },
     )
     private val job = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
@@ -239,6 +241,7 @@ internal class AndroidPairingAttempt(
             val point = keystore.getCertificate(ref.alias)?.publicKey?.encoded?.takeLast(65)?.toByteArray()
             if (point != null && point.contentEquals(ref.publicKey.copyBytes().takeLast(65).toByteArray())) {
                 keystore.deleteEntry(ref.alias)
+                AndroidTransportLeaves.retire(application(), ref.alias)
             }
         }
     }

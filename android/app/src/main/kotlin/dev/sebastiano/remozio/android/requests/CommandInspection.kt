@@ -16,6 +16,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,10 +26,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
@@ -38,6 +41,8 @@ import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.SecureFlagPolicy
 import dev.sebastiano.remozio.android.R
 import dev.remozio.protocol.CapturedFileIdentity
 import dev.remozio.protocol.CapturedSigningStatus
@@ -69,20 +74,64 @@ internal fun CommandInspection(
     val window = with(LocalDensity.current) { pixels.width.toDp() to pixels.height.toDp() }
     val identity = status?.status?.let { listOf(it.macID, it.accountID, it.requestID, it.requestDigest, it.challenge).map(CborValue::Bytes) }
     val visibleCapture = if (status?.status?.phase?.isTerminal == true) null else capture
+    val capturePolicy = if (sample) SecureFlagPolicy.Inherit else SecureFlagPolicy.SecureOn
     key(requestKey ?: identity ?: capture) {
         if (window.first < 600.dp) {
-            ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberBottomSheetState(
-                initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
-            )) {
-                InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status, Modifier.heightIn(max = window.second * 0.9f), actions = if (!sample && visibleCapture != null) actions else null)
+            ModalBottomSheet(
+                onDismissRequest = onDismiss,
+                sheetState = rememberBottomSheetState(
+                    initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+                ),
+                properties = ModalBottomSheetProperties(securePolicy = capturePolicy),
+            ) {
+                ProtectedInspection(sample, onDismiss) {
+                    InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status,
+                        Modifier.heightIn(max = window.second * 0.9f),
+                        actions = if (!sample && visibleCapture != null) actions else null)
+                }
             }
         } else {
-            Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Dialog(onDismissRequest = onDismiss,
+                properties = DialogProperties(securePolicy = capturePolicy, usePlatformDefaultWidth = false)) {
                 Surface(
                     modifier = Modifier.padding(24.dp).widthIn(max = 720.dp).fillMaxWidth().heightIn(max = window.second * 0.9f),
                     shape = MaterialTheme.shapes.extraLarge,
-                ) { InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status, actions = if (!sample && visibleCapture != null) actions else null) }
+                ) {
+                    ProtectedInspection(sample, onDismiss) {
+                        InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status,
+                            actions = if (!sample && visibleCapture != null) actions else null)
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun ProtectedInspection(sample: Boolean, onDismiss: () -> Unit, content: @Composable () -> Unit) {
+    if (sample) {
+        content()
+        return
+    }
+    val window = generateSequence(LocalView.current.parent) { it.parent }
+        .filterIsInstance<DialogWindowProvider>().firstOrNull()?.window
+    key(window) {
+        val protected by produceState<Boolean?>(null) {
+            value = if (window == null) false else try {
+                window.setHideOverlayWindows(true)
+                true
+            } catch (_: SecurityException) {
+                false
+            }
+        }
+        // The owning dialog dismisses its protected window when this inspection closes.
+        when (protected) {
+            true -> content()
+            false -> Column(Modifier.padding(24.dp)) {
+                Text(stringResource(R.string.status_details_unavailable))
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.close_details)) }
+            }
+            null -> Unit
         }
     }
 }

@@ -31,7 +31,7 @@ internal class CommandRequestNotifications(
                 val record = connection.record.enrollment
                 val retained = StoredCommandOwner(record.recordID, record.macID, record.accountID, record.label, connection)
                 val desired = sessions.mapNotNull { session ->
-                    val snapshot = session.snapshot(clock())
+                    val snapshot = session.snapshot(clock)
                     val status = snapshot.status ?: return@mapNotNull null
                     if (snapshot.closed || status.status.phase !in setOf(RequestPhase.QUEUED, RequestPhase.PRESENTED)) return@mapNotNull null
                     val remaining = status.timing.authorizationRemainingUpperBoundMs

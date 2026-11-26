@@ -42,7 +42,7 @@ internal suspend fun androidRePairRecoveryWire(context: Context, parent: Corouti
     var identity: AndroidTransportIdentity? = null
     try {
         currentCoroutineContext().ensureActive()
-        val heldIdentity = AndroidTransportIdentities.load(enrollment.transportKey.alias, enrollment.transportKey.publicKey.copyBytes())
+        val heldIdentity = AndroidTransportIdentities.load(context, enrollment.transportKey)
         identity = heldIdentity
         val directMillis = recoveryDirectBudget(LocalNetworkSettings(context).timeoutSeconds() * 1_000L, attemptMillis)
         val channel = PairingRecoveryChannel.connect(parent, androidDirectRoutes(context, enrollment.macID.copyBytes()), relay,

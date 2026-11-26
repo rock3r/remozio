@@ -29,7 +29,7 @@ The creator generates a random 128-bit alias suffix for each new key. It holds a
 
 The generated key permits P-256 signing with SHA-256 and raw ECDSA. It requires no per-use authentication, user presence, confirmation, or unlocked device. This policy permits transport while the phone is locked. It grants no biometric approval capability. StrongBox is tried first. TEE generation follows only an explicit `StrongBoxUnavailableException` and a second check that no entry exists. Other failures and partial entries stop the operation. The loader rejects software custody even if the provider generated a key successfully.
 
-The enrollment caller supplies the certificate validity window, which must include creation time. The creator does not select a product expiry or renew an existing identity. The certificate subject is generic and carries no account or device name.
+The enrollment caller supplies the original certificate validity window. The certificate subject is generic and carries no account or device name.
 
 The result contains an opaque alias, a copied public key, and the validated local identity. The authorized enrollment transaction must persist the reference with its Mac/account binding. These values alone cannot enroll a phone or replace a peer pin. Closing the result releases its key manager; it does not delete the Keystore key.
 
@@ -37,18 +37,26 @@ A crash or failed validation can leave an unreferenced key. The creator never gu
 
 JVM tests check alias collisions, partial creation, the narrow fallback condition, failure propagation, and validity boundaries. They do not exercise real hardware generation or prove provider behavior. The planned Pixel session must verify the generated custody, raw TLS signing, locked-device use, and restart behavior.
 
+## Leaf renewal
+
+On channel setup, Android renews the leaf when it has 30 days or less before expiry. It signs a new one-year leaf with the same hardware transport key. It keeps only the public leaf in private no-backup storage. It leaves the original Keystore entry intact. This works while the Mac is offline.
+
+A failed renewal uses a still-valid leaf when available. An expired leaf can be renewed locally if the original transport key can still sign. If renewal fails and no valid leaf remains, the channel refuses to connect. The explicit re-pair recovery entry point is a separate change.
+
+Leaf expiry is a certificate validity check. It is not the enrollment trust boundary, because the phone can renew the leaf with the existing key. The Mac still checks the enrolled public key, proof of possession, and revocation. Key rotation is separate.
+
 ## TLS ownership
 
 `ClientTLSKeyManager` offers the identity only for an EC client request with compatible issuers. It never selects a server identity. It validates the certificate lifetime at selection and gives TLS an opaque alias. Android's storage alias stays outside the manager.
 
 The manager copies certificate arrays and uses the native private key handle without exporting it. Closing it drops owned references and prevents further selection. It cannot revoke a handle already obtained by TLS. The session owner must close existing engines and their carriers when an enrollment changes or is revoked.
 
-A load failure returns a generic error. The loader never creates, replaces, deletes, or recovers a key. Enrollment and recovery remain future integration work.
+A load failure returns a generic error. The loader can replace the public leaf, but it never creates, replaces, or deletes a private key.
 
 ## Evidence and limits
 
 JVM tests cover client-only selection, issuer constraints, certificate lifetime, chain isolation, and closure. Android-module tests cover the extracted custody policy. The synthetic Swift/Kotlin TLS experiment uses this key manager for its engine connections, with disposable software keys.
 
-These tests do not exercise Android Keystore, Conscrypt, or a physical Pixel. Hardware-backed TLS, locked-device behavior, key invalidation, and restart behavior still require the planned device session. Native key generation is available to the future enrollment owner. Enrollment storage and the app connection flow remain unimplemented. No key is generated merely by starting the app.
+These tests do not exercise Android Keystore, Conscrypt, or a physical Pixel. Hardware-backed TLS, locked-device behavior, key invalidation, and restart behavior still require the planned device session. The attended session must also verify that a renewed leaf survives restart and authenticates to the installed Mac. App startup creates no key.
 
 References: [TLS digest authorization](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setDigests(java.lang.String...)), [KeyInfo](https://developer.android.com/reference/android/security/keystore/KeyInfo) and [X509ExtendedKeyManager](https://developer.android.com/reference/javax/net/ssl/X509ExtendedKeyManager).

@@ -41,11 +41,11 @@ internal fun CommandRequestInspection(
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 try {
                     launch {
-                        combine(session.revisions, session.closed) { _, _ -> session.snapshot(RequestElapsedClock.now()) }
+                        combine(session.revisions, session.closed) { _, _ -> session.snapshot(RequestElapsedClock::now) }
                             .collect { value = it }
                     }
                     while (isActive) {
-                        value = session.snapshot(RequestElapsedClock.now())
+                        value = session.snapshot(RequestElapsedClock::now)
                         delay(1000)
                     }
                 } finally {

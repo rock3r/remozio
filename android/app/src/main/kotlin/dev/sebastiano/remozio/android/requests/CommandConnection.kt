@@ -143,7 +143,7 @@ internal class CommandConnection(
                     ActionChoice.DECLINE -> e.decisionKey.also { check(message.purpose == SigningPurpose.CANCELLATION) }
                     else -> throw IOException("Unsupported command decision")
                 }
-                session.withPendingDecision(clock(), e.phoneID.copyBytes(), key.keyID.copyBytes(), claim.action) {
+                session.withPendingDecision(clock, e.phoneID.copyBytes(), key.keyID.copyBytes(), claim.action) {
                     check(it.encode(limits.body).contentEquals(body))
                     check(ApprovalSignature.verify(message.signature.copyBytes(), key.publicKey.copyBytes(), 1u,
                         message.type, message.purpose, body, limits.body, limits.signing))

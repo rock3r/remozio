@@ -53,7 +53,7 @@ internal class CommandApprovalContext(
 )
 
 internal data class CommandActionAvailability(val execute: Boolean, val decline: Boolean)
-internal fun commandActionAvailability(session: CommandRequestSession, record: StoredPhoneEnrollment, now: ElapsedInstant): CommandActionAvailability {
+internal fun commandActionAvailability(session: CommandRequestSession, record: StoredPhoneEnrollment, now: () -> ElapsedInstant): CommandActionAvailability {
     val enrollment = record.enrollment
     if (record.phase != EnrollmentPhase.ACTIVE || !session.isBoundToAuthority(enrollment.macID.copyBytes(),
             enrollment.accountID.copyBytes(), enrollment.authorityPublicKey.copyBytes())) return CommandActionAvailability(false, false)
@@ -120,7 +120,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
         var prompt by remember { mutableStateOf<CommandBiometricPrompt?>(null) }
         var job by remember { mutableStateOf<Job?>(null) }
         var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
-        val availability = commandActionAvailability(session, context.record, RequestElapsedClock.now())
+        val availability = commandActionAvailability(session, context.record, RequestElapsedClock::now)
 
         fun stop() {
             attempts.invalidate()
@@ -179,7 +179,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                     } else {
                         val message = withContext(Dispatchers.IO) {
                             AndroidDecisionIdentities.load(context.record).use {
-                                it.declineSession(session, RequestElapsedClock.now(), context.limits)
+                                it.declineSession(session, RequestElapsedClock::now, context.limits)
                             }
                         }
                         deliver(ticket, message)

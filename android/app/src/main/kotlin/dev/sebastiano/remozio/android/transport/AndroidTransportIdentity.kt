@@ -1,8 +1,11 @@
 package dev.sebastiano.remozio.android.transport
 
+import android.content.Context
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import androidx.annotation.WorkerThread
+import dev.remozio.phone.enrollment.EnrollmentKeyReference
+import dev.remozio.phone.enrollment.EnrollmentKeyRole
 import dev.remozio.phone.transport.ClientTLSKeyManager
 import java.security.KeyFactory
 import java.security.KeyStore
@@ -51,7 +54,16 @@ internal fun transportKeySecurity(facts: TransportKeyFacts): TransportKeySecurit
 /** Reads an existing local alias. Never creates, replaces, deletes, or silently recovers a key. */
 object AndroidTransportIdentities {
     @WorkerThread
-    fun load(alias: String, expectedLocalPublicKey: ByteArray): AndroidTransportIdentity {
+    fun load(alias: String, expectedLocalPublicKey: ByteArray): AndroidTransportIdentity =
+        load(alias, expectedLocalPublicKey, null)
+
+    @WorkerThread
+    internal fun load(context: Context, reference: EnrollmentKeyReference): AndroidTransportIdentity {
+        require(reference.role == EnrollmentKeyRole.TRANSPORT)
+        return load(reference.alias, reference.publicKey.copyBytes(), context)
+    }
+
+    private fun load(alias: String, expectedLocalPublicKey: ByteArray, context: Context?): AndroidTransportIdentity {
         var manager: ClientTLSKeyManager? = null
         try {
             require(Regex("remozio\\.transport\\.v1\\.[0-9a-f]{32}").matches(alias))
@@ -78,8 +90,11 @@ object AndroidTransportIdentities {
             require(stored.size in 1..8)
             val chain = stored.map { it as? X509Certificate ?: throw TransportIdentityUnavailable() }.toTypedArray()
             require(MessageDigest.isEqual(expected, chain.first().publicKey.encoded))
-            chain.first().checkValidity()
-            manager = ClientTLSKeyManager(key, chain)
+            val usable = if (context == null) {
+                chain.first().checkValidity()
+                chain
+            } else AndroidTransportLeaves.load(context, alias, key, chain)
+            manager = ClientTLSKeyManager(key, usable)
             return AndroidTransportIdentity(manager, security, info.isUnlockedDeviceRequired)
         } catch (_: Exception) {
             manager?.close()

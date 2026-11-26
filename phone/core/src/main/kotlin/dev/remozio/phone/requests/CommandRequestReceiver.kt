@@ -75,7 +75,7 @@ class CommandRequestReceiver private constructor(
                         if (closed.get()) return@coroutineScope
                         val message = ApprovalMessage.decode(bytes, maximumBodyBytes)
                         require(message.type != ApprovalMessageType.DECISION)
-                        when (enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas, rejectedCaptures)) {
+                        when (enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas, rejectedCaptures, clock)) {
                             CommandDeliveryOutcome.DELIVERED -> Unit
                             CommandDeliveryOutcome.CAPACITY_OMITTED -> capacityOmitted = true
                             CommandDeliveryOutcome.CAPTURE_OMITTED -> captureOmitted = true

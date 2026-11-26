@@ -38,6 +38,39 @@ class CommandRequestSessionTest {
         return session.observe(body, sign(body, status = true), time(at))
     }
 
+    @Test fun readsClockInsideSessionMonitorForSnapshotAndDecision() {
+        open().use { session ->
+            observe(session, status())
+            assertFalse(session.snapshot {
+                assertTrue(Thread.holdsLock(session))
+                time(102u)
+            }.status!!.timing.clockUncertain)
+            assertEquals(ActionChoice.EXECUTE, session.withPendingDecision({
+                assertTrue(Thread.holdsLock(session))
+                time(103u)
+            }, ByteArray(16), ByteArray(16), CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)) { it.action.choice })
+        }
+    }
+
+    @Test fun receiptBeforeLatestProjectionDoesNotDisableDecision() {
+        open().use { session ->
+            observe(session, status())
+            session.snapshot { time(103u) }
+            val body = status(revision = 2u).encode(bound)
+            assertEquals(StatusAcceptance.APPLIED, session.observe(body, sign(body, status = true), time(101u)) {
+                assertTrue(Thread.holdsLock(session))
+                time(104u)
+            })
+            val timing = session.snapshot { time(105u) }.status!!.timing
+            assertFalse(timing.clockUncertain)
+            assertEquals(1005uL, timing.ageLowerBoundMs)
+            assertEquals(58_995uL, timing.authorizationRemainingUpperBoundMs)
+            assertEquals(ActionChoice.EXECUTE, session.withPendingDecision(
+                { time(105u) }, ByteArray(16), ByteArray(16), CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)
+            ) { it.action.choice })
+        }
+    }
+
     @Test fun ordinarySignedCaptureReportsReducedByteAndDepthBudgets() {
         val body = request.encode(bound)
         val signature = sign(body)

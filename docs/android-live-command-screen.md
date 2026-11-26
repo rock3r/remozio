@@ -24,6 +24,11 @@ The connection label does not claim Mac presence. Offline requests retain their 
 
 The screen uses the existing Material 3 controls and adaptive command inspector. It shows full command details in the inspector. List rows identify individual requests and display signed status. Prepared enrollments cannot open a connection.
 
+The live command inspector sets `FLAG_SECURE` on both its compact sheet and its expanded dialog.
+It hides non-system overlays on the inspector window before it shows request details or decisions.
+If it cannot apply the overlay setting, it offers Close details. The synthetic debug preview remains available for screenshots.
+Check capture, task thumbnails, overlay visibility and closing behavior on the supported device. [Android window protections](https://developer.android.com/security/fraud-prevention/activities)
+
 ## Initial capture limits
 
 The app allows 2,097,152 capture bytes and 262,144 CBOR items. Request bodies allow 65,536 more bytes, and signing envelopes allow another 65,536. Request and signing envelopes allow 4,096 CBOR items. Status messages allow 65,536 bytes and 4,096 items. Every decoder has a depth limit of 32. These are initial runtime defaults; settings controls remain to be connected.
