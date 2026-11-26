@@ -44,13 +44,13 @@ class CommandConnectionTest {
         return enrollment.accept(body, sign(body, authority, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)).also {
             val status = RequestStatusPayload(id(2), id(3), id(7), request.requestDigest(bound, bound), request.challenge,
                 1u, RequestPhase.PRESENTED, RequestStatusReason.NONE, id(20), 1000u, 59000u, null, false, null, null).encode(bound)
-            it.observe(status, sign(status, authority, ApprovalMessageType.STATUS, SigningPurpose.STATUS), time)
+            it.observe(status, sign(status, authority, ApprovalMessageType.STATUS, SigningPurpose.STATUS), time) { time }
         }
     }
     private fun message(session: CommandRequestSession, execute: Boolean = false, signingKey: KeyPair = if (execute) biometric else decision): ApprovalMessage {
         val e = record.enrollment
         val key = if (execute) e.biometricKey else e.decisionKey
-        val body = session.withPendingDecision(time, e.phoneID.copyBytes(), key.keyID.copyBytes(), if (execute) this.execute else decline) { it.encode(bound) }
+        val body = session.withPendingDecision({ time }, e.phoneID.copyBytes(), key.keyID.copyBytes(), if (execute) this.execute else decline) { it.encode(bound) }
         val purpose = if (execute) SigningPurpose.BIOMETRIC_AUTHORIZATION else SigningPurpose.CANCELLATION
         return ApprovalMessage(1u, ApprovalMessageType.DECISION, purpose, body, sign(body, signingKey, ApprovalMessageType.DECISION, purpose))
     }
@@ -93,7 +93,7 @@ class CommandConnectionTest {
         CommandRequestInbox(1, 2).use { inbox ->
             val enrollment = inbox.add(id(2), id(3), point(authority), commandRequestLimits())
             val session = enrollment.accept(body, signature)
-            assertEquals(extraArgument, assertNotNull(session.snapshot(time).capture).arguments.last())
+            assertEquals(extraArgument, assertNotNull(session.snapshot { time }.capture).arguments.last())
         }
     }
 
@@ -107,7 +107,7 @@ class CommandConnectionTest {
             owner.approval(session).send(message)
             assertContentEquals(message.encode(bound.maxBytes), wire.sent.last())
         }
-        assertEquals(RequestPhase.PRESENTED, session.snapshot(time).status!!.status.phase)
+        assertEquals(RequestPhase.PRESENTED, session.snapshot { time }.status!!.status.phase)
         owner.close(); running.cancelAndJoin()
         assertTrue(session.closed.value); assertTrue(wire.closed)
         assertEquals(CommandConnectionState.CLOSED, owner.connectionState.value)
@@ -119,11 +119,11 @@ class CommandConnectionTest {
         val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         val otherInbox = CommandRequestInbox(1, 2)
         val other = issued(otherInbox.add(id(2), id(3), point(authority), limits))
-        assertFails { owner.approval(other).send(message(other)) }
-        assertFails { owner.approval(session).send(message(session, signingKey = biometric)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(other).send(message(other)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message(session, signingKey = biometric)) }
         val pending = message(session)
         time = ElapsedInstant(0, 60100u)
-        assertFails { owner.approval(session).send(pending) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(pending) }
         assertTrue(wire.sent.isEmpty())
         owner.close(); running.cancelAndJoin(); otherInbox.close()
     }
@@ -134,11 +134,12 @@ class CommandConnectionTest {
         val firstRun = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         val retained = session; val message = message(session)
         wires.single().write = { throw java.io.IOException("Synthetic uncertain write") }
-        assertFails { owner.approval(session).send(message) }
+        val failure = assertFailsWith<java.io.IOException> { owner.approval(session).send(message) }
+        assertFalse(failure is CommandDecisionNotSent)
         wires.single().end.complete(Unit); firstRun.await()
         assertEquals(CommandConnectionState.DISCONNECTED, owner.connectionState.value)
         assertFalse(retained.closed.value)
-        assertFails { owner.approval(session).send(message) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message) }
         val secondRun = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         assertSame(retained, session)
         assertTrue(wires.last().sent.isEmpty())
@@ -194,7 +195,7 @@ class CommandConnectionTest {
         }
         val fetch = async(start = CoroutineStart.UNDISPATCHED) { owner.fetchSnapshot() }
         assertEquals(CommandConnectionState.DISCONNECTED, owner.connectionState.value)
-        assertFails { owner.approval(captured).send(message(captured)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(captured).send(message(captured)) }
         assertTrue(background.sent.isEmpty())
         background.end.complete(Unit)
         assertTrue(fetch.await()); assertTrue(background.closed)

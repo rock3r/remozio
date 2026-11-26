@@ -53,6 +53,14 @@ internal object AndroidTransportLeaves {
 
     @WorkerThread
     @Synchronized
+    fun hasArtifacts(context: Context, alias: String): Boolean {
+        if (!transportAlias.matches(alias)) return false
+        val base = File(directory(context), "$alias.der")
+        return base.exists() || File("${base.path}.new").exists() || File("${base.path}.bak").exists()
+    }
+
+    @WorkerThread
+    @Synchronized
     fun retire(context: Context, alias: String) {
         if (!transportAlias.matches(alias)) return
         val directory = directory(context)

@@ -14,6 +14,9 @@ import kotlinx.coroutines.sync.withLock
 
 internal enum class CommandConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECOVERY_REQUIRED, CLOSED }
 
+/** This attempt failed before it called the decision writer. */
+internal class CommandDecisionNotSent : IOException("Command decision was not sent")
+
 internal interface CommandConnectionWire : AutoCloseable {
     suspend fun receive()
     suspend fun send(bytes: ByteArray)
@@ -128,33 +131,44 @@ internal class CommandConnection(
         }
     }
 
-    fun approval(session: CommandRequestSession) = CommandApprovalContext(record, limits) { send(session, it) }
+    fun approval(session: CommandRequestSession, reconnect: () -> Unit = {}) =
+        CommandApprovalContext(record, limits, connectionState, reconnect) { send(session, it) }
 
     /** Rechecks the retained request and enrolled signing role before writing on this incarnation. */
     internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage) = withContext(dispatcher) {
         sending.withLock {
-            val owner = synchronized(monitor) { check(!closed); checkNotNull(attempt?.takeIf { it.foreground }) }
-            val active = synchronized(monitor) { check(!closed && attempt === owner); checkNotNull(owner.wire) }
-            check(enrollment.sessions().any { it === session })
-            val e = record.enrollment
-            check(message.wireVersion == 1uL && message.type == ApprovalMessageType.DECISION)
-            val body = message.body.copyBytes()
-            val claim = DecisionPayload.decode(body, limits.body)
-            val key = when (claim.action.choice) {
-                ActionChoice.EXECUTE -> e.biometricKey.also { check(message.purpose == SigningPurpose.BIOMETRIC_AUTHORIZATION) }
-                ActionChoice.DECLINE -> e.decisionKey.also { check(message.purpose == SigningPurpose.CANCELLATION) }
-                else -> throw IOException("Unsupported command decision")
+            var writeStarted = false
+            try {
+                val owner = synchronized(monitor) { check(!closed); checkNotNull(attempt?.takeIf { it.foreground }) }
+                val active = synchronized(monitor) { check(!closed && attempt === owner); checkNotNull(owner.wire) }
+                check(enrollment.sessions().any { it === session })
+                val e = record.enrollment
+                check(message.wireVersion == 1uL && message.type == ApprovalMessageType.DECISION)
+                val body = message.body.copyBytes()
+                val claim = DecisionPayload.decode(body, limits.body)
+                val key = when (claim.action.choice) {
+                    ActionChoice.EXECUTE -> e.biometricKey.also { check(message.purpose == SigningPurpose.BIOMETRIC_AUTHORIZATION) }
+                    ActionChoice.DECLINE -> e.decisionKey.also { check(message.purpose == SigningPurpose.CANCELLATION) }
+                    else -> throw IOException("Unsupported command decision")
+                }
+                session.withPendingDecision(clock, e.phoneID.copyBytes(), key.keyID.copyBytes(), claim.action) {
+                    check(it.encode(limits.body).contentEquals(body))
+                    check(ApprovalSignature.verify(message.signature.copyBytes(), key.publicKey.copyBytes(), 1u,
+                        message.type, message.purpose, body, limits.body, limits.signing))
+                }
+                val bytes = message.encode(limits.body.maxBytes)
+                ensureActive()
+                synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
+                writeStarted = true
+                active.send(bytes)
+                ensureActive()
+                synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (!writeStarted) throw CommandDecisionNotSent()
+                throw IOException("Command decision delivery is uncertain", failure)
             }
-            session.withPendingDecision(clock(), e.phoneID.copyBytes(), key.keyID.copyBytes(), claim.action) {
-                check(it.encode(limits.body).contentEquals(body))
-                check(ApprovalSignature.verify(message.signature.copyBytes(), key.publicKey.copyBytes(), 1u,
-                    message.type, message.purpose, body, limits.body, limits.signing))
-            }
-            ensureActive()
-            synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
-            active.send(message.encode(limits.body.maxBytes))
-            ensureActive()
-            synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
         }
     }
 

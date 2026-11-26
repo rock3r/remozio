@@ -455,6 +455,8 @@
     <string name="pairing_repair_unavailable">This invitation does not match an eligible pairing on this phone.</string>
     <string name="macs_remove_local">Remove from this phone</string>
     <string name="macs_remove_local_description">Remove %1$s from this phone? To revoke the pairing, open Paired phones on the Mac.</string>
+    <string name="macs_discard_setup">Discard saved setup</string>
+    <string name="macs_discard_setup_description">Discard the saved setup for %1$s on this phone? If setup completed on the Mac, revoke the old phone entry in Paired phones on the Mac.</string>
     <string name="macs_remove_local_failed">Could not remove the selected pairing. Check the current list and try again.</string>
     <string name="macs_remove_local_pairing_pending">Finish or cancel the current pairing before removing this Mac.</string>
     <string name="macs_abandon_repair">Abandon re-pair on this phone</string>

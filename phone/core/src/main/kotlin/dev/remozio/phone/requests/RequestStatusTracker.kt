@@ -51,7 +51,7 @@ internal class RequestStatusTracker(
     private var current: RequestStatusPayload? = null
     private var canonical: ByteArray? = null
     private var anchor: ElapsedInstant? = null
-    private var lastElapsed: ULong = 0u
+    private var lastSample: ElapsedInstant? = null
     private var anchorClockValid = true
     private var anchorAge: ULong = 0u
     private var ageFloor: ULong = 0u
@@ -62,7 +62,8 @@ internal class RequestStatusTracker(
 
     /** Checks and commits one snapshot under the same monitor. Failed or stale input cannot replace state. */
     @Synchronized
-    fun observe(canonicalStatus: ByteArray, signature: ByteArray, receivedAt: ElapsedInstant): StatusAcceptance {
+    fun observe(canonicalStatus: ByteArray, signature: ByteArray, receivedAt: ElapsedInstant,
+                now: ElapsedInstant = receivedAt): StatusAcceptance {
         if (canonicalStatus.size > statusLimits.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
         if (signature.size != 64) reject(StatusRejection.INVALID_SIGNATURE)
         val bytes = canonicalStatus.copyOf()
@@ -81,17 +82,21 @@ internal class RequestStatusTracker(
             }
             checkProgress(previous, incoming)
         }
-        // Project the old anchor before replacement so delayed updates cannot move the visible clock backwards.
-        val oldTiming = project(receivedAt)
-        anchorAge = maxOf(oldTiming?.ageLowerBoundMs ?: 0u, incoming.observedAgeMs)
-        anchorRemaining = incoming.authorizationRemainingMs?.let { remaining ->
-            oldTiming?.authorizationRemainingUpperBoundMs?.let { minOf(it, remaining) } ?: remaining
+        // The receipt can predate another projection. Account for the local wait at the new anchor.
+        val receiptOrdered = receivedAt.epoch == now.epoch && receivedAt.milliseconds <= now.milliseconds
+        val projectionOrdered = isOrdered(now)
+        val oldTiming = project(now)
+        anchorClockValid = receiptOrdered && projectionOrdered
+        val localWait = if (anchorClockValid) now.milliseconds - receivedAt.milliseconds else 0uL
+        anchorAge = maxOf(oldTiming?.ageLowerBoundMs ?: 0u, addSaturated(incoming.observedAgeMs, localWait))
+        anchorRemaining = incoming.authorizationRemainingMs?.let {
+            val remaining = subtractFloored(it, localWait)
+            oldTiming?.authorizationRemainingUpperBoundMs?.let { ceiling -> minOf(ceiling, remaining) } ?: remaining
         }
         ageFloor = anchorAge
         remainingCeiling = anchorRemaining
-        anchorClockValid = anchor == null || anchor?.epoch != receivedAt.epoch || receivedAt.milliseconds >= lastElapsed
-        if (anchorClockValid) lastElapsed = receivedAt.milliseconds
-        anchor = receivedAt
+        if (anchorClockValid) lastSample = now
+        anchor = now
         current = incoming
         canonical = bytes
         return StatusAcceptance.APPLIED
@@ -103,11 +108,14 @@ internal class RequestStatusTracker(
         return TrackedRequestStatus(status, checkNotNull(project(now)))
     }
 
+    private fun isOrdered(now: ElapsedInstant): Boolean =
+        lastSample?.let { it.epoch != now.epoch || now.milliseconds >= it.milliseconds } ?: true
+
     private fun project(now: ElapsedInstant): RequestTiming? {
         val status = current ?: return null
         val start = checkNotNull(anchor)
-        val clockUsable = anchorClockValid && now.epoch == start.epoch && now.milliseconds >= lastElapsed
-        if (clockUsable) lastElapsed = now.milliseconds else anchorClockValid = false
+        val clockUsable = anchorClockValid && now.epoch == start.epoch && isOrdered(now)
+        if (clockUsable) lastSample = now else anchorClockValid = false
         val elapsed = if (clockUsable) now.milliseconds - start.milliseconds else 0uL
         ageFloor = maxOf(ageFloor, addSaturated(anchorAge, elapsed))
         val remaining = anchorRemaining?.let { subtractFloored(it, elapsed) }

@@ -70,39 +70,54 @@ class CommandRequestSession private constructor(
     private val revision = MutableStateFlow(0uL)
     val revisions: StateFlow<ULong> = revision.asStateFlow()
 
+    internal fun observe(body: ByteArray, signature: ByteArray, receivedAt: ElapsedInstant): StatusAcceptance =
+        observe(body, signature, receivedAt) { receivedAt }
+
     /** Removes the owned capture before notifying observers of a terminal update. */
     @Synchronized
-    fun observe(body: ByteArray, signature: ByteArray, receivedAt: ElapsedInstant): StatusAcceptance {
+    fun observe(body: ByteArray, signature: ByteArray, receivedAt: ElapsedInstant, clock: () -> ElapsedInstant): StatusAcceptance {
         if (closure.value) throw CommandSessionException(CommandSessionRejection.CLOSED)
-        val result = tracker.observe(body, signature, receivedAt)
+        val now = clock()
+        val result = tracker.observe(body, signature, receivedAt, now)
         if (result == StatusAcceptance.APPLIED) {
-            val status = checkNotNull(tracker.snapshot(receivedAt)).status
+            val status = checkNotNull(tracker.snapshot(now)).status
             if (status.phase.isTerminal) { capture = null; memory?.releaseCapture() }
             revision.value = status.revision
         }
         return result
     }
 
+    internal fun snapshot(now: ElapsedInstant): CommandRequestSnapshot = snapshot { now }
+
     /** Callers must replace old snapshots; clearing this owner cannot erase references held elsewhere. */
     @Synchronized
-    fun snapshot(now: ElapsedInstant) = if (closure.value) CommandRequestSnapshot(null, null, closed = true)
-        else CommandRequestSnapshot(capture, tracker.snapshot(now))
+    fun snapshot(clock: () -> ElapsedInstant): CommandRequestSnapshot =
+        if (closure.value) CommandRequestSnapshot(null, null, closed = true)
+        else CommandRequestSnapshot(capture, tracker.snapshot(clock()))
 
     fun isBoundToAuthority(macID: ByteArray, accountID: ByteArray, publicKey: ByteArray): Boolean =
         identity.macID == CborValue.Bytes(macID) && identity.accountID == CborValue.Bytes(accountID) &&
             authorityKey == CborValue.Bytes(publicKey)
 
-    /** Runs a bound decision operation under the session monitor. The enrolled host still decides freshness and the winning phone. */
+    internal fun <T> withPendingDecision(
+        now: ElapsedInstant,
+        phoneID: ByteArray,
+        keyID: ByteArray,
+        action: CapturedAction,
+        operation: (DecisionPayload) -> T,
+    ): T = withPendingDecision({ now }, phoneID, keyID, action, operation)
+
+    /** Samples the clock under the session monitor. The enrolled host still decides freshness and the winning phone. */
     @Synchronized
     fun <T> withPendingDecision(
-        now: ElapsedInstant,
+        clock: () -> ElapsedInstant,
         phoneID: ByteArray,
         keyID: ByteArray,
         action: CapturedAction,
         operation: (DecisionPayload) -> T,
     ): T {
         check(!closure.value && capture != null)
-        val tracked = checkNotNull(tracker.snapshot(now))
+        val tracked = checkNotNull(tracker.snapshot(clock()))
         check(tracked.status.phase == RequestPhase.QUEUED || tracked.status.phase == RequestPhase.PRESENTED)
         check(!tracked.timing.clockUncertain && (tracked.timing.authorizationRemainingUpperBoundMs ?: 0uL) > 0uL)
         ActionPolicy.requirement(action, RequestKind.COMMAND, permittedActions)

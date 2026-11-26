@@ -85,7 +85,8 @@ open class CombinedInboxPreviewActivity : ComponentActivity() {
             val session = requests.accept(body, sign(body, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST))
             val status = RequestStatusPayload(id(mac), id(account), id(7), request.requestDigest(bounds, bounds), request.challenge, 1u,
                 RequestPhase.PRESENTED, RequestStatusReason.NONE, id(20), 1000u, 59000u, null, false, null, null).encode(bounds)
-            session.observe(status, sign(status, ApprovalMessageType.STATUS, SigningPurpose.STATUS), RequestElapsedClock.now())
+            session.observe(status, sign(status, ApprovalMessageType.STATUS, SigningPurpose.STATUS),
+                RequestElapsedClock.now(), RequestElapsedClock::now)
             object : CommandConnectionWire {
                 override suspend fun receive() { awaitCancellation() }
                 override suspend fun send(bytes: ByteArray) { error("Display fixture cannot deliver a decision") }

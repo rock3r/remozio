@@ -64,8 +64,17 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
     }
     removal?.let { mac ->
         val abandonRePair = mac.setupIncomplete && mac.canAbandonRePair
-        val title = if (abandonRePair) R.string.macs_abandon_repair else R.string.macs_remove_local
-        val description = if (abandonRePair) R.string.macs_abandon_repair_description else R.string.macs_remove_local_description
+        val discardSetup = mac.setupIncomplete && !mac.rePair
+        val title = when {
+            abandonRePair -> R.string.macs_abandon_repair
+            discardSetup -> R.string.macs_discard_setup
+            else -> R.string.macs_remove_local
+        }
+        val description = when {
+            abandonRePair -> R.string.macs_abandon_repair_description
+            discardSetup -> R.string.macs_discard_setup_description
+            else -> R.string.macs_remove_local_description
+        }
         AlertDialog(
             onDismissRequest = { if (!removing) removal = null },
             title = { Text(stringResource(title)) },
@@ -76,8 +85,13 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                     removalError = null
                     scope.launch {
                         try {
-                            if (abandonRePair) app.pairing.abandonAmbiguousRePair(mac.recordID, mac.revision)
-                            else app.pairing.remove(mac.recordID, mac.revision)
+                            when {
+                                abandonRePair -> app.pairing.abandonAmbiguousRePair(mac.recordID, mac.revision)
+                                discardSetup -> app.pairing.discardOrdinarySetup(mac.recordID, mac.revision)
+                                else -> app.pairing.remove(mac.recordID, mac.revision)
+                            }
+                        } catch (_: PairingRecoveryInProgress) {
+                            removalError = R.string.pairing_receipt_in_progress
                         } catch (_: OrdinaryPairingReplacementPending) {
                             removalError = R.string.macs_remove_local_pairing_pending
                         } catch (cancelled: CancellationException) {
@@ -130,13 +144,16 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                             dev.sebastiano.remozio.android.updates.MacUpdateStatusContent(mac.recordID)
                         }
                         if (mac.setupIncomplete) {
-                            PairingReceiptControl(mac,
-                                status = remember(receiptStates, mac.recordID) {
-                                    receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
-                                },
-                                onChecked = { retry++ })
+                            val receiptState = remember(receiptStates, mac.recordID) {
+                                receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
+                            }
+                            PairingReceiptControl(mac, status = receiptState, onChecked = { retry++ })
                             if (mac.canAbandonRePair) {
                                 TextButton(onClick = { removal = mac }) { Text(stringResource(R.string.macs_abandon_repair)) }
+                            } else if (!mac.rePair) {
+                                TextButton(enabled = receiptState.value != ReceiptCheckState.CHECKING, onClick = { removal = mac }) {
+                                    Text(stringResource(R.string.macs_discard_setup))
+                                }
                             }
                         } else {
                             TextButton(onClick = { onOpen(mac) }) { Text(stringResource(R.string.commands_open)) }
