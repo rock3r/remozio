@@ -11,6 +11,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import dev.sebastiano.remozio.android.R
 import dev.remozio.protocol.ApprovalMessage
+import java.security.Signature
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,12 +67,9 @@ class CommandBiometricPrompt(
                 prompt.authenticate(BiometricPrompt.CryptoObject(prepared.signature), cancellation, activity.mainExecutor,
                     object : BiometricPrompt.AuthenticationCallback() {
                         override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                            if (token !== attempt) return
-                            val outcome = try {
-                                check(activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-                                check(result.authenticationType == BiometricPrompt.AUTHENTICATION_RESULT_TYPE_BIOMETRIC)
-                                CommandBiometricResult.Signed(prepared.complete(checkNotNull(result.cryptoObject?.signature)))
-                            } catch (_: Exception) { CommandBiometricResult.Unavailable }
+                            val outcome = commandBiometricSuccess(attempt, token,
+                                activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED), result.authenticationType,
+                                { result.cryptoObject?.signature }, prepared::complete) ?: return
                             finish(attempt, outcome)
                         }
                         override fun onAuthenticationError(code: Int, message: CharSequence) {
@@ -111,5 +109,25 @@ class CommandBiometricPrompt(
         cancel()
         identity.close()
         activity.lifecycle.removeObserver(this)
+    }
+}
+
+/** Ignore a stale callback before reading its signature or invoking the signer. */
+internal fun commandBiometricSuccess(
+    attempt: Any,
+    activeAttempt: Any?,
+    started: Boolean,
+    authenticationType: Int,
+    signature: () -> Signature?,
+    complete: (Signature) -> ApprovalMessage,
+): CommandBiometricResult? {
+    if (activeAttempt !== attempt) return null
+    if (!started || authenticationType != BiometricPrompt.AUTHENTICATION_RESULT_TYPE_BIOMETRIC) {
+        return CommandBiometricResult.Unavailable
+    }
+    return try {
+        CommandBiometricResult.Signed(complete(checkNotNull(signature())))
+    } catch (_: Exception) {
+        CommandBiometricResult.Unavailable
     }
 }

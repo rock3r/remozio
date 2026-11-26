@@ -19,6 +19,8 @@ JVM tests use software keys to verify exact bindings, signature domains, substit
 
 `CommandRequestInspection` accepts an optional enrollment-bound `CommandApprovalContext`. The same session supplies the displayed capture and both decisions. Samples remain read-only. Controls appear only for permitted pending actions and active enrollment. The integration supplies the authenticated sender; no production connection is opened by this view.
 
+JVM tests exercise the prompt's success callback checks and the inspector's attempt tickets. They use software signatures. The native prompt and per-use Android Keystore enforcement still need device validation.
+
 Approve uses the native biometric prompt. Decline loads only the decision key and does not depend on biometric-key availability. The controls distinguish preparing, signing, sending, awaiting Mac confirmation, and uncertain delivery. A successful write does not claim approval or execution. Explicit retry sends the same in-memory carrier without signing a different decision. No decision is persisted or retried automatically.
 
 Stop cancels local work and the prompt. If a carrier exists, delivery remains uncertain until an authenticated status resolves it. Disposal drops local state; this does not undo a decision already received by the Mac. Controls disappear once the Mac accepts a decision or reports a terminal state. Each request and enrollment owns separate view state.
