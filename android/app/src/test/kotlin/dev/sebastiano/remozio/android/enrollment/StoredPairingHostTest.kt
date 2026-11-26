@@ -269,6 +269,70 @@ class StoredPairingHostTest {
         assertEquals(old.recordID, reopened.inspectRePair(envelope(old)).enrollment.recordID)
     }
 
+    @Test fun restartRetiresTheNewBiometricAliasEvenBeforeMaterialWasSaved() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        val keyIDs = List(3) { CborValue.Bytes(id(92 + it)) }
+        val reservation = h.reserveRePair(envelope(old), id(30), id(60), keyIDs)
+        val alias = EnrollmentKeyReference.biometricEnrollmentAlias(keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes())
+        keys.allocated.add(alias)
+        open().use {
+            val restored = it.snapshot().rePairReservations.single()
+            assertEquals(reservation.recordID, restored.recordID)
+            assertNull(restored.material)
+            assertEquals(alias, restored.alias(EnrollmentKeyRole.BIOMETRIC))
+        }
+
+        rePairHost(keys).reconcileRePairOnStartup()
+        assertEquals(listOf(alias), keys.retired)
+        assertTrue(keys.allocated.isEmpty())
+        open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+    }
+
+    @Test fun liveReservationKeepsItsNewBiometricAliasAndRejectsAnExistingOne() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        val keyIDs = List(3) { CborValue.Bytes(id(92 + it)) }
+        val alias = EnrollmentKeyReference.biometricEnrollmentAlias(keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes())
+        keys.allocated.add(alias)
+        assertFailsWith<IllegalArgumentException> { h.reserveRePair(envelope(old), id(30), id(60), keyIDs) }
+        open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+
+        keys.allocated.remove(alias)
+        val reservation = h.reserveRePair(envelope(old), id(30), id(60), keyIDs)
+        keys.allocated.add(alias)
+        h.reconcileRePairOnStartup()
+        assertTrue(keys.retirementAttempts.isEmpty())
+        assertEquals(setOf(alias), keys.allocated)
+        open().use { assertEquals(reservation.recordID, it.snapshot().rePairReservations.single().recordID) }
+    }
+
+    @Test fun restartRetiresTheLegacyBiometricAliasFromAPreUpgradeReservation() = runBlocking {
+        val keys = RePairKeys()
+        val old = record(1)
+        activatePredecessor(rePairHost(keys), old)
+        val keyIDs = List(3) { CborValue.Bytes(id(92 + it)) }
+        val legacy = RePairReservation(id(30), old.recordID.copyBytes(), id(60), envelope(old), keyIDs,
+            usesBiometricEnrollmentInvalidationPolicy = false)
+        open().use { it.reserveRePair(legacy, it.snapshot().revision) }
+        val plaintext = cipher.decrypt(checkNotNull(storage.bytes))
+        val archive = assertIs<CborValue.Fields>(DeterministicCbor.decode(plaintext, CborLimits(65_536, 8, 1_016)))
+        val stored = assertIs<CborValue.ArrayValue>(archive.values[3u]).values.single()
+        assertEquals((0uL..5uL).toSet(), assertIs<CborValue.Fields>(stored).values.keys)
+        val keyID = keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes()
+        val alias = "remozio.biometric.v1.${keyID.toHexString()}"
+        keys.allocated.add(alias)
+
+        rePairHost(keys).reconcileRePairOnStartup()
+        assertEquals(listOf(alias), keys.retired)
+        assertFalse(EnrollmentKeyReference.biometricEnrollmentAlias(keyID) in keys.retirementAttempts)
+        open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+    }
+
     @Test fun rePairCheckpointFailureRetainsProposalAndRestartDrainsUnsubmittedKeys() = runBlocking {
         val keys = RePairKeys()
         val h = rePairHost(keys)

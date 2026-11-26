@@ -17,7 +17,7 @@ import java.security.interfaces.ECPublicKey
 enum class BiometricKeySecurity { STRONGBOX, TRUSTED_ENVIRONMENT }
 class BiometricIdentityUnavailable : IllegalStateException("Biometric identity unavailable")
 
-/** Reported enrollment invalidation is diagnostic. Actual retention still requires a device experiment. */
+/** Reported enrollment invalidation is diagnostic. Actual invalidation still requires a device experiment. */
 data class BiometricKeyInspection(val security: BiometricKeySecurity, val reportedEnrollmentInvalidation: Boolean)
 
 internal data class BiometricKeyFacts(
@@ -88,5 +88,10 @@ internal fun checkBiometricKeyOperation(
     operation: Signature = Signature.getInstance("SHA256withECDSA"),
 ) {
     try { operation.initSign(key) }
-    finally { operation.initVerify(publicKey) }
+    catch (failure: Exception) {
+        try { operation.initVerify(publicKey) }
+        catch (cleanup: Exception) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+        throw failure
+    }
+    operation.initVerify(publicKey)
 }

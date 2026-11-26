@@ -23,11 +23,16 @@ class CommandConnectionTest {
     private val decision = pair()
     private val biometric = pair()
     private fun point(pair: KeyPair) = decisionPublicPoint(pair.public as ECPublicKey)
-    private fun reference(role: EnrollmentKeyRole, pair: KeyPair) = EnrollmentKeyReference(role, id(10 + role.ordinal),
-        "remozio.${role.aliasPart}.v1.${"%032x".format(10 + role.ordinal)}", if (role == EnrollmentKeyRole.TRANSPORT) pair.public.encoded else point(pair))
-    private val record = StoredPhoneEnrollment(PhoneEnrollment(id(1), id(2), id(3), id(4), id(5), "Synthetic Mac",
+    private fun reference(role: EnrollmentKeyRole, pair: KeyPair, legacy: Boolean = false): EnrollmentKeyReference {
+        val keyID = id(10 + role.ordinal)
+        val alias = if (role == EnrollmentKeyRole.BIOMETRIC && !legacy) EnrollmentKeyReference.biometricEnrollmentAlias(keyID)
+        else "remozio.${role.aliasPart}.v1.${"%032x".format(10 + role.ordinal)}"
+        return EnrollmentKeyReference(role, keyID, alias, if (role == EnrollmentKeyRole.TRANSPORT) pair.public.encoded else point(pair))
+    }
+    private fun enrollmentRecord(legacy: Boolean = false) = StoredPhoneEnrollment(PhoneEnrollment(id(1), id(2), id(3), id(4), id(5), "Synthetic Mac",
         point(authority), pair().public.encoded, reference(EnrollmentKeyRole.TRANSPORT, pair()),
-        reference(EnrollmentKeyRole.DECISION, decision), reference(EnrollmentKeyRole.BIOMETRIC, biometric), id(6, 32), null), EnrollmentPhase.ACTIVE)
+        reference(EnrollmentKeyRole.DECISION, decision), reference(EnrollmentKeyRole.BIOMETRIC, biometric, legacy), id(6, 32), null), EnrollmentPhase.ACTIVE)
+    private val record = enrollmentRecord()
     private val decline = CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)
     private val execute = CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)
     private val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
@@ -111,6 +116,21 @@ class CommandConnectionTest {
         owner.close(); running.cancelAndJoin()
         assertTrue(session.closed.value); assertTrue(wire.closed)
         assertEquals(CommandConnectionState.CLOSED, owner.connectionState.value)
+    }
+
+    @Test fun legacyPairingCannotSendEvenAValidApproveButCanDecline() = runBlocking<Unit> {
+        val wire = Wire()
+        lateinit var session: CommandRequestSession
+        val owner = CommandConnection(enrollmentRecord(legacy = true), limits,
+            { _, enrollment -> wire.also { session = issued(enrollment) } }, { time }, dispatcher = Dispatchers.Unconfined)
+        val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
+        try {
+            assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message(session, execute = true)) }
+            assertTrue(wire.sent.isEmpty())
+            val declined = message(session)
+            owner.approval(session).send(declined)
+            assertContentEquals(declined.encode(bound.maxBytes), wire.sent.single())
+        } finally { owner.close(); running.cancelAndJoin() }
     }
 
     @Test fun rejectsWrongKeyUnownedSessionAndExpiredRequestBeforeWriting() = runBlocking<Unit> {

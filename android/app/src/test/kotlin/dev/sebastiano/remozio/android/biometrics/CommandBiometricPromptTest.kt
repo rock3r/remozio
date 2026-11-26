@@ -47,6 +47,13 @@ class CommandBiometricPromptTest {
         }
     }
 
+    @Test fun anInvalidatedApprovalKeyReachesTheCurrentPromptAsRecovery() {
+        val result = commandBiometricSuccess(token, token, true, biometric, { signature }) {
+            throw BiometricRecoveryRequired(BiometricRecoveryReason.BIOMETRIC_CHANGED)
+        }
+        assertSame(BiometricRecoveryReason.BIOMETRIC_CHANGED, assertIs<CommandBiometricResult.RecoveryRequired>(result).reason)
+    }
+
     @Test fun missingSignatureAndSignerFailureReportUnavailable() {
         val missing = commandBiometricSuccess(token, token, true, biometric, { null }) {
             fail("A callback without a signature reached the signer")

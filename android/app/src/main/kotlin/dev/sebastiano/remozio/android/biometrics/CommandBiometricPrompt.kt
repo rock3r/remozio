@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 sealed interface CommandBiometricResult {
     data class Signed(val message: ApprovalMessage) : CommandBiometricResult
     data object Cancelled : CommandBiometricResult
+    data class RecoveryRequired(val reason: BiometricRecoveryReason) : CommandBiometricResult
     data object Unavailable : CommandBiometricResult
 }
 
@@ -52,6 +53,9 @@ class CommandBiometricPrompt(
         activity.lifecycleScope.launch {
             val prepared = try { withContext(Dispatchers.IO) { identity.prepare(attempt) } }
                 catch (cancelled: CancellationException) { finish(attempt, CommandBiometricResult.Cancelled); throw cancelled }
+                catch (failure: BiometricRecoveryRequired) {
+                    finish(attempt, CommandBiometricResult.RecoveryRequired(failure.reason)); return@launch
+                }
                 catch (_: Exception) { finish(attempt, CommandBiometricResult.Unavailable); return@launch }
             if (token !== attempt) { prepared.close(); return@launch }
             operation = prepared
@@ -127,6 +131,8 @@ internal fun commandBiometricSuccess(
     }
     return try {
         CommandBiometricResult.Signed(complete(checkNotNull(signature())))
+    } catch (failure: BiometricRecoveryRequired) {
+        CommandBiometricResult.RecoveryRequired(failure.reason)
     } catch (_: Exception) {
         CommandBiometricResult.Unavailable
     }
