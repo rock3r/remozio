@@ -18,10 +18,28 @@ final class PairingSetupTests: XCTestCase {
         let invalidProposals: [Row]
         let invalidFrames: [Row]
     }
-    private func vectors() throws -> Vectors {
+    private struct DecisionProofRow: Decodable {
+        let name: String
+        let decisionInput: String
+        let frame: String
+    }
+    private struct DecisionProofVectors: Decodable {
+        let valid: [DecisionProofRow]
+        let invalidFrames: [Row]
+    }
+    private struct TranscriptRow: Decodable {
+        let name: String
+        let hex: String
+    }
+    private struct TranscriptVectors: Decodable { let valid: [TranscriptRow] }
+
+    private func vectors<T: Decodable>(_ type: T.Type, file: String) throws -> T {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        return try JSONDecoder().decode(Vectors.self, from: Data(contentsOf: root.appendingPathComponent("vectors/pairing-setup-v1.json")))
+        return try JSONDecoder().decode(type, from: Data(contentsOf: root.appendingPathComponent("vectors/" + file)))
+    }
+    private func vectors() throws -> Vectors {
+        try vectors(Vectors.self, file: "pairing-setup-v1.json")
     }
     private func hex(_ s: String) -> Data {
         Data(stride(from: 0, to: s.count, by: 2).map { offset in
@@ -76,6 +94,44 @@ final class PairingSetupTests: XCTestCase {
         XCTAssertThrowsError(try PairingSetupFrame.decode(Data(count: PairingSetupFrame.maximumBytes + 1)))
         XCTAssertThrowsError(try PairingPhoneProposal.decode(Data(count: 66001)))
     }
+    func testSharedDecisionProofBindsTheKeyPurposeAndTranscript() throws {
+        let vectors = try self.vectors(DecisionProofVectors.self, file: "pairing-decision-proof-v1.json")
+        let transcripts = try self.vectors(TranscriptVectors.self, file: "pairing-v1.json").valid
+        XCTAssertEqual(vectors.valid.map(\.name), ["add", "replace"])
+        for row in vectors.valid {
+            let source = try XCTUnwrap(transcripts.first { $0.name == row.name })
+            let other = try XCTUnwrap(transcripts.first { $0.name != row.name })
+            let transcript = try PairingTranscript.decode(hex(source.hex))
+            let otherTranscript = try PairingTranscript.decode(hex(other.hex))
+            let encoded = hex(row.frame)
+            let frame = try PairingSetupFrame.decode(encoded)
+            guard case .dualProof(let id, let digest, let biometric, let decision) = frame else {
+                return XCTFail("Expected a dual proof for \(row.name)")
+            }
+            XCTAssertEqual(try frame.encode(), encoded)
+            XCTAssertEqual(frame.description, "PairingSetupFrame(redacted)")
+            XCTAssertEqual(id, transcript.setupID)
+            XCTAssertEqual(digest, try transcript.digest())
+            XCTAssertEqual(try transcript.signingInput(purpose: .phoneDecision), hex(row.decisionInput))
+            XCTAssertTrue(try transcript.verify(signature: biometric, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric))
+            XCTAssertTrue(try transcript.verify(signature: decision, publicKey: transcript.decisionKey.publicKey, purpose: .phoneDecision))
+            XCTAssertFalse(try transcript.verify(signature: biometric, publicKey: transcript.decisionKey.publicKey, purpose: .phoneDecision))
+            XCTAssertFalse(try transcript.verify(signature: decision, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric))
+            XCTAssertFalse(try transcript.verify(signature: decision, publicKey: transcript.biometricKey.publicKey, purpose: .phoneDecision))
+            XCTAssertFalse(try transcript.verify(signature: decision, publicKey: transcript.decisionKey.publicKey, purpose: .phoneBiometric))
+            XCTAssertFalse(try otherTranscript.verify(signature: decision, publicKey: transcript.decisionKey.publicKey, purpose: .phoneDecision))
+        }
+    }
+
+    func testMalformedDualProofFramesFail() throws {
+        let vectors = try self.vectors(DecisionProofVectors.self, file: "pairing-decision-proof-v1.json")
+        for row in vectors.invalidFrames {
+            XCTAssertThrowsError(try PairingSetupFrame.decode(hex(row.hex)), row.name)
+        }
+        XCTAssertThrowsError(try PairingSetupFrame.dualProof(setupID: Data(count: 16), digest: Data(count: 32),
+            biometricSignature: Data(count: 64), decisionSignature: Data(count: 63)).encode())
+    }
+
     func testPhoneClaimsBindOfferNonceAndEachKeyRole() throws {
         let v = try vectors(), transcript = try PairingTranscript.decode(hex(v.transcript)), proposal = try PairingPhoneProposal.decode(hex(v.proposal))
         let limits = try CBORLimits(maxBytes: 66000, maxDepth: 3, maxItems: 24)

@@ -58,6 +58,51 @@ class PairingSetupTest {
         assertFails { PairingSetupFrame.decode(ByteArray(PairingSetupFrame.MAXIMUM_BYTES + 1)) }
         assertFails { PairingPhoneProposal.decode(ByteArray(66_001)) }
     }
+    @Test fun sharedDecisionProofBindsTheKeyPurposeAndTranscript() {
+        val vectors = Json.parseToJsonElement(TestVectors.pairingDecisionProof).jsonObject
+        val transcripts = Json.parseToJsonElement(TestVectors.pairing).jsonObject.getValue("valid").jsonArray
+            .map { it.jsonObject }.associateBy { it.getValue("name").jsonPrimitive.content }
+        val rows = vectors.getValue("valid").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("add", "replace"), rows.map { it.getValue("name").jsonPrimitive.content })
+        for (row in rows) {
+            val name = row.getValue("name").jsonPrimitive.content
+            val source = transcripts.getValue(name)
+            val other = transcripts.entries.single { it.key != name }.value
+            val transcript = PairingTranscript.decode(hex(source.getValue("hex").jsonPrimitive.content))
+            val otherTranscript = PairingTranscript.decode(hex(other.getValue("hex").jsonPrimitive.content))
+            val encoded = hex(row.getValue("frame").jsonPrimitive.content)
+            val proof = assertIs<PairingSetupFrame.DualProof>(PairingSetupFrame.decode(encoded))
+            val biometric = proof.biometricSignature.copyBytes()
+            val decision = proof.decisionSignature.copyBytes()
+            val decisionKey = transcript.decisionKey.publicKey.copyBytes()
+            val biometricKey = transcript.biometricKey.publicKey.copyBytes()
+            assertContentEquals(encoded, proof.encode())
+            assertEquals("PairingSetupFrame(redacted)", proof.toString())
+            assertEquals(transcript.setupID, proof.setupID)
+            assertContentEquals(transcript.digest(), proof.digest.copyBytes())
+            assertContentEquals(hex(row.getValue("decisionInput").jsonPrimitive.content),
+                transcript.signingInput(PairingProofPurpose.PHONE_DECISION))
+            assertTrue(transcript.verify(biometric, biometricKey, PairingProofPurpose.PHONE_BIOMETRIC))
+            assertTrue(transcript.verify(decision, decisionKey, PairingProofPurpose.PHONE_DECISION))
+            assertFalse(transcript.verify(biometric, decisionKey, PairingProofPurpose.PHONE_DECISION))
+            assertFalse(transcript.verify(decision, biometricKey, PairingProofPurpose.PHONE_BIOMETRIC))
+            assertFalse(transcript.verify(decision, biometricKey, PairingProofPurpose.PHONE_DECISION))
+            assertFalse(transcript.verify(decision, decisionKey, PairingProofPurpose.PHONE_BIOMETRIC))
+            assertFalse(otherTranscript.verify(decision, decisionKey, PairingProofPurpose.PHONE_DECISION))
+        }
+    }
+
+    @Test fun malformedDualProofFramesFail() {
+        val vectors = Json.parseToJsonElement(TestVectors.pairingDecisionProof).jsonObject
+        for (entry in vectors.getValue("invalidFrames").jsonArray) {
+            val row = entry.jsonObject
+            assertFails(row.getValue("name").jsonPrimitive.content) {
+                PairingSetupFrame.decode(hex(row.getValue("hex").jsonPrimitive.content))
+            }
+        }
+        assertFails { PairingSetupFrame.DualProof(ByteArray(16), ByteArray(32), ByteArray(64), ByteArray(63)) }
+    }
+
     @Test fun phoneClaimsBindOfferNonceAndEachKeyRole() {
         val v = vectors(); val transcript = PairingTranscript.decode(hex(v.getValue("transcript").jsonPrimitive.content))
         val proposal = PairingPhoneProposal.decode(hex(v.getValue("proposal").jsonPrimitive.content))

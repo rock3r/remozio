@@ -91,6 +91,14 @@ The [policy component](macos-command-elevation-policy.md) implements canonical c
 Setup, protected installation and command-dispatch composition remain pending.
 The 1Password and Little Snitch adapter contracts remain unchanged.
 
+## Decision-key proof during pairing
+
+A dedicated ALPN profile requires two phone signatures over the exact pairing transcript. The biometric key signs with purpose 0. The decision key signs with purpose 2. TLS already verifies possession of the transport key. The new setup frame carries both signatures as separate 64-byte P-256 signatures. The transcript, comparison code and commit receipt formats keep their existing bytes.
+
+The Root verifies both signatures inside the commit transaction before it changes trust or signs the receipt. This applies to initial pairing and re-pairing. When the requirement is active, the Root refuses new commits on both legacy setup profiles. An incompatible client must update before starting enrollment. Existing enrollments and receipt recovery continue to work.
+
+The extra signature proves possession of the enrolled decision key for the exact setup. It provides no hardware attestation or proof that the keys reside on the same device. The journal needs no format change. Historical enrollment records retain their original evidence. See [#847](https://github.com/rock3r/remozio/issues/847).
+
 ## Test order and signing
 
 The user made an Android 17 Pixel available through LAN ADB. Prepare and run its app tests first, with the user performing biometric interactions. Do not change biometric enrollment or debugging configuration automatically.
