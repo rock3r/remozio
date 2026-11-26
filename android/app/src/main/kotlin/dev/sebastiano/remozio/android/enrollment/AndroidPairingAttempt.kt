@@ -191,18 +191,30 @@ internal class AndroidPairingAttempt(
         }
     }
 
-    /** The exact confirmed transcript and fresh hardware proof are submitted once. A lost reply retains PREPARED storage. */
+    /** Submit the confirmed transcript once. A lost reply retains PREPARED storage. */
     suspend fun submit(proof: ByteArray) = operation {
-        check(prepared && !proofSubmitted && checkNotNull(preparedAccess).lease.isCurrent())
+        val access = checkNotNull(preparedAccess)
+        check(prepared && !proofSubmitted && access.lease.isCurrent())
         requireOpenDeadline()
-        val current = transcript
-        require(current.verify(proof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
-        val receipt = checkNotNull(channel).submitProof(current.digest(), proof) {
+        val selected = checkNotNull(channel)
+        val current = selected.transcript
+        val digest = current.digest()
+        val biometricProof = proof.copyOf()
+        val beforeProof: suspend () -> Unit = {
+            check(access.lease.isCurrent())
             requireOpenDeadline()
-            if (rePairRecordID != null) preparedAccess = store.markRePairProof(checkNotNull(preparedAccess))
+            if (rePairRecordID != null) preparedAccess = store.markRePairProof(access)
             active()
+            check(access.lease.isCurrent())
             requireOpenDeadline()
             proofSubmitted = true
+        }
+        val receipt = if (selected.requiresDecisionProof) {
+            val decisionProof = signPairingDecisionProof(access, current, biometricProof, deadline, RequestElapsedClock::now)
+            selected.submitDualProof(digest, biometricProof, decisionProof, beforeProof)
+        } else {
+            require(current.verify(biometricProof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+            selected.submitProof(digest, biometricProof, beforeProof)
         }
         active()
         store.activate(checkNotNull(enrollment).recordID, CborValue.Bytes(receipt),

@@ -3,6 +3,10 @@ package dev.sebastiano.remozio.android.biometrics
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.ElapsedInstant
 import dev.sebastiano.remozio.android.enrollment.PairingDeadline
+import dev.sebastiano.remozio.android.enrollment.PairingDeadlineExpired
+import dev.sebastiano.remozio.android.enrollment.PreparedPairingAccess
+import dev.sebastiano.remozio.android.enrollment.PreparedPairingLease
+import dev.sebastiano.remozio.android.enrollment.signPairingDecisionProof
 
 import dev.remozio.protocol.*
 import java.security.KeyPairGenerator
@@ -17,9 +21,14 @@ class AndroidPairingBiometricsTest {
     private fun key() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
     private val authority = key()
     private val biometric = key()
+    private val decision = key()
     private fun record(n: Int): PhoneEnrollment {
         fun local(role: EnrollmentKeyRole): EnrollmentKeyReference {
-            val point = (if (role == EnrollmentKeyRole.BIOMETRIC) biometric else key()).public.encoded
+            val point = when (role) {
+                EnrollmentKeyRole.TRANSPORT -> key()
+                EnrollmentKeyRole.BIOMETRIC -> biometric
+                EnrollmentKeyRole.DECISION -> decision
+            }.public.encoded
             return EnrollmentKeyReference(role, id(n * 3 + role.ordinal),
                 "remozio.${role.aliasPart}.v1.${"%032x".format(n * 3 + role.ordinal)}",
                 if (role == EnrollmentKeyRole.TRANSPORT) point else point.takeLast(65).toByteArray())
@@ -82,6 +91,69 @@ class AndroidPairingBiometricsTest {
         assertFailsWith<BiometricAuthorizationUnavailable> { next.complete(next.signature) }
         assertFalse(owner.available())
         owner.close()
+    }
+
+    private fun biometricProof(): ByteArray = owner().use { signer ->
+        val operation = signer.prepare(signer.beginAttempt())
+        operation.complete(operation.signature)
+    }
+
+    @Test fun decisionProofUsesTheExactPreparedKeyAndDistinctPurpose() {
+        val access = PreparedPairingAccess(prepared, PreparedPairingLease())
+        val proof = signPairingDecisionProof(access, transcript, biometricProof(), newDeadline(), { time }) {
+            assertSame(enrollment.decisionKey, it)
+            decision.private
+        }
+        assertTrue(transcript.verify(proof, enrollment.decisionKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_DECISION))
+        assertFalse(transcript.verify(proof, enrollment.decisionKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+        assertFailsWith<IllegalStateException> {
+            signPairingDecisionProof(access, transcript, biometricProof(), newDeadline(), { time }) { biometric.private }
+        }
+    }
+
+    @Test fun decisionProofDoesNotLoadAKeyForInvalidBiometricsOrAnotherTranscript() {
+        val access = PreparedPairingAccess(prepared, PreparedPairingLease())
+        val another = transcript(record(2))
+        assertFailsWith<IllegalArgumentException> {
+            signPairingDecisionProof(access, transcript, ByteArray(64), newDeadline(), { time }) {
+                fail("Invalid biometric proof reached the key provider")
+            }
+        }
+        val anotherDeadline = PairingDeadline(another, time, 300_000, 1_000_000u)
+        assertFailsWith<IllegalArgumentException> {
+            signPairingDecisionProof(access, another, biometricProof(), anotherDeadline, { time }) {
+                fail("Foreign transcript reached the key provider")
+            }
+        }
+    }
+
+    @Test fun decisionProofStaysBoundToTheLeaseAndDeadlineAcrossKeyLoading() {
+        val lease = PreparedPairingLease()
+        val access = PreparedPairingAccess(prepared, lease)
+        val proof = biometricProof()
+        assertFailsWith<IllegalStateException> {
+            signPairingDecisionProof(access, transcript, proof, newDeadline(), { time }) {
+                lease.close()
+                decision.private
+            }
+        }
+        assertFailsWith<IllegalStateException> {
+            signPairingDecisionProof(access, transcript, proof, newDeadline(), { time }) {
+                fail("Retired lease reached the key provider")
+            }
+        }
+        val current = PreparedPairingAccess(prepared, PreparedPairingLease())
+        assertFailsWith<PairingDeadlineExpired> {
+            signPairingDecisionProof(current, transcript, proof, newDeadline(), { time }) {
+                time = ElapsedInstant(1, 1100u)
+                decision.private
+            }
+        }
+        assertFailsWith<PairingDeadlineExpired> {
+            signPairingDecisionProof(current, transcript, proof, newDeadline(), { time }) {
+                fail("Expired setup reached the key provider")
+            }
+        }
     }
 
     @Test fun wallClockSkewOnlyControlsTheAdvisory() {
