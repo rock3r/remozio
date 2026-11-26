@@ -49,7 +49,7 @@ internal class CommandInboxNavigation(private val clock: () -> ElapsedInstant = 
             else {
                 val request = requests.singleOrNull { it.isCurrent(owners) && pending.target.matches(it) }
                 if (request == null) current else {
-                    val snapshot = request.session.snapshot(clock())
+                    val snapshot = request.session.snapshot(clock)
                     val status = snapshot.status
                     when {
                         snapshot.closed || status != null && (status.status.phase !in setOf(RequestPhase.QUEUED, RequestPhase.PRESENTED) ||

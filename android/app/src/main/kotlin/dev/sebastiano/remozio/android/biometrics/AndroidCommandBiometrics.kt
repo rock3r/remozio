@@ -79,7 +79,7 @@ class AndroidCommandBiometrics internal constructor(
         finally { cancel(operation) }
     }
 
-    private fun <T> pending(block: (DecisionPayload) -> T): T = session.withPendingDecision(now(),
+    private fun <T> pending(block: (DecisionPayload) -> T): T = session.withPendingDecision(now,
         enrollment.phoneID.copyBytes(), enrollment.biometricKey.keyID.copyBytes(), action, block)
 
     @Synchronized

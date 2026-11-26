@@ -80,7 +80,7 @@ internal fun CommandRequestRow(session: CommandRequestSession, number: Int, onOp
     LaunchedEffect(session, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             try {
-                while (isActive) { snapshot = session.snapshot(RequestElapsedClock.now()); delay(1000) }
+                while (isActive) { snapshot = session.snapshot(RequestElapsedClock::now); delay(1000) }
             } finally { snapshot = null }
         }
     }

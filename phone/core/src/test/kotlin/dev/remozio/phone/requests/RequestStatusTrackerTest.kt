@@ -127,6 +127,28 @@ class RequestStatusTrackerTest {
         assertEquals(2100uL, tracker.snapshot(time(1300u))!!.timing.ageLowerBoundMs)
     }
 
+    @Test fun waitingAfterReceiptUsesTheOriginalAuthorizationBudget() {
+        val tracker = tracker()
+        val body = status(age = 1000u, remaining = 5u).encode(limits)
+        tracker.observe(body, sign(body), time(100u), time(108u))
+        val timing = tracker.snapshot(time(110u))!!.timing
+        assertEquals(1010uL, timing.ageLowerBoundMs)
+        assertEquals(0uL, timing.authorizationRemainingUpperBoundMs)
+        assertFalse(timing.clockUncertain)
+    }
+
+    @Test fun receiptFromAnotherEpochCannotAuthorizeUntilFreshStatus() {
+        val tracker = tracker()
+        observe(tracker, status())
+        val body = status(revision = 2u, age = 2000u).encode(limits)
+        tracker.observe(body, sign(body), time(120u), time(10u, 2))
+        assertTrue(tracker.snapshot(time(20u, 2))!!.timing.clockUncertain)
+        assertEquals(StatusAcceptance.DUPLICATE, tracker.observe(body, sign(body), time(20u, 2)))
+        assertTrue(tracker.snapshot(time(20u, 2))!!.timing.clockUncertain)
+        observe(tracker, status(revision = 3u, age = 2000u), at = 30u, epoch = 2)
+        assertFalse(tracker.snapshot(time(40u, 2))!!.timing.clockUncertain)
+    }
+
     @Test fun validatesObservationAgeAndTimingContinuityWithoutReplacingState() {
         val tracker = tracker()
         observe(tracker, status())

@@ -40,7 +40,8 @@ All checks and state replacement run under one monitor. Invalid, conflicting, an
 
 The caller supplies elapsed milliseconds from a monotonic clock that includes sleep, plus an epoch that changes when the clock origin changes. The command inspector adapter supplies the platform elapsed clock while visible. The tracker itself does not read a device clock.
 
-The sampled Mac age plus elapsed time since receipt is a lower bound on current age. Unknown delivery time can only make the request older. The authorization time remaining is an upper bound; it never increases when a delayed update arrives.
+The sampled Mac age plus elapsed time since receipt is a lower bound on current age. Unknown delivery time can only make the request older. The authorization time remaining is an upper bound. It never increases when a delayed update arrives.
+The session reads the current clock under its lock for display and decisions. It also counts the time from receipt to that clock reading.
 
 A duplicate never replaces the timing anchor. A newer delayed sample preserves the largest known age and smallest known authorization time. Arithmetic saturates at the unsigned maximum and floors countdowns at zero.
 

@@ -57,7 +57,7 @@ class AndroidDecisionIdentity internal constructor(
     /** Declines the retained displayed session without biometrics. The Mac remains authoritative for consumption. */
     @WorkerThread
     @Synchronized
-    fun declineSession(session: CommandRequestSession, now: ElapsedInstant, limits: RequestLimits): ApprovalMessage {
+    fun declineSession(session: CommandRequestSession, now: () -> ElapsedInstant, limits: RequestLimits): ApprovalMessage {
         try {
             val signingKey = key ?: throw DecisionIdentityUnavailable()
             require(session.isBoundToAuthority(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),

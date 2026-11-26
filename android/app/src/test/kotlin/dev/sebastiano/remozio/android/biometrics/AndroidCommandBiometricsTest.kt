@@ -64,7 +64,7 @@ class AndroidCommandBiometricsTest {
             update(SigningInput.make(1u, ApprovalMessageType.STATUS, SigningPurpose.STATUS, payload, bound, bound))
             P256SignatureEncoding.fromDer(sign())
         }
-        session.observe(payload, signature, time)
+        session.observe(payload, signature, time) { time }
     }
     private fun identity(session: CommandRequestSession, key: java.security.PrivateKey = biometricKey.private) =
         AndroidCommandBiometrics(enrollment, session, key, biometricKey.public, limits) { time }
@@ -159,7 +159,7 @@ class AndroidCommandBiometricsTest {
         val request = request()
         val session = session(request); status(session, request)
         AndroidDecisionIdentity(enrollment, decisionKey.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { identity ->
-            val message = identity.declineSession(session, time, limits)
+            val message = identity.declineSession(session, { time }, limits)
             val payload = DecisionPayload.decode(message.body.copyBytes(), bound)
             assertEquals(decline, payload.action)
             assertEquals(SigningPurpose.CANCELLATION, message.purpose)
@@ -171,7 +171,7 @@ class AndroidCommandBiometricsTest {
             assertFalse(ApprovalSignature.verify(message.signature.copyBytes(), enrollment.biometricKey.publicKey.copyBytes(),
                 1u, message.type, message.purpose, message.body.copyBytes(), bound, bound))
             session.close()
-            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(session, time, limits) }
+            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(session, { time }, limits) }
         }
     }
 
@@ -183,8 +183,8 @@ class AndroidCommandBiometricsTest {
         val executeOnly = request(actions = listOf(execute))
         val session = session(executeOnly); status(session, executeOnly)
         AndroidDecisionIdentity(enrollment, decisionKey.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { identity ->
-            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(forged, time, limits) }
-            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(session, time, limits) }
+            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(forged, { time }, limits) }
+            assertFailsWith<DecisionIdentityUnavailable> { identity.declineSession(session, { time }, limits) }
         }
     }
 
@@ -192,12 +192,12 @@ class AndroidCommandBiometricsTest {
         val request = request(actions = listOf(decline))
         val session = session(request)
         val active = StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE)
-        assertFalse(commandActionAvailability(session, active, time).decline)
+        assertFalse(commandActionAvailability(session, active, { time }).decline)
         status(session, request)
-        assertTrue(commandActionAvailability(session, active, time).decline)
-        assertFalse(commandActionAvailability(session, active, time).execute)
-        assertFalse(commandActionAvailability(session, StoredPhoneEnrollment(enrollment, EnrollmentPhase.REMOVED), time).decline)
-        assertFalse(commandActionAvailability(session, active, ElapsedInstant(0, 60_000u)).decline)
+        assertTrue(commandActionAvailability(session, active, { time }).decline)
+        assertFalse(commandActionAvailability(session, active, { time }).execute)
+        assertFalse(commandActionAvailability(session, StoredPhoneEnrollment(enrollment, EnrollmentPhase.REMOVED), { time }).decline)
+        assertFalse(commandActionAvailability(session, active, { ElapsedInstant(0, 60_000u) }).decline)
     }
 
     @Test fun anotherEnrollmentCannotOwnTheDisplayedSession() {

@@ -60,7 +60,7 @@ class CombinedCommandInboxTest {
             val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
                 initSign(authority.private); update(SigningInput.make(1u, ApprovalMessageType.STATUS, SigningPurpose.STATUS, body, bounds, bounds)); sign()
             })
-            session.observe(body, signature, ElapsedInstant(0, 100u))
+            session.observe(body, signature, ElapsedInstant(0, 100u)) { ElapsedInstant(0, 100u) }
         }
         override fun close() = connection.close()
     }
@@ -217,7 +217,7 @@ class CombinedCommandInboxTest {
             nav.request(target);nav.synchronize(owners,rows,true)
             assertNull(nav.state.value.selected);assertNotNull(nav.state.value.pending)
             val updates=async(start=CoroutineStart.UNDISPATCHED) {
-                observeCommandInbox(owners).first { it.single().session.snapshot(now).status != null }
+                observeCommandInbox(owners).first { it.single().session.snapshot { now }.status != null }
             }
             peer.status(session);val authenticated=withTimeout(5000) { updates.await() }
             nav.synchronize(owners,authenticated,true);assertSame(session,assertNotNull(nav.state.value.selected).session)
