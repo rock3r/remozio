@@ -820,25 +820,38 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         let second = try Self.frame(9, signingKey: signingKey).0
         let firstStatus = try Self.status(first, signingKey: signingKey)
         let secondStatus = try Self.status(second, signingKey: signingKey)
+        let queryOnly = try Self.frame(10, signingKey: signingKey).0
+        let queryStatus = try Self.status(queryOnly, phase: .expired, signingKey: signingKey)
         let (service, _, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): first, Self.id(9): second],
-            exchangeSupported: true, statuses: [Self.id(8): firstStatus, Self.id(9): secondStatus], refreshMilliseconds: 250)
+            exchangeSupported: true, statuses: [Self.id(8): firstStatus, Self.id(9): secondStatus, Self.id(10): queryStatus],
+            refreshMilliseconds: 250)
         let requests = [try Self.capability(features: [RequestDeliveryResult.capability])]
         let phone = try Phone(scope: peer.scope, requests: requests, persistent: true)
         let channel = try await deliveryResultChannel(phone, peer: peer, enabled: true)
         let loop = Task { try await factory.run(peer, channel) }
-        await wait(phone, 2)
+        defer { loop.cancel(); channel.close() }
+        await fulfillment(of: [phone.expectPayload(firstStatus)], timeout: 3)
         try await phone.submit(Self.deliveryResult(first, requestDigest: Self.id(88, 32)))
         try await phone.submit(Self.deliveryResult(second))
-        try await phone.submit(RequestStatusQuery(requestID: Self.id(8)).encode())
-        await wait(phone, 3)
+        // Only the explicit query can produce this reply. It follows both results on the incoming stream.
+        try await phone.submit(RequestStatusQuery(requestID: Self.id(10)).encode())
+        await fulfillment(of: [phone.expectPayload(queryStatus)], timeout: 3)
         let beforeRefresh = await phone.payloads.count
         driver.setPending([Self.id(8), Self.id(9)])
-        await fulfillment(of: [phone.expectPayload(second)], timeout: 3)
+        await fulfillment(of: [phone.expectPayload(secondStatus)], timeout: 3)
         let output = await phone.payloads
         XCTAssertTrue(output.dropFirst(beforeRefresh).contains(first))
         XCTAssertTrue(output.dropFirst(beforeRefresh).contains(second))
+        XCTAssertTrue(output.dropFirst(beforeRefresh).contains(secondStatus))
         XCTAssertTrue(driver.exchangeQueries.allSatisfy { $0.decisionFrame == nil })
-        await phone.close(); try await loop.value; await service.close()
+        _ = try await channel.negotiated()
+        // The refresh loop can still be writing when the test ends. Cancel it as the session owner.
+        loop.cancel()
+        let termination = await loop.result
+        await service.close()
+        do { try termination.get() }
+        catch is CancellationError { }
+        catch ApprovalChannelError.closed { }
     }
 
     func testDeliveryResultRequiresMatchingLiveCapabilities() async throws {
