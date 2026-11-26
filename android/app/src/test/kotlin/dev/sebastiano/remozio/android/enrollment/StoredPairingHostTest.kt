@@ -1018,6 +1018,106 @@ class StoredPairingHostTest {
         assertFails { host().activate(e.recordID, receipt(t)) }
         open().use { assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single().phase) }
     }
+    @Test fun discardingAnOrdinaryPreparedSetupAllowsPairingTheSameMacAgain() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val other = record(2, mac = 22)
+        activatePredecessor(h, other)
+        val stuck = record(1)
+        val t = transcript(stuck)
+        val saved = h.prepare(stuck, t, 2u, 1u)
+        val stuckKeys = listOf(stuck.transportKey, stuck.decisionKey, stuck.biometricKey)
+        val otherKeys = listOf(other.transportKey, other.decisionKey, other.biometricKey)
+        keys.allocate(stuckKeys + otherKeys)
+        keys.beforeRetire = {
+            assertTrue(mutex.isLocked)
+            open().use {
+                val savedRow = it.snapshot().entries.single { entry -> entry.enrollment.recordID == stuck.recordID }
+                assertEquals(EnrollmentPhase.REMOVED, savedRow.phase)
+            }
+        }
+        val row = storedMacs(saved).macs.single { it.recordID == stuck.recordID }
+        assertTrue(row.setupIncomplete)
+        assertFalse(row.rePair)
+        val invitation = envelope(stuck).invitation.exportText()
+        val stoppedAtAllocation = IllegalStateException("Stop before generating a hardware key")
+        var allocations = 0
+        val parent = CoroutineScope(checkNotNull(currentCoroutineContext()[Job]))
+        fun attempt() = AndroidPairingAttempt(parent, h, { error("Unexpected Android context access") }) { _, _ ->
+            allocations++
+            throw stoppedAtAllocation
+        }
+        val blocked = attempt()
+        try {
+            assertFailsWith<IllegalArgumentException> { blocked.connect(invitation) }
+            assertEquals(0, allocations)
+        } finally { blocked.closeAndJoin() }
+
+        invalidated.clear()
+        assertFailsWith<IllegalArgumentException> { h.discardOrdinarySetup(row.recordID, row.revision - 1u) }
+        val recovering = h.recoverable(row.recordID)
+        try {
+            assertFailsWith<PairingRecoveryInProgress> { h.discardOrdinarySetup(row.recordID, row.revision) }
+            assertTrue(recovering.lease.isCurrent())
+            assertTrue(keys.retirementAttempts.isEmpty())
+        } finally { h.release(row.recordID, recovering.lease) }
+
+        val discarded = h.discardOrdinarySetup(row.recordID, row.revision)
+        assertEquals(listOf(setOf(stuck.recordID)), invalidated)
+        assertEquals(stuckKeys.map { it.alias }, keys.retired)
+        assertEquals(otherKeys.map { it.alias }.toSet(), keys.allocated)
+        assertEquals(listOf(other.recordID), storedMacs(discarded).macs.map { it.recordID })
+        assertFails { h.activate(stuck.recordID, receipt(t)) }
+
+        val fresh = attempt()
+        try {
+            val failure = assertFailsWith<IllegalStateException> { fresh.connect(invitation) }
+            assertEquals(stoppedAtAllocation.message, failure.message)
+            assertEquals(1, allocations)
+        } finally { fresh.closeAndJoin() }
+        open().use {
+            assertEquals(EnrollmentPhase.ACTIVE, it.snapshot().entries.single { row -> row.enrollment.recordID == other.recordID }.phase)
+            assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single { row -> row.enrollment.recordID == stuck.recordID }.phase)
+        }
+    }
+
+    @Test fun ordinarySetupDiscardPreservesKeysSharedWithTheActivePredecessor() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val active = record(1)
+        activatePredecessor(h, active)
+        val next = record(2)
+        val replacement = PhoneEnrollment(next.recordID.copyBytes(), next.macID.copyBytes(), next.accountID.copyBytes(),
+            next.phoneID.copyBytes(), next.epoch.copyBytes(), next.label, next.authorityPublicKey.copyBytes(),
+            next.transportPublicKey.copyBytes(), next.transportKey, active.decisionKey, next.biometricKey,
+            next.enrollmentTag.copyBytes(), null)
+        val snapshot = h.prepare(replacement, transcript(replacement, active), 2u, 1u, active.recordID)
+        keys.allocate(listOf(active.transportKey, active.decisionKey, active.biometricKey, next.transportKey, next.biometricKey))
+
+        assertFailsWith<IllegalArgumentException> { h.discardOrdinarySetup(active.recordID, snapshot.revision) }
+        val discarded = h.discardOrdinarySetup(replacement.recordID, snapshot.revision)
+        assertEquals(active.recordID, discarded.entries.single { it.phase == EnrollmentPhase.ACTIVE }.enrollment.recordID)
+        assertEquals(listOf(next.transportKey.alias, next.biometricKey.alias), keys.retirementAttempts)
+        assertEquals(setOf(active.transportKey.alias, active.decisionKey.alias, active.biometricKey.alias), keys.allocated)
+    }
+
+    @Test fun failedOrdinarySetupKeyRetirementDoesNotUndoTheDiscard(): Unit = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val stuck = record(1)
+        val t = transcript(stuck)
+        val prepared = h.prepare(stuck, t, 0u, 1u)
+        keys.allocate(listOf(stuck.transportKey, stuck.decisionKey, stuck.biometricKey))
+        keys.beforeRetire = { error("Synthetic native cleanup failure") }
+
+        val removed = h.discardOrdinarySetup(stuck.recordID, prepared.revision)
+        assertEquals(listOf(stuck.transportKey.alias), keys.retirementAttempts)
+        assertEquals(EnrollmentPhase.REMOVED, removed.entries.single().phase)
+        assertTrue(storedMacs(removed).macs.isEmpty())
+        open().use { assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single().phase) }
+        assertFails { h.activate(stuck.recordID, receipt(t)) }
+    }
+
     @Test fun preparedLeaseRetiresBeforeRemovalAndCannotLoadAnAlteredTranscript() = runBlocking<Unit> {
         val h = host(); val e = record(1); val t = transcript(e)
         h.prepare(e, t, 0u, 1u)

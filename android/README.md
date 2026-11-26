@@ -310,7 +310,9 @@ The app requests local network permission only after the explicit action.
 Denial skips local area network (LAN) discovery but still permits a retained relay route.
 
 A failed check reports that setup remains incomplete. It never claims that the Mac did not commit.
-Explicit re-enrollment remains unimplemented. The [receipt recovery contract](../protocol/pairing-receipt.md) defines recovery behavior.
+For an incomplete ordinary setup, **Discard saved setup** removes the selected record from this phone's active inventory.
+After discarding it, start ordinary pairing with a new invitation. If the Mac already completed the old setup, revoke that phone entry in **Paired phones** on the Mac.
+The [receipt recovery contract](../protocol/pairing-receipt.md) defines how to recover a pairing that the Mac completed.
 Native Pixel permission, key custody, and lifecycle behavior still need interactive checks.
 
 ### Pairing previews
