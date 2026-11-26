@@ -61,7 +61,7 @@ internal fun PairingSetupSheet(model: PairingViewModel, activity: ComponentActiv
         }
     }
     PairingSetupSurface(state, model::connect, model::confirmComparison, model::expire, model::close,
-        inspectRePair = model::inspectRePair, onConnectV2 = { model.connectV2(it, requiresDecisionProof = !testV2) },
+        inspectRePair = model::inspectRePair, onConnectV2 = { model.connectV2(it, offerDecisionProof = !testV2) },
         inspectRePairV2 = model::inspectRePairV2, legacyInputEnabled = !testV2)
 }
 

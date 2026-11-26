@@ -51,20 +51,18 @@ private suspend fun <T> rejectBeforeTLS(carrier: EncryptedRecordTransport, invit
 // Releases whatever it created if it throws, because the caller never receives the stream.
 private suspend fun openPairingTLS(scope: CoroutineScope, carrier: EncryptedRecordTransport, localKeys: Array<KeyManager>,
     invitation: PairingInvitation, provider: PairingV2TLSProvider? = null,
-    requiresDecisionProof: Boolean = false,
+    offerDecisionProof: Boolean = false,
 ): PairingByteStream {
     var engine: PinnedTLSClient? = null
     var session: TLSRecordSession? = null
     try {
         val pin = P256_SPKI_PREFIX + invitation.transportPublicKey.copyBytes()
         val tls = if (provider == null) PinnedTLSClient(localKeys, pin, PairingSetupFrame.APPLICATION_PROTOCOL, 1_048_576)
-            else PinnedTLSClient.forPairingV2(localKeys, pin, provider, requiresDecisionProof)
+            else PinnedTLSClient.forPairingV2(localKeys, pin, provider, offerDecisionProof)
         engine = tls
         session = TLSRecordSession(scope, tls, carrier)
-        val decisionProof = requiresDecisionProof
         return if (provider == null) PairingTLSStream(session) else object : PairingTLSStream(session), PairingV2ByteStream {
-            // awaitOpen has already checked the single permitted ALPN when the channel reads this flag.
-            override val requiresDecisionProof = decisionProof
+            override val requiresDecisionProof: Boolean get() = tls.pairingV2RequiresDecisionProof()
             override fun pairingExporter() = tls.pairingExporter()
         }
     } catch (failure: Throwable) {
@@ -93,7 +91,7 @@ suspend fun authenticatePairingRoutes(parent: CoroutineScope, direct: Flow<Appro
 /** Authenticate candidate routes without sending a proof. Only the selected channel may send it. */
 suspend fun authenticatePairingV2Routes(parent: CoroutineScope, direct: Flow<ApprovalCarrierRoute>,
     localKeys: Array<KeyManager>, invitation: PairingInvitationV2, proposal: PairingPhoneProposal, timeoutMillis: Long,
-    provider: PairingV2TLSProvider, requiresDecisionProof: Boolean = false,
+    provider: PairingV2TLSProvider, offerDecisionProof: Boolean = false,
 ): PairingSetupChannel {
     val publicInvitation = invitation.invitation
     proposal.validateMacScope(publicInvitation)
@@ -105,7 +103,7 @@ suspend fun authenticatePairingV2Routes(parent: CoroutineScope, direct: Flow<App
             currentCoroutineContext().ensureActive()
             // Route selection times out separately from the human setup session.
             PairingSetupChannel.authenticate(parent, publicInvitation, proposal) { scope ->
-                openPairingTLS(scope, carrier, localKeys, publicInvitation, provider, requiresDecisionProof)
+                openPairingTLS(scope, carrier, localKeys, publicInvitation, provider, offerDecisionProof)
             }
         } catch (failure: Throwable) {
             withContext(NonCancellable) { carrier.close(); carrier.awaitClosed() }

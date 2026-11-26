@@ -1,6 +1,8 @@
 package dev.remozio.phone.transport
 
 import dev.remozio.protocol.CborValue
+import dev.remozio.protocol.PairingRecoveryFrame
+import dev.remozio.protocol.PairingSetupPreludeV2
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -34,12 +36,12 @@ class TLSClientProgress internal constructor(
  */
 class PinnedTLSClient private constructor(
     localKeys: Array<KeyManager>, peerSubjectPublicKeyInfo: ByteArray,
-    private val applicationProtocol: String, private val maximumHandshakeBytes: Int,
+    private val offeredProtocols: List<String>, private val maximumHandshakeBytes: Int,
     private val exporterProvider: PairingTLSExporter?,
 ) : AutoCloseable {
     constructor(localKeys: Array<KeyManager>, peerSubjectPublicKeyInfo: ByteArray, applicationProtocol: String,
         maximumHandshakeBytes: Int,
-    ) : this(localKeys, peerSubjectPublicKeyInfo, applicationProtocol, maximumHandshakeBytes, null)
+    ) : this(localKeys, peerSubjectPublicKeyInfo, listOf(applicationProtocol), maximumHandshakeBytes, null)
 
     private var engine: SSLEngine?
     private val incoming = ByteBuffer.allocate(BUFFER_BYTES)
@@ -51,7 +53,9 @@ class PinnedTLSClient private constructor(
 
     init {
         require(localKeys.size == 1 && localKeys[0] is X509KeyManager) { "One enrollment key manager required" }
-        require(applicationProtocol.length in 1..255 && applicationProtocol.all { it.code in 0x21..0x7e })
+        require(offeredProtocols.isNotEmpty() && offeredProtocols.all { protocol ->
+            protocol.length in 1..255 && protocol.all { it.code in 0x21..0x7e }
+        })
         require(maximumHandshakeBytes in 1..1_048_576)
         val pin = p256TransportPin(peerSubjectPublicKeyInfo)
         val trust = object : X509TrustManager {
@@ -68,7 +72,7 @@ class PinnedTLSClient private constructor(
         engine = context.createSSLEngine().apply {
             useClientMode = true
             enabledProtocols = arrayOf("TLSv1.3")
-            sslParameters = sslParameters.apply { applicationProtocols = arrayOf(this@PinnedTLSClient.applicationProtocol) }
+            sslParameters = sslParameters.apply { applicationProtocols = offeredProtocols.toTypedArray() }
             exporterProvider?.configure(this)
         }
     }
@@ -78,6 +82,15 @@ class PinnedTLSClient private constructor(
         val bytes = checkNotNull(exporterProvider).export(checkNotNull(engine))
         if (bytes == null || bytes.size != 32) throw SSLException("Pairing exporter unavailable")
         return bytes
+    }
+
+    @Synchronized internal fun pairingV2RequiresDecisionProof(): Boolean {
+        check(currentState == TLSClientState.OPEN && authenticated)
+        return when (checkNotNull(engine).applicationProtocol) {
+            PairingSetupPreludeV2.APPLICATION_PROTOCOL -> false
+            PairingSetupPreludeV2.DECISION_PROOF_APPLICATION_PROTOCOL -> true
+            else -> error("Not a pairing v2 profile")
+        }
     }
 
     @Synchronized fun state(): TLSClientState = currentState
@@ -180,7 +193,7 @@ class PinnedTLSClient private constructor(
     }
 
     private fun authenticate(tls: SSLEngine) {
-        if (tls.session.protocol != "TLSv1.3" || tls.applicationProtocol != applicationProtocol || tls.session.localCertificates.isNullOrEmpty()) {
+        if (tls.session.protocol != "TLSv1.3" || tls.applicationProtocol !in offeredProtocols || tls.session.localCertificates.isNullOrEmpty()) {
             throw SSLException("TLS profile mismatch")
         }
         authenticated = true
@@ -214,15 +227,18 @@ class PinnedTLSClient private constructor(
         private const val MAX_CHUNK_BYTES = 32_768
 
         internal fun forPairingV2(keys: Array<KeyManager>, pin: ByteArray, provider: PairingV2TLSProvider,
-            requiresDecisionProof: Boolean = false,
+            offerDecisionProof: Boolean,
         ): PinnedTLSClient {
-            val protocol = if (requiresDecisionProof) dev.remozio.protocol.PairingSetupPreludeV2.DECISION_PROOF_APPLICATION_PROTOCOL
-                else dev.remozio.protocol.PairingSetupPreludeV2.APPLICATION_PROTOCOL
-            return PinnedTLSClient(keys, pin, protocol, 1_048_576, provider)
+            val protocols = if (offerDecisionProof) {
+                listOf(PairingSetupPreludeV2.DECISION_PROOF_APPLICATION_PROTOCOL, PairingSetupPreludeV2.APPLICATION_PROTOCOL)
+            } else {
+                listOf(PairingSetupPreludeV2.APPLICATION_PROTOCOL)
+            }
+            return PinnedTLSClient(keys, pin, protocols, 1_048_576, provider)
         }
 
         internal fun forPairingRecovery(keys: Array<KeyManager>, pin: ByteArray,
             provider: PairingRecoveryTLSProvider,
-        ) = PinnedTLSClient(keys, pin, dev.remozio.protocol.PairingRecoveryFrame.APPLICATION_PROTOCOL, 1_048_576, provider)
+        ) = PinnedTLSClient(keys, pin, listOf(PairingRecoveryFrame.APPLICATION_PROTOCOL), 1_048_576, provider)
     }
 }

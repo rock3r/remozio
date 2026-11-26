@@ -70,14 +70,14 @@ internal class AndroidPairingAttempt(
         return connect(rePair?.invitation ?: PairingInvitation.importText(imported), rePair, null, recoveryRecordID)
     }
 
-    suspend fun connectV2(invitation: PairingInvitationV2, requiresDecisionProof: Boolean,
+    suspend fun connectV2(invitation: PairingInvitationV2, offerDecisionProof: Boolean,
         recoveryRecordID: CborValue.Bytes? = null): PairingTranscript = connect(
         invitation.invitation, invitation.replacement?.let { RePairInvitation(invitation.invitation, it) },
-        invitation, recoveryRecordID, requiresDecisionProof,
+        invitation, recoveryRecordID, offerDecisionProof,
     )
 
     private suspend fun connect(selected: PairingInvitation, rePair: RePairInvitation?,
-        v2: PairingInvitationV2?, recoveryRecordID: CborValue.Bytes?, requiresDecisionProof: Boolean = false,
+        v2: PairingInvitationV2?, recoveryRecordID: CborValue.Bytes?, offerDecisionProof: Boolean = false,
     ): PairingTranscript = operation {
         check(invitation == null)
         require(recoveryRecordID == null || rePair != null)
@@ -133,7 +133,7 @@ internal class AndroidPairingAttempt(
         val timeout = LocalNetworkSettings(application()).timeoutSeconds() * 1000L
         val opened = if (v2 == null) authenticatePairingRoutes(scope, routes, keys, selected, proposal, timeout)
             else authenticatePairingV2Routes(scope, routes, keys, v2, proposal, timeout, AndroidInvitationExporter,
-                requiresDecisionProof = requiresDecisionProof)
+                offerDecisionProof = offerDecisionProof)
         channel = opened; active()
         val prepareProposal: suspend () -> Unit = {
             rePairRecordID?.let { store.prepareRePairProposal(it, RePairProposalMaterial(proposal, ownedKeys)) }
