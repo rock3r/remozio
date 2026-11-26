@@ -6738,7 +6738,9 @@ extension MachCommandCallerReceiverTests {
             submissionDigest: admission.submissionDigest, request: admitted)
         _ = try ownerDecision(request, fixture: fixture, decline: false)
         try beginDispatch(fixture, request: request, launcher: launcher)
-        let receive = try receiver(terminal, maximum: 8192), bytes = Data((0..<131072).map { UInt8($0 % 251) })
+        // 64 KiB of input is twice the 32 KiB credit window, so the one-slot queue must refuse sends; 32 KiB of output
+        // is 32 times the 1 KiB raw PTY buffer. The CI measurement for #1020 recorded both kinds of backpressure at these sizes.
+        let receive = try receiver(terminal, maximum: 8192), bytes = Data((0..<65536).map { UInt8($0 % 251) })
         var control: MachCommandAuthorityPort?, available = 0, sent = 0, outgoing: UInt64 = 0
         var incoming = CommandStreamReceiveSequence(direction: .toFrontend)
         var output = Data(), ended = false, inputEndSent = false, queueTimeouts = 0
@@ -6806,7 +6808,7 @@ extension MachCommandCallerReceiverTests {
             throw error
         }
         XCTAssertEqual(sent, bytes.count); XCTAssertTrue(inputEndSent); XCTAssertGreaterThan(queueTimeouts, 0)
-        let expected = bytes + Data((0..<262144).map { UInt8(($0 * 17 + 3) % 251) })
+        let expected = bytes + Data((0..<32768).map { UInt8(($0 * 17 + 3) % 251) })
         XCTAssertEqual(output, expected)
         let acknowledgment = try CommandStreamFrame(sequence: outgoing, body: .outputDrained).encode(binding: binding)
         try Self.waitQueued { try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true) }
@@ -9243,6 +9245,18 @@ extension MachCommandCallerReceiverTests {
         XCTAssertFalse(worker.isRetired)
         XCTAssertGreaterThanOrEqual(fcntl(input, F_GETFD), 0)
         XCTAssertGreaterThanOrEqual(fcntl(output, F_GETFD), 0)
+        failures.withLock { $0 = false }
+        let nextReply = try Endpoint(), nextResult = try Endpoint()
+        let next = try submit(id: 0xd0, reply: nextReply, result: nextResult)
+        try await waitForReceiveWorker { outcomes.withLock { $0 == 2 } }
+        guard case .admitted = try typedOutcome(nextReply, submission: next, profile: profile) else {
+            await worker.close()
+            return XCTFail("The new request was not admitted after output descriptor pressure")
+        }
+        XCTAssertNotNil(try fixture.reservation(next.binding.id))
+        XCTAssertNotNil(try fixture.reservation(original.binding.id))
+        XCTAssertEqual(worker.status, .running)
+        XCTAssertEqual(waits.withLock { $0.count }, 12)
         await worker.close()
     }
 
