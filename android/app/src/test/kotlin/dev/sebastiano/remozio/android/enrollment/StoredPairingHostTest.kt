@@ -115,10 +115,11 @@ class StoredPairingHostTest {
     private class RePairKeys : RePairKeyCleanup {
         val allocated = mutableSetOf<String>()
         val publicKeys = mutableMapOf<String, CborValue.Bytes>()
+        val leafArtifacts = mutableSetOf<String>()
         val retired = mutableListOf<String>()
         val retirementAttempts = mutableListOf<String>()
         var beforeRetire: () -> Unit = {}
-        override fun contains(alias: String) = alias in allocated
+        override fun contains(alias: String) = alias in allocated || alias in leafArtifacts
 
         fun allocate(keys: List<EnrollmentKeyReference>) {
             for (key in keys) {
@@ -130,11 +131,12 @@ class StoredPairingHostTest {
         override fun retire(alias: String, expectedPublicKey: CborValue.Bytes?) {
             retirementAttempts.add(alias)
             beforeRetire()
-            if (expectedPublicKey != null && publicKeys[alias] != expectedPublicKey) return
+            if (alias in allocated && expectedPublicKey != null && publicKeys[alias] != expectedPublicKey) return
             if (allocated.remove(alias)) {
                 publicKeys.remove(alias)
                 retired.add(alias)
             }
+            leafArtifacts.remove(alias)
         }
     }
 
@@ -732,6 +734,8 @@ class StoredPairingHostTest {
             basis.transportPublicKey.copyBytes(), shared, basis.decisionKey, basis.biometricKey, basis.enrollmentTag.copyBytes(), null)
         val before = open().use { it.snapshot().revision }
         host.remove(old.recordID, before)
+        val retiredOnRemoval = keys.retired.toList()
+        assertEquals(aliases(old), retiredOnRemoval.toSet())
         host.prepare(retained, transcript(retained), before + 1u, 1u)
         val changedAlias = row.enrollment.biometricKey.alias
         keys.publicKeys[changedAlias] = CborValue.Bytes(key().public.encoded.takeLast(65).toByteArray())
@@ -743,7 +747,7 @@ class StoredPairingHostTest {
         assertFalse(shared.alias in keys.retirementAttempts)
         assertTrue(changedAlias in keys.allocated)
         assertTrue(changedAlias in keys.retirementAttempts)
-        assertEquals(listOf(row.enrollment.decisionKey.alias), keys.retired)
+        assertEquals(retiredOnRemoval + row.enrollment.decisionKey.alias, keys.retired)
     }
 
     @Test fun archiveRejectsAReservationThatAliasesARetiredCandidateKey() = runBlocking<Unit> {
@@ -1286,6 +1290,85 @@ class StoredPairingHostTest {
         assertFails { h.remove(e.recordID, active.revision) }; assertEquals(1, changes)
         storage.fail = false
         open().use { assertEquals(EnrollmentPhase.ACTIVE, it.snapshot().entries.single().phase) }
+    }
+
+    @Test fun activeRemovalCommitsBeforeRetiringItsExactKeysAndLeaf() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val e = record(1)
+        activatePredecessor(h, e)
+        val owned = listOf(e.transportKey, e.decisionKey, e.biometricKey)
+        keys.allocate(owned)
+        keys.leafArtifacts.add(e.transportKey.alias)
+        keys.beforeRetire = {
+            assertTrue(mutex.isLocked)
+            assertEquals(listOf(setOf(e.recordID)), invalidated)
+            open().use { assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single().phase) }
+        }
+        invalidated.clear()
+
+        val removed = h.remove(e.recordID, 2u)
+        assertEquals(EnrollmentPhase.REMOVED, removed.entries.single().phase)
+        assertEquals(owned.map { it.alias }, keys.retired)
+        assertTrue(keys.leafArtifacts.isEmpty())
+        assertEquals(e.recordID, h.inspectRePair(envelope(e)).enrollment.recordID)
+    }
+
+    @Test fun startupResumesCleanupAfterRemovalAndDoesNotRepeatCompletedWork() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val e = record(1)
+        activatePredecessor(h, e)
+        val owned = listOf(e.transportKey, e.decisionKey, e.biometricKey)
+        keys.allocate(owned)
+        keys.leafArtifacts.add(e.transportKey.alias)
+        keys.beforeRetire = { error("Synthetic interruption after removal commits") }
+        val removed = h.remove(e.recordID, 2u)
+        assertEquals(EnrollmentPhase.REMOVED, removed.entries.single().phase)
+        assertEquals(owned.map { it.alias }.toSet(), keys.allocated)
+        val writes = storage.replacements
+        val archived = checkNotNull(storage.bytes).copyOf()
+
+        // Model interruption after native transport-key deletion but before its leaf callback.
+        assertTrue(keys.allocated.remove(e.transportKey.alias))
+        keys.beforeRetire = {}
+        keys.retirementAttempts.clear()
+        val reopened = rePairHost(keys)
+        reopened.reconcileRePairOnStartup()
+        assertEquals(owned.map { it.alias }, keys.retirementAttempts)
+        assertTrue(keys.allocated.isEmpty())
+        assertTrue(keys.leafArtifacts.isEmpty())
+        assertEquals(writes, storage.replacements)
+        assertContentEquals(archived, storage.bytes)
+        reopened.reconcileRePairOnStartup()
+        assertEquals(owned.map { it.alias }, keys.retirementAttempts)
+    }
+
+    @Test fun startupSweepKeepsLiveReservationAndRejectsAnAliasCollisionWithRemovedKeys() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val active = record(1)
+        activatePredecessor(h, active)
+        val retired = record(2, mac = 22)
+        val transcript = transcript(retired)
+        h.prepare(retired, transcript, 2u, 1u)
+        val second = h.activate(retired.recordID, receipt(transcript))
+        open().use { it.remove(retired.recordID.copyBytes(), second.revision) }
+
+        val keyIDs = List(3) { CborValue.Bytes(id(92 + it)) }
+        val collision = listOf(retired.transportKey.keyID, keyIDs[1], keyIDs[2])
+        assertFailsWith<IllegalArgumentException> {
+            h.reserveRePair(envelope(active), id(30), id(60), collision)
+        }
+        val reservation = h.reserveRePair(envelope(active), id(30), id(60), keyIDs)
+        val (material, _) = proposalFor(reservation)
+        h.prepareRePairProposal(reservation.recordID, material)
+        keys.allocate(material.keys + listOf(retired.transportKey, retired.decisionKey, retired.biometricKey))
+
+        h.reconcileRePairOnStartup()
+        assertEquals(aliases(retired), keys.retirementAttempts.toSet())
+        assertEquals(material.keys.map { it.alias }.toSet(), keys.allocated)
+        open().use { assertEquals(reservation.recordID, it.snapshot().rePairReservations.single().recordID) }
     }
 
     @Test fun schedulingFailureCannotUndoACommittedPairingOrRemoval() = runBlocking<Unit> {

@@ -177,7 +177,10 @@ class RemozioApplication : Application() {
                     finally { retireEnrollmentConnectionsLocked(ids) }
                 }
             }, { validatePairingKeys(this, it) },
-            rePairKeys = AndroidRePairKeyCleanup { AndroidTransportLeaves.retire(this, it) },
+            rePairKeys = AndroidRePairKeyCleanup(
+                hasRetainedLeaf = { AndroidTransportLeaves.hasArtifacts(this, it) },
+                onRetired = { AndroidTransportLeaves.retire(this, it) },
+            ),
             onChanged = {
                 foregroundCommands.refresh()
                 foregroundRouting.refresh()
