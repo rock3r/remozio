@@ -131,7 +131,12 @@ internal class StoredPairingHost(
 
     suspend fun reconcileRePairOnStartup() = withContext(dispatcher) {
         enrollmentAccess.withLock {
-            bestEffortEnrollmentCleanup { openExisting()?.use { reconcileRePairLocked(it) } }
+            bestEffortEnrollmentCleanup {
+                openExisting()?.use { store ->
+                    bestEffortEnrollmentCleanup { reconcileRePairLocked(store, cleanRemoved = false) }
+                    sweepRemovedKeysLocked(store.snapshot())
+                }
+            }
         }
     }
 
@@ -145,7 +150,7 @@ internal class StoredPairingHost(
         }
     }
 
-    private fun reconcileRePairLocked(store: EncryptedEnrollmentStore) {
+    private fun reconcileRePairLocked(store: EncryptedEnrollmentStore, cleanRemoved: Boolean = true) {
         val initial = store.snapshot()
         val reservations = initial.rePairReservations.filter { it.recordID !in liveRePairs }
         for (reservation in reservations) {
@@ -162,6 +167,7 @@ internal class StoredPairingHost(
             retireUnreferenced(initial, row)
             store.abandonRePair(row.enrollment.recordID, store.snapshot().revision)
         }
+        if (!cleanRemoved) return
         for (row in initial.entries.filter {
             it.phase == EnrollmentPhase.REMOVED && (it.successorRecordID != null || it.rePair != null) &&
                 it.enrollment.recordID !in liveRePairs && preparedLeases[it.enrollment.recordID].isNullOrEmpty()
@@ -170,14 +176,42 @@ internal class StoredPairingHost(
         }
     }
 
+    private fun sweepRemovedKeysLocked(snapshot: EnrollmentSnapshot) {
+        val protected = protectedAliases(snapshot)
+        val visited = mutableSetOf<String>()
+        for (row in snapshot.entries) {
+            if (row.phase != EnrollmentPhase.REMOVED) continue
+            for (key in references(row.enrollment)) {
+                if (key.alias in protected || !visited.add(key.alias)) continue
+                bestEffortEnrollmentCleanup {
+                    if (rePairKeys.contains(key.alias)) rePairKeys.retire(key.alias, key.publicKey)
+                }
+            }
+        }
+    }
+
+    private fun protectedAliases(
+        snapshot: EnrollmentSnapshot, ignored: StoredPhoneEnrollment? = null,
+    ): Set<String> {
+        val protected = mutableSetOf<String>()
+        for (row in snapshot.entries) {
+            val id = row.enrollment.recordID
+            if ((row !== ignored && row.phase != EnrollmentPhase.REMOVED) ||
+                id in liveRePairs || !preparedLeases[id].isNullOrEmpty()
+            ) {
+                references(row.enrollment).mapTo(protected) { it.alias }
+            }
+        }
+        for (reservation in snapshot.rePairReservations) {
+            EnrollmentKeyRole.entries.mapTo(protected) { reservation.alias(it) }
+        }
+        return protected
+    }
+
     private fun retireUnreferenced(
         snapshot: EnrollmentSnapshot, row: StoredPhoneEnrollment, retireMissingAliases: Boolean = false,
     ) {
-        val retained = snapshot.entries.filter { it !== row && it.phase != EnrollmentPhase.REMOVED }
-            .flatMap { references(it.enrollment) }.mapTo(mutableSetOf()) { it.alias }
-        for (reservation in snapshot.rePairReservations) {
-            EnrollmentKeyRole.entries.mapTo(retained) { reservation.alias(it) }
-        }
+        val retained = protectedAliases(snapshot, ignored = row)
         for (key in references(row.enrollment)) {
             if (key.alias !in retained && (retireMissingAliases || rePairKeys.contains(key.alias))) {
                 rePairKeys.retire(key.alias, key.publicKey)
@@ -441,7 +475,11 @@ internal class StoredPairingHost(
                 }
                 invalidatePreparedLocked(setOf(recordID))
                 invalidateLocked(setOf(recordID))
-                store.remove(recordID.copyBytes(), expectedRevision)
+                val removed = store.remove(recordID.copyBytes(), expectedRevision)
+                if (row.phase == EnrollmentPhase.ACTIVE) {
+                    bestEffortEnrollmentCleanup { retireUnreferenced(removed, row) }
+                }
+                removed
             }
         }
     }.also { notifyChange() }
@@ -469,10 +507,13 @@ internal interface RePairKeyCleanup {
     fun retire(alias: String, expectedPublicKey: CborValue.Bytes?)
 }
 
-internal class AndroidRePairKeyCleanup(private val onRetired: (String) -> Unit = {}) : RePairKeyCleanup {
+internal class AndroidRePairKeyCleanup(
+    private val hasRetainedLeaf: (String) -> Boolean = { false },
+    private val onRetired: (String) -> Unit = {},
+) : RePairKeyCleanup {
     private fun keyStore() = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
-    override fun contains(alias: String): Boolean = keyStore().containsAlias(alias)
+    override fun contains(alias: String): Boolean = keyStore().containsAlias(alias) || hasRetainedLeaf(alias)
 
     override fun retire(alias: String, expectedPublicKey: CborValue.Bytes?) {
         val store = keyStore()
