@@ -125,23 +125,23 @@ internal class StoredPairingHost(
             val leases = preparedLeases[recordID]
             leases?.removeAll { !it.isCurrent() }
             if (leases.isNullOrEmpty()) preparedLeases.remove(recordID)
-            reconcileRePairBestEffort { checkNotNull(openExisting()).use { reconcileRePairLocked(it) } }
+            bestEffortEnrollmentCleanup { checkNotNull(openExisting()).use { reconcileRePairLocked(it) } }
         }
     }.also { notifyChange() }
 
     suspend fun reconcileRePairOnStartup() = withContext(dispatcher) {
         enrollmentAccess.withLock {
-            reconcileRePairBestEffort { openExisting()?.use { reconcileRePairLocked(it) } }
+            bestEffortEnrollmentCleanup { openExisting()?.use { reconcileRePairLocked(it) } }
         }
     }
 
-    private inline fun reconcileRePairBestEffort(cleanup: () -> Unit) {
+    private inline fun bestEffortEnrollmentCleanup(cleanup: () -> Unit) {
         try {
             cleanup()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            // Retain the archive evidence so startup or setup can retry incomplete cleanup.
+            // A cleanup failure cannot undo a committed enrollment change.
         }
     }
 
@@ -170,14 +170,16 @@ internal class StoredPairingHost(
         }
     }
 
-    private fun retireUnreferenced(snapshot: EnrollmentSnapshot, row: StoredPhoneEnrollment) {
+    private fun retireUnreferenced(
+        snapshot: EnrollmentSnapshot, row: StoredPhoneEnrollment, retireMissingAliases: Boolean = false,
+    ) {
         val retained = snapshot.entries.filter { it !== row && it.phase != EnrollmentPhase.REMOVED }
             .flatMap { references(it.enrollment) }.mapTo(mutableSetOf()) { it.alias }
         for (reservation in snapshot.rePairReservations) {
             EnrollmentKeyRole.entries.mapTo(retained) { reservation.alias(it) }
         }
         for (key in references(row.enrollment)) {
-            if (key.alias !in retained && rePairKeys.contains(key.alias)) {
+            if (key.alias !in retained && (retireMissingAliases || rePairKeys.contains(key.alias))) {
                 rePairKeys.retire(key.alias, key.publicKey)
             }
         }
@@ -289,7 +291,7 @@ internal class StoredPairingHost(
                 val removed = next.entries.single { it.enrollment.recordID == recordID }
                 invalidatePreparedLocked(setOf(recordID))
                 invalidateLocked(setOf(recordID))
-                reconcileRePairBestEffort { retireUnreferenced(next, removed) }
+                bestEffortEnrollmentCleanup { retireUnreferenced(next, removed) }
             }
         }
     }.also { notifyChange() }
@@ -347,7 +349,7 @@ internal class StoredPairingHost(
                 }.map { it.enrollment.recordID }.toSet()
                 invalidatePreparedLocked(affected + retired)
                 invalidateLocked(affected + retired)
-                reconcileRePairBestEffort { reconcileRePairLocked(store) }
+                bestEffortEnrollmentCleanup { reconcileRePairLocked(store) }
                 committed
             }
         }
@@ -403,6 +405,24 @@ internal class StoredPairingHost(
                     val removed = next.entries.single { it.enrollment.recordID == recordID }
                     retireUnreferenced(next, removed)
                     next
+                }
+            }
+        }.also { notifyChange() }
+
+    /** Discard one ordinary preparation after its setup and recovery owners release it. */
+    suspend fun discardOrdinarySetup(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot =
+        withContext(dispatcher) {
+            enrollmentAccess.withLock {
+                checkNotNull(openExisting()).use { store ->
+                    val snapshot = store.snapshot()
+                    require(snapshot.revision == expectedRevision)
+                    val row = snapshot.entries.single { it.enrollment.recordID == recordID }
+                    require(row.phase == EnrollmentPhase.PREPARED && row.rePair == null)
+                    if (!preparedLeases[recordID].isNullOrEmpty()) throw PairingRecoveryInProgress()
+                    invalidateLocked(setOf(recordID))
+                    val removed = store.remove(recordID.copyBytes(), expectedRevision)
+                    bestEffortEnrollmentCleanup { retireUnreferenced(removed, row, retireMissingAliases = true) }
+                    removed
                 }
             }
         }.also { notifyChange() }
