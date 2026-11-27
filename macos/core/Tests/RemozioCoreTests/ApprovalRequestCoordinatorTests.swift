@@ -24,9 +24,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
             firstObservedAt: now(100), deadlineMilliseconds: deadline, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
     }
-    private func descriptor(_ epoch: UInt8) throws -> AuditEpochDescriptor {
+    private func descriptor(_ epoch: UInt8, generation: UInt64? = nil) throws -> AuditEpochDescriptor {
         try .decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(epoch)),
-            4: .unsigned(UInt64(epoch)), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
+            4: .unsigned(generation ?? UInt64(epoch)), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
     }
     private func open(_ fixture: Fixture, initialize: Bool, routingPolicy: RoutingJournalPolicy? = nil) throws -> JournalDatabase {
         try .init(lease: fixture.lease(), macID: id(1), accountID: id(2), recordLimits: limits, descriptorLimits: limits,
@@ -593,7 +593,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try assertCheckpoint(db, store, writer)
     }
 
-    private func retirementFixture(_ fixture: Fixture) throws
+    private func retirementFixture(_ fixture: Fixture, installReplay: Bool = true) throws
         -> (JournalDatabase, AuditEpochWriter, ApprovalRequestCoordinator, ContinuityStore) {
         let (db, writer) = try setup(fixture)
         let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEF1234",
@@ -604,7 +604,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             try $0.installCommandSubmissionReplay()
         }
         let (owner, store) = try checkpointedOwner(fixture, db, writer)
-        XCTAssertEqual(try CheckpointedJournal(journal: db, continuity: store).installPermanentReplay(), .installed)
+        if installReplay {
+            XCTAssertEqual(try CheckpointedJournal(journal: db, continuity: store).installPermanentReplay(), .installed)
+        }
         return (db, writer, owner, store)
     }
 
@@ -726,6 +728,54 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let fresh = try CommandSubmissionReservation(macID: old.macID, accountID: old.accountID,
             submission: CapturedSubmission(id: id(44), nonce: id(46, 32), callerBinding: id(47)), captureDigest: id(48, 32))
         XCTAssertEqual(try restarted.write(epoch: writer.epoch) { try $0.reserveCommandSubmission(fresh) }, fresh)
+    }
+
+    func testDetailRetirementLeavesLegacyReservationWithoutStartupWork() throws {
+        let fixture = try Fixture()
+        let (db, writer, owner, store) = try retirementFixture(fixture, installReplay: false)
+        let (request, receipt) = try declineForRetirement(owner)
+        let commits = CheckpointedJournal(journal: db, continuity: store)
+        let reservation = try CommandSubmissionReservation(macID: id(1), accountID: id(2),
+            submission: CapturedSubmission(id: id(40), nonce: id(41, 32), callerBinding: id(42)), captureDigest: id(43, 32))
+        XCTAssertFalse(try commits.read { try $0.hasPermanentReplayStorage() })
+        XCTAssertEqual(try commits.write(epoch: writer.epoch) { try $0.reserveCommandSubmission(reservation) }, reservation)
+        try owner.forgetTerminal(requestID: request.requestID)
+        owner.close()
+        XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+        XCTAssertEqual(try commits.read { try $0.consumptionReceiptHistory(requestID: request.requestID) }, .present(receipt))
+
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
+        let marked = try XCTUnwrap(commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: false))
+        XCTAssertEqual(marked.observed, 1)
+        let retired = try XCTUnwrap(commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: true))
+        XCTAssertEqual(retired.retiredReceipts, 1)
+        XCTAssertEqual(retired.retiredSubmissions, 0)
+
+        try db.close()
+        store.close()
+        let reopened = try open(fixture, initialize: false)
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+            relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
+        defer { try? reopened.close(); continuity.close() }
+        let startup = try JournalStartupRecovery(journal: reopened, continuity: continuity,
+            maximumRecords: 10, maximumBytes: 16384)
+        let nextEpoch = try descriptor(4, generation: continuity.read().committed.currentAuthorityGeneration)
+        guard case .recovering = try startup.start(descriptor: nextEpoch) else { return XCTFail("startup did not begin") }
+        guard case .complete = try startup.advance() else { return XCTFail("startup did not finish in one empty batch") }
+        let restartedWriter = try startup.completedWriter()
+        let checkpoint = try continuity.read().committed
+        XCTAssertEqual(restartedWriter.epoch, nextEpoch.epoch)
+        XCTAssertEqual(checkpoint.journalHead, 0)
+        try assertCheckpoint(reopened, continuity, restartedWriter)
+
+        let restarted = CheckpointedJournal(journal: reopened, continuity: continuity)
+        try restarted.read {
+            XCTAssertTrue(try $0.hasConsumed(requestID: request.requestID))
+            XCTAssertEqual(try $0.consumptionReceiptHistory(requestID: request.requestID), .retired)
+            XCTAssertEqual(try $0.consumptionOutcomeHistory(requestID: request.requestID), .retired)
+            XCTAssertEqual(try $0.commandSubmissionHistory(submissionID: reservation.submission.id), .present(reservation))
+            XCTAssertTrue(try $0.consumptionOutcomes(maximumRecords: 10, maximumBytes: 16384).outcomes.isEmpty)
+        }
     }
 
     func testDetailRetirementMissingHistoryDoesNotChangeReplayMembership() throws {

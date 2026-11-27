@@ -134,14 +134,13 @@ final class CheckpointedJournal {
                        after: Data?, continuing: Bool) throws -> DetailRetirement.Result? {
         let (checkpoint, planned) = try verifiedRead { checkpoint, transaction in
             guard try transaction.hasPermanentReplayStorage(), try !transaction.hasRecordedHistoryGap() else {
-                return (checkpoint, nil as (DetailRetirement.Plan, Duration)?)
+                return (checkpoint, nil as (plan: DetailRetirement.Plan, liveCountTime: Duration, planning: Duration)?)
             }
-            let started = ContinuousClock.now
             let plan = try transaction.planDetailRetirement(checkpoint: checkpoint, policy: policy,
                 protecting: protecting, after: after, continuing: continuing)
-            return (checkpoint, (plan, started.duration(to: .now)))
+            return (checkpoint, plan)
         }
-        guard let (plan, planning) = planned else { return nil }
+        guard let (plan, liveCountTime, planning) = planned else { return nil }
         var submissions = 0
         var mutation = Duration.zero
         if !plan.observations.isEmpty || !plan.deletions.isEmpty {
@@ -155,7 +154,7 @@ final class CheckpointedJournal {
         return DetailRetirement.Result(observed: plan.observations.count, retiredReceipts: retired,
             retiredSubmissions: submissions, protectedScanned: plan.protected,
             continuing: plan.liveCount > policy.target + retired && (continuing || plan.liveCount >= policy.trigger),
-            nextRequest: plan.nextRequest, planning: planning, mutation: mutation)
+            nextRequest: plan.nextRequest, liveCountTime: liveCountTime, planning: planning, mutation: mutation)
     }
 
     static func checkpoint(transaction: JournalTransaction, epoch: Data, generation: UInt64,

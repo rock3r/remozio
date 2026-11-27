@@ -25,6 +25,7 @@ enum DetailRetirement {
         let protectedScanned: Int
         let continuing: Bool
         let nextRequest: Data?
+        let liveCountTime: Duration
         let planning: Duration
         let mutation: Duration
     }
@@ -44,8 +45,7 @@ enum DetailRetirement {
     }
 
     static func plan(_ transaction: JournalTransaction, storage: ReplayDetailJournal, checkpoint: ContinuityCheckpoint,
-                     policy: Policy, protecting: Set<Data>, after: Data?, continuing: Bool) throws -> Plan {
-        let live = try storage.liveCount()
+                     live: Int, policy: Policy, protecting: Set<Data>, after: Data?, continuing: Bool) throws -> Plan {
         var plan = Plan(liveCount: live)
         guard live > policy.target, continuing || live >= policy.trigger else { return plan }
         var scanned = 0

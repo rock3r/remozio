@@ -780,10 +780,15 @@ public final class JournalTransaction {
     }
 
     func planDetailRetirement(checkpoint: ContinuityCheckpoint, policy: DetailRetirement.Policy,
-                              protecting: Set<Data>, after: Data?, continuing: Bool) throws -> DetailRetirement.Plan {
-        try withReplayDetails(write: false) {
-            try DetailRetirement.plan(self, storage: $0, checkpoint: checkpoint, policy: policy,
-                                      protecting: protecting, after: after, continuing: continuing)
+                              protecting: Set<Data>, after: Data?, continuing: Bool) throws
+        -> (plan: DetailRetirement.Plan, liveCountTime: Duration, planning: Duration) {
+        try withReplayDetails(write: false) { storage in
+            let countStart = ContinuousClock.now
+            let live = try storage.liveCount()
+            let planningStart = ContinuousClock.now
+            let plan = try DetailRetirement.plan(self, storage: storage, checkpoint: checkpoint, live: live,
+                policy: policy, protecting: protecting, after: after, continuing: continuing)
+            return (plan, countStart.duration(to: planningStart), planningStart.duration(to: .now))
         }
     }
 
