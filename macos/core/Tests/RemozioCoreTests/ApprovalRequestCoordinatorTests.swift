@@ -372,6 +372,172 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try restarted.close()
     }
 
+    private func seedStartupPages(_ owner: ApprovalRequestCoordinator, interrupted: Bool) throws -> [Data] {
+        let requests = try (0..<5).map { _ in try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil) }
+            .sorted { $0.requestID.lexicographicallyPrecedes($1.requestID) }
+        for (index, request) in requests.enumerated() {
+            if interrupted && (index == 1 || index == 3) {
+                _ = try consume(owner, request)
+                if index == 3 {
+                    _ = try owner.recordOutcome(requestID: request.requestID, expectedRevision: 0, event: .beginDispatch,
+                        now: now(), receiptTimeMs: nil)
+                }
+            } else {
+                let (body, signature) = try decision(request, decline: true)
+                _ = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: id(5),
+                    authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil)
+            }
+        }
+        owner.close()
+        return requests.map(\.requestID)
+    }
+
+    func testStartupScansSettledPagesWithoutReconciliationWrites() throws {
+        for installReplay in [false, true] {
+            let fixture = try Fixture(), (db, _, owner, store) = try retirementFixture(fixture, installReplay: installReplay)
+            defer { try? db.close(); store.close() }
+            let requests = try seedStartupPages(owner, interrupted: false)
+            let startup = try JournalStartupRecovery(journal: db, continuity: store, maximumRecords: 1, maximumBytes: 16384)
+            let next = try descriptor(4, generation: store.read().committed.currentAuthorityGeneration)
+            guard case .recovering = try startup.start(descriptor: next) else { return XCTFail("startup did not begin") }
+            let afterEpoch = try store.read()
+            guard case .complete = try startup.advance() else { return XCTFail("settled scan did not finish") }
+            XCTAssertEqual(try store.read(), afterEpoch)
+            XCTAssertEqual(try startup.completedWriter().epoch, next.epoch)
+            try db.read { transaction in
+                for request in requests {
+                    XCTAssertEqual(try transaction.consumptionOutcome(requestID: request)?.phase, .declined)
+                }
+            }
+        }
+    }
+
+    func testStartupWritesOnlyPagesWithInterruptedOutcomes() throws {
+        for installReplay in [false, true] {
+            let fixture = try Fixture(), (db, _, owner, store) = try retirementFixture(fixture, installReplay: installReplay)
+            defer { try? db.close(); store.close() }
+            let requests = try seedStartupPages(owner, interrupted: true)
+            let startup = try JournalStartupRecovery(journal: db, continuity: store, maximumRecords: 1, maximumBytes: 16384)
+            let next = try descriptor(4, generation: store.read().committed.currentAuthorityGeneration)
+            guard case .recovering = try startup.start(descriptor: next) else { return XCTFail("startup did not begin") }
+            let afterEpoch = try store.read().committed.generation
+            for page in UInt64(1)...2 {
+                guard case .recovering = try startup.advance() else { return XCTFail("work page was skipped") }
+                XCTAssertEqual(try store.read().committed.generation, afterEpoch + page)
+                XCTAssertEqual(try store.read().committed.journalHead, page)
+                XCTAssertThrowsError(try startup.completedWriter())
+            }
+            guard case .complete = try startup.advance() else { return XCTFail("settled tail did not finish") }
+            XCTAssertEqual(try store.read().committed.generation, afterEpoch + 2)
+            XCTAssertEqual(try startup.completedWriter().epoch, next.epoch)
+            try db.read { transaction in
+                for (index, request) in requests.enumerated() {
+                    let outcome = try XCTUnwrap(transaction.consumptionOutcome(requestID: request))
+                    if index == 1 || index == 3 {
+                        XCTAssertEqual(outcome.phase, .unknown)
+                        XCTAssertEqual(outcome.event.reason, .authorityRestarted)
+                        XCTAssertEqual(outcome.event.journalEpoch, next.epoch)
+                    } else {
+                        XCTAssertEqual(outcome.phase, .declined)
+                    }
+                }
+            }
+        }
+    }
+
+    func testStartupReconciliationFailureKeepsAdmissionClosedUntilReopen() throws {
+        enum Cut: Error, CaseIterable { case beforePrepare, afterPrepare, afterCommit }
+        for cut in Cut.allCases {
+            let finalize = cut == .afterCommit
+            let fixture = try Fixture(), (db, _, owner, store) = try retirementFixture(fixture, installReplay: false)
+            defer { try? db.close(); store.close() }
+            let requests = try seedStartupPages(owner, interrupted: true)
+            let startup = try JournalStartupRecovery(journal: db, continuity: store, maximumRecords: 1, maximumBytes: 16384)
+            let next = try descriptor(4, generation: store.read().committed.currentAuthorityGeneration)
+            let before: ContinuityCheckpoint
+            if cut == .afterPrepare {
+                let commits = CheckpointedJournal(journal: db, continuity: store)
+                let writer = try commits.write(epoch: next.epoch) { try $0.createEpoch(next) }
+                before = try store.read().committed
+                XCTAssertThrowsError(try db.write { transaction in
+                    let page = try transaction.consumptionOutcomes(afterRequestID: requests[0],
+                        maximumRecords: 1, maximumBytes: 16384)
+                    let batch = try transaction.reconcileInterruptedConsumptions(afterRequestID: requests[0],
+                        maximumRecords: 1, maximumBytes: 16384, writer: writer, expectedHead: 0, expectedPage: page)
+                    XCTAssertEqual(batch.changedCount, 1)
+                    let digests = try transaction.continuityDigests()
+                    let candidate = try before.successor(authorityDigest: digests.authority,
+                        ledgerDigest: digests.ledger, journalEpoch: writer.epoch, journalHead: batch.journalHead)
+                    // Interrupt after the independent preparation and before SQLite commits the journal.
+                    try store.prepare(expected: before, candidate: candidate)
+                    throw Cut.afterPrepare
+                }) {
+                    XCTAssertEqual($0 as? Cut, .afterPrepare)
+                }
+                XCTAssertEqual(try db.read { try $0.consumptionOutcome(requestID: requests[1])?.phase }, .authorized)
+            } else {
+                guard case .recovering = try startup.start(descriptor: next) else { return XCTFail("startup did not begin") }
+                before = try store.read().committed
+                let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
+                try fixture.sql("""
+                    CREATE TRIGGER fail_outcome_recovery BEFORE UPDATE ON continuity_v1 WHEN \(condition)
+                    BEGIN SELECT RAISE(ABORT,'injected'); END
+                    """, continuity: true)
+                XCTAssertThrowsError(try startup.advance())
+                try fixture.sql("DROP TRIGGER fail_outcome_recovery", continuity: true)
+                XCTAssertThrowsError(try startup.advance())
+            }
+            XCTAssertThrowsError(try startup.completedWriter())
+            let interrupted = try store.read()
+            XCTAssertEqual(interrupted.committed, before)
+            let expectedRecovery: JournalCheckpointRecovery.Result
+            let journalBoundary: ContinuityCheckpoint
+            switch cut {
+            case .beforePrepare:
+                XCTAssertNil(interrupted.pending)
+                expectedRecovery = .unchanged(before)
+                journalBoundary = before
+            case .afterPrepare:
+                let pending = try XCTUnwrap(interrupted.pending)
+                XCTAssertEqual(pending.journalHead, 1)
+                XCTAssertNotEqual(pending.ledgerDigest, before.ledgerDigest)
+                expectedRecovery = .discarded(before)
+                journalBoundary = before
+            case .afterCommit:
+                let pending = try XCTUnwrap(interrupted.pending)
+                XCTAssertEqual(pending.journalHead, 1)
+                expectedRecovery = .finalized(pending)
+                journalBoundary = pending
+            }
+            XCTAssertEqual(try db.read { transaction in
+                try CheckpointedJournal.checkpoint(transaction: transaction, epoch: next.epoch,
+                    generation: journalBoundary.generation, authorityGeneration: journalBoundary.authorityGeneration)
+            }, journalBoundary)
+            try db.close(); store.close()
+            let reopened = try open(fixture, initialize: false)
+            let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+                relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
+            defer { try? reopened.close(); continuity.close() }
+            XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: reopened, continuity: continuity), expectedRecovery)
+            XCTAssertNil(try continuity.read().pending)
+            let restart = try JournalStartupRecovery(journal: reopened, continuity: continuity,
+                maximumRecords: 1, maximumBytes: 16384)
+            let retryEpoch = try descriptor(5, generation: before.currentAuthorityGeneration)
+            guard case .recovering = try restart.start(descriptor: retryEpoch) else { return XCTFail("retry did not begin") }
+            for _ in 0..<(finalize ? 1 : 2) {
+                guard case .recovering = try restart.advance() else { return XCTFail("retry skipped work") }
+            }
+            guard case .complete = try restart.advance() else { return XCTFail("retry did not finish") }
+            XCTAssertEqual(try continuity.read().committed.journalHead, finalize ? 1 : 2)
+            XCTAssertEqual(try restart.completedWriter().epoch, retryEpoch.epoch)
+            try reopened.read { transaction in
+                XCTAssertEqual(try transaction.consumptionOutcome(requestID: requests[1])?.event.journalEpoch,
+                    finalize ? next.epoch : retryEpoch.epoch)
+                XCTAssertEqual(try transaction.consumptionOutcome(requestID: requests[3])?.event.journalEpoch, retryEpoch.epoch)
+            }
+        }
+    }
+
     private func pairingAttempt(_ db: JournalDatabase, authority: P256.Signing.PrivateKey,
                                 replacement: PairingReplacement? = nil) throws -> (PairingEnrollmentAttempt, Data) {
         let trust = try db.read { try $0.approvalTrustSnapshot() }

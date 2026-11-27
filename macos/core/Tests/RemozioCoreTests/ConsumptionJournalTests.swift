@@ -369,9 +369,10 @@ final class ConsumptionJournalTests: XCTestCase {
         let retry = try JournalStartupRecovery(journal: restarted, continuity: restartedStore,
             maximumRecords: 1, maximumBytes: 16384)
         guard case .recovering = try retry.start(descriptor: descriptor(21)) else { return XCTFail("restart did not begin") }
-        guard case .recovering = try retry.advance() else { return XCTFail("terminal page ended too soon") }
         XCTAssertThrowsError(try retry.completedWriter())
-        guard case .complete = try retry.advance() else { return XCTFail("second page did not finish") }
+        let restartGeneration = try restartedStore.read().committed.generation
+        guard case .complete = try retry.advance() else { return XCTFail("restart did not finish the remaining work") }
+        XCTAssertEqual(try restartedStore.read().committed.generation, restartGeneration + 1)
         XCTAssertEqual(try retry.completedWriter().epoch, id(21))
         XCTAssertEqual(try restarted.read { try $0.consumptionOutcome(requestID: id(4)) }, first)
         let second = try XCTUnwrap(restarted.read { try $0.consumptionOutcome(requestID: id(6)) })

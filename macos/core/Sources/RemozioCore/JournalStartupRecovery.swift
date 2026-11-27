@@ -60,10 +60,8 @@ final class JournalStartupRecovery {
     func advance() throws -> Progress {
         guard case .recovering = state, let commits, let writer else { throw Failure.incomplete }
         state = .retired
-        let batch = try commits.write(epoch: writer.epoch) {
-            try $0.reconcileInterruptedConsumptions(afterRequestID: cursor, maximumRecords: maximumRecords,
-                maximumBytes: maximumBytes, writer: writer, expectedHead: head)
-        }
+        let batch = try commits.recoverInterruptedConsumptions(afterRequestID: cursor, maximumRecords: maximumRecords,
+            maximumBytes: maximumBytes, writer: writer, expectedHead: head)
         cursor = batch.nextRequestID; head = batch.journalHead
         state = cursor == nil ? .complete : .recovering
         return cursor == nil ? .complete : .recovering
