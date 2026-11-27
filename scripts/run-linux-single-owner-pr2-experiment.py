@@ -1145,9 +1145,19 @@ def _label(pid, tag):
         raw = SO.read_bounded(f"/proc/{pid}/attr/current", 4096).decode("ascii", "replace").strip("\0\n ")
     except (OSError, ValueError):
         return "other"
+    return label_kind(raw, tag)
+
+
+def label_kind(raw, tag):
+    """An AppArmor label from attr/current. systemd 257 on Ubuntu attaches AppArmorProfile= as a stack
+    with unconfined ("rmzso-owner-<tag>//&unconfined (enforce)"); a stack confines by the intersection
+    of its parts and unconfined adds no rule, so it counts as the profile. Any other stack is "other"."""
     if raw == "unconfined":
         return "unconfined"
-    return "profile" if raw.split(" ")[0] == PROFILE_PREFIX + tag else "other"
+    parts = raw.split(" ")[0].split("//&")
+    if parts[0] == PROFILE_PREFIX + tag and all(part == "unconfined" for part in parts[1:]):
+        return "profile"
+    return "other"
 
 
 class UnitOwner:

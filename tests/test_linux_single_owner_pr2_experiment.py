@@ -1406,6 +1406,15 @@ class LoaderTests(unittest.TestCase):
         self.assertFalse(EXPERIMENT.runtime_system_only(["/opt/lib/libsqlite3.so.0"]))
         self.assertFalse(EXPERIMENT.runtime_system_only([]))
 
+    def test_the_owner_label_accepts_the_profile_stacked_only_with_unconfined(self):
+        name = EXPERIMENT.PROFILE_PREFIX + TAG
+        self.assertEqual(EXPERIMENT.label_kind(f"{name} (enforce)", TAG), "profile")
+        self.assertEqual(EXPERIMENT.label_kind(f"{name}//&unconfined (enforce)", TAG), "profile")
+        self.assertEqual(EXPERIMENT.label_kind("unconfined", TAG), "unconfined")
+        self.assertEqual(EXPERIMENT.label_kind(f"{name}//&snap.other (enforce)", TAG), "other")
+        self.assertEqual(EXPERIMENT.label_kind(f"unconfined//&{name} (enforce)", TAG), "other")
+        self.assertEqual(EXPERIMENT.label_kind(f"{EXPERIMENT.PROFILE_PREFIX}00000000 (enforce)", TAG), "other")
+
     def test_a_soname_symlink_is_hashed_through_its_resolved_system_file(self):
         resolved = {"/lib/x86_64-linux-gnu/libsqlite3.so.0": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6",
                     "/lib/x86_64-linux-gnu/libbad.so.1": "/opt/lib/libbad.so.1"}
