@@ -58,7 +58,7 @@ final class CheckpointedJournalTests: XCTestCase {
             ledger: "dd549d1c602964b26834098c8cb7df8b1383afb988591d2f9b39ec37f5abadff")
     }
 
-    func testBufferedContinuityDigestsMatchLegacyEncoderOnSameSnapshot() throws {
+    func testContinuityDigestsMatchPreviousEncoderWithEveryTable() throws {
         let fixture = try Fixture(), commits = try installCommandReplay(fixture), reservation = try commandReservation()
         _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(reservation) }
         try commits.write(epoch: fixture.epoch) { try fixture.append($0) }
@@ -67,7 +67,51 @@ final class CheckpointedJournalTests: XCTestCase {
             (X'01010101010101010101010101010101', X'02020202020202020202020202020202',
              X'03030303030303030303030303030303', zeroblob(0), zeroblob(16384)),
             (X'01010101010101010101010101010101', X'02020202020202020202020202020202',
-             X'04040404040404040404040404040404', zeroblob(16385), zeroblob(32769));
+             X'04040404040404040404040404040404', zeroblob(16375), zeroblob(16376)),
+            (X'01010101010101010101010101010101', X'02020202020202020202020202020202',
+             X'05050505050505050505050505050505', zeroblob(16385), zeroblob(32769));
+            """, journal: true)
+        var connection: OpaquePointer?
+        let path = fixture.root.appendingPathComponent("journal/journal.sqlite").path
+        XCTAssertEqual(sqlite3_open_v2(path, &connection, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        let db = try XCTUnwrap(connection)
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+        defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
+
+        try UpdateSchedulingJournal.createStorage(connection: db, from: 15)
+        // The digest visits empty tables too. No gateway grant is needed for this snapshot.
+        guard sqlite3_exec(db, """
+            CREATE TABLE main.gateway_abandoned_grants_v1 (
+                operation BLOB PRIMARY KEY REFERENCES gateway_outbox_v1(operation),
+                revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8),
+                kind BLOB NOT NULL CHECK(length(kind)=8),
+                digest BLOB NOT NULL CHECK(length(digest)=32),
+                signature BLOB CHECK(signature IS NULL OR length(signature)=64),
+                resolution INTEGER NOT NULL CHECK(resolution IN (0,1,2) AND (resolution!=1 OR signature IS NOT NULL)),
+                first_unconfirmed_ms BLOB CHECK(first_unconfirmed_ms IS NULL OR
+                    (length(first_unconfirmed_ms)=8 AND signature IS NOT NULL))
+            ) STRICT, WITHOUT ROWID;
+            INSERT INTO update_scheduling_state_v1 VALUES(1,zeroblob(32),zeroblob(8),zeroblob(8),NULL);
+            """, nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+        try AuthorityJournalSchema.setFeatureTier(18, on: db)
+        try AuthorityJournalSchema.installRecoveryFormat(on: db)
+        let catalog = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: true, tier: 18)
+        XCTAssertEqual(Set(catalog.authority + catalog.ledger).count, 28)
+        let actual = try JournalContinuityDigest.read(db)
+        XCTAssertEqual(actual, try LegacyContinuityDigest.read(db))
+        XCTAssertEqual(actual, try PreviousContinuityDigest.read(db))
+    }
+
+    func testContinuityDigestsMatchPreviousEncoderForSQLiteTypes() throws {
+        let fixture = try Fixture()
+        // This fixture exercises the digest's raw SQLite encodings independently of the row decoders.
+        try fixture.sql("""
+            DROP TABLE gateway_recovered_revocations_v1;
+            CREATE TABLE gateway_recovered_revocations_v1(id INTEGER PRIMARY KEY, value ANY) STRICT;
+            INSERT INTO gateway_recovered_revocations_v1 VALUES
+                (8, NULL), (3, CAST(x'6100c3a9' AS TEXT)), (4, ''), (6, x''),
+                (2, -9223372036854775808), (1, 9223372036854775807);
             """, journal: true)
         var connection: OpaquePointer?
         let path = fixture.root.appendingPathComponent("journal/journal.sqlite").path
@@ -76,7 +120,9 @@ final class CheckpointedJournalTests: XCTestCase {
         defer { sqlite3_close(db) }
         guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
         defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
-        XCTAssertEqual(try JournalContinuityDigest.read(db), try LegacyContinuityDigest.read(db))
+        let actual = try JournalContinuityDigest.read(db)
+        XCTAssertEqual(actual, try LegacyContinuityDigest.read(db))
+        XCTAssertEqual(actual, try PreviousContinuityDigest.read(db))
     }
 
     func testCommandReplayCheckpointAndReservationSurviveRestartWithoutCreatingAnAuditEvent() throws {
@@ -1464,6 +1510,121 @@ final class CheckpointedJournalTests: XCTestCase {
                   let connection else { throw Fault.injected }
             defer { sqlite3_close(connection) }
             guard sqlite3_exec(connection, query, nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+        }
+    }
+}
+
+// Buffered encoder from before the scratch buffer change.
+private enum PreviousContinuityDigest {
+    static func read(_ db: OpaquePointer) throws -> JournalContinuityDigests {
+        guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
+        let recoveryFormat = try AuthorityJournalSchema.recoveryFormatInstalled(on: db)
+        let tier = try AuthorityJournalSchema.featureTier(on: db)
+        let catalog = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
+        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
+        return try JournalContinuityDigests(authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema),
+                                            ledger: digest(db, tables: catalog.ledger, domain: "ledger"))
+    }
+
+    private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12) throws -> Data {
+        var encoder = DigestEncoder()
+        encoder.field(Data("remozio/journal-continuity/v1/schema\(schema)/\(domain)".utf8))
+        for table in tables.sorted() {
+            encoder.field(Data(table.utf8))
+            var columns = [String]()
+            try rows(db, "PRAGMA main.table_info('\(table)')") { row in
+                guard let name = sqlite3_column_text(row, 1) else { throw JournalDatabaseError.incompatibleStore }
+                columns.append(String(cString: name))
+            }
+            guard !columns.isEmpty else { throw JournalDatabaseError.incompatibleStore }
+            encoder.number(UInt64(columns.count))
+            for column in columns { encoder.field(Data(column.utf8)) }
+            // Ordinals avoid interpreting column names as SQL. Sorting every value also handles composite keys.
+            let order = (1...columns.count).map(String.init).joined(separator: ",")
+            try rows(db, "SELECT * FROM main.\(table) ORDER BY \(order)") { row in
+                encoder.byte(1)
+                for index in columns.indices {
+                    let column = Int32(index)
+                    let type = sqlite3_column_type(row, column)
+                    switch type {
+                    case SQLITE_NULL: encoder.byte(0)
+                    case SQLITE_INTEGER:
+                        encoder.byte(1)
+                        encoder.number(UInt64(bitPattern: sqlite3_column_int64(row, column)))
+                    case SQLITE_TEXT, SQLITE_BLOB:
+                        let text = type == SQLITE_TEXT
+                        encoder.byte(text ? 2 : 3)
+                        let pointer = text ? sqlite3_column_text(row, column).map(UnsafeRawPointer.init) : sqlite3_column_blob(row, column)
+                        let size = Int(sqlite3_column_bytes(row, column))
+                        guard size == 0 || pointer != nil else { throw JournalDatabaseError.storage(SQLITE_NOMEM) }
+                        encoder.field(UnsafeRawBufferPointer(start: pointer, count: size))
+                    default: throw JournalDatabaseError.incompatibleStore
+                    }
+                }
+            }
+            encoder.byte(0)
+        }
+        return encoder.finish()
+    }
+
+    private struct DigestEncoder {
+        private static let capacity = 16_384
+        private var hash = SHA256()
+        private var buffer = [UInt8]()
+
+        init() { buffer.reserveCapacity(Self.capacity) }
+
+        mutating func byte(_ value: UInt8) {
+            if buffer.count == Self.capacity { flush() }
+            buffer.append(value)
+        }
+
+        mutating func number(_ value: UInt64) {
+            var bigEndian = value.bigEndian
+            withUnsafeBytes(of: &bigEndian) { append($0) }
+        }
+
+        mutating func field(_ data: Data) {
+            data.withUnsafeBytes { field($0) }
+        }
+
+        mutating func field(_ bytes: UnsafeRawBufferPointer) {
+            number(UInt64(bytes.count))
+            append(bytes)
+        }
+
+        mutating func finish() -> Data {
+            flush()
+            return Data(hash.finalize())
+        }
+
+        private mutating func append(_ bytes: UnsafeRawBufferPointer) {
+            if bytes.count > Self.capacity - buffer.count { flush() }
+            if bytes.count >= Self.capacity {
+                // The bytes are consumed while the SQLite row still owns them.
+                hash.update(bufferPointer: bytes)
+            } else {
+                buffer.append(contentsOf: bytes)
+            }
+        }
+
+        private mutating func flush() {
+            guard !buffer.isEmpty else { return }
+            buffer.withUnsafeBytes { hash.update(bufferPointer: $0) }
+            buffer.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private static func rows(_ db: OpaquePointer, _ sql: String, _ body: (OpaquePointer) throws -> Void) throws {
+        var statement: OpaquePointer?
+        let result = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
+        guard result == SQLITE_OK, let statement else { throw JournalDatabaseError.storage(result) }
+        defer { sqlite3_finalize(statement) }
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            try body(statement)
         }
     }
 }

@@ -27,8 +27,11 @@ enum JournalContinuityDigest {
         let tier = try AuthorityJournalSchema.featureTier(on: db)
         let catalog = try requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
         let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
-        return try JournalContinuityDigests(authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema),
-                                            ledger: digest(db, tables: catalog.ledger, domain: "ledger"))
+        return try withUnsafeTemporaryAllocation(byteCount: DigestEncoder.capacity, alignment: 1) { buffer in
+            try JournalContinuityDigests(
+                authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema, buffer: buffer),
+                ledger: digest(db, tables: catalog.ledger, domain: "ledger", buffer: buffer))
+        }
     }
 
     static func requireCatalog(_ db: OpaquePointer, recoveryFormat: Bool, tier: Int64) throws -> (authority: [String], ledger: [String]) {
@@ -49,8 +52,9 @@ enum JournalContinuityDigest {
         return (authorityTables, ledgerTables)
     }
 
-    private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12) throws -> Data {
-        var encoder = DigestEncoder()
+    private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12,
+                               buffer: UnsafeMutableRawBufferPointer) throws -> Data {
+        var encoder = DigestEncoder(buffer: buffer.baseAddress!)
         encoder.field(Data("remozio/journal-continuity/v1/schema\(schema)/\(domain)".utf8))
         for table in tables.sorted() {
             encoder.field(Data(table.utf8))
@@ -72,15 +76,13 @@ enum JournalContinuityDigest {
                     switch type {
                     case SQLITE_NULL: encoder.byte(0)
                     case SQLITE_INTEGER:
-                        encoder.byte(1)
-                        encoder.number(UInt64(bitPattern: sqlite3_column_int64(row, column)))
+                        encoder.taggedNumber(1, UInt64(bitPattern: sqlite3_column_int64(row, column)))
                     case SQLITE_TEXT, SQLITE_BLOB:
                         let text = type == SQLITE_TEXT
-                        encoder.byte(text ? 2 : 3)
                         let pointer = text ? sqlite3_column_text(row, column).map(UnsafeRawPointer.init) : sqlite3_column_blob(row, column)
                         let size = Int(sqlite3_column_bytes(row, column))
                         guard size == 0 || pointer != nil else { throw JournalDatabaseError.storage(SQLITE_NOMEM) }
-                        encoder.field(UnsafeRawBufferPointer(start: pointer, count: size))
+                        encoder.taggedField(text ? 2 : 3, UnsafeRawBufferPointer(start: pointer, count: size))
                     default: throw JournalDatabaseError.incompatibleStore
                     }
                 }
@@ -91,29 +93,57 @@ enum JournalContinuityDigest {
     }
 
     private struct DigestEncoder {
-        private static let capacity = 16_384
+        static let capacity = 16_384
+        private static let numberBytes = MemoryLayout<UInt64>.size
+        private static let taggedHeaderBytes = 1 + numberBytes
+        // The caller owns this scratch allocation for the duration of both digests.
+        private let buffer: UnsafeMutableRawPointer
+        private var count = 0
         private var hash = SHA256()
-        private var buffer = [UInt8]()
 
-        init() { buffer.reserveCapacity(Self.capacity) }
+        init(buffer: UnsafeMutableRawPointer) { self.buffer = buffer }
 
         mutating func byte(_ value: UInt8) {
-            if buffer.count == Self.capacity { flush() }
-            buffer.append(value)
+            reserve(1)
+            writeByte(value)
         }
 
         mutating func number(_ value: UInt64) {
-            var bigEndian = value.bigEndian
-            withUnsafeBytes(of: &bigEndian) { append($0) }
+            reserve(Self.numberBytes)
+            writeNumber(value)
+        }
+
+        mutating func taggedNumber(_ tag: UInt8, _ value: UInt64) {
+            reserve(Self.taggedHeaderBytes)
+            writeByte(tag)
+            writeNumber(value)
         }
 
         mutating func field(_ data: Data) {
-            data.withUnsafeBytes { field($0) }
+            number(UInt64(data.count))
+            data.withUnsafeBytes { bytes in
+                if bytes.count >= Self.capacity {
+                    flush()
+                    hash.update(bufferPointer: bytes)
+                } else {
+                    reserve(bytes.count)
+                    copy(bytes)
+                }
+            }
         }
 
-        mutating func field(_ bytes: UnsafeRawBufferPointer) {
-            number(UInt64(bytes.count))
-            append(bytes)
+        mutating func taggedField(_ tag: UInt8, _ bytes: UnsafeRawBufferPointer) {
+            if bytes.count <= Self.capacity - Self.taggedHeaderBytes {
+                reserve(Self.taggedHeaderBytes + bytes.count)
+                writeByte(tag)
+                writeNumber(UInt64(bytes.count))
+                copy(bytes)
+            } else {
+                taggedNumber(tag, UInt64(bytes.count))
+                flush()
+                // SQLite owns these bytes until the next step.
+                hash.update(bufferPointer: bytes)
+            }
         }
 
         mutating func finish() -> Data {
@@ -121,20 +151,35 @@ enum JournalContinuityDigest {
             return Data(hash.finalize())
         }
 
-        private mutating func append(_ bytes: UnsafeRawBufferPointer) {
-            if bytes.count > Self.capacity - buffer.count { flush() }
-            if bytes.count >= Self.capacity {
-                // The bytes are consumed while the SQLite row still owns them.
-                hash.update(bufferPointer: bytes)
-            } else {
-                buffer.append(contentsOf: bytes)
+        private mutating func reserve(_ length: Int) {
+            if length > Self.capacity - count { flush() }
+        }
+
+        private mutating func writeByte(_ value: UInt8) {
+            buffer.storeBytes(of: value, toByteOffset: count, as: UInt8.self)
+            count += 1
+        }
+
+        private mutating func writeNumber(_ value: UInt64) {
+            var bigEndian = value.bigEndian
+            withUnsafeBytes(of: &bigEndian) { bytes in
+                // Fields need not start at an aligned offset.
+                buffer.advanced(by: count).copyMemory(from: bytes.baseAddress!, byteCount: Self.numberBytes)
+            }
+            count += Self.numberBytes
+        }
+
+        private mutating func copy(_ bytes: UnsafeRawBufferPointer) {
+            if let start = bytes.baseAddress, !bytes.isEmpty {
+                buffer.advanced(by: count).copyMemory(from: start, byteCount: bytes.count)
+                count += bytes.count
             }
         }
 
         private mutating func flush() {
-            guard !buffer.isEmpty else { return }
-            buffer.withUnsafeBytes { hash.update(bufferPointer: $0) }
-            buffer.removeAll(keepingCapacity: true)
+            guard count != 0 else { return }
+            hash.update(bufferPointer: UnsafeRawBufferPointer(start: buffer, count: count))
+            count = 0
         }
     }
 
