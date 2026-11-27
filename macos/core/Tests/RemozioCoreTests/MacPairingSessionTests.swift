@@ -14,6 +14,7 @@ private actor MacPairingRootFixture: MacPairingRootControl {
     var loseCommitReply = false
     var rejectBeforeSend = false
     var remainingRePairChecks: Int?
+    var newPairingRequired = false
     var heldCommit: AsyncStream<Void>?
     func canRePair(_ selection: PairedPhoneSelection) -> Bool {
         guard let remainingRePairChecks else { return true }
@@ -21,6 +22,8 @@ private actor MacPairingRootFixture: MacPairingRootControl {
         return remainingRePairChecks > 0
     }
     func permitRePairChecks(_ count: Int) { remainingRePairChecks = count }
+    func requireNewPairing() { newPairingRequired = true }
+    func requiresNewPairing(_ selection: PairedPhoneSelection) -> Bool { newPairingRequired }
     func holdCommit(_ signal: AsyncStream<Void>) { heldCommit = signal }
     init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
     func start() -> AuthorityPairingContext {
@@ -206,6 +209,39 @@ final class MacPairingSessionTests: XCTestCase {
         XCTAssertEqual(starts, 1)
         XCTAssertGreaterThan(o.transport.abortCount, 0)
         XCTAssertNil(snapshot.rePairInvitation)
+        XCTAssertEqual(snapshot.phase, .unavailable)
+    }
+
+    func testRePairRefreshShowsNewPairingRequiredWithoutAnInvitation() async throws {
+        let o = try Owner(rePair: true)
+        await o.root.permitRePairChecks(0)
+        await o.root.requireNewPairing()
+        do { try await o.start(); XCTFail("Published an invitation for a restricted phone") }
+        catch MacPairingSessionError.ineligiblePredecessor {}
+        let state = await o.session.snapshot()
+        XCTAssertEqual(state.phase, .newPairingRequired)
+        XCTAssertNil(state.invitation)
+        XCTAssertNil(state.rePairInvitation)
+        XCTAssertNil(state.invitationV2)
+        let starts = await o.transport.rePairStarts
+        XCTAssertEqual(starts, 0)
+    }
+
+    func testRePairRefreshClearsAnInvitationWhenRestrictionAppearsBeforeStaging() async throws {
+        let o = try Owner(rePair: true)
+        try await o.start()
+        await o.root.permitRePairChecks(0)
+        await o.root.requireNewPairing()
+        do { try await o.select(); XCTFail("Staged a restricted phone") }
+        catch MacPairingSessionError.ineligiblePredecessor {}
+        let state = await o.session.snapshot()
+        XCTAssertEqual(state.phase, .newPairingRequired)
+        XCTAssertNil(state.invitation)
+        XCTAssertNil(state.rePairInvitation)
+        XCTAssertNil(state.invitationV2)
+        XCTAssertNil(state.comparisonCode)
+        let stages = await o.root.stages
+        XCTAssertEqual(stages, 0)
     }
 
     func testRePairRejectsAStagedTranscriptForADifferentTrustRevision() async throws {

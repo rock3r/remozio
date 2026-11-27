@@ -144,8 +144,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         replyWithPhoneManagementVersion(1, reply: reply)
     }
     func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
-        // Versions 3 and 4 require the installed pairing owners.
-        let version = min(maximumVersion, owners == nil ? 2 : 4)
+        // Versions 3 through 5 require the installed pairing owners.
+        let version = min(maximumVersion, owners == nil ? 2 : 5)
         replyWithPhoneManagementVersion(version, reply: reply)
     }
     private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
@@ -176,6 +176,12 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 }
                 return try access.pairedPhones(includeRePair: true, includeRepairNotices: true)
                     .encode(includeRePair: true, includeRepairNotices: true)
+            case .listWithRePairRestrictions:
+                guard state.withLock({ $0.phoneManagementVersion >= 5 }), selection.isEmpty, authorization.isEmpty else {
+                    throw AuthorityPairingSetupError.unavailable
+                }
+                return try access.pairedPhones(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
+                    .encode(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
             case .validateRePair:
                 guard authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try Data([access.canRePair(.decode(selection)) ? 1 : 0])

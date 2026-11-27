@@ -6,7 +6,7 @@ import Synchronization
 public enum MacPairingSessionError: Error { case invalidConfiguration, invalidState, closed, expired, changedCandidate, ineligiblePredecessor }
 public enum MacPairingSessionPhase: Sendable {
     case idle, connecting, waitingForPhone, authorizing, comparing, waitingForBiometric, committing
-    case registeredOnMac, receiptSent, expired, unavailable, unavailableInterface, outcomeUnknown, closed
+    case registeredOnMac, receiptSent, expired, unavailable, unavailableInterface, newPairingRequired, outcomeUnknown, closed
 }
 
 /// Display data only. A receipt write never claims that the phone activated its enrollment.
@@ -26,6 +26,7 @@ public struct MacPairingSessionSnapshot: Sendable {
 protocol MacPairingRootControl: Sendable {
     func start() async throws -> AuthorityPairingContext
     func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool
+    func requiresNewPairing(_ selection: PairedPhoneSelection) async throws -> Bool
     func stage(_ proposal: PairingPhoneProposal, authorization: Data) async throws -> PairingTranscript
     /// Call onSend immediately before submitting the commit to Root.
     func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
@@ -404,7 +405,33 @@ public actor MacPairingSession {
             else { phase = .unavailable }
         }
         await releaseChannels()
+        if phase == .unavailable, let predecessor, await refreshRePairRestriction(predecessor),
+           cancellation.ifActive({}) {
+            phase = .newPairingRequired
+            invitation = nil
+            rePairInvitation = nil
+            candidates = []
+            selected = nil
+            transcript = nil
+            proof = nil
+            humanConfirmed = false
+        }
     }
+
+    private func refreshRePairRestriction(_ selection: PairedPhoneSelection) async -> Bool {
+        guard let openInstalledRoot else { return (try? await root.requiresNewPairing(selection)) == true }
+        guard let channel = try? openInstalledRoot() else { return false }
+        let restricted: Bool
+        do {
+            _ = try await channel.start()
+            restricted = try await channel.requiresNewPairing(selection)
+        } catch {
+            restricted = false
+        }
+        await channel.close()
+        return restricted
+    }
+
     private func releaseChannels() async {
         invitationV2 = nil
         root.abort()

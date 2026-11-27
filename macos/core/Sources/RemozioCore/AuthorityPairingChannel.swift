@@ -189,12 +189,28 @@ public actor AuthorityPairingChannel {
     }
 
     public func pairedPhonesWithRepairNotices() async throws -> PairedPhoneSnapshot {
-        guard case .version(let version) = try await perform(.versionedPhoneManagementHello(4)),
-              (1...4).contains(version) else { throw AuthorityPairingChannelError.unsupportedVersion }
+        try await pairedPhoneManagementSnapshot(maximumVersion: 4)
+    }
+
+    public func pairedPhonesForManagement() async throws -> PairedPhoneSnapshot {
+        try await pairedPhoneManagementSnapshot(maximumVersion: 5)
+    }
+
+    private func pairedPhoneManagementSnapshot(maximumVersion: UInt64) async throws -> PairedPhoneSnapshot {
+        guard case .version(let version) = try await perform(.versionedPhoneManagementHello(maximumVersion)),
+              (1...maximumVersion).contains(version) else { throw AuthorityPairingChannelError.unsupportedVersion }
         managesPhones = true
         if version < 4 { return try await pairedPhonesForRePair() }
-        return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(.listWithRepairNotices, Data(), Data()))),
-            macID: macID, accountID: accountID, includeRePair: true, includeRepairNotices: true)
+        let includesRestrictions = version >= 5
+        let operation: PairedPhoneOperation = includesRestrictions ? .listWithRePairRestrictions : .listWithRepairNotices
+        return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(operation, Data(), Data()))),
+            macID: macID, accountID: accountID, includeRePair: true, includeRepairNotices: true,
+            includeRePairRestrictions: includesRestrictions)
+    }
+
+    func requiresNewPairing(_ selection: PairedPhoneSelection) async throws -> Bool {
+        try requireScope(selection)
+        return try await pairedPhonesForManagement().phonesRequiringNewPairing.contains(selection.phone.phoneID)
     }
 
     public func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool {
