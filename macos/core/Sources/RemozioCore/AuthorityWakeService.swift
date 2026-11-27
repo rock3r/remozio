@@ -236,6 +236,11 @@ public actor AuthorityWakeService {
                 phonePushRegistration: phoneCapability.registrationProvider(),
                 phonePushRecovery: phoneCapability.recoveryProvider(), phoneUpdateScheduling: updateScheduling?.provider,
                 wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
+                auditExecutionIsIdle: {
+                    guard let executionWorker else { return true }
+                    let work = executionWorker.maintenanceExecutionWork
+                    return work.started && !work.stopping && !work.failed && work.queuedTurns == 0 && work.rejectedTurns == 0
+                },
                 onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: { notice in
                     _ = executionWorker?.enqueue(notice)
                     onCommandAuthorized(notice)

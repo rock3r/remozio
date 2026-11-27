@@ -2340,6 +2340,69 @@ extension ApprovalRequestCoordinatorTests {
         XCTAssertEqual(batch.queryNonce, nonce); XCTAssertEqual(batch.macID, id(1)); XCTAssertEqual(batch.accountID, id(2))
         return batch
     }
+    func testIdleAuditRetentionSkipsRequestExchangeAndExecutionWork() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let (requests, store) = try checkpointedOwner(fixture, db, writer)
+        let journal = AuthorityJournal(requests: requests)
+        defer { try? journal.close(); store.close() }
+        let epoch = id(3), initial = now(), deadline = now(200), draft = try draft()
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 3, maximumRowsPerBatch: 1)
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        _ = try journal.withRequests { try $0.expirePending(now: deadline, receiptTimeMs: nil) }
+        let before = try store.read()
+        func whileExchangeActive(_ body: () throws -> Void) throws {
+            try journal.beginCommandExchange()
+            defer { journal.endCommandExchange() }
+            try body()
+        }
+        try whileExchangeActive { XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy)) }
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy, executionIsIdle: { false }))
+        try journal.withRequests { _ in
+            XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        }
+        XCTAssertEqual(try store.read(), before)
+        XCTAssertEqual(try journal.pruneAuditHistoryIfIdle(policy: policy),
+                       .init(retainedRows: 2, prunedRows: 1, remainingEligibleExcess: 1, protectedExcess: 0))
+        XCTAssertEqual(try journal.pruneAuditHistoryIfIdle(policy: policy),
+                       .init(retainedRows: 1, prunedRows: 1, remainingEligibleExcess: 0, protectedExcess: 0))
+        XCTAssertEqual(try journal.read { try $0.epoch(epoch)?.retainedAfter }, 2)
+        let pruned = try store.read()
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        XCTAssertEqual(try store.read(), pruned)
+    }
+
+    func testIdleAuditRetentionTransfersVerifiedBoundaryAndRetainedRecords() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let binding = try frameBinding(db), signer = key
+        let (requests, store) = try checkpointedOwner(fixture, db, writer)
+        let journal = AuthorityJournal(requests: requests)
+        defer { try? journal.close(); store.close() }
+        let initial = now(), deadline = now(210), draft = try draft()
+        _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
+        _ = try journal.withRequests { try $0.expirePending(now: deadline, receiptTimeMs: nil) }
+        func reply(_ query: PhoneAuditFrame) throws -> PhoneAuditFrame {
+            let frame = try journal.withRequests { owner in
+                try owner.phoneAudit(query, binding: binding, authorityPublicKey: signer.publicKey.x963Representation,
+                    maximumFrameBytes: 4096, now: { deadline }, signer: { try signer.signature(for: $0).rawRepresentation })
+            }
+            return try PhoneAuditFrame.decode(frame.encode())
+        }
+        let olderReply = try reply(auditQuery(page: true))
+        let saved = try olderReply.encode()
+        let original = try auditBatch(olderReply)
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 3, maximumRowsPerBatch: 10)
+        XCTAssertEqual(try journal.pruneAuditHistoryIfIdle(policy: policy)?.prunedRows, 2)
+        let status = try auditStatus(reply(auditQuery()))
+        XCTAssertEqual(status.currentRetainedAfter, 2)
+        XCTAssertEqual(status.currentHead, original.head)
+        let page = try auditBatch(reply(auditQuery(page: true)))
+        XCTAssertTrue(page.retentionGap)
+        XCTAssertEqual(page.records, Array(original.records.suffix(1)))
+        XCTAssertEqual(try auditBatch(PhoneAuditFrame.decode(saved)).records, original.records)
+    }
+
     func testPhoneAuditReadsBothReplyKindsWithoutChangingHistoryOrContinuity() throws {
         for checkpointed in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture)

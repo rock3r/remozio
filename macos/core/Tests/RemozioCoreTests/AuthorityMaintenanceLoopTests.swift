@@ -12,6 +12,22 @@ final class AuthorityMaintenanceLoopTests: XCTestCase {
         loop.close(); loop.close()
         XCTAssertThrowsError(try loop.start())
     }
+    func testDelayedMaintenanceUsesTheFirstIntervalForEachNewOwner() throws {
+        for _ in 0..<2 {
+            let tick = expectation(description: "first delayed callback")
+            let start = DispatchTime.now().uptimeNanoseconds
+            let loop = try AuthorityMaintenanceLoop(intervalMilliseconds: 100, runImmediately: false, work: {
+                XCTAssertGreaterThanOrEqual(DispatchTime.now().uptimeNanoseconds - start, 90_000_000)
+                tick.fulfill()
+                throw Failure.injected
+            }, failed: {})
+            try loop.start()
+            wait(for: [tick], timeout: 2)
+            loop.close()
+            XCTAssertThrowsError(try loop.start())
+        }
+    }
+
     func testFailureRunsOnceAndRetiresTimer() throws {
         let failure = expectation(description: "failure callback")
         failure.assertForOverFulfill = true

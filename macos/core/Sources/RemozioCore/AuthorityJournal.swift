@@ -432,6 +432,26 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Try one audit batch without queueing behind request work. Keep the idle check and write under one lock.
+    func pruneAuditHistoryIfIdle(policy: AuditRetention.Policy,
+                                executionIsIdle: () -> Bool = { true }) throws -> AuditRetention.Result? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard lock.depth == 1, !requestOperationActive, !updatePolicyOperationActive, let requests,
+              !updateHealthOnly, !updateCompletionOnly, !retainedSetupPolicyOnly else { return nil }
+        let work = try requests.maintenanceRequestWork(), exchanges = commandExchanges.maintenanceWork
+        guard work.liveRequests == 0, work.commandCaptures == 0, work.activityOwners == 0,
+              !exchanges.stopped, exchanges.active == 0, commandExecutions.isEmpty, commandActivity.isEmpty,
+              commandsAwaitingPreparation.isEmpty, deferredCommandPreparations.isEmpty, executionIsIdle() else { return nil }
+        requestOperationActive = true
+        defer { requestOperationActive = false }
+        do { return try requests.pruneAuditHistoryIfNeeded(policy: policy) }
+        catch {
+            if requests.retired || !isStorageContention(error) { throw error }
+            return nil
+        }
+    }
+
     /// Transfers an already assembled command into the serialized request owner.
     /// A failed first transfer closes its objects. Rejected reentry leaves previously owned objects intact.
     /// The host completes negotiation and current elevation-policy validation before this call.

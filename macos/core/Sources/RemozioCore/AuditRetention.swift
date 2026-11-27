@@ -39,15 +39,19 @@ enum AuditRetention {
         let result: Result
     }
 
-    static func plan(transaction: JournalTransaction, activeEpoch: Data, policy: Policy, continuing: Bool) throws -> Plan {
-        let epochs = try transaction.auditEpochs()
-        let byID = Dictionary(uniqueKeysWithValues: epochs.map { ($0.descriptor.epoch, $0) })
-        guard let active = byID[activeEpoch] else { throw AuditReplyError.epochMismatch }
-        let total = try epochs.reduce(UInt64(0)) { count, epoch in
+    static func rowCount(_ epochs: [AuditEpochRead]) throws -> UInt64 {
+        try epochs.reduce(UInt64(0)) { count, epoch in
             let (next, overflow) = count.addingReportingOverflow(epoch.head - epoch.retainedAfter)
             guard !overflow else { throw AuditReplyError.invalidBounds }
             return next
         }
+    }
+
+    static func plan(transaction: JournalTransaction, activeEpoch: Data, policy: Policy, continuing: Bool) throws -> Plan {
+        let epochs = try transaction.auditEpochs()
+        let byID = Dictionary(uniqueKeysWithValues: epochs.map { ($0.descriptor.epoch, $0) })
+        guard let active = byID[activeEpoch] else { throw AuditReplyError.epochMismatch }
+        let total = try rowCount(epochs)
         guard total > policy.targetRows, continuing || total >= policy.triggerRows else {
             return Plan(prefixes: [], result: Result(retainedRows: total, prunedRows: 0,
                                                     remainingEligibleExcess: 0, protectedExcess: 0))

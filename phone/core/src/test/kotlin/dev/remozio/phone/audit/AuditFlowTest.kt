@@ -78,6 +78,36 @@ class AuditFlowTest {
         }
     }
 
+    @Test fun retainedProofsSurviveACachedRoundTripAfterNativePruning() = Peer().use { peer ->
+        val disk = Disk(); val key = aesKey()
+        val saved = Phone(peer.publicKey, disk, key).use { phone ->
+            phone.round(peer)
+            phone.session.state.value.history.proofs.map { it.canonicalBody to it.signature }
+        }
+        assertTrue(saved.isNotEmpty())
+        peer.control("pruneCurrent", "pruned")
+        val newDisk = Disk(); val newKey = aesKey()
+        Phone(peer.publicKey, newDisk, newKey).use { phone -> phone.round(peer) }
+        Phone(peer.publicKey, newDisk, newKey).use { phone ->
+            val epoch = phone.session.state.value.history.epochs.single()
+            assertEquals(4uL, epoch.highestRetainedAfter)
+            assertEquals(listOf(AuditHistoryGap(0u, 4u, true)), epoch.gaps)
+            assertTrue(epoch.records.isEmpty())
+        }
+        Phone(peer.publicKey, disk, key).use { phone ->
+            phone.round(peer)
+            val history = phone.session.state.value.history
+            assertEquals(4uL, history.epochs.single().highestRetainedAfter)
+            assertTrue(history.proofs.map { it.canonicalBody to it.signature }.containsAll(saved))
+        }
+        Phone(peer.publicKey, disk, key).use { phone ->
+            val history = phone.session.state.value.history
+            assertEquals(listOf(1uL, 2uL, 3uL, 4uL), history.epochs.single().records.map { it.sequence })
+            assertTrue(history.epochs.single().gaps.isEmpty())
+            assertTrue(history.proofs.map { it.canonicalBody to it.signature }.containsAll(saved))
+        }
+    }
+
     @Test fun signedRepliesStillNeedThePinnedKeyNonceAndLiveQuery() = Peer().use { peer ->
         Phone(peer.publicKey).use { phone ->
             phone.session.start(); val cancelled = assertNotNull(phone.session.next())

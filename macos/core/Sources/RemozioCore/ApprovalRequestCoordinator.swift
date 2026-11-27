@@ -92,6 +92,7 @@ public final class ApprovalRequestCoordinator {
     private var accountUpdateDrain: UpdateDrainToken?
     var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
+    private var auditRetentionContinuing = false
     private var retainedBytes = 0
     private var deliveryBytes = 0
     private let wakePublication: RetainedWakePublication
@@ -154,6 +155,25 @@ public final class ApprovalRequestCoordinator {
         return .init(liveRequests: entries.values.filter { !$0.state.phase.isTerminal }.count,
             commandCaptures: entries.values.filter { $0.command != nil }.count,
             activityOwners: entries.values.filter { $0.activity != nil }.count)
+    }
+
+    /// The journal owner has excluded live requests and executions for this maintenance turn.
+    func pruneAuditHistoryIfNeeded(policy: AuditRetention.Policy) throws -> AuditRetention.Result? {
+        try running()
+        guard let checkpointed, accountUpdateDrain == nil else { return nil }
+        do {
+            // The cheap count schedules work only. The checkpointed operation verifies and counts again before pruning.
+            let count = try database.read { try AuditRetention.rowCount($0.auditEpochs()) }
+            let minimum = auditRetentionContinuing ? policy.targetRows + 1 : policy.triggerRows
+            guard count >= minimum else { auditRetentionContinuing = false; return nil }
+            let activity: ReleaseActivityToken?
+            do { activity = try releaseActivity?.acquireShared() }
+            catch ReleaseActivityError.busy { return nil }
+            defer { activity?.close() }
+            let result = try checkpointed.pruneAuditHistory(policy: policy, continuing: auditRetentionContinuing)
+            auditRetentionContinuing = result.remainingEligibleExcess > 0
+            return result
+        } catch { retireAfterStorageFailure(); throw error }
     }
 
     /// The host retains both store leases and completes startup recovery before supplying the writer.
