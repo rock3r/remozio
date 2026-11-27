@@ -1468,6 +1468,213 @@ final class CheckpointedJournalTests: XCTestCase {
     }
 }
 
+extension CheckpointedJournalTests {
+    private func appendRetentionEvents(_ count: UInt64, writer: AuditEpochWriter,
+                                       transaction: JournalTransaction, fixture: Fixture) throws {
+        let head = try XCTUnwrap(transaction.epoch(writer.epoch)).head
+        for offset in 1...count {
+            let eventID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
+            let event = try AuditEventMetadata(eventID: eventID,
+                macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+                journalEpoch: writer.epoch, sequence: head + offset, requestID: nil,
+                eventTimeMs: nil, authorityReceiptTimeMs: nil, kind: .consumed, category: .command,
+                action: nil, decisionPhoneID: nil, authentication: .system, outcome: .accepted, reason: .none,
+                droppedEventCount: nil, peerDeviceID: nil).encode(limits: fixture.limits)
+            try transaction.append(event, writer: writer, expectedHead: head + offset - 1)
+        }
+    }
+
+    private func retentionEpoch(_ id: UInt8, after previous: Data, sequence: UInt64,
+                                fixture: Fixture, transaction: JournalTransaction,
+                                digestOverride: Data? = nil) throws -> AuditEpochWriter {
+        let page = try transaction.page(epoch: previous, after: sequence - 1,
+                                        maximumRecords: 1, maximumBytes: fixture.limits.maxBytes)
+        let record = try XCTUnwrap(page.canonicalRecords.first)
+        let digest = digestOverride ?? Data(SHA256.hash(data: record))
+        let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+            0: .unsigned(1), 1: .bytes(Data(repeating: 1, count: 16)), 2: .bytes(Data(repeating: 2, count: 16)),
+            3: .bytes(Data(repeating: id, count: 16)), 4: .unsigned(7),
+            5: .unsigned(AuditEpochCause.restart.rawValue), 6: .bytes(previous),
+            7: .unsigned(sequence), 8: .bytes(digest),
+        ]), limits: fixture.limits), limits: fixture.limits)
+        return try transaction.createEpoch(descriptor)
+    }
+
+    private func appendRetentionFixture(_ fixture: Fixture, commits: CheckpointedJournal) throws {
+        try commits.write(epoch: fixture.epoch) {
+            try appendRetentionEvents(7, writer: fixture.writer, transaction: $0, fixture: fixture)
+        }
+    }
+
+    private func retainedFloor(_ fixture: Fixture) throws -> UInt64 {
+        try fixture.journal.read { try XCTUnwrap($0.epoch(fixture.epoch)).retainedAfter }
+    }
+
+    func testAuditRetentionContinuesToTargetBelowTriggerAndPreservesReplay() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture)
+        let reservation = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(reservation) }
+        try appendRetentionFixture(fixture, commits: commits)
+        let before = try fixture.store.read().committed
+        let policy = try AuditRetention.Policy(targetRows: 3, triggerRows: 7, maximumRowsPerBatch: 2)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy),
+                       .init(retainedRows: 5, prunedRows: 2, remainingEligibleExcess: 2, protectedExcess: 0))
+        let first = try fixture.store.read().committed
+        XCTAssertEqual(first.generation, before.generation + 1)
+        XCTAssertEqual(try retainedFloor(fixture), 2)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy).prunedRows, 0)
+        XCTAssertEqual(try fixture.store.read().committed, first)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy, continuing: true),
+                       .init(retainedRows: 3, prunedRows: 2, remainingEligibleExcess: 0, protectedExcess: 0))
+        XCTAssertEqual(try retainedFloor(fixture), 4)
+        let after = try fixture.store.read().committed
+        XCTAssertEqual(after.journalHead, before.journalHead)
+        XCTAssertEqual(after.authorityDigest, before.authorityDigest)
+        XCTAssertNotEqual(after.ledgerDigest, before.ledgerDigest)
+        XCTAssertEqual(try commits.read { try $0.commandSubmissionReservation(submissionID: reservation.submission.id) },
+                       reservation)
+    }
+
+    func testAuditRetentionKeepsDetachedRowsAndDescriptorAnchors() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let detached = Data(repeating: 4, count: 16), active = Data(repeating: 5, count: 16)
+        try commits.write(epoch: fixture.epoch) {
+            try appendRetentionEvents(4, writer: fixture.writer, transaction: $0, fixture: fixture)
+        }
+        try commits.write(epoch: detached) { transaction in
+            let writer = try retentionEpoch(4, after: fixture.epoch, sequence: 2, fixture: fixture, transaction: transaction)
+            try appendRetentionEvents(5, writer: writer, transaction: transaction, fixture: fixture)
+        }
+        try commits.write(epoch: active) { transaction in
+            let writer = try retentionEpoch(5, after: fixture.epoch, sequence: 4, fixture: fixture, transaction: transaction)
+            try appendRetentionEvents(4, writer: writer, transaction: transaction, fixture: fixture)
+        }
+        let descriptor = try commits.read { try XCTUnwrap($0.epoch(active)).descriptor.encode(limits: fixture.limits) }
+        let policy = try AuditRetention.Policy(targetRows: 3, triggerRows: 4, maximumRowsPerBatch: 20)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy),
+                       .init(retainedRows: 9, prunedRows: 4, remainingEligibleExcess: 0, protectedExcess: 6))
+        try commits.read { transaction in
+            XCTAssertEqual(try XCTUnwrap(transaction.epoch(fixture.epoch)).retainedAfter, 1)
+            XCTAssertEqual(try XCTUnwrap(transaction.epoch(detached)).retainedAfter, 0)
+            let retained = try XCTUnwrap(transaction.epoch(active))
+            XCTAssertEqual(retained.retainedAfter, 3)
+            XCTAssertEqual(retained.head, 4)
+            XCTAssertEqual(try retained.descriptor.encode(limits: fixture.limits), descriptor)
+        }
+        let after = try fixture.store.read()
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy, continuing: true).protectedExcess, 6)
+        XCTAssertEqual(try fixture.store.read(), after)
+    }
+
+    func testAuditRetentionLeavesPredecessorWithUnverifiedDigestIntact() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try appendRetentionFixture(fixture, commits: commits)
+        try commits.write(epoch: Data(repeating: 4, count: 16)) { transaction in
+            let writer = try retentionEpoch(4, after: fixture.epoch, sequence: 7, fixture: fixture,
+                                            transaction: transaction, digestOverride: Data(repeating: 0, count: 32))
+            try appendRetentionEvents(3, writer: writer, transaction: transaction, fixture: fixture)
+        }
+        let policy = try AuditRetention.Policy(targetRows: 2, triggerRows: 4, maximumRowsPerBatch: 20)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy),
+                       .init(retainedRows: 8, prunedRows: 2, remainingEligibleExcess: 0, protectedExcess: 6))
+        XCTAssertEqual(try retainedFloor(fixture), 0)
+    }
+
+    func testAuditRetentionKeepsGapFromHistoryRecovery() throws {
+        let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
+        let recovered = try resumeHistory(fixture)
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let active = Data(repeating: 4, count: 16)
+        try commits.write(epoch: active) { transaction in
+            let writer = try retentionEpoch(4, after: recovered.journalEpoch, sequence: 1,
+                                            fixture: fixture, transaction: transaction)
+            try appendRetentionEvents(5, writer: writer, transaction: transaction, fixture: fixture)
+        }
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 2, maximumRowsPerBatch: 20)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy),
+                       .init(retainedRows: 3, prunedRows: 4, remainingEligibleExcess: 0, protectedExcess: 2))
+        try commits.read { transaction in
+            let page = try transaction.page(epoch: recovered.journalEpoch, after: 0,
+                                            maximumRecords: 2, maximumBytes: fixture.limits.maxBytes)
+            let gap = try AuditEventMetadata.decode(XCTUnwrap(page.canonicalRecords.first), limits: fixture.limits)
+            XCTAssertEqual(gap.kind, .recovery)
+            XCTAssertEqual(try transaction.historyRecovery(epoch: recovered.journalEpoch), intent)
+        }
+    }
+
+    func testAuditRetentionRejectsChangedLedgerBeforeAdvancingFloor() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try appendRetentionFixture(fixture, commits: commits)
+        let before = try fixture.store.read()
+        try fixture.sql("DELETE FROM audit_records_v1 WHERE sequence = X'0000000000000002'", journal: true)
+        let policy = try AuditRetention.Policy(targetRows: 3, triggerRows: 6, maximumRowsPerBatch: 20)
+        XCTAssertThrowsError(try commits.pruneAuditHistory(policy: policy)) {
+            XCTAssertEqual($0 as? CheckpointedJournal.Failure, .boundaryMismatch)
+        }
+        XCTAssertEqual(try retainedFloor(fixture), 0)
+        XCTAssertEqual(try fixture.store.read(), before)
+    }
+
+    func testAuditRetentionPreparationFailureRollsBackPrune() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try appendRetentionFixture(fixture, commits: commits)
+        let before = try fixture.store.read()
+        let policy = try AuditRetention.Policy(targetRows: 3, triggerRows: 6, maximumRowsPerBatch: 20)
+        try fixture.sql("CREATE TRIGGER fail_prepare BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try commits.pruneAuditHistory(policy: policy))
+        try fixture.sql("DROP TRIGGER fail_prepare")
+        try fixture.reopen()
+        XCTAssertEqual(try fixture.store.read(), before)
+        XCTAssertEqual(try retainedFloor(fixture), 0)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                       .unchanged(before.committed))
+    }
+
+    func testAuditRetentionCommitFailureDiscardsPreparedPrune() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try appendRetentionFixture(fixture, commits: commits)
+        let before = try fixture.store.read().committed
+        let policy = try AuditRetention.Policy(targetRows: 3, triggerRows: 6, maximumRowsPerBatch: 20)
+        try fixture.withJournalReader {
+            XCTAssertThrowsError(try commits.pruneAuditHistory(policy: policy)) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_BUSY))
+            }
+        }
+        let prepared = try XCTUnwrap(fixture.store.read().pending)
+        XCTAssertEqual(prepared.journalHead, before.journalHead)
+        XCTAssertNotEqual(prepared.ledgerDigest, before.ledgerDigest)
+        try fixture.reopen()
+        XCTAssertEqual(try retainedFloor(fixture), 0)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                       .discarded(before))
+    }
+
+    func testAuditRetentionFinalizesCommittedPruneAfterRestart() throws {
+        let fixture = try Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        try appendRetentionFixture(fixture, commits: commits)
+        let before = try fixture.store.read().committed
+        let policy = try AuditRetention.Policy(targetRows: 3, triggerRows: 6, maximumRowsPerBatch: 20)
+        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        XCTAssertThrowsError(try commits.pruneAuditHistory(policy: policy))
+        let candidate = try XCTUnwrap(fixture.store.read().pending)
+        XCTAssertEqual(try fixture.store.read().committed, before)
+        try fixture.sql("DROP TRIGGER fail_finalize")
+        try fixture.reopen()
+        XCTAssertEqual(try retainedFloor(fixture), 4)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                       .finalized(candidate))
+        let recovered = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertEqual(try recovered.pruneAuditHistory(policy: policy).prunedRows, 0)
+        XCTAssertEqual(try fixture.store.read().committed, candidate)
+    }
+}
+
 // Reference encoder for checking byte compatibility on the same journal snapshot.
 private enum LegacyContinuityDigest {
     static func read(_ db: OpaquePointer) throws -> JournalContinuityDigests {

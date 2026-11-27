@@ -849,6 +849,7 @@ public final class JournalTransaction {
     }
 
     public func epoch(_ id: Data) throws -> AuditEpochRead? { try tables().epoch(id) }
+    func auditEpochs() throws -> [AuditEpochRead] { try tables().epochs() }
     public func page(epoch: Data, after: UInt64, maximumRecords: Int, maximumBytes: Int) throws -> AuditJournalPage {
         try tables().page(epoch: epoch, after: after, maximumRecords: maximumRecords, maximumBytes: maximumBytes)
     }
