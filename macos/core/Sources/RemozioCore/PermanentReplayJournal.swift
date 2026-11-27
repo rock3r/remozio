@@ -90,7 +90,8 @@ enum PermanentReplayJournal {
 
     static func validateSchema(on db: OpaquePointer) throws {
         // A WITHOUT ROWID primary key is the table B-tree. There must be no secondary index to select.
-        let names = tables.map { "'\($0)'" }.joined(separator: ",")
+        let schemaTables = tables + [ReplayDetailJournal.table]
+        let names = schemaTables.map { "'\($0)'" }.joined(separator: ",")
         try query(db, """
             SELECT 1 FROM main.sqlite_schema WHERE type='trigger'
               OR (type='index' AND tbl_name IN (\(names))) LIMIT 1
@@ -101,7 +102,7 @@ enum PermanentReplayJournal {
             case let code: throw JournalDatabaseError.storage(code)
             }
         }
-        for (table, definition) in zip(tables, definitions) {
+        for (table, definition) in zip(schemaTables, definitions + [ReplayDetailJournal.definition]) {
             try query(db, """
                 SELECT type,sql FROM main.sqlite_schema
                 WHERE name='\(table)'

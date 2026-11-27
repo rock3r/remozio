@@ -302,6 +302,28 @@ final class CheckpointedJournalTests: XCTestCase {
         }
     }
 
+    func testPermanentReplayRejectsRetirementSchemaChanges() throws {
+        for mutation in [
+            "CREATE INDEX retirement_request_idx ON replay_detail_retirement_v1(request)",
+            "CREATE TRIGGER retirement_insert AFTER INSERT ON replay_detail_retirement_v1 BEGIN SELECT 1; END",
+            "ALTER TABLE replay_detail_retirement_v1 ADD COLUMN unexpected BLOB",
+        ] {
+            let fixture = try Fixture(), commits = try installCommandReplay(fixture)
+            XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+            let before = try fixture.store.read()
+            XCTAssertEqual(try commits.read { try $0.continuityDigests().ledger }, before.committed.ledgerDigest)
+            try fixture.sql(mutation, journal: true)
+
+            XCTAssertThrowsError(try commits.read { try $0.continuityDigests() }, mutation) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .incompatibleStore, mutation)
+            }
+            XCTAssertEqual(try fixture.store.read(), before, mutation)
+            XCTAssertThrowsError(try fixture.reopen(), mutation) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .incompatibleStore, mutation)
+            }
+        }
+    }
+
     private final class ReplaySQLTrace {
         var statements: [String] = []
     }

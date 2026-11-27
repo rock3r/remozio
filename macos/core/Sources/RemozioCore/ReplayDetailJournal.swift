@@ -4,6 +4,18 @@ import SQLite3
 /// Scoped ledger metadata for observing settlement and linking new command reservations to requests.
 struct ReplayDetailJournal {
     static let table = "replay_detail_retirement_v1"
+    static let definition = """
+        CREATE TABLE \(table) (
+            mac BLOB NOT NULL CHECK(length(mac)=16), account BLOB NOT NULL CHECK(length(account)=16),
+            request BLOB NOT NULL CHECK(length(request)=16),
+            submission BLOB CHECK(submission IS NULL OR length(submission)=16),
+            revision BLOB CHECK(revision IS NULL OR length(revision)=8),
+            watermark BLOB CHECK(watermark IS NULL OR length(watermark)=8),
+            epoch BLOB CHECK(epoch IS NULL OR length(epoch)=16),
+            CHECK((revision IS NULL)=(watermark IS NULL) AND (watermark IS NULL)=(epoch IS NULL)),
+            PRIMARY KEY(mac,account,request)
+        ) STRICT, WITHOUT ROWID
+        """
 
     struct Mark {
         let revision: Data
@@ -31,18 +43,7 @@ struct ReplayDetailJournal {
     }
 
     static func create(on db: OpaquePointer) throws {
-        let code = sqlite3_exec(db, """
-            CREATE TABLE main.\(table) (
-                mac BLOB NOT NULL CHECK(length(mac)=16), account BLOB NOT NULL CHECK(length(account)=16),
-                request BLOB NOT NULL CHECK(length(request)=16),
-                submission BLOB CHECK(submission IS NULL OR length(submission)=16),
-                revision BLOB CHECK(revision IS NULL OR length(revision)=8),
-                watermark BLOB CHECK(watermark IS NULL OR length(watermark)=8),
-                epoch BLOB CHECK(epoch IS NULL OR length(epoch)=16),
-                CHECK((revision IS NULL)=(watermark IS NULL) AND (watermark IS NULL)=(epoch IS NULL)),
-                PRIMARY KEY(mac,account,request)
-            ) STRICT, WITHOUT ROWID
-            """, nil, nil, nil)
+        let code = sqlite3_exec(db, definition, nil, nil, nil)
         guard code == SQLITE_OK else { throw JournalDatabaseError.storage(code) }
     }
 
