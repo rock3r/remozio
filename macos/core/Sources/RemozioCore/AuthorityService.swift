@@ -23,6 +23,7 @@ public final class AuthorityService: @unchecked Sendable {
     private let journal: AuthorityJournal
     private let listener: AuthorityXPCListener
     private var maintenance: AuthorityMaintenanceLoop?
+    private var auditMaintenance: AuthorityMaintenanceLoop?
     private let requestClock: @Sendable () throws -> AuthorityMoment
     private let onMaintenanceFailure: @Sendable () -> Void
     private var started = false
@@ -133,6 +134,7 @@ public final class AuthorityService: @unchecked Sendable {
          wakeHintFeed: AuthorityWakeHintFeed? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
+         auditExecutionIsIdle: @escaping @Sendable () -> Bool = { true },
          onMaintenanceFailure: @escaping @Sendable () -> Void = {},
          onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         self.journal = journal
@@ -203,6 +205,10 @@ public final class AuthorityService: @unchecked Sendable {
                         try reconcileExpired(states)
                     }
                 }, failed: { [weak self] in self?.maintenanceDidFail() })
+                let policy = try AuditRetention.Policy(maximumRowsPerBatch: 10_000)
+                auditMaintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: 60_000, runImmediately: false, work: {
+                    _ = try journal.pruneAuditHistoryIfIdle(policy: policy, executionIsIdle: auditExecutionIsIdle)
+                }, failed: { [weak self] in self?.maintenanceDidFail() })
             } else if let maintain {
                 maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: maintenanceIntervalMilliseconds,
                     work: maintain, failed: { [weak self] in self?.maintenanceDidFail() })
@@ -251,7 +257,7 @@ public final class AuthorityService: @unchecked Sendable {
             onCommandAuthorized: onCommandAuthorized)
     }
 
-    deinit { maintenance?.close(); listener.close(); try? journal.close() }
+    deinit { auditMaintenance?.close(); maintenance?.close(); listener.close(); try? journal.close() }
 
     func preparePairingProofs(access: AuthorityPairingSetupAccess, owners: AuthorityMaintenancePairingOwners) throws {
         try listener.preparePairingProofs(access: access, owners: owners)
@@ -264,9 +270,11 @@ public final class AuthorityService: @unchecked Sendable {
             do {
                 try listener.start()
                 try maintenance?.start()
+                try auditMaintenance?.start()
                 started = true
             } catch {
                 closed = true
+                auditMaintenance?.close()
                 maintenance?.close()
                 listener.close()
                 try? journal.close()
@@ -290,6 +298,7 @@ public final class AuthorityService: @unchecked Sendable {
     public func close() throws {
         try lock.withLock {
             closed = true
+            auditMaintenance?.close()
             maintenance?.close()
             listener.close()
             try journal.close()

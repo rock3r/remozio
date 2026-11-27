@@ -36,15 +36,18 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let db = try open(fixture, initialize: true, routingPolicy: routingPolicy)
         let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
         let writer = try db.write { try $0.createEpoch(descriptor(3)) }
-        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+        let enrollment = try fixtureEnrollment()
+        _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+            eventID: id(30), receiptTimeMs: 900, writer: writer, expectedAuditHead: 0) }
+        return (db, writer)
+    }
+    private func fixtureEnrollment() throws -> StoredApprovalEnrollment {
+        try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
             identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
             approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities, keys: [
                 EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
                 EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation),
             ]))
-        _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
-            eventID: id(30), receiptTimeMs: 900, writer: writer, expectedAuditHead: 0) }
-        return (db, writer)
     }
     private func owner(_ db: JournalDatabase, _ writer: AuditEpochWriter, maximum: Int = 8, bytes: Int = 32768,
                        wakes: Int = 1024) throws -> ApprovalRequestCoordinator {
@@ -318,12 +321,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     private func checkpointedOwner(_ fixture: Fixture, _ db: JournalDatabase, _ writer: AuditEpochWriter) throws -> (ApprovalRequestCoordinator, ContinuityStore) {
-        let directory = fixture.root.appendingPathComponent("continuity")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        for name in ["writer.lock", "continuity.sqlite"] {
-            let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
-            guard fd >= 0 else { throw Failure.fixture }; Darwin.close(fd)
-        }
+        try fixture.createContinuityFiles()
         let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
             generation: 1, authorityGeneration: 3) }
         let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path, relativeDirectory: "continuity", owner: getuid()),
@@ -1639,6 +1637,33 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func lease() throws -> ProtectedJournalLease { try .init(anchor: root.path, relativeDirectory: "store", owner: getuid()) }
+        func createContinuityFiles() throws {
+            let directory = root.appendingPathComponent("continuity")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "continuity.sqlite"] {
+                let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw Failure.fixture }; Darwin.close(fd)
+            }
+        }
+        func continuitySnapshot() throws -> ContinuityState {
+            let path = root.appendingPathComponent("continuity/continuity.sqlite").path
+            var connection: OpaquePointer?
+            defer { sqlite3_close(connection) }
+            guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+                  let connection else { throw Failure.fixture }
+            var query: OpaquePointer?
+            defer { sqlite3_finalize(query) }
+            guard sqlite3_prepare_v2(connection, "SELECT committed,pending,repair FROM continuity_v1 WHERE id=1", -1,
+                                     &query, nil) == SQLITE_OK,
+                  let query, sqlite3_step(query) == SQLITE_ROW else { throw Failure.fixture }
+            func checkpoint(_ column: Int32) throws -> ContinuityCheckpoint {
+                guard let bytes = sqlite3_column_blob(query, column) else { throw Failure.fixture }
+                return try ContinuityCheckpoint.decode(Data(bytes: bytes, count: Int(sqlite3_column_bytes(query, column))))
+            }
+            let committed = try checkpoint(0)
+            let pending: ContinuityCheckpoint? = try sqlite3_column_type(query, 1) == SQLITE_NULL ? nil : checkpoint(1)
+            return try ContinuityState(committed: committed, pending: pending, recoveryRequired: sqlite3_column_int(query, 2) != 0)
+        }
         func sql(_ sql: String, continuity: Bool = false) throws {
             var db: OpaquePointer?
             guard sqlite3_open(continuity ? root.appendingPathComponent("continuity/continuity.sqlite").path : path, &db) == SQLITE_OK, let db else { throw Failure.fixture }
@@ -2340,6 +2365,178 @@ extension ApprovalRequestCoordinatorTests {
         XCTAssertEqual(batch.queryNonce, nonce); XCTAssertEqual(batch.macID, id(1)); XCTAssertEqual(batch.accountID, id(2))
         return batch
     }
+    private func idleRetentionJournal(_ fixture: Fixture, cyclePolicy: AuditRetention.Policy? = nil)
+        throws -> (AuthorityJournal, AuthorityPeerBinding) {
+        let limits = try limits, capabilities = try capabilities, contract = try contract
+        let anchor = fixture.root.path, clock = clock, mac = id(1), account = id(2)
+        let original = try descriptor(3), enrollment = try fixtureEnrollment(), enrollmentEvent = id(30)
+        try fixture.createContinuityFiles()
+        let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+            macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits,
+            decisionLimits: limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+        let firstWriter = try db.write { transaction in
+            let revision = try transaction.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract])
+            let writer = try transaction.createEpoch(original)
+            _ = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+                eventID: enrollmentEvent, receiptTimeMs: 900, writer: writer, expectedAuditHead: 0)
+            return writer
+        }
+        let writer: AuditEpochWriter
+        if let cyclePolicy {
+            let oldEvent = try AuditEventMetadata(eventID: id(80), macID: mac, accountID: account,
+                journalEpoch: original.epoch, sequence: 2, requestID: nil, eventTimeMs: nil,
+                authorityReceiptTimeMs: nil, kind: .requestCreated, category: .command, action: nil,
+                decisionPhoneID: nil, authentication: .system, outcome: .pending, reason: .none,
+                droppedEventCount: nil, peerDeviceID: nil).encode(limits: limits)
+            // The two empty epochs form a cycle. The checkpoint still matches the journal bytes.
+            func linked(_ epoch: UInt8, previous: UInt8) throws -> AuditEpochDescriptor {
+                try .decode(DeterministicCBOR.encode(.map([
+                    0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(Data(repeating: epoch, count: 16)),
+                    4: .unsigned(UInt64(epoch)), 5: .unsigned(AuditEpochCause.restart.rawValue),
+                    6: .bytes(Data(repeating: previous, count: 16)), 7: .unsigned(0), 8: .null,
+                ]), limits: limits), limits: limits)
+            }
+            let previous = try linked(4, previous: 5), active = try linked(5, previous: 4)
+            writer = try db.write { transaction in
+                try transaction.append(oldEvent, writer: firstWriter, expectedHead: 1)
+                _ = try transaction.createEpoch(previous)
+                return try transaction.createEpoch(active)
+            }
+            XCTAssertThrowsError(try db.read {
+                try AuditRetention.plan(transaction: $0, activeEpoch: active.epoch, policy: cyclePolicy, continuing: false)
+            }) {
+                XCTAssertEqual($0 as? AuditRetention.PlanningFailure, .cyclicLineage)
+            }
+        } else {
+            writer = firstWriter
+        }
+        let epoch = writer.epoch
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        let binding = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision)
+        let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch,
+            generation: 1, authorityGeneration: 3) }
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
+            macID: mac, accountID: account, initialize: initial)
+        let requests = try ApprovalRequestCoordinator(database: db, continuity: continuity, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        return (AuthorityJournal(requests: requests), binding)
+    }
+
+    func testIdleAuditRetentionSkipsRequestExchangeAndExecutionWork() throws {
+        let fixture = try Fixture()
+        let (journal, _) = try idleRetentionJournal(fixture)
+        defer { try? journal.close() }
+        let epoch = id(3), initial = now(), deadline = now(200), draft = try draft()
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 3, maximumRowsPerBatch: 1)
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        _ = try journal.withRequests { try $0.expirePending(now: deadline, receiptTimeMs: nil) }
+        let before = try fixture.continuitySnapshot()
+        func whileExchangeActive(_ body: () throws -> Void) throws {
+            try journal.beginCommandExchange()
+            defer { journal.endCommandExchange() }
+            try body()
+        }
+        try whileExchangeActive { XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy)) }
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy, executionIsIdle: { false }))
+        try journal.withRequests { _ in
+            XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        }
+        XCTAssertEqual(try fixture.continuitySnapshot(), before)
+        XCTAssertEqual(try journal.pruneAuditHistoryIfIdle(policy: policy),
+                       .init(retainedRows: 2, prunedRows: 1, remainingEligibleExcess: 1, protectedExcess: 0))
+        XCTAssertEqual(try journal.pruneAuditHistoryIfIdle(policy: policy),
+                       .init(retainedRows: 1, prunedRows: 1, remainingEligibleExcess: 0, protectedExcess: 0))
+        XCTAssertEqual(try journal.read { try $0.epoch(epoch)?.retainedAfter }, 2)
+        let pruned = try fixture.continuitySnapshot()
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        XCTAssertEqual(try fixture.continuitySnapshot(), pruned)
+    }
+
+    func testIdleAuditRetentionSuspendsPlanningFailureAndKeepsRequestsAvailable() throws {
+        let fixture = try Fixture()
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 2, maximumRowsPerBatch: 10)
+        let (journal, _) = try idleRetentionJournal(fixture, cyclePolicy: policy)
+        let before = try fixture.continuitySnapshot()
+        defer { try? journal.close() }
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        XCTAssertEqual(try fixture.continuitySnapshot(), before)
+
+        let draft = try draft(), initial = now(), deadline = now(210), epoch = id(5)
+        _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
+        _ = try journal.withRequests { try $0.expirePending(now: deadline, receiptTimeMs: nil) }
+        let after = try fixture.continuitySnapshot()
+        XCTAssertEqual(after.committed.journalHead, 2)
+        // Appending broke the zero-head cycle. A new plan now has an eligible active prefix.
+        XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
+        XCTAssertEqual(try fixture.continuitySnapshot(), after)
+        XCTAssertEqual(try journal.read { try $0.epoch(epoch)?.retainedAfter }, 0)
+    }
+
+    func testIdleAuditRetentionLeavesStorageAndIntegrityFailuresFailClosed() throws {
+        for changeJournal in [false, true] {
+            let fixture = try Fixture()
+            let (journal, _) = try idleRetentionJournal(fixture)
+            defer { try? journal.close() }
+            let draft = try draft(), initial = now(), deadline = now(210), later = now(220), epoch = id(3)
+            _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
+            _ = try journal.withRequests { try $0.expirePending(now: deadline, receiptTimeMs: nil) }
+            let before = try fixture.continuitySnapshot()
+            if changeJournal {
+                try fixture.sql("DELETE FROM audit_records_v1 WHERE sequence = X'0000000000000001'")
+            } else {
+                try fixture.sql("""
+                    CREATE TRIGGER fail_prune_prepare BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NOT NULL
+                    BEGIN SELECT RAISE(ABORT,'injected'); END
+                    """, continuity: true)
+            }
+            let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 3, maximumRowsPerBatch: 10)
+            XCTAssertThrowsError(try journal.pruneAuditHistoryIfIdle(policy: policy)) { error in
+                if changeJournal {
+                    XCTAssertEqual(error as? CheckpointedJournal.Failure, .boundaryMismatch)
+                } else if case .storage? = error as? ContinuityStoreError {
+                    // The independent prepare failed before SQLite could commit the prune.
+                } else {
+                    XCTFail("Expected continuity storage failure: \(error)")
+                }
+            }
+            XCTAssertTrue(try journal.withRequests { $0.retired })
+            XCTAssertThrowsError(try journal.withRequests { try $0.admitFixture(draft, now: later, receiptTimeMs: nil) })
+            XCTAssertEqual(try journal.read { try $0.epoch(epoch)?.retainedAfter }, 0)
+            XCTAssertEqual(try fixture.continuitySnapshot(), before)
+        }
+    }
+
+    func testIdleAuditRetentionTransfersVerifiedBoundaryAndRetainedRecords() throws {
+        let fixture = try Fixture(), signer = key
+        let (journal, binding) = try idleRetentionJournal(fixture)
+        defer { try? journal.close() }
+        let initial = now(), deadline = now(210), draft = try draft()
+        _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
+        _ = try journal.withRequests { try $0.expirePending(now: deadline, receiptTimeMs: nil) }
+        func reply(_ query: PhoneAuditFrame) throws -> PhoneAuditFrame {
+            let frame = try journal.withRequests { owner in
+                try owner.phoneAudit(query, binding: binding, authorityPublicKey: signer.publicKey.x963Representation,
+                    maximumFrameBytes: 4096, now: { deadline }, signer: { try signer.signature(for: $0).rawRepresentation })
+            }
+            return try PhoneAuditFrame.decode(frame.encode())
+        }
+        let olderReply = try reply(auditQuery(page: true))
+        let saved = try olderReply.encode()
+        let original = try auditBatch(olderReply)
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 3, maximumRowsPerBatch: 10)
+        XCTAssertEqual(try journal.pruneAuditHistoryIfIdle(policy: policy)?.prunedRows, 2)
+        let status = try auditStatus(reply(auditQuery()))
+        XCTAssertEqual(status.currentRetainedAfter, 2)
+        XCTAssertEqual(status.currentHead, original.head)
+        let page = try auditBatch(reply(auditQuery(page: true)))
+        XCTAssertTrue(page.retentionGap)
+        XCTAssertEqual(page.records, Array(original.records.suffix(1)))
+        XCTAssertEqual(try auditBatch(PhoneAuditFrame.decode(saved)).records, original.records)
+    }
+
     func testPhoneAuditReadsBothReplyKindsWithoutChangingHistoryOrContinuity() throws {
         for checkpointed in [false, true] {
             let fixture = try Fixture(), (db, writer) = try setup(fixture)

@@ -17,6 +17,7 @@ The repository contains experiments, protocol code, and partial native apps.
 - The [shared host core](host/shared-core/README.md) provides decision verification used by the Mac authority, with tests for both Mac and Linux.
 - The [Linux host proposal](docs/linux-host-contract.md) and [Linux validation guide](docs/linux-validation.md) track Ubuntu experiments and the remaining hardware and integration gates.
 - The [Android app](android/README.md) pairs with Macs and receives signed command requests and status over an authenticated connection. It supports biometric approval and decline without biometrics. Installed Mac and Pixel testing is pending.
+- [Mac audit retention](docs/macos-audit-retention.md) explains when the Mac removes older audit history and how the phone sees gaps.
 - The [native Mac app](macos/app/README.md) has a main window, a menu bar entry, and Settings.
 - The [iOS app](docs/ios-app.md) imports a pairing invitation, shows its claims, and can test the connection up to the comparison code. It does not pair yet.
 
