@@ -182,6 +182,18 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestExchange
         } catch { await close(); throw error }
     }
+    func recordPhoneRepairNotice(_ peer: DirectApprovalPeer, revision: UUID, notice: PhoneRepairNoticeFrame) async throws -> Bool {
+        guard peer.scope == notice.scope, peer.scope.macID == macID, peer.scope.accountID == accountID else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        inFlightOperations += 1; defer { finishOperation() }
+        try await acquire()
+        defer { release() }
+        let accepted = try await activeChannel().recordPhoneRepairNotice(binding: AuthorityPeerBinding(peer: peer, revision: revision), notice: notice)
+        try requireActive()
+        return accepted
+    }
+
     /// Each network exchange owns a separate Root connection and one challenge.
     func withPairingLookup<Value: Sendable>(
         _ body: @Sendable (AuthorityXPCChannel) async throws -> Value

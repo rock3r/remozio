@@ -443,7 +443,17 @@ struct PairedPhonesSheet: View {
                             ForEach(snapshot.phones, id: \.self) { phone in
                                 let id = displayID(phone, among: snapshot.phones)
                                 HStack {
-                                    Text("Phone \(id)")
+                                    VStack(alignment: .leading) {
+                                        Text("Phone \(id)")
+                                        switch snapshot.repairNotices[phone] {
+                                        case .legacyPolicy:
+                                            Text("Pair again from your phone to update its approval key.").font(.caption)
+                                        case .biometricChanged:
+                                            Text("Your phone’s fingerprints or faces changed. Pair again from your phone to restore approvals.").font(.caption)
+                                        case nil:
+                                            EmptyView()
+                                        }
+                                    }
                                     Spacer()
                                     Button("Revoke…") {
                                         guard let selection = snapshot.selection(for: phone) else { return }
@@ -621,7 +631,7 @@ struct PairedPhonesSheet: View {
     private func refresh() async {
         do {
             let active = try await connect()
-            snapshot = try await active.pairedPhonesForRePair()
+            snapshot = try await active.pairedPhonesWithRepairNotices()
             refreshError = nil
         } catch is CancellationError {
             return

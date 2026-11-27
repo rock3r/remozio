@@ -188,6 +188,15 @@ public actor AuthorityPairingChannel {
             macID: macID, accountID: accountID, includeRePair: true)
     }
 
+    public func pairedPhonesWithRepairNotices() async throws -> PairedPhoneSnapshot {
+        guard case .version(let version) = try await perform(.versionedPhoneManagementHello(4)),
+              (1...4).contains(version) else { throw AuthorityPairingChannelError.unsupportedVersion }
+        managesPhones = true
+        if version < 4 { return try await pairedPhonesForRePair() }
+        return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(.listWithRepairNotices, Data(), Data()))),
+            macID: macID, accountID: accountID, includeRePair: true, includeRepairNotices: true)
+    }
+
     public func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool {
         try requireScope(selection)
         try await requirePhoneManagement()

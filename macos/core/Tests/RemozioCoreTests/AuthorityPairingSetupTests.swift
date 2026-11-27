@@ -486,13 +486,22 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
         await channel.close()
     }
-    private func pairForRevocation(_ fixture: Fixture) async throws -> (AuthorityPairingChannel, ClientDriver) {
+    private func pairForRevocation(_ fixture: Fixture, decision: P256.Signing.PrivateKey? = nil) async throws -> (AuthorityPairingChannel, ClientDriver) {
         let driver = try ClientDriver(fixture), channel = client(fixture, driver: driver)
         _ = try await channel.start()
-        let transcript = try await channel.stage(fixture.proposal(), authorization: authorization)
+        let transcript = try await channel.stage(fixture.proposal(decision: decision), authorization: authorization)
         _ = try await channel.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, fixture),
             authorization: authorization)
         return (channel, driver)
+    }
+
+    private func pairForRepairNotices(_ fixture: Fixture, decision: P256.Signing.PrivateKey) async throws
+        -> (AuthorityPairingChannel, AuthorityMaintenancePairingOwners) {
+        let (channel, driver) = try await pairForRevocation(fixture, decision: decision)
+        let owners = AuthorityMaintenancePairingOwners(admission: fixture.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        return (channel, owners)
     }
 
     private func rePairProposal(_ fixture: Fixture, predecessor: PairingReplacement,
@@ -1411,6 +1420,128 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             setupID: Data(repeating: 3, count: 16), transcriptDigest: Data(repeating: 4, count: 32))
     }
 
+    private func signedPhoneRepairNotice(_ reason: PhoneRepairNoticeFrame.Reason, using signer: P256.Signing.PrivateKey,
+                                         scope: ChannelScope) throws -> PhoneRepairNoticeFrame {
+        let input = try PhoneRepairNoticeFrame.signingInput(scope: scope, reason: reason)
+        return try .init(scope: scope, reason: reason, signature: signer.signature(for: input).rawRepresentation)
+    }
+
+    private func phoneRepairNoticeFile(_ fixture: Fixture, scope: ChannelScope) -> URL {
+        let file = AdministrativeSetupPublication.File.phoneRepairNotice(phone: scope.phoneID, epoch: scope.enrollmentEpoch)
+        return fixture.root.appendingPathComponent("store").appendingPathComponent(file.name)
+    }
+
+    func testPhoneRepairNoticeIsAuthenticatedAndCannotChangePairingState() async throws {
+        let fixture = try Fixture(), key = P256.Signing.PrivateKey()
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
+        let before = try await channel.pairedPhonesWithRepairNotices()
+        let recipient = try XCTUnwrap(before.phones.first)
+        let originalSelection = try XCTUnwrap(before.selection(for: recipient))
+        XCTAssertTrue(before.repairNotices.isEmpty)
+        let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
+        let wrongSigner = try signedPhoneRepairNotice(.biometricChanged, using: fixture.biometric, scope: peer.scope)
+        XCTAssertFalse(try fixture.journal.retainPhoneRepairNotice(wrongSigner, binding: binding, validateTransport: { _ in }))
+        let wrongEpoch = try ChannelScope(macID: fixture.mac, accountID: fixture.account, phoneID: recipient.phoneID,
+            enrollmentEpoch: Data(repeating: 77, count: 16))
+        let wrongScope = try signedPhoneRepairNotice(.biometricChanged, using: key, scope: wrongEpoch)
+        XCTAssertFalse(try fixture.journal.retainPhoneRepairNotice(wrongScope, binding: binding, validateTransport: { _ in }))
+        let first = try signedPhoneRepairNotice(.biometricChanged, using: key, scope: peer.scope)
+        XCTAssertThrowsError(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in throw Failure.denied }))
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in }))
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in }))
+        let later = try signedPhoneRepairNotice(.legacyPolicy, using: key, scope: peer.scope)
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(later, binding: binding, validateTransport: { _ in }))
+
+        let after = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertEqual(after.repairNotices, [recipient: .biometricChanged])
+        XCTAssertEqual(after.phones, before.phones)
+        XCTAssertEqual(after.rePairablePhones, before.rePairablePhones)
+        XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(try fixture.records(), 1)
+        try fixture.assertCheckpoint()
+        let legacy = try await channel.pairedPhones()
+        XCTAssertTrue(legacy.repairNotices.isEmpty)
+
+        let revoked = try await channel.revokePhone(originalSelection, authorization: authorization)
+        XCTAssertEqual(revoked, .revokedOnMac)
+        let retired = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertTrue(retired.repairNotices.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: phoneRepairNoticeFile(fixture, scope: peer.scope)), try first.encode())
+        XCTAssertThrowsError(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in })) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        await channel.close()
+    }
+
+    func testBrokenPhoneRepairNoticeLeavesPairedPhoneManagementUsable() async throws {
+        let fixture = try Fixture(), key = P256.Signing.PrivateKey()
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
+        let before = try await channel.pairedPhonesWithRepairNotices()
+        let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
+        let original = try signedPhoneRepairNotice(.legacyPolicy, using: key, scope: peer.scope)
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(original, binding: binding, validateTransport: { _ in }))
+        let file = phoneRepairNoticeFile(fixture, scope: peer.scope)
+        let unverified = try signedPhoneRepairNotice(.biometricChanged, using: fixture.biometric, scope: peer.scope)
+        var diagnostics = 0
+        let storage = PhoneRepairNoticeStorage(anchor: fixture.root.path, relativeDirectory: "store", owner: getuid(),
+            reportInvalidNotice: { diagnostics += 1 })
+        let decisionKey = key.publicKey.x963Representation
+        XCTAssertEqual(try storage.read(scope: peer.scope, decisionKey: decisionKey), .legacyPolicy)
+        XCTAssertEqual(diagnostics, 0)
+        for (index, invalid) in [Data([0xff]), try unverified.encode()].enumerated() {
+            try invalid.write(to: file)
+            XCTAssertThrowsError(try storage.read(scope: peer.scope, decisionKey: decisionKey))
+            XCTAssertEqual(diagnostics, index + 1)
+            let listed = try await channel.pairedPhonesWithRepairNotices()
+            XCTAssertTrue(listed.repairNotices.isEmpty)
+            XCTAssertEqual(listed.phones, before.phones)
+            XCTAssertEqual(listed.revision, before.revision)
+            XCTAssertThrowsError(try fixture.journal.retainPhoneRepairNotice(original, binding: binding, validateTransport: { _ in }))
+            XCTAssertEqual(try Data(contentsOf: file), invalid)
+            XCTAssertTrue(try fixture.journal.validatePeer(binding))
+            try fixture.assertCheckpoint()
+        }
+        let recipient = try XCTUnwrap(before.phones.first)
+        let selection = try XCTUnwrap(before.selection(for: recipient))
+        let revoked = try await channel.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(revoked, .revokedOnMac)
+        await channel.close()
+    }
+
+    func testPhoneRepairNoticeIsLocalToTheOriginalJournalDirectory() async throws {
+        let fixture = try Fixture(), key = P256.Signing.PrivateKey()
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
+        let before = try await channel.pairedPhonesWithRepairNotices()
+        let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
+        let first = try signedPhoneRepairNotice(.legacyPolicy, using: key, scope: peer.scope)
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in }))
+        let oldFile = phoneRepairNoticeFile(fixture, scope: peer.scope)
+        await channel.close()
+        try fixture.journal.close()
+
+        let target = fixture.root.appendingPathComponent("replacement")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let lock = Darwin.open(target.appendingPathComponent("writer.lock").path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+        guard lock >= 0 else { throw Failure.denied }
+        Darwin.close(lock)
+        try FileManager.default.copyItem(at: oldFile.deletingLastPathComponent().appendingPathComponent("journal.sqlite"),
+            to: target.appendingPathComponent("journal.sqlite"))
+        let reopened = try JournalDatabase(lease: .init(anchor: fixture.root.path, relativeDirectory: "replacement", owner: getuid()),
+            macID: fixture.mac, accountID: fixture.account, recordLimits: fixture.limits, descriptorLimits: fixture.limits,
+            decisionLimits: fixture.limits, maximumConsumptions: 20, busyMilliseconds: 100, initialize: false)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.approvalTrustSnapshot().revision }, before.revision)
+        let scope = peer.scope, publicKey = key.publicKey.x963Representation
+        XCTAssertNil(try reopened.read { try $0.phoneRepairNotice(scope: scope, decisionKey: publicKey) })
+        XCTAssertEqual(try Data(contentsOf: oldFile), try first.encode())
+    }
+
     func testPairedPhoneRevocationIsCheckpointedAndRejectsOldSelection() async throws {
         let f = try Fixture(), (channel, driver) = try await pairForRevocation(f)
         let listed = try await channel.pairedPhones()
@@ -1589,7 +1720,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let negotiated = Box<UInt64>(0)
         second.pairedPhoneHello { negotiated.value = $0 }
         XCTAssertEqual(negotiated.value, 1)
-        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (UInt64.max, 2)]
+        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (3, 2), (4, 2), (UInt64.max, 2)]
         for (maximum, expected) in versions {
             second.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
             XCTAssertEqual(negotiated.value, expected)
@@ -1598,6 +1729,30 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         second.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: Data(repeating: 0, count: 129),
             authorization: authorization) { malformed.value = $0 }
         XCTAssertNil(malformed.value)
+        XCTAssertEqual(f.environment.authorized.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+
+        let installed = try f.endpoint()
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        installed.attachInstalledPairing(to: owners)
+        try owners.retain(installed, id: UUID())
+        defer { installed.close(); withExtendedLifetime(owners) {} }
+        try hello(installed)
+        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (UInt64.max, 4)]
+        for (maximum, expected) in installedVersions {
+            installed.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
+            XCTAssertEqual(negotiated.value, expected)
+        }
+
+        let repairNoticeList = Box<Data?>(nil)
+        installed.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue,
+            selection: Data(), authorization: Data()) { repairNoticeList.value = $0 }
+        XCTAssertNotNil(repairNoticeList.value)
+        installed.pairedPhoneHello(maximumVersion: 3) { negotiated.value = $0 }
+        XCTAssertEqual(negotiated.value, 3)
+        installed.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue,
+            selection: Data(), authorization: Data()) { repairNoticeList.value = $0 }
+        XCTAssertNil(repairNoticeList.value)
         XCTAssertEqual(f.environment.authorized.value, 0)
         XCTAssertEqual(try f.records(), 0)
     }

@@ -749,6 +749,25 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Verify and retain an advisory under the same owner lock as enrollment changes.
+    func retainPhoneRepairNotice(_ notice: PhoneRepairNoticeFrame, binding: AuthorityPeerBinding,
+                                 validateTransport: @Sendable (JournalTransaction) throws -> Void) throws -> Bool {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard !updateHealthOnly, !updateCompletionOnly, notice.scope == binding.scope else { return false }
+            let decisionKey = try validatedRead { tx -> Data? in
+                try validateTransport(tx)
+                try tx.requireDirectApprovalBinding(binding)
+                return try tx.approvalEnrollments().first(where: {
+                    $0.approval.active && $0.approval.phoneID == binding.scope.phoneID && $0.epoch == binding.scope.enrollmentEpoch
+                })?.repairNoticeDecisionKey
+            }
+            guard let decisionKey, try notice.verify(decisionPublicKey: decisionKey) else { return false }
+            try withStorageFailureCleanup { try database.retainPhoneRepairNotice(notice, decisionKey: decisionKey) }
+            return true
+        }
+    }
+
     /// Reads paired update health state before request startup. The native owner must separately verify code and closed admission.
     func readForUpdateHealth<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {

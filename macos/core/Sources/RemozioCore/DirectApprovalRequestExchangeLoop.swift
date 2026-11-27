@@ -10,6 +10,7 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
     let remoteRequests: [ChannelRequestCapability]
     let deliveryResultSchemas: Set<UInt64>
     let supportsDecisionRefusals: Bool
+    let supportsPhoneRepairNotices: Bool
     let timeoutMilliseconds: UInt64
     let refreshMilliseconds: UInt64
 
@@ -68,6 +69,13 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
                 work = remaining.sorted { $0.lexicographicallyPrecedes($1) }; position = 0
             case .incoming(let envelope):
                 let bytes = envelope.payload
+                if let notice = try? PhoneRepairNoticeFrame.decode(bytes) {
+                    guard supportsPhoneRepairNotices, notice.scope == session.peer.scope,
+                          try await service.recordPhoneRepairNotice(for: session, notice: notice) else {
+                        throw ApprovalChannelError.invalidInput
+                    }
+                    continue
+                }
                 if !deliveryResultSchemas.isEmpty, let result = try? RequestDeliveryResult.decode(bytes) {
                     let identity = DeliveryIdentity(requestID: result.requestID, requestDigest: result.requestDigest)
                     if delivered[identity] != nil { delivered[identity] = .refused }

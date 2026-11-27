@@ -84,6 +84,10 @@ public actor NegotiatedNetworkChannel {
         try !resultSchemas(feature: DecisionRefusalFrame.capability).isEmpty
     }
 
+    func supportsPhoneRepairNotices() throws -> Bool {
+        try !resultSchemas(feature: PhoneRepairNoticeFrame.capability).isEmpty
+    }
+
     private func resultSchemas(feature: UInt64) throws -> Set<UInt64> {
         guard purpose == .approvals else { return [] }
         func supported(_ capabilities: [ChannelRequestCapability]) -> Set<UInt64> {

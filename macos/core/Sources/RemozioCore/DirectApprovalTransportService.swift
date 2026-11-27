@@ -160,6 +160,13 @@ public actor DirectApprovalTransportService {
         return status
     }
 
+    func recordPhoneRepairNotice(for session: DirectApprovalSession, notice: PhoneRepairNoticeFrame) async throws -> Bool {
+        try await validate(session)
+        let retained = try await feed.recordPhoneRepairNotice(session.peer, revision: session.revision, notice: notice)
+        try await validate(session)
+        return retained
+    }
+
     /// Sends one bounded discovery snapshot over the admitted channel. Writes are not phone receipts or approvals.
     /// Custom handlers may continue with other operations after this snapshot.
     /// Failure closes the channel. Missing or incompatible frames do not imply a terminal request outcome.
@@ -222,6 +229,7 @@ public actor DirectApprovalTransportService {
                 try await DirectApprovalRequestExchangeLoop(service: self, session: session, channel: channel,
                     remoteRequests: metadata.peer.requests, deliveryResultSchemas: deliveryResultSchemas,
                     supportsDecisionRefusals: supportsDecisionRefusals,
+                    supportsPhoneRepairNotices: try await channel.supportsPhoneRepairNotices(),
                     timeoutMilliseconds: timeoutMilliseconds,
                     refreshMilliseconds: refreshMilliseconds).run()
             } catch {

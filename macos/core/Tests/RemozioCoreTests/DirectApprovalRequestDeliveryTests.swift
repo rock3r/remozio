@@ -237,6 +237,12 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
             self.trust = trust; self.ids = ids; self.frames = frames
             self.exchangeSupported = exchangeSupported; self.statuses = statuses; self.decisions = decisions
         }
+        private var recordedRepairNotices: [Data] = []
+        var repairNotices: [Data] { lock.withLock { recordedRepairNotices } }
+        func phoneRepairNotice(_ binding: Data, notice: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { recordedRepairNotices.append(notice) }
+            reply(.phoneRepairNotice(true))
+        }
         var exchangeQueries: [AuthorityRequestExchange.Query] { lock.withLock { exchanges } }
         func setPending(_ ids: [Data]) { lock.withLock { self.ids = ids } }
         func setDecisionRefusal(_ id: Data, _ response: Data) { lock.withLock { refusals[id] = response } }
@@ -877,6 +883,60 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         let snapshot = try DirectApprovalListener.requestCapabilities(offered, purpose: .pendingSnapshot,
             enableDeliveryResults: true)
         XCTAssertEqual(snapshot.first?.features, [])
+    }
+
+    func testPhoneRepairNoticeRequiresRootAndMatchingLiveCapabilities() async throws {
+        let scope = try Self.scope()
+        let plain = [try Self.capability()]
+        let advertisedByRoot = [try Self.capability(features: [PhoneRepairNoticeFrame.capability])]
+        let offered = try DirectApprovalListener.requestCapabilities(advertisedByRoot, purpose: .approvals,
+            enableDeliveryResults: true, enablePhoneRepairNotices: true)
+        let withoutRoot = try DirectApprovalListener.requestCapabilities(plain, purpose: .approvals,
+            enableDeliveryResults: true, enablePhoneRepairNotices: true)
+        let snapshot = try DirectApprovalListener.requestCapabilities(advertisedByRoot, purpose: .pendingSnapshot,
+            enableDeliveryResults: true, enablePhoneRepairNotices: true)
+        XCTAssertEqual(snapshot.first?.features, [])
+        for (purpose, local, remote, expected) in [
+            (EnrolledChannelPurpose.approvals, offered, advertisedByRoot, true),
+            (.approvals, offered, plain, false),
+            (.approvals, withoutRoot, advertisedByRoot, false),
+            (.pendingSnapshot, offered, advertisedByRoot, false),
+        ] {
+            let phone = try Phone(scope: scope, requests: remote)
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope, requests: local,
+                auditVersions: [], maximumPayloadBytes: 4096, purpose: purpose)
+            let actual = try await channel.supportsPhoneRepairNotices()
+            XCTAssertEqual(actual, expected)
+            await channel.closeAndWait()
+        }
+    }
+
+    func testLivePhoneRepairNoticeDoesNotEnterRequestExchange() async throws {
+        let id = Self.id(8)
+        let root = P256.Signing.PrivateKey(), decision = P256.Signing.PrivateKey()
+        let frame = try Self.frame(8, signingKey: root).0
+        let pending = try Self.status(frame, signingKey: root)
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:],
+            features: [PhoneRepairNoticeFrame.capability], exchangeSupported: true, statuses: [id: pending])
+        let requests = try DirectApprovalListener.requestCapabilities(peer.requests, purpose: .approvals,
+            enableDeliveryResults: true, enablePhoneRepairNotices: true)
+        let phone = try Phone(scope: peer.scope, requests: requests, persistent: true)
+        let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: requests,
+            auditVersions: [], maximumPayloadBytes: peer.maximumPayloadBytes)
+        let encoded = try PhoneRepairNoticeFrame(scope: peer.scope, reason: .legacyPolicy,
+            signature: decision.signature(for: PhoneRepairNoticeFrame.signingInput(scope: peer.scope, reason: .legacyPolicy))
+                .rawRepresentation).encode()
+        let loop = Task { try await factory.run(peer, channel) }
+        defer { loop.cancel(); channel.close() }
+        try await phone.submit(encoded)
+        try await phone.submit(RequestStatusQuery(requestID: id).encode())
+        await wait(phone, 1)
+        let payloads = await phone.payloads
+        XCTAssertEqual(payloads, [pending])
+        XCTAssertEqual(driver.repairNotices, [encoded])
+        XCTAssertEqual(driver.exchangeQueries.count, 1)
+        XCTAssertNil(driver.exchangeQueries.first?.decisionFrame)
+        await phone.close(); try await loop.value; await service.close()
     }
 
     func testLiveChannelRoutesExactDecisionAndReturnsSignedRootOutcome() async throws {

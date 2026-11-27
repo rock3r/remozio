@@ -36,6 +36,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
     private let exchange: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
+    private let phoneRepairNotice: (@Sendable (AuthorityPeerBinding, PhoneRepairNoticeFrame) throws -> Bool)?
     private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let routingExchange: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
     private let updateSchedulingExchange: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)?
@@ -72,6 +73,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                             requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
                             exchangeRequest: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)? = nil,
+                            recordPhoneRepairNotice: (@Sendable (AuthorityPeerBinding, PhoneRepairNoticeFrame) throws -> Bool)? = nil,
                             pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pairingLookup: AuthorityPairingLookupHandler? = nil,
          pairingLookupBudget: AuthorityXPCWorkBudget? = nil,
@@ -88,7 +90,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             verify: { _ = try invocation.verifyInvocation() },
             verifyProofPeer: { try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs,
-            exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, pairingLookup: pairingLookup, pairingLookupBudget: pairingLookupBudget, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: wakeHints)
+            exchangeRequest: exchangeRequest, recordPhoneRepairNotice: recordPhoneRepairNotice, pairingReceipt: pairingReceipt, pairingLookup: pairingLookup, pairingLookupBudget: pairingLookupBudget, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: wakeHints)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
         connection.exportedObject = self
@@ -105,6 +107,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
          exchangeRequest: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)? = nil,
+         recordPhoneRepairNotice: (@Sendable (AuthorityPeerBinding, PhoneRepairNoticeFrame) throws -> Bool)? = nil,
          pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          pairingLookup: AuthorityPairingLookupHandler? = nil,
          pairingLookupBudget: AuthorityXPCWorkBudget? = nil,
@@ -121,6 +124,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
         self.pairingLookupBudget = pairingLookupBudget
         self.macID = macID; self.accountID = accountID; self.budget = budget
         self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
+        self.phoneRepairNotice = recordPhoneRepairNotice
         self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
     }
     deinit {
@@ -501,6 +505,17 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             defer { completed.activity?.close() }
             send { reply(completed.value) }
         } catch { close(); reply(nil) }
+    }
+    public func recordPhoneRepairNotice(_ binding: Data, notice: Data, reply: @escaping @Sendable (Bool) -> Void) {
+        do {
+            let completed = try work {
+                guard lock.withLock({ exchangeReady }), let phoneRepairNotice else { return false }
+                let peer = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
+                return try phoneRepairNotice(peer, PhoneRepairNoticeFrame.decode(notice))
+            }
+            defer { completed.activity?.close() }
+            send { reply(completed.value) }
+        } catch { reply(false) }
     }
     public func trustSnapshot(reply: @escaping @Sendable (Data?) -> Void) {
         do {

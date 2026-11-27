@@ -209,7 +209,7 @@ final class EnrollmentJournal {
     }
 
     func directApprovalTrust(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64,
-                             auditVersions: Set<UInt64>) throws -> DirectApprovalTrust {
+                             auditVersions: Set<UInt64>, supportsPhoneRepairNotices: Bool) throws -> DirectApprovalTrust {
         let trust = try snapshot()
         let active = Set(trust.enrollments.map(\.phoneID))
         var peers: [DirectApprovalPeer] = []
@@ -225,8 +225,14 @@ final class EnrollmentJournal {
                 case .onePasswordUnlock: kind = 2
                 case .littleSnitch: kind = 3
                 }
+                let notice = PhoneRepairNoticeFrame.capability
+                var features = Set(local.intersection(remote).subtracting([notice]).sorted().prefix(64))
+                if supportsPhoneRepairNotices, kind == 0, contract.wireVersion == 1,
+                   maximumPayloadBytes >= PhoneRepairNoticeFrame.maximumBytes, features.count < 64 {
+                    features.insert(notice)
+                }
                 return try ChannelRequestCapability(kind: kind, wireVersion: contract.wireVersion,
-                    schemaVersion: contract.schemaVersion, features: Set(local.intersection(remote).sorted().prefix(64)))
+                    schemaVersion: contract.schemaVersion, features: features)
             }
             peers.append(try DirectApprovalPeer(scope: ChannelScope(macID: mac, accountID: account,
                 phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),

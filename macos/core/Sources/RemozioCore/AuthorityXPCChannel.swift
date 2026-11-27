@@ -16,6 +16,7 @@ import RemozioProtocol
     /// Optional state/decision extension. Negotiate before sending request IDs or signed decisions.
     func requestExchangeVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func exchangeRequest(_ binding: Data, query: Data, reply: @escaping @Sendable (Data?) -> Void)
+    @objc optional func recordPhoneRepairNotice(_ binding: Data, notice: Data, reply: @escaping @Sendable (Bool) -> Void)
     /// Read-only receipt recovery. Negotiate before sending a retained setup ID or phone binding.
     func pairingLookupVersion(reply: @escaping @Sendable (UInt64, UInt64) -> Void)
     func pairingLookup(_ request: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -44,7 +45,7 @@ import RemozioProtocol
 }
 
 public enum AuthorityXPCError: Error { case unsupportedPairingLookup, unsupportedPhoneUpdateScheduling, unsupportedPhoneRouting, unsupportedPhoneAudit, unsupportedPhonePushRecovery, unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case pairingProofOffer(UInt64, NSXPCListenerEndpoint?), pairingLookupVersion(UInt64, UInt64), pairingLookup(Data), updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
+enum AuthorityXPCReply: Sendable { case phoneRepairNotice(Bool), pairingProofOffer(UInt64, NSXPCListenerEndpoint?), pairingLookupVersion(UInt64, UInt64), pairingLookup(Data), updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -56,6 +57,7 @@ protocol AuthorityXPCDriver: Sendable {
     func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func phoneRepairNotice(_ binding: Data, notice: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func pairingLookupVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func pairingLookup(_ request: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func receiptVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -96,6 +98,7 @@ extension AuthorityXPCDriver {
     func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.exchangeVersion(0)) }
     func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
+    func phoneRepairNotice(_ binding: Data, notice: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.discoveryVersion(0)) }
     func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.deliveryVersion(0)) }
@@ -166,6 +169,11 @@ final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable {
     func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.exchangeRequest(binding, query: query) { [self] bytes in checked(bytes.map(AuthorityXPCReply.exchange) ?? .failed, reply) }
+    }
+    func phoneRepairNotice(_ binding: Data, notice: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        guard let record = proxy.recordPhoneRepairNotice else { reply(.phoneRepairNotice(false)); return }
+        record(binding, notice) { [self] accepted in checked(.phoneRepairNotice(accepted), reply) }
     }
     func receiptVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
@@ -250,7 +258,7 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case pairingProofOffer, pairingLookupVersion, pairingLookup, updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private enum Operation { case phoneRepairNotice, pairingProofOffer, pairingLookupVersion, pairingLookup, updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
     private var updateSchedulingVersion: UInt64?
     private var routingVersion: UInt64?
     private var auditVersion: UInt64?
@@ -370,6 +378,15 @@ public actor AuthorityXPCChannel {
         }
         catch { finish(.invalidMessage); throw error }
         return bytes
+    }
+
+    func recordPhoneRepairNotice(binding: AuthorityPeerBinding, notice: PhoneRepairNoticeFrame) async throws -> Bool {
+        guard notice.scope == binding.scope, try await supportsRequestExchange() else { throw AuthorityXPCError.invalidMessage }
+        let encoded = try AuthorityTrustCodec.encodeBinding(binding)
+        guard case .phoneRepairNotice(let accepted) = try await perform(.phoneRepairNotice, binding: encoded, query: notice.encode()) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        return accepted
     }
 
     func openPairingProof(rendezvousID: Data? = nil) async throws -> NSXPCListenerEndpoint? {
@@ -614,6 +631,7 @@ public actor AuthorityXPCChannel {
                     case .receipt: driver.receipt(binding!, setupID: setupID!, reply)
                     case .exchangeVersion: driver.exchangeVersion(reply)
                     case .exchange: driver.exchange(binding!, query: query!, reply)
+                    case .phoneRepairNotice: driver.phoneRepairNotice(binding!, notice: query!, reply)
                     case .hello: driver.hello(reply)
                     case .discoveryVersion: driver.discoveryVersion(reply)
                     case .pendingRequests: driver.pendingRequests(binding!, reply)
@@ -653,7 +671,7 @@ public actor AuthorityXPCChannel {
         case (.pairingLookup, .pairingLookup(let bytes)) where (1...PairingRecoveryFrame.maximumBytes).contains(bytes.count): break
         case (.receiptVersion, .receiptVersion): break
         case (.receipt, .receipt(let bytes)) where bytes.isEmpty || bytes.count == 64: break
-        case (.exchangeVersion, .exchangeVersion): break
+        case (.phoneRepairNotice, .phoneRepairNotice), (.exchangeVersion, .exchangeVersion): break
         case (.exchange, .exchange(let bytes)) where bytes.count <= AuthorityRequestExchange.maximumFrameBytes: break
         case (.pendingRequests, .pendingRequests(let bytes)) where !bytes.isEmpty && bytes.count <= AuthorityPendingRequests.maximumBytes: break
         case (.requestFrame, .requestFrame(let bytes)) where bytes.count <= AuthorityRequestFrame.maximumBytes: break

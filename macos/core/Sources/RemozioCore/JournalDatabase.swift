@@ -32,6 +32,25 @@ public final class JournalDatabase {
     func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
         try lease.directoryIdentities()
     }
+    func retainPhoneRepairNotice(_ notice: PhoneRepairNoticeFrame, decisionKey: Data) throws {
+        guard !readOnlyForCutover, !retired else { throw JournalDatabaseError.readOnly }
+        try validateLease()
+        do {
+            try lease.phoneRepairNotices.retain(notice, decisionKey: decisionKey, verify: validateLease)
+        } catch {
+            if !retired { try validateLease() }
+            throw error
+        }
+    }
+
+    func readPhoneRepairNotice(scope: ChannelScope, decisionKey: Data) throws -> PhoneRepairNoticeFrame.Reason? {
+        try validateLease()
+        // An unreadable or invalid advisory must leave the paired phone list usable.
+        let reason = try? lease.phoneRepairNotices.read(scope: scope, decisionKey: decisionKey)
+        try validateLease()
+        return reason
+    }
+
     let readOnlyForCutover: Bool
     private let lease: ProtectedJournalLease
     private let journalStep: (OpaquePointer) -> Int32
@@ -881,12 +900,13 @@ public final class JournalTransaction {
     }
     /// One protected read for a listener incarnation. The host supplies current local protocol policy and resource limits.
     public func directApprovalTrust(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64 = 1,
-                                    auditVersions: Set<UInt64> = []) throws -> DirectApprovalTrust {
+                                    auditVersions: Set<UInt64> = [], supportsPhoneRepairNotices: Bool = false) throws -> DirectApprovalTrust {
         guard (1...16_777_216).contains(maximumPayloadBytes), minimumEnvelopeVersion > 0,
               auditVersions.count <= 16, !auditVersions.contains(0) else { throw DirectListenerError.invalidConfiguration }
         return try withEnrollment(write: false) {
             try $0.directApprovalTrust(maximumPayloadBytes: maximumPayloadBytes,
-                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
+                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions,
+                supportsPhoneRepairNotices: supportsPhoneRepairNotices)
         }
     }
     /// Rechecks the protected revision and peer binding. It grants no approval or execution authority.
@@ -903,6 +923,12 @@ public final class JournalTransaction {
 
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
+    }
+
+    func phoneRepairNotice(scope: ChannelScope, decisionKey: Data) throws -> PhoneRepairNoticeFrame.Reason? {
+        _ = try tables()
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.readPhoneRepairNotice(scope: scope, decisionKey: decisionKey)
     }
 
     func rePairPredecessors(in rows: [StoredApprovalEnrollment]) throws -> [DeliveryRecipient] {
