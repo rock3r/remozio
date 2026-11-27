@@ -426,7 +426,7 @@ final class AuthorityPairingSetupAccess: Sendable {
             try window?.requireStaging(self.now())
         })
     }
-    func pairedPhones(includeRePair: Bool = false) throws -> PairedPhoneSnapshot {
+    func pairedPhones(includeRePair: Bool = false, includeRepairNotices: Bool = false) throws -> PairedPhoneSnapshot {
         try journal.read { tx in
             try self.requireCurrent(tx)
             let trust = try tx.requestDeliveryTrust()
@@ -440,11 +440,24 @@ final class AuthorityPairingSetupAccess: Sendable {
             let health = inconclusiveSince != nil && (liveHealth == .clear || liveHealth == .pending)
                 ? .grantAbandonmentInconclusive : liveHealth
             let rePairable = try includeRePair ? tx.rePairPredecessors(in: trust.enrollments) : []
+            let active = trust.enrollments.filter { $0.approval.active }
+            var notices: [DeliveryRecipient: PhoneRepairNoticeFrame.Reason] = [:]
+            if includeRepairNotices {
+                for enrollment in active {
+                    let phone = DeliveryRecipient(enrollment)
+                    let scope = try ChannelScope(macID: self.macID, accountID: self.accountID,
+                        phoneID: phone.phoneID, enrollmentEpoch: phone.enrollmentEpoch)
+                    if let key = enrollment.repairNoticeDecisionKey {
+                        notices[phone] = try tx.phoneRepairNotice(scope: scope, decisionKey: key)
+                    }
+                }
+            }
             return PairedPhoneSnapshot(macID: self.macID, accountID: self.accountID, revision: trust.approval.revision,
-                phones: trust.enrollments.filter { $0.approval.active }.map(DeliveryRecipient.init),
+                phones: active.map(DeliveryRecipient.init),
                 rePairablePhones: rePairable,
                 revocationAvailability: availability, gatewayRevocationHealth: health,
-                gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil)
+                gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil,
+                repairNotices: notices)
         }
     }
 

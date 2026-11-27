@@ -211,15 +211,20 @@ public final class DirectApprovalListener: @unchecked Sendable {
     }
 
     static func requestCapabilities(_ requests: [ChannelRequestCapability], purpose: EnrolledChannelPurpose,
-                                    enableDeliveryResults: Bool, enableDecisionRefusals: Bool = false)
+                                    enableDeliveryResults: Bool, enableDecisionRefusals: Bool = false,
+                                    enablePhoneRepairNotices: Bool = false)
         throws -> [ChannelRequestCapability] {
         try requests.map { capability in
-            guard capability.kind == 0, capability.wireVersion == 1 else { return capability }
-            let delivery = RequestDeliveryResult.capability, refusal = DecisionRefusalFrame.capability
-            var features = capability.features.subtracting([delivery, refusal])
-            if purpose == .approvals {
-                if enableDeliveryResults, features.count < 64 { features.insert(delivery) }
-                if enableDecisionRefusals, features.count < 64 { features.insert(refusal) }
+            let notice = PhoneRepairNoticeFrame.capability
+            var features = capability.features.subtracting([notice])
+            if capability.kind == 0, capability.wireVersion == 1 {
+                let delivery = RequestDeliveryResult.capability, refusal = DecisionRefusalFrame.capability
+                features.subtract([delivery, refusal])
+                if purpose == .approvals {
+                    if enableDeliveryResults, features.count < 64 { features.insert(delivery) }
+                    if enableDecisionRefusals, features.count < 64 { features.insert(refusal) }
+                    if enablePhoneRepairNotices, capability.features.contains(notice), features.count < 64 { features.insert(notice) }
+                }
             }
             return try .init(kind: capability.kind, wireVersion: capability.wireVersion,
                 schemaVersion: capability.schemaVersion, features: features)
@@ -299,7 +304,8 @@ public final class DirectApprovalListener: @unchecked Sendable {
                 if purpose == .audit, !peer.auditVersions.contains(1) { throw DirectListenerError.invalidConfiguration }
                 let requests = try Self.requestCapabilities(peer.requests, purpose: purpose,
                     enableDeliveryResults: enableRequestDeliveryResults,
-                    enableDecisionRefusals: enableRequestDeliveryResults && peer.maximumPayloadBytes >= DecisionRefusalFrame.maximumBytes)
+                    enableDecisionRefusals: enableRequestDeliveryResults && peer.maximumPayloadBytes >= DecisionRefusalFrame.maximumBytes,
+                    enablePhoneRepairNotices: enableRequestDeliveryResults && peer.maximumPayloadBytes >= PhoneRepairNoticeFrame.maximumBytes)
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
                     requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .audit || purpose == .updateScheduling) ? [] : requests,
                     auditVersions: purpose == .audit ? [1] : ((purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .updateScheduling) ? [] : peer.auditVersions),

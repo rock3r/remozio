@@ -40,11 +40,12 @@ final class AuthorityTransportAccess: Sendable {
         try journal.read { try self.requireCurrent($0) }
     }
 
-    func snapshot() throws -> DirectApprovalTrust {
+    func snapshot(supportsPhoneRepairNotices: Bool = false) throws -> DirectApprovalTrust {
         try journal.read { transaction in
             try self.requireCurrent(transaction)
             return try transaction.directApprovalTrust(maximumPayloadBytes: self.maximumPayloadBytes,
-                minimumEnvelopeVersion: self.minimumEnvelopeVersion, auditVersions: self.auditVersions)
+                minimumEnvelopeVersion: self.minimumEnvelopeVersion, auditVersions: self.auditVersions,
+                supportsPhoneRepairNotices: supportsPhoneRepairNotices)
         }
     }
 
@@ -83,6 +84,10 @@ final class AuthorityTransportAccess: Sendable {
                 try self.requireCurrent(transaction)
                 try transaction.requireDirectApprovalBinding(binding)
             }, body: { try handler($0, binding, query) }, onCommandAuthorized: onCommandAuthorized)
+    }
+
+    func recordPhoneRepairNotice(binding: AuthorityPeerBinding, notice: PhoneRepairNoticeFrame) throws -> Bool {
+        try journal.retainPhoneRepairNotice(notice, binding: binding, validateTransport: requireCurrent)
     }
 
     func pairingReceipt(binding: AuthorityPeerBinding, setupID: Data,

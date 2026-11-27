@@ -34,6 +34,13 @@ struct CommandCarrierVectors: Decodable {
     let sessionEnvelope: Carrier
     let requestStatusQuery: Carrier
     let requestDeliveryResult: Carrier
+    struct RepairNotices: Decodable {
+        let valid: [Row]
+        let invalid: [Row]
+        let signingInput: [Row]
+        let decisionKey: [Row]
+    }
+    let phoneRepairNotice: RepairNotices
 
     static func load() throws -> Self {
         let protocolRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

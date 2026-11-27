@@ -49,7 +49,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private let onHandshake: @Sendable () -> Void
     private struct WorkState {
         var ready = false, closed = false, busy = false
-        var phoneManagement = false
+        var phoneManagementVersion: UInt64 = 0
         var attempt: PairingEnrollmentAttempt?
         var activity: ReleaseActivityToken?
         var stage: AuthorityMaintenancePairingAdmission.Stage?
@@ -144,13 +144,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         replyWithPhoneManagementVersion(1, reply: reply)
     }
     func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
-        // Version 3 adds discovery for the installed setup extension. Versions 1 and 2 keep their original behavior.
-        replyWithPhoneManagementVersion(min(maximumVersion, owners == nil ? 2 : 3), reply: reply)
+        // Version 4 adds a read-only list with notices. A client capped at version 3 keeps its prior negotiation.
+        let version = maximumVersion >= 4 ? 4 : min(maximumVersion, owners == nil ? 2 : 3)
+        replyWithPhoneManagementVersion(version, reply: reply)
     }
     private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
         do {
             let completed = try work {
-                if version > 0 { state.withLock { $0.phoneManagement = true } }
+                if version > 0 { state.withLock { $0.phoneManagementVersion = version } }
             }
             defer { completed.completion.close() }
             send { reply(version) }
@@ -159,7 +160,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
                            reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
-            guard state.withLock({ $0.phoneManagement }), let operation = PairedPhoneOperation(rawValue: operation) else {
+            guard state.withLock({ $0.phoneManagementVersion > 0 }), let operation = PairedPhoneOperation(rawValue: operation) else {
                 throw AuthorityPairingSetupError.unavailable
             }
             switch operation {
@@ -169,6 +170,12 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             case .listForRePair:
                 guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try access.pairedPhones(includeRePair: true).encode(includeRePair: true)
+            case .listWithRepairNotices:
+                guard state.withLock({ $0.phoneManagementVersion >= 4 }), selection.isEmpty, authorization.isEmpty else {
+                    throw AuthorityPairingSetupError.unavailable
+                }
+                return try access.pairedPhones(includeRePair: true, includeRepairNotices: true)
+                    .encode(includeRePair: true, includeRepairNotices: true)
             case .validateRePair:
                 guard authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try Data([access.canRePair(.decode(selection)) ? 1 : 0])

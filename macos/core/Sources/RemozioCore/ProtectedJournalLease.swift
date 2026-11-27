@@ -10,6 +10,7 @@ public enum JournalLeaseError: Error, Equatable {
 /// Serialize access. This lease does not validate journal contents or permit dispatch.
 public final class ProtectedJournalLease {
     private let storage: ProtectedStorageLease
+    let phoneRepairNotices: PhoneRepairNoticeStorage
     func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
         try storage.directoryIdentities()
     }
@@ -26,6 +27,7 @@ public final class ProtectedJournalLease {
     init(anchor: String, relativeDirectory: String, owner: uid_t) throws {
         storage = try ProtectedStorageLease(anchor: anchor, relativeDirectory: relativeDirectory,
             owner: owner, ancestorOwner: owner, databaseName: "journal.sqlite")
+        phoneRepairNotices = .init(anchor: anchor, relativeDirectory: relativeDirectory, owner: owner)
     }
 
     /// Call before opening SQLite and at authority commit/recovery boundaries. Failure retires this lease.
