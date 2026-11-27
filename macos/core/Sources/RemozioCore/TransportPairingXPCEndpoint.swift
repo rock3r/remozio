@@ -13,6 +13,9 @@ import RemozioProtocol
                         reply: @escaping @Sendable (UInt64) -> Void)
     func beginPairingV2LAN(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
                            reply: @escaping @Sendable (UInt64) -> Void)
+    @objc(beginDecisionProofSetup:windowID:invitation:lifetimeMilliseconds:requiresLAN:reply:)
+    func beginDecisionProofSetup(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                                 requiresLAN: Bool, reply: @escaping @Sendable (UInt64) -> Void)
     func setupCandidates(reply: @escaping @Sendable (Data?) -> Void)
     func stageSetup(_ candidateID: Data, transcript: Data, reply: @escaping @Sendable (Bool) -> Void)
     func deliverSetupReceipt(_ candidateID: Data, signature: Data, reply: @escaping @Sendable (Bool) -> Void)
@@ -117,7 +120,8 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
     }
 
     private func beginV2(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
-                         requiresLAN: Bool, reply: @escaping @Sendable (UInt64) -> Void) {
+                         requiresLAN: Bool, requiresDecisionProof: Bool = false,
+                         reply: @escaping @Sendable (UInt64) -> Void) {
         launch(failed: { reply(0) }) { owner in
             guard rendezvousID.count == 16, windowID.count == 16,
                   (1...AuthorityPairingSetupConfiguration.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds) else {
@@ -128,7 +132,8 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
             let window = MacPairingV2PublicWindow(id: windowID, invitation: publicInvitation,
                 replacement: rePair?.predecessor, lifetimeMilliseconds: lifetimeMilliseconds)
             do {
-                let port = try await owner.beginInstalledV2(window, rendezvousID: rendezvousID, requiresLAN: requiresLAN)
+                let port = try await owner.beginInstalledV2(window, rendezvousID: rendezvousID,
+                    requiresLAN: requiresLAN, requiresDecisionProof: requiresDecisionProof)
                 return { reply(UInt64(port)) }
             } catch TransportPairingControlError.unavailableInterface where requiresLAN {
                 await owner.closeAndWait()
@@ -139,6 +144,12 @@ final class TransportPairingXPCEndpoint: NSObject, TransportPairingXPCProtocol, 
                 }
             }
         }
+    }
+
+    func beginDecisionProofSetup(_ rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64,
+                                 requiresLAN: Bool, reply: @escaping @Sendable (UInt64) -> Void) {
+        beginV2(rendezvousID, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetimeMilliseconds,
+                requiresLAN: requiresLAN, requiresDecisionProof: true, reply: reply)
     }
 
     func setupCandidates(reply: @escaping @Sendable (Data?) -> Void) {

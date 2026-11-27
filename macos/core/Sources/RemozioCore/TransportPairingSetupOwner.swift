@@ -12,6 +12,7 @@ protocol TransportPairingPeer: Sendable {
     func proposal() async throws -> PairingPhoneProposal
     func stage(_ transcript: PairingTranscript) async throws
     func receiveProof() async throws -> Data
+    func receivePhoneProof() async throws -> PairingPhoneProof
     func sendReceipt(_ signature: Data) async throws
     func abort()
     func close() async
@@ -20,6 +21,10 @@ extension TransportPairingPeer {
     var provedConnection: UUID? { get async { nil } }
     var proofPublicationDeadline: ContinuousClock.Instant? { get async { nil } }
     func retireVerifiedProof() {}
+    func receivePhoneProof() async throws -> PairingPhoneProof {
+        let biometric = try await receiveProof()
+        return try .init(biometric: biometric)
+    }
 }
 extension PairingSetupNetworkSession: TransportPairingPeer {}
 protocol TransportPairingIngress: Sendable {
@@ -110,7 +115,7 @@ public actor TransportPairingSetupOwner {
         let peer: any TransportPairingPeer
         let proposal: PairingPhoneProposal
         var phase = TransportPairingPhase.proposed
-        var proof: Data?
+        var proof: PairingPhoneProof?
         init(id: UUID, peer: any TransportPairingPeer, proposal: PairingPhoneProposal) {
             self.id = id; self.peer = peer; self.proposal = proposal
         }
@@ -226,7 +231,8 @@ public actor TransportPairingSetupOwner {
         } catch { prepared.close(); throw error }
     }
 
-    func beginInstalledV2(_ window: MacPairingV2PublicWindow, rendezvousID: Data, requiresLAN: Bool = false) async throws -> UInt16 {
+    func beginInstalledV2(_ window: MacPairingV2PublicWindow, rendezvousID: Data, requiresLAN: Bool = false,
+                          requiresDecisionProof: Bool = false) async throws -> UInt16 {
         try active()
         guard !started, !openingProofLink, proofClient == nil, let installedIdentity,
               let preparedProof, preparedProof.id == rendezvousID else { throw TransportPairingControlError.invalidMessage }
@@ -244,7 +250,8 @@ public actor TransportPairingSetupOwner {
             } else { route = nil }
             try active()
             let ingress = PairingSetupV2Ingress(windowID: window.id, lifetimeMilliseconds: window.lifetimeMilliseconds, authority: client)
-            return try await beginV2(window, identity: installedIdentity.identity, ingress: ingress, lanRoute: route, lanBinding: binding.lan)
+            return try await beginV2(window, identity: installedIdentity.identity, ingress: ingress, lanRoute: route,
+                                     lanBinding: binding.lan, requiresDecisionProof: requiresDecisionProof)
         } catch { client.close(); throw error }
     }
 
@@ -282,14 +289,15 @@ public actor TransportPairingSetupOwner {
     }
 
     private func beginV2(_ window: MacPairingV2PublicWindow, identity: SecIdentity,
-                         ingress: PairingSetupV2Ingress, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil) async throws -> UInt16 {
+                         ingress: PairingSetupV2Ingress, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil,
+                         requiresDecisionProof: Bool = false) async throws -> UInt16 {
         let holder = PairingIdentityHolder(identity)
         let rePair = window.replacement.map { RePairInvitation(invitation: window.invitation, predecessor: $0) }
         return try await begin(window.invitation, rePair: rePair, v2Factory: { invitation, event, handler in
             let listener = try PairingSetupListener(identity: holder.identity, invitation: invitation,
                 binding: lanRoute == nil ? .loopback : .localNetwork, maximumConnections: 4, handshakeTimeoutMilliseconds: 3_000,
                 setupTimeoutMilliseconds: window.lifetimeMilliseconds, v2: ingress, lanRoute: lanRoute, lanBinding: lanBinding,
-                event: event, handler: { try await handler($0) })
+                requiresDecisionProof: requiresDecisionProof, event: event, handler: { try await handler($0) })
             return NativePairingIngress(listener: listener)
         })
     }
@@ -326,7 +334,7 @@ public actor TransportPairingSetupOwner {
     public func snapshot() throws -> TransportPairingSnapshot {
         try active(); guard let port else { throw TransportPairingControlError.closed }
         return try .init(port: port, candidates: entries.values.sorted { $0.bytes.lexicographicallyPrecedes($1.bytes) }.map {
-            try .init(id: $0.bytes, proposal: $0.proposal, phase: $0.phase, biometricProof: $0.proof)
+            try .init(id: $0.bytes, proposal: $0.proposal, phase: $0.phase, phoneProof: $0.proof)
         })
     }
     public func stage(candidateID: Data, transcript: PairingTranscript) async throws {
@@ -339,7 +347,7 @@ public actor TransportPairingSetupOwner {
             entry.phase = .awaitingProof
             let id = entry.id
             let reader = Task { [weak self, peer = entry.peer] in
-                do { let proof = try await peer.receiveProof(); await self?.received(id, proof: proof) }
+                do { let proof = try await peer.receivePhoneProof(); await self?.received(id, proof: proof) }
                 catch { await self?.finish(id) }
             }
             readers[id] = reader
@@ -432,8 +440,8 @@ public actor TransportPairingSetupOwner {
         }
         await finish(id)
     }
-    private func received(_ id: UUID, proof: Data) async {
-        guard lifetime.active, let entry = entries[id], entry.phase == .awaitingProof, proof.count == 64 else {
+    private func received(_ id: UUID, proof: PairingPhoneProof) async {
+        guard lifetime.active, let entry = entries[id], entry.phase == .awaitingProof else {
             await finish(id); return
         }
         entry.proof = proof; entry.phase = .proofReady

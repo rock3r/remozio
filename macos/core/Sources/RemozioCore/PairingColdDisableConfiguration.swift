@@ -18,7 +18,8 @@ struct PairingColdDisableConfiguration {
             throw PairingColdDisableError.notEnabled
         }
         let disabled = try AuthorityPairingSetupConfiguration(transportPublicKey: pairing.transportPublicKey,
-            lifetimeMilliseconds: pairing.lifetimeMilliseconds, v2ActivationEnabled: false)
+            lifetimeMilliseconds: pairing.lifetimeMilliseconds, v2ActivationEnabled: false,
+            decisionProofRequired: pairing.decisionProofRequired)
         let nextPresence = try AuthorityPresenceStartupConfiguration.decode(Self.replace(presence.canonicalBytes,
             key: 10, expected: pairing.canonicalBytes, target: disabled.canonicalBytes))
         let nextCommand = try AuthorityCommandStartupConfiguration.decode(Self.replace(command.canonicalBytes,
@@ -32,7 +33,8 @@ struct PairingColdDisableConfiguration {
         retained: AuthorityCommandStartupConfiguration) throws {
         guard let source = derived.presence.pairing, let disabled = retained.presence.pairing,
               disabled.v2ActivationEnabled == false, disabled.lanScope == nil,
-              source.transportPublicKey == disabled.transportPublicKey else { throw RuntimeActivationError.changedScope }
+              source.transportPublicKey == disabled.transportPublicKey,
+              source.decisionProofRequired == disabled.decisionProofRequired else { throw RuntimeActivationError.changedScope }
         do {
             let presence = try replace(retained.presence.canonicalBytes, key: 10,
                 expected: disabled.canonicalBytes, target: source.canonicalBytes)

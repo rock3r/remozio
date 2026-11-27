@@ -17,6 +17,9 @@ import Synchronization
 @objc public protocol AuthorityInstalledPairingXPCProtocol {
     @objc(pairingSetupHelloWithMaximumVersion:reply:)
     func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void)
+    @objc(commitPairingWithDecisionProof:confirmedDigest:biometricProof:decisionProof:authorization:reply:)
+    func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                       decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     @objc(openPairingV2:rendezvousID:predecessor:reply:)
     func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?, reply: @escaping @Sendable (Data?) -> Void)
     @objc(stagePairingV2:connectionID:authorization:reply:)
@@ -215,8 +218,9 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             let completed = try work { () -> (UInt64, Data?) in
                 try access.requirePairingOpen()
                 guard maximumVersion >= 1, let owners else { return (0, nil) }
-                guard access.requiresInstalledV2 else { return (1, nil) }
-                let version: UInt64 = access.lanScope == nil ? 2 : 3
+                guard access.requiresInstalledV2 else { return (access.requiresDecisionProof ? 0 : 1, nil) }
+                let version: UInt64 = if access.requiresDecisionProof { access.lanScope == nil ? 4 : 5 }
+                    else { access.lanScope == nil ? 2 : 3 }
                 guard maximumVersion >= version, rendezvous == nil, v2Window == nil, attempt == nil else { return (0, nil) }
                 let pending = AuthorityPairingRendezvous(revision: access.activationRevision, lanScope: access.lanScope)
                 owners.register(pending)
@@ -363,6 +367,16 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, authorization: Data,
                        reply: @escaping @Sendable (Data?) -> Void) {
+        commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: nil,
+                      authorization: authorization, reply: reply)
+    }
+    func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                       decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: decisionProof,
+                      authorization: authorization, reply: reply)
+    }
+    private func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, decisionProof: Data?,
+                               authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
             guard let pending = attempt, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
                 throw AuthorityPairingSetupError.unavailable
@@ -371,7 +385,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             clearAttempt()
             defer { closeV2Window() }
             return try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
-                window: v2Window, authorize: { [authorize] in try authorize(authorization) })
+                decisionProof: decisionProof, window: v2Window, authorize: { [authorize] in try authorize(authorization) })
         }
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
@@ -506,6 +520,11 @@ final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @uncheck
     func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, authorization: Data,
                        reply: @escaping @Sendable (Data?) -> Void) {
         pairing.commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, authorization: authorization, reply: reply)
+    }
+    func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                       decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        pairing.commitPairingWithDecisionProof(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof,
+                                               decisionProof: decisionProof, authorization: authorization, reply: reply)
     }
     func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void) {
         pairing.pairingSetupHello(maximumVersion: maximumVersion, reply: reply)

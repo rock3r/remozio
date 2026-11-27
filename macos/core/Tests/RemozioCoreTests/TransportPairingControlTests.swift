@@ -130,10 +130,13 @@ final class PairingControlLocalDriver: TransportPairingDriver, @unchecked Sendab
             case .prepareV2(let id):
                 calls.append("prepareV2")
                 endpoint.preparePairingV2(id) { reply(.flag($0)) }
-            case let .beginV2(id, windowID, invitation, lifetime, requiresLAN):
+            case let .beginV2(id, windowID, invitation, lifetime, requiresLAN, requiresDecisionProof):
                 calls.append(requiresLAN ? "beginV2LAN" : "beginV2")
                 let complete: @Sendable (UInt64) -> Void = { reply(.number($0)) }
-                if requiresLAN {
+                if requiresDecisionProof {
+                    endpoint.beginDecisionProofSetup(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime,
+                        requiresLAN: requiresLAN, reply: complete)
+                } else if requiresLAN {
                     endpoint.beginPairingV2LAN(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime, reply: complete)
                 } else {
                     endpoint.beginPairingV2(id, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime, reply: complete)
@@ -259,6 +262,24 @@ final class TransportPairingControlTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try TransportPairingSnapshot(port: 4321, candidates: [row, row]))
         XCTAssertThrowsError(try TransportPairingSnapshot(port: 0, candidates: []))
         XCTAssertThrowsError(try TransportPairingSnapshot.decode(value.encode() + Data([0])))
+    }
+    func testSnapshotCarriesBothProofsWithoutChangingLegacyShape() throws {
+        let fixture = try TransportPairingFixture()
+        let id = Data(repeating: 1, count: 16)
+        let biometric = try fixture.proof()
+        let decision = try fixture.decision.signature(for: fixture.transcript.signingInput(purpose: .phoneDecision)).rawRepresentation
+        let proof = try PairingPhoneProof(biometric: biometric, decision: decision)
+        let candidate = try TransportPairingCandidate(id: id, proposal: fixture.proposal, phase: .proofReady, phoneProof: proof)
+        let snapshot = try TransportPairingSnapshot(port: 4321, candidates: [candidate])
+        let bytes = try snapshot.encode()
+        let decoded = try TransportPairingSnapshot.decode(bytes)
+        XCTAssertEqual(decoded.candidates.first?.phoneProof, proof)
+        XCTAssertEqual(try decoded.encode(), bytes)
+        let legacy = try TransportPairingCandidate(id: Data(repeating: 2, count: 16), proposal: fixture.proposal,
+            phase: .proofReady, biometricProof: biometric)
+        XCTAssertThrowsError(try TransportPairingSnapshot(port: 4321, candidates: [candidate, legacy]))
+        let legacyBytes = try TransportPairingSnapshot(port: 4321, candidates: [legacy]).encode()
+        XCTAssertNil(try TransportPairingSnapshot.decode(legacyBytes).candidates.first?.phoneProof?.decision)
     }
     func testLogicalAppControlTransfersOneVerifiedProofAndOneReceipt() async throws {
         let f = try TransportPairingFixture(), ingress = PairingControlIngressFixture(), owner = ingress.owner(f.configuration)

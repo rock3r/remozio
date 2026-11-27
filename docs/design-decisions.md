@@ -97,6 +97,8 @@ A dedicated ALPN profile requires two phone signatures over the exact pairing tr
 
 The Root verifies both signatures inside the commit transaction before it changes trust or signs the receipt. This applies to initial pairing and re-pairing. When the requirement is active, the Root refuses new commits on both legacy setup profiles. An incompatible client must update before starting enrollment. Existing enrollments and receipt recovery continue to work.
 
+The protected Root configuration sets the proof requirement independently of the installed v2 listener setting. The decision-proof listener uses the `remozio-pairing/3` ALPN and the existing invitation prelude. If the requirement is active and the listener is disabled, new setup stays closed. Cold disable retains the proof requirement.
+
 The extra signature proves possession of the enrolled decision key for the exact setup. It provides no hardware attestation or proof that the keys reside on the same device. The journal needs no format change. Historical enrollment records retain their original evidence. See [#847](https://github.com/rock3r/remozio/issues/847).
 
 ## Test order and signing

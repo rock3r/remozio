@@ -6,6 +6,7 @@ public enum PairingSetupPreludeV2: Sendable, CustomStringConvertible {
     case proposal(PairingPhoneProposal, tag: Data)
 
     public static let applicationProtocol = "remozio-pairing/2"
+    public static let decisionProofApplicationProtocol = "remozio-pairing/3"
     public static let maximumBytes = 66_128
     private static let domain = "dev.remozio.pairing.exchange"
     private static var limits: CBORLimits { get throws { try .init(maxBytes: maximumBytes, maxDepth: 2, maxItems: 13) } }

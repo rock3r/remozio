@@ -105,6 +105,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
          maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
          v2: PairingSetupV2Ingress?, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil,
+         requiresDecisionProof: Bool = false,
          proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
          registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
          sourceKey: @escaping @Sendable (NWEndpoint) -> PairingSetupV2Source? = { PairingSetupV2Source($0) },
@@ -113,7 +114,7 @@ public final class PairingSetupListener: @unchecked Sendable {
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
-        guard (lanRoute == nil) == (lanBinding == nil),
+        guard !requiresDecisionProof || v2 != nil, (lanRoute == nil) == (lanBinding == nil),
               ingressFixture == nil || (lanRoute == nil && v2 != nil && binding == .loopback) else {
             throw DirectListenerError.invalidConfiguration
         }
@@ -151,7 +152,9 @@ public final class PairingSetupListener: @unchecked Sendable {
             intakeNow = nil
         }
         channelAllocated = ingressFixture?.channelAllocated
-        let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
+        let applicationProtocol: String = if requiresDecisionProof { PairingSetupPreludeV2.decisionProofApplicationProtocol }
+            else if v2 != nil { PairingSetupPreludeV2.applicationProtocol }
+            else { PairingSetupFrame.applicationProtocol }
         self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
         sec_protocol_options_set_local_identity(options, local)
@@ -344,7 +347,8 @@ public final class PairingSetupListener: @unchecked Sendable {
                             }, retire: candidate.retire)
                     } else { proof = nil }
                     let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
-                        peerPoint: point, timeoutMilliseconds: timeout, v2: proof)
+                        peerPoint: point, timeoutMilliseconds: timeout, v2: proof,
+                        requiresDecisionProof: applicationProtocol == PairingSetupPreludeV2.decisionProofApplicationProtocol)
                     confirmed = proof != nil
                     do { try Task.checkCancellation() }
                     catch { session.retireVerifiedProof(); await session.closeAndWait(); throw error }
