@@ -148,7 +148,13 @@ internal class CommandApprovalViewState {
 }
 
 @Composable
-internal fun CommandApprovalControls(session: CommandRequestSession, context: CommandApprovalContext, status: TrackedRequestStatus?, state: CommandApprovalViewState) {
+internal fun CommandApprovalControls(
+    session: CommandRequestSession,
+    context: CommandApprovalContext,
+    status: TrackedRequestStatus?,
+    state: CommandApprovalViewState,
+    promptContext: CommandPromptContext,
+) {
     if (status?.status?.phase !in setOf(RequestPhase.QUEUED, RequestPhase.PRESENTED)) return
     val activity = LocalActivity.current as? ComponentActivity
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -224,7 +230,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                                 state.stage = CommandActionStage.UNAVAILABLE
                                 return@launch
                             }
-                            val native = CommandBiometricPrompt(activity, checkNotNull(loaded))
+                            val native = CommandBiometricPrompt(activity, checkNotNull(loaded), promptContext)
                             loaded = null
                             prompt = native
                             state.stage = CommandActionStage.BIOMETRIC

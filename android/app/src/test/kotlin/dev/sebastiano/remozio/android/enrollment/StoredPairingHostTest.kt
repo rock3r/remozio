@@ -356,6 +356,30 @@ class StoredPairingHostTest {
         assertEquals(material.keys.map { it.alias }.toSet(), keys.retired.toSet())
     }
 
+    @Test fun rejectedRePairCleansTheAttemptAndKeepsTheExistingEnrollment() = runBlocking {
+        val keys = RePairKeys()
+        val host = rePairHost(keys)
+        val previous = record(1)
+        activatePredecessor(host, previous)
+        val reservation = host.reserveRePair(envelope(previous), id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val (material, _) = proposalFor(reservation)
+        keys.allocate(material.keys)
+        host.prepareRePairProposal(reservation.recordID, material)
+
+        // The proposed replacement never received a transcript or sent a pairing proof.
+        host.finishRePair(reservation.recordID)
+        open().use {
+            val snapshot = it.snapshot()
+            val retained = snapshot.entries.single()
+            assertEquals(previous.recordID, retained.enrollment.recordID)
+            assertEquals(previous.phoneID, retained.enrollment.phoneID)
+            assertEquals(previous.epoch, retained.enrollment.epoch)
+            assertEquals(EnrollmentPhase.ACTIVE, retained.phase)
+            assertTrue(snapshot.rePairReservations.isEmpty())
+        }
+        assertEquals(material.keys.map { it.alias }.toSet(), keys.retired.toSet())
+    }
+
     @Test fun rePairProofMarkerSurvivesRestartAndReceiptRetiresTheExactRemovedPredecessor(): Unit = runTest {
         val keys = RePairKeys()
         val h = rePairHost(keys)

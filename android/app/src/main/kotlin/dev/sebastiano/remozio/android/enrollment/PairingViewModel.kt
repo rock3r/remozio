@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 internal enum class RePairAvailability { ELIGIBLE, PENDING, UNAVAILABLE }
-internal enum class PairingPhase { CLOSED, INPUT, CONNECTING, COMPARING, PREPARING, BIOMETRIC, SUBMITTING, COMPLETE, RECOVERY_PENDING, FAILED, EXPIRED, CLOSING }
+internal enum class PairingPhase { CLOSED, INPUT, CONNECTING, COMPARING, PREPARING, BIOMETRIC, SUBMITTING, COMPLETE, RECOVERY_PENDING, FAILED, RE_PAIR_FAILED, EXPIRED, CLOSING }
 internal data class PairingScreenState(
     val phase: PairingPhase = PairingPhase.CLOSED,
     val phoneSuffix: String = "",
@@ -27,6 +27,19 @@ internal data class PairingScreenState(
     val mayHaveSavedSetup: Boolean = false,
     val recoveryRecordID: CborValue.Bytes? = null,
 )
+
+internal fun PairingScreenState.connectionFailed(
+    failure: Exception,
+    isRePair: Boolean,
+    cleanupSucceeded: Boolean,
+): PairingScreenState {
+    val phase = when (failure) {
+        is RePairAlreadyPending -> PairingPhase.RECOVERY_PENDING
+        is PairingDeadlineExpired -> PairingPhase.EXPIRED
+        else -> if (isRePair && cleanupSucceeded) PairingPhase.RE_PAIR_FAILED else PairingPhase.FAILED
+    }
+    return copy(phase = phase, mayHaveSavedSetup = !cleanupSucceeded)
+}
 
 /** Retains one setup owner across rotation. Activity and biometric prompts are never retained here. */
 internal class PairingViewModel(private val app: RemozioApplication) : ViewModel() {
@@ -109,12 +122,9 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
                 val result = app.retirePairing(owner).await()
                 if (attempt === owner) {
                     if (result.isSuccess) attempt = null
-                    val phase = when (failure) {
-                        is RePairAlreadyPending -> PairingPhase.RECOVERY_PENDING
-                        is PairingDeadlineExpired -> PairingPhase.EXPIRED
-                        else -> PairingPhase.FAILED
-                    }
-                    mutable.value = mutable.value.copy(phase = phase, mayHaveSavedSetup = result.isFailure)
+                    mutable.value = mutable.value.connectionFailed(
+                        failure, isRePair = rePairSuffix != null, cleanupSucceeded = result.isSuccess,
+                    )
                 }
             }
         }

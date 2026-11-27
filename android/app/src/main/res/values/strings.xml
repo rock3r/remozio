@@ -392,7 +392,9 @@
     <string name="notification_action_failed">The notification action could not complete. Try again or open Android settings.</string>
     <string name="notification_test_cleared">The local test notification was cleared.</string>
     <string name="command_biometric_title">Approve command</string>
-    <string name="command_biometric_subtitle">Authorize the command you just reviewed</string>
+    <string name="command_request_reference">Request %1$s</string>
+    <string name="command_biometric_description">%1$s on %2$s (%3$s)</string>
+    <string name="command_biometric_description_fallback">Approve only if the request reference matches the command you reviewed</string>
     <string name="command_biometric_cancel">Cancel</string>
     <string name="command_action_approve">Approve with biometrics</string>
     <string name="command_action_decline">Decline</string>
@@ -457,6 +459,7 @@
     <string name="pairing_repair_connect">Re-pair</string>
     <string name="pairing_repair_pending">Check the pending setup in Your Macs. To use a new phone ID, start a new pairing on the Mac. The pending setup stays available for recovery.</string>
     <string name="pairing_repair_unavailable">This invitation does not match an eligible pairing on this phone.</string>
+    <string name="pairing_repair_new_pairing_guidance">If Setup on your Mac says this phone needs a new pairing, open Your Macs on your phone and choose Remove from this phone for this Mac. Then use Pair a Mac.</string>
     <string name="macs_remove_local">Remove from this phone</string>
     <string name="macs_remove_local_description">Remove %1$s from this phone? To revoke the pairing, open Paired phones on the Mac.</string>
     <string name="macs_discard_setup">Discard saved setup</string>

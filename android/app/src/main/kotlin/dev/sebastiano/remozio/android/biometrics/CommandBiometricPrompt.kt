@@ -10,6 +10,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import dev.sebastiano.remozio.android.R
+import dev.sebastiano.remozio.android.requests.CommandPromptContext
 import dev.remozio.protocol.ApprovalMessage
 import java.security.Signature
 import kotlinx.coroutines.CancellationException
@@ -28,9 +29,10 @@ sealed interface CommandBiometricResult {
 
 /** Owns the supplied identity. Close on request replacement or enrollment change, including Compose disposal. */
 @MainThread
-class CommandBiometricPrompt(
+internal class CommandBiometricPrompt(
     private val activity: ComponentActivity,
     private val identity: AndroidCommandBiometrics,
+    private val request: CommandPromptContext,
 ) : DefaultLifecycleObserver, AutoCloseable {
     private var closed = false
     private var token: Any? = null
@@ -63,7 +65,10 @@ class CommandBiometricPrompt(
                 val cancellation = CancellationSignal().also { signal = it }
                 val prompt = BiometricPrompt.Builder(activity)
                     .setTitle(activity.getString(R.string.command_biometric_title))
-                    .setSubtitle(activity.getString(R.string.command_biometric_subtitle))
+                    .setSubtitle(activity.getString(R.string.command_request_reference, request.reference))
+                    .setDescription(request.labels?.let {
+                        activity.getString(R.string.command_biometric_description, it.executable, it.host, it.account)
+                    } ?: activity.getString(R.string.command_biometric_description_fallback))
                     .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                     .setNegativeButton(activity.getString(R.string.command_biometric_cancel), activity.mainExecutor) { _, _ ->
                         finish(attempt, CommandBiometricResult.Cancelled)
