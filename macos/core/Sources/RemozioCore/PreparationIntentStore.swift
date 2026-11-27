@@ -1776,7 +1776,7 @@ public final class PreparationIntentStore {
     }
     // Account reservation precedes any key, journal or service creation. Only the authenticated setup owner calls this.
     func beginAccountPreparation(owner: LocalAccountIdentity, allowedTargetUIDs: Set<UInt32>,
-                                 disclosureAccepted: Bool, expectedInventoryRevision: Data,
+                                 disclosureAccepted: Bool, expectedInventoryRevision: Data, pairingPolicy: SetupPairingPolicy = .disabled,
                                  makeInitial: (Data, Data) throws -> AuthorityJournalInitialization) throws -> AccountPreparationIntent {
         return try transaction(write: true) {
             try requireInventorySchema()
@@ -1802,7 +1802,8 @@ public final class PreparationIntentStore {
             let initial = try makeInitial(macID, accountID)
             let value = try AccountPreparationIntent(setupID: AccountPreparationIntent.randomID(), revision: AccountPreparationIntent.randomID(),
                 macID: macID, installationID: inventory.installationID, releaseDigest: inventory.releaseDigest, accountID: accountID,
-                ownerUID: owner.uid, directoryID: owner.directoryID, policyBytes: policy.canonicalBytes, initializationBytes: initial.initializationBytes)
+                ownerUID: owner.uid, directoryID: owner.directoryID, policyBytes: policy.canonicalBytes,
+                initializationBytes: initial.initializationBytes, pairingPolicy: pairingPolicy)
             if try scalar("PRAGMA user_version") == 2 { try upgradeInitializationStorage() }
             if try scalar("PRAGMA user_version") == 3 {
                 try exec("CREATE TABLE account_preparation_v1(owner INTEGER PRIMARY KEY CHECK(owner>0 AND owner<4294967295),account BLOB UNIQUE NOT NULL CHECK(length(account)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 147456)) STRICT")

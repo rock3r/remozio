@@ -13,17 +13,21 @@ final class PairingColdDisableTests: XCTestCase {
         let activation: RuntimeActivationFixture
         let host: InstalledAuthorityCommandConfiguration
 
-        init() throws {
-            activation = try RuntimeActivationFixture()
+        init(pairingPolicy: SetupPairingPolicy = .disabled) throws {
+            activation = try RuntimeActivationFixture(pairingPolicy: pairingPolicy)
             let original = activation.plan.host
-            let presence = original.command.presence
-            let pairing = try XCTUnwrap(presence.pairing)
-            let scoped = try AuthorityPairingSetupConfiguration(transportPublicKey: pairing.transportPublicKey,
-                lifetimeMilliseconds: 52_001, v2ActivationEnabled: true, lanScope: .init(interfaceName: "en0", family: .ipv6))
-            let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 6, maxItems: 1024)
-            let nextPresence = try Self.replace(presence.canonicalBytes, 10, scoped.canonicalBytes, limits: limits)
-            let command = try Self.replace(original.command.canonicalBytes, 1, nextPresence, limits: limits)
-            host = try .decode(Self.replace(original.canonicalBytes, 5, command, limits: limits))
+            if pairingPolicy == .disabled {
+                let presence = original.command.presence
+                let pairing = try XCTUnwrap(presence.pairing)
+                let scoped = try AuthorityPairingSetupConfiguration(transportPublicKey: pairing.transportPublicKey,
+                    lifetimeMilliseconds: 52_001, v2ActivationEnabled: true, lanScope: .init(interfaceName: "en0", family: .ipv6))
+                let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 6, maxItems: 1024)
+                let nextPresence = try Self.replace(presence.canonicalBytes, 10, scoped.canonicalBytes, limits: limits)
+                let command = try Self.replace(original.command.canonicalBytes, 1, nextPresence, limits: limits)
+                host = try .decode(Self.replace(original.canonicalBytes, 5, command, limits: limits))
+            } else {
+                host = original
+            }
             root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("remozio-cold-disable-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: "Runtime", owner: getuid(), visibility: .privateState)
@@ -58,9 +62,9 @@ final class PairingColdDisableTests: XCTestCase {
         }
     }
 
-    private func withFixture(_ body: (Fixture) throws -> Void) throws {
+    private func withFixture(pairingPolicy: SetupPairingPolicy = .disabled, _ body: (Fixture) throws -> Void) throws {
         try XCTSkipIf(getuid() == 0 || geteuid() == 0, "Ordinary-owner fixture")
-        let fixture = try Fixture()
+        let fixture = try Fixture(pairingPolicy: pairingPolicy)
         defer { fixture.directory.close(); XCTAssertNoThrow(try FileManager.default.removeItem(at: fixture.root)) }
         try body(fixture)
     }
@@ -94,6 +98,29 @@ final class PairingColdDisableTests: XCTestCase {
 
             XCTAssertEqual(try fixture.apply(didPublish: { _ in XCTFail("Unexpected replay write") }), completed)
             XCTAssertNoThrow(try PairingColdDisableIntent.requirePairingOpen(read: { try fixture.read(.pairingColdDisableIntent) }))
+        }
+    }
+
+    func testColdDisableKeepsTheDecisionRequirementAndCanValidateTheRetainedBytes() throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        try withFixture(pairingPolicy: .v2WithDecisionProof(lanScope: scope)) { fixture in
+            let original = try XCTUnwrap(fixture.host.command.presence.pairing)
+            XCTAssertTrue(original.decisionProofRequired)
+            XCTAssertThrowsError(try fixture.apply(didPublish: { if case .host = $0 { throw StopFailure.interrupted } }))
+            XCTAssertThrowsError(try PairingColdDisableIntent.requirePairingOpen(read: { try fixture.read(.pairingColdDisableIntent) }))
+            _ = try fixture.apply()
+            let bytes = try fixture.read(.commandConfiguration)
+            let stopped = try AuthorityCommandStartupConfiguration.decode(bytes)
+            let pairing = try XCTUnwrap(stopped.presence.pairing)
+            XCTAssertEqual(pairing.v2ActivationEnabled, false)
+            XCTAssertTrue(pairing.decisionProofRequired)
+            XCTAssertNil(pairing.lanScope)
+            XCTAssertEqual(pairing.transportPublicKey, original.transportPublicKey)
+            XCTAssertEqual(pairing.lifetimeMilliseconds, original.lifetimeMilliseconds)
+            try RuntimeActivationFiles.validateCommand(derived: fixture.activation.plan.host.command, retained: stopped,
+                readIntent: { try fixture.read(.pairingColdDisableIntent) })
+            _ = try fixture.apply(didPublish: { _ in XCTFail("Unexpected replay write") })
+            XCTAssertEqual(try fixture.read(.commandConfiguration), bytes)
         }
     }
 

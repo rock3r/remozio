@@ -53,6 +53,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let resume: (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent
     private let verifyHost: (InstallationInventory) throws -> Void
     private let accountCodePolicy: AuthorityCodePolicy?
+    private let pairingPolicy: SetupPairingPolicy
     private let verifyAccountStartup: (Data, Data) throws -> Void
     private let lookupAccount: (uid_t) throws -> LocalAccountIdentity
     private let prepareAccount: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent
@@ -98,7 +99,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
          verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in },
-         accountCodePolicy: AuthorityCodePolicy? = nil,
+         accountCodePolicy: AuthorityCodePolicy? = nil, pairingPolicy: SetupPairingPolicy = .disabled,
          lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity = LocalAccountDirectory.lookup,
          prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent = {
              try AccountPreparationController.resume(machine: $0, expected: $1, verifyCurrent: $2)
@@ -112,7 +113,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
          importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil,
          verifyAccountStartup: @escaping (Data, Data) throws -> Void = { _, _ in }) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
+            accountCodePolicy: accountCodePolicy, pairingPolicy: pairingPolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -132,12 +133,12 @@ public final class SetupAccountOwner: @unchecked Sendable {
          importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil,
          verifyAccountStartup: @escaping (Data, Data) throws -> Void = { _, _ in }) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
+            accountCodePolicy: accountCodePolicy, pairingPolicy: .disabled, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
          verifyHost: @escaping (InstallationInventory) throws -> Void,
-         accountCodePolicy: AuthorityCodePolicy?, lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity,
+         accountCodePolicy: AuthorityCodePolicy?, pairingPolicy: SetupPairingPolicy, lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity,
          prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent,
          prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State,
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
@@ -149,7 +150,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         self.gatewayActivationOperation = gatewayActivationOperation; self.gatewaySettingsOperation = gatewaySettingsOperation
         self.importedGatewayOperation = importedGatewayOperation
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
-        self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
+        self.accountCodePolicy = accountCodePolicy; self.pairingPolicy = pairingPolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
         do {
             let activity = try releaseActivity?.acquireShared()
             defer { activity?.close() }
@@ -1310,7 +1311,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             let owner = try lookupAccount(callerUID)
             guard owner.uid == callerUID else { throw AdministrativeSetupError.wrongAccount }
             let intent = try machine.beginAccountPreparation(owner: owner, allowedTargetUIDs: allowedTargetUIDs,
-                disclosureAccepted: disclosureAccepted, expectedInventoryRevision: inventory.revision,
+                disclosureAccepted: disclosureAccepted, expectedInventoryRevision: inventory.revision, pairingPolicy: pairingPolicy,
                 makeInitial: { mac, account in try Self.initialAuthority(macID: mac, accountID: account, codePolicy: policy) })
             try verifyEnrollment(intent, callerUID: callerUID, machine: machine)
             return intent

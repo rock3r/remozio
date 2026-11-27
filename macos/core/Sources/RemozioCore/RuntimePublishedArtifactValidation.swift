@@ -31,11 +31,18 @@ enum RuntimePublishedArtifactValidation {
         return result
     }
     static func validate(bundle: RuntimeConfigurationBundle, material: RuntimePreparationMaterial,
-                         verifyCurrent: () throws -> Void, read: (Artifact) throws -> Data = RuntimePublishedArtifactValidation.nativeRead) throws {
+                         verifyCurrent: () throws -> Void, read: (Artifact) throws -> Data = RuntimePublishedArtifactValidation.nativeRead,
+                         retainedColdDisable: (() throws -> (AuthorityCommandStartupConfiguration, Data?)?)? = nil) throws {
         try verifyCurrent()
         for artifact in try artifacts(bundle: bundle, material: material) {
             try verifyCurrent(); let actual = try read(artifact); try verifyCurrent()
-            guard actual == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+            if actual == artifact.bytes { continue }
+            guard artifact.path == bundle.paths.commandConfiguration,
+                  bundle.command.presence.pairing?.decisionProofRequired == true,
+                  let (retained, intent) = try retainedColdDisable?(), retained.canonicalBytes == actual else {
+                throw AdministrativeSetupPublicationError.conflictingConfiguration
+            }
+            try RuntimeActivationFiles.validateCommand(derived: bundle.command, retained: retained, readIntent: { intent })
         }
         try verifyCurrent()
     }

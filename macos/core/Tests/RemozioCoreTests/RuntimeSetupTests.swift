@@ -15,14 +15,22 @@ final class RuntimeSetupTests: XCTestCase {
         let plan: ServiceAccountPlan
         let directory: ProtectedSetupDirectory
         var creations = 0, publications = 0
-        init() throws {
+        init(pairingPolicy: SetupPairingPolicy) throws {
             let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild]
             let policy = try AuthorityCodePolicy(entries: roles.map { role in
                 try .init(role: role, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.role-\(role.rawValue)",
                     installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: UInt8(role.rawValue), count: 20), active: true)
             })
-            f = try .init(policy: policy); machine = try f.open(initialize: true)
-            account = try f.resume(machine, f.begin(machine))
+            let fixture = try AccountPreparationFixture(policy: policy)
+            f = fixture
+            try fixture.open(initialize: true).close()
+            let setup = try SetupAccountOwner(openMachine: { try fixture.open() }, expectedReleaseDigest: fixture.release,
+                resume: { _, _ in throw Interrupted.injected }, accountCodePolicy: fixture.policy,
+                pairingPolicy: pairingPolicy, lookupAccount: { _ in fixture.identity })
+            let reserved = try setup.beginEnrollment(callerUID: getuid(), allowedTargetUIDs: [0], disclosureAccepted: true)
+            try setup.close()
+            machine = try f.open()
+            account = try f.resume(machine, reserved)
             plan = try .init(account: account, planID: AccountPreparationIntent.randomID(), claims: [
                 .init(accountID: account.accountID, role: .transport, number: 20000, userID: UUID(), groupID: UUID()),
                 .init(accountID: account.accountID, role: .gateway, number: 20001, userID: UUID(), groupID: UUID())])
@@ -32,6 +40,7 @@ final class RuntimeSetupTests: XCTestCase {
         deinit { directory.close(); try? machine.close() }
         var state: RuntimePreparationState { get throws { try machine.runtimePreparation(accountID: account.accountID) } }
         func prepare(_ expected: RuntimePreparationState, verify: @escaping () throws -> Void = {},
+                     writeCommandFile: Bool = false,
                      stage: (RuntimePublicationController.Stage) throws -> Void = { _ in }) throws -> RuntimePreparationState {
             try RuntimePublicationController.prepare(machine: machine, account: account, expected: expected,
                 verifyCurrent: verify, verifyServices: { services in XCTAssertEqual(services, self.plan) },
@@ -48,6 +57,10 @@ final class RuntimeSetupTests: XCTestCase {
                     XCTAssertEqual(bundle.transport.transport.identityPublicKeyInfo, material.transportPublicKeyInfo)
                     XCTAssertEqual(bundle.command.presence.pairing?.transportPublicKey, try material.reference.transportPublicKeyX963)
                     XCTAssertEqual(bundle.frontendClient.serviceName, bundle.command.serviceName)
+                    if writeCommandFile {
+                        _ = try AdministrativeSetupPublication.publish(bundle.command.canonicalBytes, file: .commandConfiguration,
+                            directory: self.directory, owner: getuid(), verify: check)
+                    }
                 }, didStage: stage)
         }
         func owner() throws -> SetupAccountOwner {
@@ -60,9 +73,46 @@ final class RuntimeSetupTests: XCTestCase {
                 })
         }
     }
-    private func fixture() throws -> Fixture {
+    private func fixture(pairingPolicy: SetupPairingPolicy = .disabled) throws -> Fixture {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner setup fixture") }
-        return try .init()
+        return try .init(pairingPolicy: pairingPolicy)
+    }
+
+    func testRootPairingSelectionSurvivesReservationAndPublicationRetry() throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        let selections: [SetupPairingPolicy] = [.disabled, .v2WithDecisionProof(lanScope: nil), .v2WithDecisionProof(lanScope: scope)]
+        for selection in selections {
+            let f = try fixture(pairingPolicy: selection)
+            let retained = try XCTUnwrap(f.machine.accountPreparation(ownerUID: getuid()))
+            XCTAssertEqual(retained.pairingPolicy, selection)
+            let replay = try f.f.begin(f.machine, pairingPolicy: .disabled)
+            XCTAssertEqual(replay, retained)
+            XCTAssertThrowsError(try f.prepare(f.state, writeCommandFile: true, stage: {
+                if $0 == .filesPublished { throw Interrupted.injected }
+            })) { XCTAssertTrue($0 is Interrupted) }
+            func published() throws -> Data {
+                try ProtectedServiceConfiguration.read(anchor: f.directory.path,
+                    relativePath: AdministrativeSetupPublication.File.commandConfiguration.name, owner: getuid())
+            }
+            let before = try published()
+            let command = try AuthorityCommandStartupConfiguration.decode(before)
+            let pairing = try XCTUnwrap(command.presence.pairing)
+            XCTAssertEqual(pairing.transportPublicKey, try XCTUnwrap(f.state.reference).transportPublicKeyX963)
+            switch selection {
+            case .disabled:
+                let legacy = try AuthorityPairingSetupConfiguration(transportPublicKey: pairing.transportPublicKey)
+                XCTAssertEqual(pairing.canonicalBytes, legacy.canonicalBytes)
+                XCTAssertNil(pairing.v2ActivationEnabled)
+                XCTAssertFalse(pairing.decisionProofRequired)
+            case .v2WithDecisionProof(let scope):
+                XCTAssertEqual(pairing.v2ActivationEnabled, true)
+                XCTAssertTrue(pairing.decisionProofRequired)
+                XCTAssertEqual(pairing.lanScope, scope)
+            }
+            XCTAssertTrue(try f.prepare(f.state, writeCommandFile: true).configurationPublished)
+            XCTAssertEqual(try published(), before)
+            XCTAssertEqual(f.creations, 1)
+        }
     }
     func testEveryInterruptedStageResumesTheSameIdentityWithoutResettingCompletion() throws {
         let stages: [RuntimePublicationController.Stage] = [.materialRestored, .referenceRetained, .filesPublished, .completed]
