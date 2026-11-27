@@ -302,6 +302,15 @@ final class CheckpointedJournalTests: XCTestCase {
             XCTAssertThrowsError(try startup.completedWriter(), mutation)
             XCTAssertNil(try fixture.journal.read { try $0.epoch(next) }, mutation)
             XCTAssertEqual(try fixture.store.read().committed, candidate, mutation)
+
+            try fixture.journal.close()
+            fixture.store.close()
+            let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
+            defer { try? owner.close() }
+            XCTAssertThrowsError(try owner.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384), mutation) {
+                XCTAssertEqual($0 as? AuthorityStorageStartupError, .repairRequired, mutation)
+            }
+            XCTAssertThrowsError(try owner.withRequests { _ in true }, mutation)
         }
     }
 
@@ -835,28 +844,27 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertNil(try fixture.store.read().pending)
     }
 
-    func testInstalledReplayMustBeVerifiedBeforeOpeningRequestsOnEveryStartup() throws {
+    func testInstalledReplayRestartsWithoutMigrationAuthorization() throws {
         let fixture = try Fixture()
         _ = try installCommandReplay(fixture)
-        let owner = try requestStartupOwner(fixture)
-        XCTAssertEqual(try owner.installPermanentReplay(), .installed)
-        XCTAssertThrowsError(try owner.withRequests { _ in true })
-        try owner.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)
-        XCTAssertTrue(try owner.withRequests { _ in true })
-        try owner.close()
+        let initial = try requestStartupOwner(fixture)
+        XCTAssertEqual(try initial.installPermanentReplay(), .installed)
+        try initial.close()
 
-        let unverified = try AuthorityJournal(storage: fixture.openTransferredStorage())
-        XCTAssertThrowsError(try unverified.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)) {
-            XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+        for migrationDrainBusy in [true, false] {
+            let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
+            defer { try? owner.close() }
+            if migrationDrainBusy {
+                try owner.prepareLegacyReplayInstallation { _ in
+                    throw UpdateAdmissionBarrierError.busy
+                }
+            } else {
+                try owner.prepareLegacyReplayInstallation(nil)
+            }
+            XCTAssertThrowsError(try owner.withRequests { _ in true })
+            try owner.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)
+            XCTAssertTrue(try owner.withRequests { _ in true })
         }
-        XCTAssertThrowsError(try unverified.withRequests { _ in true })
-        try unverified.close()
-
-        let verified = try AuthorityJournal(storage: fixture.openTransferredStorage())
-        XCTAssertEqual(try verified.installPermanentReplay(), .alreadyInstalled)
-        try verified.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)
-        XCTAssertTrue(try verified.withRequests { _ in true })
-        try verified.close()
     }
 
     func testRequestAdmissionReservesCarrierSpaceWithinConfiguredPayloadBudget() throws {

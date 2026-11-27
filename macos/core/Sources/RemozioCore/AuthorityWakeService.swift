@@ -184,7 +184,7 @@ public actor AuthorityWakeService {
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy,
             gatewayPolicy: configuration.phonePush?.journalPolicy(clockEpoch: clock.epoch))
         do {
-            try preparePermanentReplay?(journal)
+            try journal.prepareLegacyReplayInstallation(preparePermanentReplay)
         } catch {
             try? journal.close()
             throw error

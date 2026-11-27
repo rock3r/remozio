@@ -44,7 +44,6 @@ public final class AuthorityJournal: @unchecked Sendable {
     private static let auditRetentionLogger = Logger(subsystem: "dev.sebastiano.remozio.macos.authority", category: "audit-retention")
     private var observePairingContention: (@Sendable () -> Void)?
     private var requestStartupAttempted = false
-    private var replayStartupVerified = false
     private(set) var updateHealthOnly = false
     private var updateCompletionOnly = false
     private var retainedSetupPolicyOnly = false
@@ -170,6 +169,12 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Only a legacy journal needs the installed migration authorization. Request startup verifies existing storage.
+    func prepareLegacyReplayInstallation(_ install: (@Sendable (AuthorityJournal) throws -> Void)?) throws {
+        guard let install, try read({ try !$0.hasPermanentReplayStorage() }) else { return }
+        try install(self)
+    }
+
     /// The installer validates the reader floor before calling this startup-only migration.
     func installPermanentReplay() throws -> CheckpointedJournal.PermanentReplayMigration {
         try lock.withLock {
@@ -177,9 +182,7 @@ public final class AuthorityJournal: @unchecked Sendable {
             guard !requestStartupAttempted, requests == nil, !updateHealthOnly, !updateCompletionOnly,
                   !retainedSetupPolicyOnly, let storage else { throw JournalDatabaseError.unavailable }
             do {
-                let result = try CheckpointedJournal(journal: database, continuity: storage.continuity).installPermanentReplay()
-                replayStartupVerified = result != .legacyHistoryGap
-                return result
+                return try CheckpointedJournal(journal: database, continuity: storage.continuity).installPermanentReplay()
             } catch {
                 try? close()
                 throw error
@@ -194,13 +197,9 @@ public final class AuthorityJournal: @unchecked Sendable {
             try requireNoRequestOperation()
             guard !updateHealthOnly, !updateCompletionOnly else { throw JournalDatabaseError.readOnly }
             guard let storage else { return }
-            let replayInstalled = try withStorageFailureCleanup {
-                try database.read { try $0.hasPermanentReplayStorage() }
-            }
             guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
             requestStartupAttempted = true
             do {
-                guard !replayInstalled || replayStartupVerified else { throw JournalDatabaseError.unavailable }
                 guard (1...16_777_216).contains(maximumPayloadBytes) else { throw ApprovalCoordinatorError.invalidConfiguration }
                 let bodyBytes = AuthorityServiceConfiguration.requestBodyLimit(maximumPayloadBytes)
                 let limits = try CBORLimits(maxBytes: bodyBytes, maxDepth: 32, maxItems: 262_144)
