@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback fixtures only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let commandCapture: String?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let pairingV2: Bool?; let decisionProof: Bool?; let legacyCommit: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let commandCapture: String?; let repairNotices: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let rePair: Bool?; let pairingV2: Bool?; let decisionProof: Bool?; let legacyCommit: Bool?; let dropRePairReceipt: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
 
 private actor SyntheticPairingReceipt {
     private var committed: (setupID: Data, signature: Data)?
@@ -248,7 +248,7 @@ if setup.routing == true || setup.audit == true || setup.commandCapture != nil {
         supported: setup.routing == true && setup.routingSupported != false,
         auditSupported: setup.audit == true && setup.auditSupported != false,
         maximumPayloadBytes: setup.audit == true ? (setup.maximumPayloadBytes ?? 65_536) : 16_384,
-        commandCapture: commandCapture)
+        commandCapture: commandCapture, repairNotices: setup.repairNotices == true)
     let feed = AuthorityTrustFeed(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), factory: { onClose in
         AuthorityXPCChannel(driver: try fixture.driver(), onClose: onClose)
     })

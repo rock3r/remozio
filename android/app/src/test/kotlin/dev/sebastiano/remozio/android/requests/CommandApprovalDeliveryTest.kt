@@ -5,6 +5,7 @@ import dev.sebastiano.remozio.android.R
 import dev.sebastiano.remozio.android.biometrics.BiometricRecoveryReason
 import dev.remozio.protocol.ApprovalMessageType
 import dev.remozio.protocol.DecisionRefusalFrame
+import dev.remozio.protocol.PhoneRepairNoticeFrame
 import dev.remozio.protocol.RequestDeliveryResult
 import dev.remozio.protocol.SigningPurpose
 import java.io.IOException
@@ -87,7 +88,7 @@ class CommandApprovalDeliveryTest {
 
     @Test fun liveCapabilityAdvertisingRespectsFrameBudgetAndLeavesInspectionUnchanged() {
         val original = commandInspectionCapabilities()
-        val expected = setOf(RequestDeliveryResult.CAPABILITY, DecisionRefusalFrame.CAPABILITY)
+        val expected = setOf(RequestDeliveryResult.CAPABILITY, DecisionRefusalFrame.CAPABILITY, PhoneRepairNoticeFrame.CAPABILITY)
         assertEquals(original.map { it.schemaVersion }, liveCommandCapabilities(65536).map { it.schemaVersion })
         assertEquals(setOf(expected), liveCommandCapabilities(65536).map { it.features }.toSet())
         assertEquals(setOf(setOf(RequestDeliveryResult.CAPABILITY)), liveCommandCapabilities(128).map { it.features }.toSet())

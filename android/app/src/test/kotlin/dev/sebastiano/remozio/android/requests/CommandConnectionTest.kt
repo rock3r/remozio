@@ -1,5 +1,8 @@
 package dev.sebastiano.remozio.android.requests
 
+import dev.sebastiano.remozio.android.biometrics.BiometricRecoveryReason
+import dev.sebastiano.remozio.android.decisions.AndroidDecisionIdentity
+import dev.sebastiano.remozio.android.decisions.DecisionKeySecurity
 import dev.sebastiano.remozio.android.decisions.decisionPublicPoint
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.*
@@ -59,9 +62,14 @@ class CommandConnectionTest {
         val purpose = if (execute) SigningPurpose.BIOMETRIC_AUTHORIZATION else SigningPurpose.CANCELLATION
         return ApprovalMessage(1u, ApprovalMessageType.DECISION, purpose, body, sign(body, signingKey, ApprovalMessageType.DECISION, purpose))
     }
-    private class Wire : CommandConnectionWire {
+    private class Wire(override val supportsPhoneRepairNotices: Boolean = false) : CommandConnectionWire {
         val end = CompletableDeferred<Unit>()
         val sent = mutableListOf<ByteArray>()
+        val notices = mutableListOf<PhoneRepairNoticeFrame>()
+        override suspend fun sendPhoneRepairNotice(notice: PhoneRepairNoticeFrame) {
+            check(supportsPhoneRepairNotices && !closed)
+            notices += notice
+        }
         var closed = false
         var write: suspend () -> Unit = {}
         override suspend fun receive() { end.await() }
@@ -71,6 +79,42 @@ class CommandConnectionTest {
     private fun owner(snapshot: (suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire)? = null,
                       open: suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire) =
         CommandConnection(record, limits, open, { time }, dispatcher = Dispatchers.Unconfined, openSnapshot = snapshot)
+
+    @Test fun biometricRecoveryReportsOnceOnTheNegotiatedForegroundWire() = runBlocking<Unit> {
+        for (supported in listOf(false, true)) {
+            val wire = Wire(supported)
+            lateinit var session: CommandRequestSession
+            var signs = 0
+            val owner = CommandConnection(record, limits, { _, enrollment -> wire.also { session = issued(enrollment) } },
+                { time }, dispatcher = Dispatchers.Unconfined, signRepairNotice = { reason ->
+                    signs++
+                    AndroidDecisionIdentity(record.enrollment, decision.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT)
+                        .use { it.phoneRepairNotice(reason) }
+                })
+            val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
+            try {
+                owner.approval(session).reportRepair(BiometricRecoveryReason.BIOMETRIC_CHANGED)
+                owner.approval(session).reportRepair(BiometricRecoveryReason.LEGACY_POLICY)
+                assertEquals(if (supported) 1 else 0, signs)
+                assertEquals(signs, wire.notices.size)
+                assertTrue(wire.sent.isEmpty())
+                assertEquals(RequestPhase.PRESENTED, session.snapshot { time }.status!!.status.phase)
+                if (supported) {
+                    val notice = wire.notices.single()
+                    assertEquals(PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED, notice.reason)
+                    assertEquals(ChannelScope(id(1), id(2), id(3), id(4)), notice.scope)
+                    assertTrue(notice.verify(point(decision)))
+                }
+            } finally { owner.close(); running.cancelAndJoin() }
+        }
+    }
+
+    @Test fun phoneRepairNoticeCapabilityIsBoundedAndLimitedToLiveOffers() {
+        val feature = PhoneRepairNoticeFrame.CAPABILITY
+        assertTrue(liveCommandCapabilities(PhoneRepairNoticeFrame.MAXIMUM_BYTES).all { feature in it.features })
+        assertTrue(liveCommandCapabilities(PhoneRepairNoticeFrame.MAXIMUM_BYTES - 1).none { feature in it.features })
+        assertTrue(commandInspectionCapabilities().none { feature in it.features })
+    }
 
     @Test fun anUnrecoverableCertificateOffersPairingButAnOfflinePeerDoesNot() = runBlocking<Unit> {
         val recovery = owner { _, _ ->

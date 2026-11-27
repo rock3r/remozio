@@ -24,7 +24,8 @@ class CommandRequestReceiverTest {
                        override val maximumPayloadBytes: Int = 65536,
                        override val commandSchemas: Set<ULong> = if (supportsCommands) setOf(1u) else emptySet(),
                        override val deliveryResultSchemas: Set<ULong> = emptySet(),
-                       override val refusalSessionID: CborValue.Bytes? = null) : RequestMessageChannel {
+                       override val refusalSessionID: CborValue.Bytes? = null,
+                       override val supportsPhoneRepairNotices: Boolean = false) : RequestMessageChannel {
         val queue = Channel<ByteArray>(8)
         var closed = false
         val sent = Channel<ByteArray>(16)
@@ -83,6 +84,28 @@ class CommandRequestReceiverTest {
         bind(enrollment, wire, time).run()
         assertTrue(wire.closed)
     }
+    @Test fun phoneRepairNoticeRequiresNegotiatedSupportAndExactEnrollmentScope() = runBlocking<Unit> {
+        for (supported in listOf(false, true)) {
+            CommandRequestInbox(1, 2).use { inbox ->
+                val wire = Wire(scope(), supportsPhoneRepairNotices = supported)
+                val receiver = bind(Mac().enroll(inbox), wire)
+                receiver.use {
+                    val wrong = PhoneRepairNoticeFrame(scope(9), PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED, id(0, 64))
+                    assertFailsWith<IllegalArgumentException> { receiver.sendPhoneRepairNotice(wrong) }
+                    val notice = PhoneRepairNoticeFrame(scope(), PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED, id(0, 64))
+                    assertEquals(supported, receiver.supportsPhoneRepairNotices)
+                    if (supported) {
+                        receiver.sendPhoneRepairNotice(notice)
+                        assertContentEquals(notice.encode(), wire.sent.tryReceive().getOrThrow())
+                    } else {
+                        assertFailsWith<IllegalArgumentException> { receiver.sendPhoneRepairNotice(notice) }
+                    }
+                    assertTrue(wire.sent.tryReceive().isFailure)
+                }
+            }
+        }
+    }
+
     @Test fun captureBudgetRefusalKeepsTheConnectionAndDoesNotSendAFrame() = runBlocking<Unit> {
         val fixture = CommandCaptureBudgetFixture(capture, bound)
         val mac = Mac()

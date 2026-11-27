@@ -50,6 +50,7 @@ internal class CommandApprovalContext(
     val connectionState: StateFlow<CommandConnectionState>,
     val reconnect: () -> Unit,
     val onRepair: (() -> Unit)?,
+    val reportRepair: suspend (BiometricRecoveryReason) -> Unit,
     val sendWithRefusal: suspend (ApprovalMessage, ((DecisionRefusalFrame.Reason, () -> Boolean) -> Unit)?) -> Unit,
 ) {
     suspend fun send(message: ApprovalMessage) = sendWithRefusal(message, null)
@@ -148,17 +149,20 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
     val scope = rememberCoroutineScope()
     key(session, context.record, context.limits, lifecycle) {
         val sender by rememberUpdatedState(context.sendWithRefusal)
+        val repairReporter by rememberUpdatedState(context.reportRepair)
         val connectionState by context.connectionState.collectAsStateWithLifecycle()
         val connected = connectionState == CommandConnectionState.CONNECTED
         val attempts = state.attempts
         var prompt by remember { mutableStateOf<CommandBiometricPrompt?>(null) }
         var job by remember { mutableStateOf<Job?>(null) }
+        var repairJob by remember { mutableStateOf<Job?>(null) }
         var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
         val availability = commandActionAvailability(session, context.record, RequestElapsedClock::now)
 
         fun stop() {
             attempts.invalidate()
             job?.cancel(); job = null
+            repairJob?.cancel(); repairJob = null
             prompt?.close(); prompt = null
             state.stage = if (state.retained != null) CommandActionStage.UNCERTAIN else CommandActionStage.IDLE
         }
@@ -180,6 +184,17 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                             if (foreground && isCurrent()) state.refuse(ticket, decision, reason)
                         }
                     }
+                }
+            }
+        }
+
+        fun requireRecovery(ticket: Any, reason: BiometricRecoveryReason) {
+            if (!attempts.owns(ticket)) return
+            state.requireBiometricRecovery(ticket, reason)
+            if (foreground) {
+                repairJob?.cancel()
+                repairJob = scope.launch {
+                    if (foreground && attempts.owns(ticket)) repairReporter(reason)
                 }
             }
         }
@@ -215,7 +230,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                                     is CommandBiometricResult.Signed -> deliver(ticket, result.message)
                                     CommandBiometricResult.Cancelled -> state.stage = CommandActionStage.IDLE
                                     CommandBiometricResult.Unavailable -> state.stage = CommandActionStage.UNAVAILABLE
-                                    is CommandBiometricResult.RecoveryRequired -> state.requireBiometricRecovery(ticket, result.reason)
+                                    is CommandBiometricResult.RecoveryRequired -> requireRecovery(ticket, result.reason)
                                 }
                             }
                         } finally { loaded?.close() }
@@ -231,7 +246,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                     if (attempts.owns(ticket)) state.stage = CommandActionStage.UNAVAILABLE
                     throw cancelled
                 } catch (failure: BiometricRecoveryRequired) {
-                    state.requireBiometricRecovery(ticket, failure.reason)
+                    requireRecovery(ticket, failure.reason)
                 } catch (_: Exception) { if (attempts.owns(ticket)) state.stage = CommandActionStage.UNAVAILABLE }
             }
         }

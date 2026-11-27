@@ -78,6 +78,23 @@ class AndroidDecisionIdentity internal constructor(
         } catch (_: Exception) { throw DecisionIdentityUnavailable() }
     }
 
+    /** Uses the decision key only for an advisory for this enrollment. */
+    @WorkerThread
+    @Synchronized
+    internal fun phoneRepairNotice(reason: PhoneRepairNoticeFrame.Reason): PhoneRepairNoticeFrame {
+        try {
+            val signingKey = key ?: throw DecisionIdentityUnavailable()
+            val scope = ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),
+                enrollment.phoneID.copyBytes(), enrollment.epoch.copyBytes())
+            val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                initSign(signingKey)
+                update(PhoneRepairNoticeFrame.signingInput(scope, reason))
+                sign()
+            })
+            return PhoneRepairNoticeFrame(scope, reason, signature)
+        } catch (_: Exception) { throw DecisionIdentityUnavailable() }
+    }
+
     /** Signs an explicit Away choice with the existing decision key. No biometric operation is used. */
     @WorkerThread
     @Synchronized

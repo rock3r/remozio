@@ -22,6 +22,14 @@ The following protections remain required:
 
 The [journal experiment](experiments/macos-authority-journal.md) still demonstrates a real limitation: a matching old database and checkpoint are indistinguishable locally. The accepted boundary does not turn that observation into successful rollback detection. It also does not authorize an unprivileged caller to restore arbitrary files.
 
+## Android approval keys after biometric changes
+
+The owner chose to invalidate the approval key when the phone enrolls a new fingerprint or face. A person who learns the phone PIN could otherwise add a fingerprint and use the existing approval key on paired Macs. The approval key requires a strong biometric on every use. Knowing the PIN does not directly authorize a request.
+
+Adding a biometric may stop approvals on each paired Mac until the user pairs again. A legacy key requires one explicit re-pair per Mac at the first approval attempt after upgrade. Android cannot change that key in place. We rejected keeping legacy keys available until the next ordinary pairing because it would leave this risk in place.
+
+The decision follows the pairing lifecycle in #851, #840, and #831. It reuses authorized re-pairing and its receipt and recovery checks. The signed notice in #834 explains why approval stopped on the Mac. The notice has no effect on approvals, revocation, or pairing. See [what to do on the phone](android-biometric-keys.md#pair-again-after-a-change).
+
 ## Abandoned gateway grants
 
 A stale candidate or activation can leave an unrecorded revision. A later grant can advance the gateway beyond that revision. Recovery requires complete signed history, so the missing record prevents reconciliation.
