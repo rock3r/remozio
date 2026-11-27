@@ -243,6 +243,9 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                 else -> if (state.mayHaveSavedSetup) R.string.pairing_setup_incomplete else R.string.pairing_setup_failed
             }
             Text(stringResource(status), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            if (state.phase == PairingPhase.RE_PAIR_FAILED && !state.mayHaveSavedSetup) {
+                Text(stringResource(R.string.pairing_repair_new_pairing_guidance))
+            }
             if (state.phase in setOf(PairingPhase.CONNECTING, PairingPhase.PREPARING, PairingPhase.BIOMETRIC, PairingPhase.SUBMITTING, PairingPhase.CLOSING)) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
