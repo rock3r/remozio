@@ -129,6 +129,13 @@ public final class CommandSubmissionReplayTables {
             """, values: [macID, accountID, submission.id, macID, accountID, submission.nonce]) { try step($0) == SQLITE_ROW }
     }
 
+    public func containsPermanentSubmission(id: Data) throws -> Bool {
+        try transaction()
+        guard id.count == 16 else { throw CommandSubmissionReplayError.invalidConfiguration }
+        return try statement("SELECT 1 FROM main.\(Self.permanentReplayTable) WHERE mac=? AND account=? AND submission=?",
+            values: [macID, accountID, id]) { try step($0) == SQLITE_ROW }
+    }
+
     public func read(submissionID: Data) throws -> CommandSubmissionReservation? {
         try transaction()
         guard submissionID.count == 16 else { throw CommandSubmissionReplayError.invalidConfiguration }

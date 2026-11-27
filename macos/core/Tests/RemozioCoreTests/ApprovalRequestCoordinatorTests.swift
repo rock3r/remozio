@@ -24,9 +24,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
             firstObservedAt: now(100), deadlineMilliseconds: deadline, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
     }
-    private func descriptor(_ epoch: UInt8) throws -> AuditEpochDescriptor {
+    private func descriptor(_ epoch: UInt8, generation: UInt64? = nil) throws -> AuditEpochDescriptor {
         try .decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(epoch)),
-            4: .unsigned(UInt64(epoch)), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
+            4: .unsigned(generation ?? UInt64(epoch)), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
     }
     private func open(_ fixture: Fixture, initialize: Bool, routingPolicy: RoutingJournalPolicy? = nil) throws -> JournalDatabase {
         try .init(lease: fixture.lease(), macID: id(1), accountID: id(2), recordLimits: limits, descriptorLimits: limits,
@@ -303,11 +303,19 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
     }
     private func decision(_ request: IssuedRequestPayload, decline: Bool = false) throws -> (Data, Data) {
+        try Self.decision(request, decline: decline, signingKey: decline ? decisionKey : key, limits: limits)
+    }
+
+    private static func decision(_ request: IssuedRequestPayload, decline: Bool, signingKey: P256.Signing.PrivateKey,
+                                 limits: CBORLimits) throws -> (Data, Data) {
         let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
             requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
-            phoneID: id(5), keyID: id(decline ? 7 : 6), action: request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
-        return (body, try (decline ? decisionKey : key).signature(for: SigningInput.make(wireVersion: 1, messageType: .decision, purpose: decline ? .cancellation : .biometricAuthorization,
-            canonicalPayload: body, payloadLimits: limits, inputLimits: limits)).rawRepresentation)
+            phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: decline ? 7 : 6, count: 16),
+            action: request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
+        let input = try SigningInput.make(wireVersion: 1, messageType: .decision,
+            purpose: decline ? .cancellation : .biometricAuthorization,
+            canonicalPayload: body, payloadLimits: limits, inputLimits: limits)
+        return (body, try signingKey.signature(for: input).rawRepresentation)
     }
     private func consume(_ owner: ApprovalRequestCoordinator, _ request: IssuedRequestPayload, time: UInt64 = 110) throws -> ConsumptionReceipt {
         let (body, signature) = try decision(request)
@@ -591,6 +599,305 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertTrue(try writerAfterMigration.read { try $0.hasConsumed(requestID: independent.requestID) })
         XCTAssertEqual(try owner.markPresented(requestID: pending.requestID, now: now(120), receiptTimeMs: nil).phase, .presented)
         try assertCheckpoint(db, store, writer)
+    }
+
+    private func retirementFixture(_ fixture: Fixture, installReplay: Bool = true) throws
+        -> sending (JournalDatabase, AuditEpochWriter, ApprovalRequestCoordinator, ContinuityStore) {
+        let limits = try limits, capabilities = try capabilities, contract = try contract
+        let anchor = fixture.root.path, clock = clock, mac = id(1), account = id(2)
+        let descriptor = try descriptor(3), enrollment = try fixtureEnrollment(), enrollmentEvent = id(30)
+        let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEF1234",
+            identifier: "dev.sebastiano.remozio.macos.authority", installedGeneration: 1, minimumGeneration: 1,
+            codeDirectoryHash: id(8, 20), active: true)])
+        try fixture.createContinuityFiles()
+        let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+            macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+            maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+        let writer = try db.write { transaction in
+            let revision = try transaction.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract])
+            let writer = try transaction.createEpoch(descriptor)
+            _ = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+                eventID: enrollmentEvent, receiptTimeMs: 900, writer: writer, expectedAuditHead: 0)
+            _ = try transaction.installCodePolicy(policy, expectedRevision: nil)
+            try transaction.installCommandSubmissionReplay()
+            return writer
+        }
+        let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
+            generation: 1, authorityGeneration: 3) }
+        let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
+            macID: mac, accountID: account, initialize: initial)
+        if installReplay {
+            let result = try CheckpointedJournal(journal: db, continuity: store).installPermanentReplay()
+            XCTAssertEqual(result, .installed)
+        }
+        let owner = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        return (db, writer, owner, store)
+    }
+
+    private func retirementDecliner() throws -> @Sendable (ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, ConsumptionReceipt) {
+        let draft = try draft(), time = now(), limits = try limits, signer = decisionKey
+        let phoneID = id(5), enrollmentEpoch = id(9)
+        return { owner in
+            let request = try owner.admitFixture(draft, now: time, receiptTimeMs: nil)
+            let (body, signature) = try Self.decision(request, decline: true, signingKey: signer, limits: limits)
+            let receipt = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: phoneID,
+                authenticatedEnrollmentEpoch: enrollmentEpoch, now: time, receiptTimeMs: nil)
+            return (request, receipt)
+        }
+    }
+
+    private func declineForRetirement(_ owner: ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, ConsumptionReceipt) {
+        try retirementDecliner()(owner)
+    }
+
+    func testDetailRetirementUsesIdleOwnerAndProtectsRetainedTerminalRequests() throws {
+        let fixture = try Fixture(), (_, _, owner, _) = try retirementFixture(fixture)
+        let authority = AuthorityJournal(requests: owner)
+        defer { try? authority.close() }
+        let (issued, receipt) = try authority.withRequests(retirementDecliner())
+        let request = issued.requestID
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
+        XCTAssertNil(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { false }))
+        let protected = try XCTUnwrap(authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
+        XCTAssertEqual(protected.result.protectedScanned, 1)
+        XCTAssertEqual(protected.result.observed, 0)
+        XCTAssertEqual(try authority.read { try $0.consumptionReceiptHistory(requestID: request) }, .present(receipt))
+
+        try authority.withRequests { try $0.forgetTerminal(requestID: request) }
+        let first = try XCTUnwrap(authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
+        XCTAssertEqual(first.result.observed, 1)
+        XCTAssertEqual(first.result.retiredReceipts, 0)
+        XCTAssertEqual(try authority.read { try $0.consumptionReceiptHistory(requestID: request) }, .present(receipt))
+        let second = try XCTUnwrap(authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
+        XCTAssertEqual(second.result.retiredReceipts, 1)
+        XCTAssertEqual(try authority.read { try $0.consumptionReceiptHistory(requestID: request) }, .retired)
+        XCTAssertEqual(try authority.withRequests { try $0.historicalOutcomeLookup(requestID: request) }, .retired)
+        XCTAssertGreaterThanOrEqual(second.fixedCost, .zero)
+    }
+
+    func testDetailRetirementSerializesAdmissionAfterLockedWrite() throws {
+        let fixture = try Fixture(), (_, _, owner, _) = try retirementFixture(fixture)
+        let authority = AuthorityJournal(requests: owner)
+        defer { try? authority.close() }
+        let decline = try retirementDecliner()
+        try authority.withRequests { owner in
+            let (retired, _) = try decline(owner)
+            try owner.forgetTerminal(requestID: retired.requestID)
+        }
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
+        XCTAssertEqual(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true })?.result.observed, 1)
+
+        let entered = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
+        let accepted = Mutex<IssuedRequestPayload?>(nil)
+        let input = try draft(), time = now(120)
+        let batch = try XCTUnwrap(authority.retireDetailsIfIdle(policy: policy, executionIsIdle: {
+            DispatchQueue.global().async {
+                entered.signal()
+                defer { finished.signal() }
+                let issued = try? authority.withRequests { try $0.admitFixture(input, now: time, receiptTimeMs: nil) }
+                accepted.withLock { $0 = issued }
+            }
+            XCTAssertEqual(entered.wait(timeout: .now() + .seconds(2)), .success)
+            XCTAssertEqual(finished.wait(timeout: .now() + .milliseconds(50)), .timedOut)
+            return true
+        }))
+        XCTAssertEqual(batch.result.retiredReceipts, 1)
+        XCTAssertEqual(finished.wait(timeout: .now() + .seconds(2)), .success)
+        let issued = try XCTUnwrap(accepted.withLock { $0 })
+        XCTAssertEqual(try authority.withRequests { try $0.state(requestID: issued.requestID).phase }, .queued)
+    }
+
+    func testDetailRetirementPreservesPermanentRequestAndNonceAfterRestart() throws {
+        let fixture = try Fixture(), (db, writer, owner, store) = try retirementFixture(fixture)
+        let (request, receipt) = try declineForRetirement(owner)
+        let commits = CheckpointedJournal(journal: db, continuity: store)
+        let old = try CommandSubmissionReservation(macID: id(1), accountID: id(2),
+            submission: CapturedSubmission(id: id(40), nonce: id(41, 32), callerBinding: id(42)), captureDigest: id(43, 32))
+        try commits.write(epoch: writer.epoch) {
+            _ = try $0.reserveCommandSubmission(old)
+            try $0.bindCommandRetirement(submissionID: old.submission.id, requestID: request.requestID)
+        }
+        try owner.forgetTerminal(requestID: request.requestID)
+        let before = try store.read().committed
+        XCTAssertEqual(try commits.read { try $0.consumptionReceiptHistory(requestID: request.requestID) }, .present(receipt))
+        XCTAssertEqual(try commits.read { try $0.commandSubmissionHistory(submissionID: old.submission.id) }, .present(old))
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 1)
+        let mark = try XCTUnwrap(commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: false))
+        XCTAssertEqual(mark.observed, 1)
+        XCTAssertEqual(mark.retiredReceipts, 0)
+        let retired = try XCTUnwrap(commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: true))
+        XCTAssertEqual(retired.retiredReceipts, 1)
+        XCTAssertEqual(retired.retiredSubmissions, 1)
+        XCTAssertEqual(try store.read().committed.authorityDigest, before.authorityDigest)
+
+        owner.close()
+        try db.close()
+        store.close()
+        let reopened = try open(fixture, initialize: false)
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+            relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
+        defer { try? reopened.close(); continuity.close() }
+        let restarted = CheckpointedJournal(journal: reopened, continuity: continuity)
+        XCTAssertEqual(try restarted.read { try $0.consumptionOutcomeHistory(requestID: request.requestID) }, .retired)
+        XCTAssertEqual(try restarted.read { try $0.commandSubmissionHistory(submissionID: old.submission.id) }, .retired)
+        XCTAssertEqual(try restarted.read { try $0.commandSubmissionHistory(submissionID: id(44)) }, .absent)
+        XCTAssertTrue(try restarted.read { try $0.hasConsumed(requestID: request.requestID) })
+
+        let (body, signature) = try decision(request, decline: true)
+        let retained = try RetainedApprovalRequest(payload: request, phase: .queued, admittedAt: now(100), deadlineMilliseconds: 200)
+        let revision = try restarted.read { try $0.approvalTrustSnapshot().revision }
+        XCTAssertThrowsError(try restarted.write(epoch: writer.epoch, recoverRejectedBody: true) {
+            try $0.consume(canonicalDecision: body, signature: signature, retained: retained, expectedTrustRevision: revision,
+                now: now(), eventID: id(45), receiptTimeMs: nil, writer: writer,
+                expectedHead: try XCTUnwrap($0.epoch(writer.epoch)).head, requestLimits: limits, signingLimits: limits)
+        }) { XCTAssertEqual($0 as? ConsumptionJournalError, .alreadyConsumed) }
+
+        for (submission, nonce) in [(id(44), old.submission.nonce), (old.submission.id, id(46, 32))] {
+            let retry = try CommandSubmissionReservation(macID: old.macID, accountID: old.accountID,
+                submission: CapturedSubmission(id: submission, nonce: nonce, callerBinding: id(47)), captureDigest: id(48, 32))
+            XCTAssertThrowsError(try restarted.write(epoch: writer.epoch, recoverRejectedBody: true) {
+                try $0.reserveCommandSubmission(retry)
+            }) { XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved) }
+        }
+        XCTAssertEqual(try restarted.read { try $0.commandSubmissionHistory(submissionID: id(44)) }, .absent)
+        let fresh = try CommandSubmissionReservation(macID: old.macID, accountID: old.accountID,
+            submission: CapturedSubmission(id: id(44), nonce: id(46, 32), callerBinding: id(47)), captureDigest: id(48, 32))
+        XCTAssertEqual(try restarted.write(epoch: writer.epoch) { try $0.reserveCommandSubmission(fresh) }, fresh)
+    }
+
+    func testDetailRetirementLeavesLegacyReservationWithoutStartupWork() throws {
+        let fixture = try Fixture()
+        let (db, writer, owner, store) = try retirementFixture(fixture, installReplay: false)
+        let (request, receipt) = try declineForRetirement(owner)
+        let commits = CheckpointedJournal(journal: db, continuity: store)
+        let reservation = try CommandSubmissionReservation(macID: id(1), accountID: id(2),
+            submission: CapturedSubmission(id: id(40), nonce: id(41, 32), callerBinding: id(42)), captureDigest: id(43, 32))
+        XCTAssertFalse(try commits.read { try $0.hasPermanentReplayStorage() })
+        XCTAssertEqual(try commits.write(epoch: writer.epoch) { try $0.reserveCommandSubmission(reservation) }, reservation)
+        try owner.forgetTerminal(requestID: request.requestID)
+        owner.close()
+        XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+        XCTAssertEqual(try commits.read { try $0.consumptionReceiptHistory(requestID: request.requestID) }, .present(receipt))
+
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
+        let marked = try XCTUnwrap(commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: false))
+        XCTAssertEqual(marked.observed, 1)
+        let retired = try XCTUnwrap(commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: true))
+        XCTAssertEqual(retired.retiredReceipts, 1)
+        XCTAssertEqual(retired.retiredSubmissions, 0)
+
+        try db.close()
+        store.close()
+        let reopened = try open(fixture, initialize: false)
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+            relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
+        defer { try? reopened.close(); continuity.close() }
+        let startup = try JournalStartupRecovery(journal: reopened, continuity: continuity,
+            maximumRecords: 10, maximumBytes: 16384)
+        let nextEpoch = try descriptor(4, generation: continuity.read().committed.currentAuthorityGeneration)
+        guard case .recovering = try startup.start(descriptor: nextEpoch) else { return XCTFail("startup did not begin") }
+        guard case .complete = try startup.advance() else { return XCTFail("startup did not finish in one empty batch") }
+        let restartedWriter = try startup.completedWriter()
+        let checkpoint = try continuity.read().committed
+        XCTAssertEqual(restartedWriter.epoch, nextEpoch.epoch)
+        XCTAssertEqual(checkpoint.journalHead, 0)
+        try assertCheckpoint(reopened, continuity, restartedWriter)
+
+        let restarted = CheckpointedJournal(journal: reopened, continuity: continuity)
+        try restarted.read {
+            XCTAssertTrue(try $0.hasConsumed(requestID: request.requestID))
+            XCTAssertEqual(try $0.consumptionReceiptHistory(requestID: request.requestID), .retired)
+            XCTAssertEqual(try $0.consumptionOutcomeHistory(requestID: request.requestID), .retired)
+            XCTAssertEqual(try $0.commandSubmissionHistory(submissionID: reservation.submission.id), .present(reservation))
+            XCTAssertTrue(try $0.consumptionOutcomes(maximumRecords: 10, maximumBytes: 16384).outcomes.isEmpty)
+        }
+    }
+
+    func testDetailRetirementMissingHistoryDoesNotChangeReplayMembership() throws {
+        let fixture = try Fixture(), (db, writer, owner, store) = try retirementFixture(fixture)
+        defer { try? db.close(); store.close() }
+        let (request, _) = try declineForRetirement(owner)
+        try owner.forgetTerminal(requestID: request.requestID)
+        owner.close()
+        // Model lost receipt detail in the disposable ledger. The history recovery path records the gap.
+        try fixture.sql("DELETE FROM consumptions_v1")
+        let recovered = try JournalHistoryRecovery.recover(journal: db, continuity: store, macID: id(1), accountID: id(2))
+        XCTAssertNotEqual(recovered.journalEpoch, writer.epoch)
+        let commits = CheckpointedJournal(journal: db, continuity: store)
+        XCTAssertEqual(try commits.read { try $0.consumptionReceiptHistory(requestID: request.requestID) }, .unavailable)
+        XCTAssertEqual(try commits.read { try $0.consumptionOutcomeHistory(requestID: id(99)) }, .absent)
+        XCTAssertTrue(try commits.read { try $0.hasConsumed(requestID: request.requestID) })
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
+        XCTAssertNil(try commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: true))
+    }
+
+    func testDetailRetirementReconcilesInterruptedCheckpoint() throws {
+        enum Cut: Error, CaseIterable { case beforePrepare, afterPrepare, afterCommit }
+        for cut in Cut.allCases {
+            let fixture = try Fixture(), (db, writer, owner, store) = try retirementFixture(fixture)
+            let (request, receipt) = try declineForRetirement(owner)
+            try owner.forgetTerminal(requestID: request.requestID)
+            owner.close()
+            let commits = CheckpointedJournal(journal: db, continuity: store)
+            let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
+            XCTAssertEqual(try commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: false)?.observed, 1)
+            let before = try store.read().committed
+            if cut == .afterPrepare {
+                let plan = try commits.read {
+                    try $0.planDetailRetirement(checkpoint: before, policy: policy, protecting: [],
+                        after: nil, continuing: true).plan
+                }
+                XCTAssertEqual(plan.deletions, [request.requestID])
+                XCTAssertThrowsError(try db.write { transaction in
+                    _ = try transaction.applyDetailRetirement(plan)
+                    let boundary = try XCTUnwrap(transaction.epoch(writer.epoch))
+                    let digests = try transaction.continuityDigests()
+                    let candidate = try before.successor(authorityDigest: digests.authority, ledgerDigest: digests.ledger,
+                        journalEpoch: writer.epoch, journalHead: boundary.head)
+                    // Commit the independent checkpoint, then interrupt the journal before its COMMIT.
+                    try store.prepare(expected: before, candidate: candidate)
+                    XCTAssertEqual(try store.read().pending, candidate)
+                    throw Cut.afterPrepare
+                }) {
+                    XCTAssertEqual($0 as? Cut, .afterPrepare)
+                }
+            } else {
+                let condition = cut == .beforePrepare ? "NEW.pending IS NOT NULL" : "NEW.pending IS NULL"
+                try fixture.sql("""
+                    CREATE TRIGGER fail_retirement BEFORE UPDATE ON continuity_v1 WHEN \(condition)
+                    BEGIN SELECT RAISE(ABORT,'injected'); END
+                    """, continuity: true)
+                XCTAssertThrowsError(try commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: true))
+                try fixture.sql("DROP TRIGGER fail_retirement", continuity: true)
+            }
+            let pending = try store.read().pending
+            try db.close()
+            store.close()
+            let journal = try open(fixture, initialize: false)
+            let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+                relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
+            defer { try? journal.close(); continuity.close() }
+            let recovered = try JournalCheckpointRecovery.reconcile(journal: journal, continuity: continuity)
+            switch cut {
+            case .beforePrepare:
+                XCTAssertNil(pending)
+                XCTAssertEqual(recovered, .unchanged(before))
+            case .afterPrepare:
+                XCTAssertNotEqual(try XCTUnwrap(pending).ledgerDigest, before.ledgerDigest)
+                XCTAssertEqual(recovered, .discarded(before))
+            case .afterCommit:
+                let candidate = try XCTUnwrap(pending)
+                XCTAssertNotEqual(candidate.ledgerDigest, before.ledgerDigest)
+                XCTAssertEqual(recovered, .finalized(candidate))
+            }
+            XCTAssertNil(try continuity.read().pending)
+            let restarted = CheckpointedJournal(journal: journal, continuity: continuity)
+            XCTAssertTrue(try restarted.read { try $0.hasConsumed(requestID: request.requestID) })
+            XCTAssertEqual(try restarted.read { try $0.consumptionReceiptHistory(requestID: request.requestID) },
+                cut == .afterCommit ? .retired : .present(receipt))
+        }
     }
 
     func testInvalidSignatureDoesNotRetireHealthyCheckpointedRequestOwner() throws {

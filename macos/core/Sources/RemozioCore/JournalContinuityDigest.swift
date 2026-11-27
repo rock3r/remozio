@@ -52,7 +52,7 @@ enum JournalContinuityDigest {
             + (tier >= 18 ? [GatewayAuthorityJournal.abandonmentTable] : [])
             + (recoveryFormat ? [AuthorityJournalSchema.tierTable, PairingRecoveryStageJournal.table] : [])
         let ledgerTables = Self.ledgerTables + (tier >= 14 ? ["history_recoveries_v1"] : [])
-            + (permanentReplay ? ["command_submissions_v1"] : [])
+            + (permanentReplay ? ["command_submissions_v1", ReplayDetailJournal.table] : [])
         guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
         return (authorityTables, ledgerTables)
     }

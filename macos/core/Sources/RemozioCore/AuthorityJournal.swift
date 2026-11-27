@@ -450,12 +450,48 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
-    /// Try one audit batch without queueing behind request work. Keep the idle check and write under one lock.
+    /// Try one audit batch without queueing behind request work.
     func pruneAuditHistoryIfIdle(policy: AuditRetention.Policy,
                                 executionIsIdle: () -> Bool = { true }) throws -> AuditRetention.Result? {
+        try withIdleMaintenance(enabled: { !auditRetentionSuspended }, executionIsIdle: executionIsIdle) { requests, _ in
+            do {
+                let result = try requests.pruneAuditHistoryIfNeeded(policy: policy)
+                if let result, result.protectedExcess > 0 {
+                    Self.auditRetentionLogger.notice("Audit retention kept \(result.protectedExcess, privacy: .public) rows above the target")
+                }
+                return result
+            } catch let failure as AuditRetention.PlanningFailure where !requests.retired {
+                auditRetentionSuspended = true
+                Self.auditRetentionLogger.error("Audit retention suspended until restart: \(failure.rawValue, privacy: .public)")
+                return nil
+            } catch {
+                if requests.retired || !isStorageContention(error) { throw error }
+                return nil
+            }
+        }
+    }
+
+    /// Only an explicitly scheduled maintenance turn can retire details.
+    func retireDetailsIfIdle(policy: DetailRetirement.Policy,
+                             executionIsIdle: () -> Bool) throws -> DetailRetirement.IdleBatch? {
+        try withIdleMaintenance(enabled: { true }, executionIsIdle: executionIsIdle) { requests, acquired in
+            do {
+                guard let result = try requests.retireDetailsIfNeeded(policy: policy) else { return nil }
+                return DetailRetirement.IdleBatch(result: result, lockHold: acquired.duration(to: .now))
+            } catch {
+                if requests.retired || !isStorageContention(error) { throw error }
+                return nil
+            }
+        }
+    }
+
+    /// Keeps the idle observation and the entire checkpointed maintenance operation under the same lock.
+    private func withIdleMaintenance<Value>(enabled: () -> Bool, executionIsIdle: () -> Bool,
+        _ body: (ApprovalRequestCoordinator, ContinuousClock.Instant) throws -> Value?) throws -> Value? {
         guard lock.try() else { return nil }
+        let acquired = ContinuousClock.now
         defer { lock.unlock() }
-        guard lock.depth == 1, !auditRetentionSuspended, !requestOperationActive, !updatePolicyOperationActive,
+        guard lock.depth == 1, enabled(), !requestOperationActive, !updatePolicyOperationActive,
               !updateHealthOnly, !updateCompletionOnly, !retainedSetupPolicyOnly, let requests else { return nil }
         let work = try requests.maintenanceRequestWork(), exchanges = commandExchanges.maintenanceWork
         // The worker reads its counters here. It releases its mutex before invoking any journal callback.
@@ -464,20 +500,7 @@ public final class AuthorityJournal: @unchecked Sendable {
               commandsAwaitingPreparation.isEmpty, deferredCommandPreparations.isEmpty, executionIsIdle() else { return nil }
         requestOperationActive = true
         defer { requestOperationActive = false }
-        do {
-            let result = try requests.pruneAuditHistoryIfNeeded(policy: policy)
-            if let result, result.protectedExcess > 0 {
-                Self.auditRetentionLogger.notice("Audit retention kept \(result.protectedExcess, privacy: .public) rows above the target")
-            }
-            return result
-        } catch let failure as AuditRetention.PlanningFailure where !requests.retired {
-            auditRetentionSuspended = true
-            Self.auditRetentionLogger.error("Audit retention suspended until restart: \(failure.rawValue, privacy: .public)")
-            return nil
-        } catch {
-            if requests.retired || !isStorageContention(error) { throw error }
-            return nil
-        }
+        return try body(requests, acquired)
     }
 
     /// Transfers an already assembled command into the serialized request owner.

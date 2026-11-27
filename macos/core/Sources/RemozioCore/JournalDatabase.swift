@@ -66,6 +66,8 @@ public final class JournalDatabase {
     private var configuredUpdateSchedulingPolicy: UpdateSchedulingJournalPolicy?
     private let recordLimits: CBORLimits
     private let descriptorLimits: CBORLimits
+    private let macID: Data
+    private let accountID: Data
     private var active: UUID?
     private var unavailable = false
 
@@ -100,6 +102,8 @@ public final class JournalDatabase {
         self.journalStep = journalStep
         self.recordLimits = recordLimits
         self.descriptorLimits = descriptorLimits
+        self.macID = macID
+        self.accountID = accountID
         do {
             guard !readOnlyForCutover || (!initialize && migrateFromVersion == nil && initialAuthority == nil),
                   macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
@@ -365,6 +369,12 @@ public final class JournalDatabase {
         _ = try access(token)
         guard let db else { throw JournalDatabaseError.expiredTransaction }
         try AuthorityJournalSchema.installPermanentReplayFormat(on: db)
+    }
+
+    fileprivate func replayDetailLedger(_ token: UUID) throws -> ReplayDetailJournal {
+        _ = try access(token)
+        guard let db, try AuthorityJournalSchema.permanentReplayInstalled(on: db) else { throw JournalDatabaseError.incompatibleStore }
+        return ReplayDetailJournal(connection: db, macID: macID, accountID: accountID)
     }
 
     fileprivate func ledger(_ token: UUID) throws -> ConsumptionJournal {
@@ -754,6 +764,47 @@ public final class JournalTransaction {
 
     public func commandSubmissionReservation(submissionID: Data) throws -> CommandSubmissionReservation? {
         try withCommandReplay(write: false) { try $0.read(submissionID: submissionID) }
+    }
+
+    public func commandSubmissionHistory(submissionID: Data) throws -> HistoricalJournalLookup<CommandSubmissionReservation> {
+        guard submissionID.count == 16 else { throw CommandSubmissionReplayError.invalidConfiguration }
+        guard try featureTier >= 15 else { return .unavailable }
+        return try classifyHistory(commandSubmissionReservation(submissionID: submissionID)) {
+            try withCommandReplay(write: false) { try $0.containsPermanentSubmission(id: submissionID) }
+        }
+    }
+
+    func bindCommandRetirement(submissionID: Data, requestID: Data) throws {
+        guard try hasPermanentReplayStorage() else { return }
+        try withReplayDetails(write: true) { try $0.bindSubmission(submissionID, to: requestID) }
+    }
+
+    func planDetailRetirement(checkpoint: ContinuityCheckpoint, policy: DetailRetirement.Policy,
+                              protecting: Set<Data>, after: Data?, continuing: Bool) throws
+        -> (plan: DetailRetirement.Plan, liveCountTime: Duration, planning: Duration) {
+        try withReplayDetails(write: false) { storage in
+            let countStart = ContinuousClock.now
+            let live = try storage.liveCount()
+            let planningStart = ContinuousClock.now
+            let plan = try DetailRetirement.plan(self, storage: storage, checkpoint: checkpoint, live: live,
+                policy: policy, protecting: protecting, after: after, continuing: continuing)
+            return (plan, countStart.duration(to: planningStart), planningStart.duration(to: .now))
+        }
+    }
+
+    func applyDetailRetirement(_ plan: DetailRetirement.Plan) throws -> Int {
+        try withReplayDetails(write: true) { storage in
+            for (request, mark) in plan.observations { try storage.observe(request, mark: mark) }
+            return try plan.deletions.reduce(0) { count, request in count + (try storage.retire(request)) }
+        }
+    }
+
+    private func withReplayDetails<Value>(write: Bool, _ body: (ReplayDetailJournal) throws -> Value) throws -> Value {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.replayDetailLedger(token))
+        } catch { failed = true; throw error }
     }
 
     /// Internal observation through the current protected transaction. The admission owner must validate continuity and scope.
@@ -1229,6 +1280,24 @@ public final class JournalTransaction {
     public func consumption(requestID: Data) throws -> ConsumptionReceipt? {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.ledger(token).receipt(requestID: requestID)
+    }
+
+    public func consumptionReceiptHistory(requestID: Data) throws -> HistoricalJournalLookup<ConsumptionReceipt> {
+        try classifyHistory(consumption(requestID: requestID)) { try hasConsumed(requestID: requestID) }
+    }
+
+    public func consumptionOutcomeHistory(requestID: Data) throws -> HistoricalJournalLookup<ConsumptionOutcome> {
+        try classifyHistory(consumptionOutcome(requestID: requestID)) { try hasConsumed(requestID: requestID) }
+    }
+
+    private func classifyHistory<Value: Sendable>(_ detail: Value?,
+                                                  membership: () throws -> Bool) throws -> HistoricalJournalLookup<Value> {
+        if let detail { return .present(detail) }
+        if try hasPermanentReplayStorage() {
+            guard try membership() else { return .absent }
+            return try hasRecordedHistoryGap() ? .unavailable : .retired
+        }
+        return try hasRecordedHistoryGap() ? .unavailable : .absent
     }
 
     /// Record a controller-verified observation. No transition grants permission to execute or retry an action.
