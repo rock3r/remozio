@@ -693,7 +693,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
     }
 
     func testRePairEligibilityRefusesARestrictedRevokedPhoneAtTheCurrentRevision() async throws {
-        let f = try Fixture(configureGateway: true), (channel, _) = try await pairForRevocation(f)
+        let f = try Fixture(configureGateway: true), (channel, driver) = try await pairForRevocation(f)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        defer { withExtendedLifetime(owners) {} }
         let firstList = try await channel.pairedPhones()
         let phone = try XCTUnwrap(firstList.phones.first)
         let selection = try XCTUnwrap(firstList.selection(for: phone))
@@ -727,7 +731,105 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let after = try await channel.pairedPhonesForRePair()
         XCTAssertEqual(after.revision, result.trustRevision)
         XCTAssertTrue(after.rePairablePhones.isEmpty)
+        let oldView = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertTrue(oldView.phonesRequiringNewPairing.isEmpty)
+        let current = try await channel.pairedPhonesForManagement()
+        XCTAssertEqual(current.revision, result.trustRevision)
+        XCTAssertEqual(current.phonesRequiringNewPairing, [phone.phoneID])
+        XCTAssertNil(current.rePairSelection(for: phone))
+        XCTAssertNil(current.selection(for: phone))
+        let restrictionAfterRefresh = try await channel.requiresNewPairing(eligible)
+        XCTAssertTrue(restrictionAfterRefresh)
+        XCTAssertEqual(try f.records(), 3)
         await channel.close()
+    }
+
+    func testManagementV5ShowsARestrictedActivePhoneWithoutActions() async throws {
+        let f = try Fixture(configureGateway: true), (channel, driver) = try await pairForRevocation(f)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        defer { withExtendedLifetime(owners) {} }
+        let listed = try await channel.pairedPhonesForManagement()
+        let phone = try XCTUnwrap(listed.phones.first)
+        let registration = try XCTUnwrap(f.gatewayRevocations?.registration)
+        let binding = try GatewayTokenBinding(ownerID: registration.ownerID, macID: registration.macID,
+            accountID: registration.accountID, gatewayID: registration.gatewayID, lifecycleEpoch: registration.lifecycleEpoch,
+            phoneID: phone.phoneID, enrollmentEpoch: Data(repeating: 97, count: 16), candidateID: Data(repeating: 98, count: 16),
+            tokenDigest: Data(repeating: 95, count: 32), challenge: Data(repeating: 96, count: 32),
+            enrollmentTag: Data(repeating: 97, count: 32))
+        let unknown = try GatewayTokenCandidate(binding: binding, revision: 99, operationID: Data(repeating: 99, count: 16),
+            issuedAtUnixMillis: 100, expiresAtUnixMillis: 200)
+        let payload = try unknown.encode(limits: f.limits)
+        let signature = try f.authority.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+            canonicalPayload: payload, payloadLimits: f.limits, inputLimits: f.limits)).rawRepresentation
+        let result = try f.journal.write {
+            try $0.restrictUnknownGatewayTrust(kind: .candidate, canonicalPayload: payload, signature: signature,
+                registration: registration, expectedTrustRevision: listed.revision, eventID: Data(repeating: 100, count: 16),
+                receiptTimeMs: 1000, writer: f.writer, expectedAuditHead: 1)
+        }
+        XCTAssertEqual(result.disposition, .restricted)
+
+        let oldView = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertEqual(oldView.phones, [phone])
+        XCTAssertTrue(oldView.phonesRequiringNewPairing.isEmpty)
+        let current = try await channel.pairedPhonesForManagement()
+        XCTAssertEqual(current.phonesRequiringNewPairing, [phone.phoneID])
+        XCTAssertTrue(current.phones.isEmpty)
+        XCTAssertTrue(current.rePairablePhones.isEmpty)
+        XCTAssertNil(current.selection(for: phone))
+        XCTAssertNil(current.rePairSelection(for: phone))
+        XCTAssertEqual(try f.records(), 2)
+        await channel.close()
+    }
+
+    func testManagementV5RejectsDuplicateAndActionableRestrictedPhoneIDs() throws {
+        let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16)
+        let phoneID = Data(repeating: 3, count: 16)
+        let phone = DeliveryRecipient(phoneID: phoneID, enrollmentEpoch: Data(repeating: 4, count: 16))
+        for (phones, restricted) in [([], [phoneID, phoneID]), ([phone], [phoneID])] {
+            let snapshot = PairedPhoneSnapshot(macID: mac, accountID: account, revision: UUID(),
+                phones: phones, rePairablePhones: [], revocationAvailability: .available, gatewayRevocationHealth: .clear,
+                gatewayInconclusiveSinceUnixMillis: nil, phonesRequiringNewPairing: restricted)
+            let encoded = try snapshot.encode(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
+            XCTAssertThrowsError(try PairedPhoneSnapshot.decode(encoded, macID: mac, accountID: account, includeRePair: true,
+                includeRepairNotices: true, includeRePairRestrictions: true))
+        }
+    }
+
+    func testManagementV5FitsMixedAndLargestSnapshotsAtTheEnrollmentLimit() throws {
+        let mac = Data(repeating: 1, count: 16)
+        let account = Data(repeating: 2, count: 16)
+        let revision = UUID()
+        func identifier(_ value: Int, kind: UInt8) -> Data {
+            var bytes = Data([kind, UInt8(value >> 8), UInt8(truncatingIfNeeded: value)])
+            bytes.append(Data(count: 13))
+            return bytes
+        }
+        let rows = (0..<1024).map {
+            DeliveryRecipient(phoneID: identifier($0, kind: 3), enrollmentEpoch: identifier($0, kind: 4))
+        }
+        for (activeCount, revokedCount) in [(512, 256), (1024, 0)] {
+            let active = Array(rows.prefix(activeCount))
+            let revoked = Array(rows.dropFirst(activeCount).prefix(revokedCount))
+            let restricted = rows.dropFirst(activeCount + revokedCount).map(\.phoneID)
+            let notices = Dictionary(uniqueKeysWithValues: active.map { ($0, PhoneRepairNoticeFrame.Reason.biometricChanged) })
+            let snapshot = PairedPhoneSnapshot(macID: mac, accountID: account, revision: revision, phones: active,
+                rePairablePhones: revoked, revocationAvailability: .available, gatewayRevocationHealth: .grantAbandonmentInconclusive,
+                gatewayInconclusiveSinceUnixMillis: UInt64.max, repairNotices: notices, phonesRequiringNewPairing: restricted)
+
+            let bytes = try snapshot.encode(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
+            XCTAssertLessThanOrEqual(bytes.count, 38_000)
+            if activeCount == 1024 { XCTAssertEqual(bytes.count, 36_935) }
+            let decoded = try PairedPhoneSnapshot.decode(bytes, macID: mac, accountID: account, includeRePair: true,
+                includeRepairNotices: true, includeRePairRestrictions: true)
+            XCTAssertEqual(decoded.revision, revision)
+            XCTAssertEqual(decoded.phones, active)
+            XCTAssertEqual(decoded.rePairablePhones, revoked)
+            XCTAssertEqual(decoded.phonesRequiringNewPairing, restricted)
+            XCTAssertEqual(decoded.repairNotices, notices)
+            XCTAssertEqual(decoded.gatewayInconclusiveSinceUnixMillis, UInt64.max)
+        }
     }
 
     func testRePairRejectsActiveMissingAndReusedPredecessorMaterial() async throws {
@@ -1738,7 +1840,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         try owners.retain(installed, id: UUID())
         defer { installed.close(); withExtendedLifetime(owners) {} }
         try hello(installed)
-        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (UInt64.max, 4)]
+        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (5, 5), (UInt64.max, 5)]
         for (maximum, expected) in installedVersions {
             installed.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
             XCTAssertEqual(negotiated.value, expected)

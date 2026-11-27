@@ -426,7 +426,8 @@ final class AuthorityPairingSetupAccess: Sendable {
             try window?.requireStaging(self.now())
         })
     }
-    func pairedPhones(includeRePair: Bool = false, includeRepairNotices: Bool = false) throws -> PairedPhoneSnapshot {
+    func pairedPhones(includeRePair: Bool = false, includeRepairNotices: Bool = false,
+                      includeRePairRestrictions: Bool = false) throws -> PairedPhoneSnapshot {
         try journal.read { tx in
             try self.requireCurrent(tx)
             let trust = try tx.requestDeliveryTrust()
@@ -440,7 +441,10 @@ final class AuthorityPairingSetupAccess: Sendable {
             let health = inconclusiveSince != nil && (liveHealth == .clear || liveHealth == .pending)
                 ? .grantAbandonmentInconclusive : liveHealth
             let rePairable = try includeRePair ? tx.rePairPredecessors(in: trust.enrollments) : []
-            let active = trust.enrollments.filter { $0.approval.active }
+            let restricted = try includeRePairRestrictions
+                ? tx.approvalTrustRestrictions().intersection(trust.enrollments.map { $0.approval.phoneID })
+                : Set<Data>()
+            let active = trust.enrollments.filter { $0.approval.active && !restricted.contains($0.approval.phoneID) }
             var notices: [DeliveryRecipient: PhoneRepairNoticeFrame.Reason] = [:]
             if includeRepairNotices {
                 for enrollment in active {
@@ -457,7 +461,7 @@ final class AuthorityPairingSetupAccess: Sendable {
                 rePairablePhones: rePairable,
                 revocationAvailability: availability, gatewayRevocationHealth: health,
                 gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil,
-                repairNotices: notices)
+                repairNotices: notices, phonesRequiringNewPairing: restricted.sorted { $0.lexicographicallyPrecedes($1) })
         }
     }
 

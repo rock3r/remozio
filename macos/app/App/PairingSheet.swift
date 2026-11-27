@@ -112,7 +112,7 @@ final class MacPairingControls {
                             self?.working = false
                             return
                         }
-                        if [.receiptSent, .registeredOnMac, .expired, .unavailable, .unavailableInterface, .outcomeUnknown, .closed].contains(current.phase) { return }
+                        if [.receiptSent, .registeredOnMac, .expired, .unavailable, .unavailableInterface, .newPairingRequired, .outcomeUnknown, .closed].contains(current.phase) { return }
                         try await Task.sleep(for: .milliseconds(500))
                     }
                 } catch {
@@ -234,6 +234,12 @@ private struct PairingPasteboardEntry {
     }
 }
 
+private struct NewPhonePairingInstructions: View {
+    var body: some View {
+        Text("On your phone, open Your Macs and choose Remove from this phone for this Mac. Then use Pair a Mac to pair as a new phone.")
+    }
+}
+
 struct PairingSheetContent: View {
     let state: PairingPresentation
     let working: Bool
@@ -276,7 +282,7 @@ struct PairingSheetContent: View {
         copiedCredential?.clearIfOwned()
         copiedCredential = nil
     }
-    private var isFinished: Bool { [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .unavailable, .unavailableInterface, .closed].contains(state.phase) }
+    private var isFinished: Bool { [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .unavailable, .unavailableInterface, .newPairingRequired, .closed].contains(state.phase) }
     @ViewBuilder private var content: some View {
         switch state.phase {
         case .idle, .connecting:
@@ -341,6 +347,9 @@ struct PairingSheetContent: View {
         case .unavailableInterface:
             Text("The network interface for pairing is unavailable.").font(.headline)
             Text("Check that this Mac is connected on the configured network, then close this sheet and try again.")
+        case .newPairingRequired:
+            Text("This phone needs a new pairing.").font(.headline)
+            NewPhonePairingInstructions()
         case .unavailable, .closed:
             Text("Pairing is unavailable.").font(.headline)
             Text("Check this Mac’s service setup, then close this sheet and try again.")
@@ -436,7 +445,9 @@ struct PairedPhonesSheet: View {
                 case .gatewayUnavailable: Text("You can revoke a phone on this Mac. Gateway delivery may be delayed.")
                 }
                 GatewayRevocationWarning(status: snapshot.gatewayRevocationStatus)
-                if snapshot.phones.isEmpty && snapshot.rePairablePhones.isEmpty { Text("No phones are paired with this Mac.") }
+                if snapshot.phones.isEmpty && snapshot.rePairablePhones.isEmpty && snapshot.phonesRequiringNewPairing.isEmpty {
+                    Text("No phones are paired with this Mac.")
+                }
                 else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
@@ -462,6 +473,14 @@ struct PairedPhonesSheet: View {
                                     }
                                     .accessibilityLabel(Text("Revoke phone \(id)"))
                                     .disabled(busy)
+                                }
+                            }
+                            if !snapshot.phonesRequiringNewPairing.isEmpty {
+                                Text("Phones that need a new pairing").font(.headline)
+                                NewPhonePairingInstructions().font(.caption)
+                                ForEach(snapshot.phonesRequiringNewPairing, id: \.self) { phone in
+                                    let identifier = displayID(phone, among: snapshot.phonesRequiringNewPairing)
+                                    Text("Phone \(identifier)")
                                 }
                             }
                             if !snapshot.rePairablePhones.isEmpty { Text("Revoked phones").font(.headline) }
@@ -631,7 +650,7 @@ struct PairedPhonesSheet: View {
     private func refresh() async {
         do {
             let active = try await connect()
-            snapshot = try await active.pairedPhonesWithRepairNotices()
+            snapshot = try await active.pairedPhonesForManagement()
             refreshError = nil
         } catch is CancellationError {
             return
