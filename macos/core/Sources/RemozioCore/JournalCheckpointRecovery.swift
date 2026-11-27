@@ -17,7 +17,9 @@ enum JournalCheckpointRecovery {
         let state = try continuity.read()
         guard !state.recoveryRequired else { return .repairRequired }
         return try journal.read { transaction in
-            let digests = try transaction.continuityDigests()
+            let digests: JournalContinuityDigests
+            do { digests = try transaction.continuityDigests() }
+            catch PermanentReplayJournal.Failure.inconsistentCommandKeys { return .repairRequired }
             func matches(_ checkpoint: ContinuityCheckpoint) throws -> Bool {
                 guard checkpoint.authorityDigest == digests.authority, checkpoint.ledgerDigest == digests.ledger,
                       let epoch = try transaction.epoch(checkpoint.journalEpoch) else { return false }

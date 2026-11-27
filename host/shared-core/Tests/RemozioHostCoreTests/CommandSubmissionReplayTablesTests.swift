@@ -170,6 +170,30 @@ final class CommandSubmissionReplayTablesTests: XCTestCase {
         _ = try db.write { try table.reserve(value()) }
     }
 
+    func testFailedPermanentReservationRollsBackBothKeys() throws {
+        let db = try DB(), table = try tables(db), reservation = try value()
+        try db.exec("""
+            CREATE TABLE command_submission_replay_v1 (
+                mac BLOB, account BLOB, submission BLOB, nonce BLOB, PRIMARY KEY(mac,account,submission)
+            ) STRICT, WITHOUT ROWID;
+            CREATE TABLE command_nonce_replay_v1 (
+                mac BLOB, account BLOB, nonce BLOB, submission BLOB, PRIMARY KEY(mac,account,nonce)
+            ) STRICT, WITHOUT ROWID;
+            ALTER TABLE command_submissions_v1 RENAME TO unavailable_details;
+            """)
+        try db.write {
+            expect(.storage(SQLITE_ERROR)) { _ = try table.reserve(reservation, permanentReplay: true) }
+            XCTAssertEqual(try db.integer("SELECT count(*) FROM command_submission_replay_v1"), 0)
+            XCTAssertEqual(try db.integer("SELECT count(*) FROM command_nonce_replay_v1"), 0)
+        }
+        try db.exec("ALTER TABLE unavailable_details RENAME TO command_submissions_v1")
+        try db.write {
+            XCTAssertEqual(try table.reserve(reservation, permanentReplay: true), reservation)
+            expect(.alreadyReserved) { _ = try table.reserve(value(10, nonce: 7), permanentReplay: true) }
+            expect(.alreadyReserved) { _ = try table.reserve(value(7, nonce: 10), permanentReplay: true) }
+        }
+    }
+
     func testCaughtDuplicateDoesNotReplaceWinnerOrPoisonBorrowedConnection() throws {
         // The protected owner decides whether to roll back the entire batch; the table does not commit or poison it.
         let db = try DB(), table = try tables(db)

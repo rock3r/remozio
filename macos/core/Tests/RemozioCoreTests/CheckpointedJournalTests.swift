@@ -4,6 +4,8 @@ import Foundation
 import SQLite3
 import XCTest
 import RemozioProtocol
+import class RemozioHostCore.CommandSubmissionReplayTables
+import class RemozioHostCore.ConsumptionJournalTables
 @testable import RemozioCore
 
 final class CheckpointedJournalTests: XCTestCase {
@@ -260,12 +262,78 @@ final class CheckpointedJournalTests: XCTestCase {
     }
 
     func testPermanentReplayMissingKeyRequiresRepair() throws {
+        for mutation in [
+            "DELETE FROM command_submission_replay_v1",
+            "DELETE FROM command_nonce_replay_v1",
+            "UPDATE command_submission_replay_v1 SET nonce=zeroblob(32)",
+            "UPDATE command_nonce_replay_v1 SET submission=zeroblob(16)",
+        ] {
+            let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+            _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
+            XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+            let checkpoint = try fixture.store.read()
+            try fixture.sql(mutation, journal: true)
+            try fixture.reopen()
+            XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                .repairRequired, mutation)
+            XCTAssertThrowsError(try recoverHistory(fixture), mutation)
+            XCTAssertEqual(try fixture.store.read(), checkpoint, mutation)
+        }
+    }
+
+    private final class ReplaySQLTrace {
+        var statements: [String] = []
+    }
+
+    func testPermanentReplayLookupsUseOnlyPrimaryKeys() throws {
         let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
         _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
         XCTAssertEqual(try commits.installPermanentReplay(), .installed)
-        try fixture.sql("DELETE FROM command_submission_replay_v1", journal: true)
-        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .repairRequired)
-        XCTAssertThrowsError(try recoverHistory(fixture))
+        let path = fixture.root.appendingPathComponent("journal/journal.sqlite").path
+        var connection: OpaquePointer?
+        guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db = connection else {
+            throw Fault.injected
+        }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+
+        let trace = ReplaySQLTrace(), context = Unmanaged.passUnretained(trace).toOpaque()
+        XCTAssertEqual(sqlite3_trace_v2(db, UInt32(SQLITE_TRACE_STMT), { _, context, rawStatement, _ in
+            guard let context, let rawStatement, let sql = sqlite3_sql(OpaquePointer(rawStatement)) else { return 0 }
+            Unmanaged<ReplaySQLTrace>.fromOpaque(context).takeUnretainedValue().statements.append(String(cString: sql))
+            return 0
+        }, context), SQLITE_OK)
+        defer { sqlite3_trace_v2(db, 0, nil, nil) }
+        let commands = try CommandSubmissionReplayTables(connection: db, macID: value.macID, accountID: value.accountID, maximumRows: 10)
+        let consumptions = try ConsumptionJournalTables(connection: db, macID: value.macID, accountID: value.accountID,
+            decisionLimits: fixture.limits, recordLimits: fixture.limits, maximumRows: 10)
+        XCTAssertTrue(try commands.contains(value.submission, permanentReplay: true))
+        XCTAssertFalse(try consumptions.hasConsumed(requestID: value.submission.id, permanentReplay: true))
+        XCTAssertEqual(sqlite3_trace_v2(db, 0, nil, nil), SQLITE_OK)
+        XCTAssertEqual(trace.statements.count, 2)
+
+        let searches = try trace.statements.flatMap { sql -> [String] in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "EXPLAIN QUERY PLAN " + sql, -1, &statement, nil) == SQLITE_OK,
+                  let row = statement else { throw Fault.injected }
+            defer { sqlite3_finalize(row) }
+            var details: [String] = []
+            var step = sqlite3_step(row)
+            while step == SQLITE_ROW {
+                details.append(String(cString: try XCTUnwrap(sqlite3_column_text(row, 3))))
+                step = sqlite3_step(row)
+            }
+            XCTAssertEqual(step, SQLITE_DONE)
+            XCTAssertFalse(details.contains { $0.contains("SCAN ") || $0.contains(" INDEX ") }, details.joined(separator: "\n"))
+            return details.filter { $0.hasPrefix("SEARCH ") }
+        }
+        XCTAssertEqual(searches.count, 3)
+        for (name, key) in [("command_submission_replay_v1", "submission"), ("command_nonce_replay_v1", "nonce"),
+                            ("consumption_replay_v1", "request")] {
+            XCTAssertTrue(searches.contains { detail in
+                detail.contains(name + " USING PRIMARY KEY") && detail.contains(key + "=?")
+            }, searches.joined(separator: "\n"))
+        }
     }
 
     func testCommandReplayMalformedSubmissionFieldsAreRejectedBeforeCheckpointWork() throws {

@@ -3,9 +3,12 @@ import SQLite3
 
 /// Defines the replay tables owned by the checkpointed macOS journal format.
 enum PermanentReplayJournal {
+    enum Failure: Error { case inconsistentCommandKeys }
+
     private static let consumed = ConsumptionJournalTables.permanentReplayTable
     private static let submissions = CommandSubmissionReplayTables.permanentReplayTable
-    static let tables = [consumed, submissions]
+    private static let nonces = CommandSubmissionReplayTables.permanentNonceTable
+    static let tables = [consumed, submissions, nonces]
 
     private static let definitions = [
         """
@@ -18,7 +21,14 @@ enum PermanentReplayJournal {
         CREATE TABLE \(submissions) (
             mac BLOB NOT NULL CHECK(length(mac)=16), account BLOB NOT NULL CHECK(length(account)=16),
             submission BLOB NOT NULL CHECK(length(submission)=16), nonce BLOB NOT NULL CHECK(length(nonce)=32),
-            PRIMARY KEY(mac,account,submission), UNIQUE(mac,account,nonce)
+            PRIMARY KEY(mac,account,submission)
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE \(nonces) (
+            mac BLOB NOT NULL CHECK(length(mac)=16), account BLOB NOT NULL CHECK(length(account)=16),
+            nonce BLOB NOT NULL CHECK(length(nonce)=32), submission BLOB NOT NULL CHECK(length(submission)=16),
+            PRIMARY KEY(mac,account,nonce)
         ) STRICT, WITHOUT ROWID
         """
     ]
@@ -40,6 +50,7 @@ enum PermanentReplayJournal {
         ;
         INSERT INTO main.\(consumed) SELECT mac,account,request FROM main.consumptions_v1;
         INSERT INTO main.\(submissions) SELECT mac,account,submission,nonce FROM main.command_submissions_v1;
+        INSERT INTO main.\(nonces) SELECT mac,account,nonce,submission FROM main.\(submissions);
         """
         let result = sqlite3_exec(db, sql, nil, nil, nil)
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
@@ -56,11 +67,38 @@ enum PermanentReplayJournal {
                 guard sqlite3_column_int($0, 0) == 1 else { throw JournalDatabaseError.incompatibleStore }
             }
         }
+        try validateStorage(on: db)
     }
 
     static func validateStorage(on db: OpaquePointer) throws {
-        try query(db, "SELECT 1 FROM main.sqlite_schema WHERE type='trigger' LIMIT 1") {
-            guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore }
+        // Matching each nonce to the nonce on its unique submission proves the inverse is injective.
+        // Equal counts then prove that every submission has exactly one nonce row.
+        try query(db, """
+            SELECT (SELECT count(*) FROM main.\(submissions))=(SELECT count(*) FROM main.\(nonces))
+              AND NOT EXISTS (
+                SELECT 1 FROM main.\(nonces) n LEFT JOIN main.\(submissions) s
+                  ON s.mac=n.mac AND s.account=n.account AND s.submission=n.submission
+                WHERE s.nonce IS NOT n.nonce
+              )
+            """) { row in
+            let step = sqlite3_step(row)
+            guard step == SQLITE_ROW else { throw JournalDatabaseError.storage(step) }
+            guard sqlite3_column_int(row, 0) == 1 else { throw Failure.inconsistentCommandKeys }
+        }
+    }
+
+    static func validateSchema(on db: OpaquePointer) throws {
+        // A WITHOUT ROWID primary key is the table B-tree. There must be no secondary index to select.
+        let names = tables.map { "'\($0)'" }.joined(separator: ",")
+        try query(db, """
+            SELECT 1 FROM main.sqlite_schema WHERE type='trigger'
+              OR (type='index' AND tbl_name IN (\(names))) LIMIT 1
+            """) {
+            switch sqlite3_step($0) {
+            case SQLITE_DONE: break
+            case SQLITE_ROW: throw JournalDatabaseError.incompatibleStore
+            case let code: throw JournalDatabaseError.storage(code)
+            }
         }
         for (table, definition) in zip(tables, definitions) {
             try query(db, """
