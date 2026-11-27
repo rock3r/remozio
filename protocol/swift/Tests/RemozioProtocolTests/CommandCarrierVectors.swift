@@ -23,6 +23,13 @@ struct CommandCarrierVectors: Decodable {
         }
     }
 
+    struct SignedCarrier: Decodable {
+        let valid: [Row]
+        let invalid: [Row]
+        let signingInputs: [Row]
+    }
+
+    let decisionRefusalFrame: SignedCarrier
     let approvalMessage: Carrier
     let sessionEnvelope: Carrier
     let requestStatusQuery: Carrier

@@ -50,8 +50,10 @@ internal class CommandApprovalContext(
     val connectionState: StateFlow<CommandConnectionState>,
     val reconnect: () -> Unit,
     val onRepair: (() -> Unit)?,
-    val send: suspend (ApprovalMessage) -> Unit,
-)
+    val sendWithRefusal: suspend (ApprovalMessage, ((DecisionRefusalFrame.Reason, () -> Boolean) -> Unit)?) -> Unit,
+) {
+    suspend fun send(message: ApprovalMessage) = sendWithRefusal(message, null)
+}
 
 internal data class CommandActionAvailability(val execute: Boolean, val decline: Boolean)
 internal fun commandActionAvailability(session: CommandRequestSession, record: StoredPhoneEnrollment, now: () -> ElapsedInstant): CommandActionAvailability {
@@ -71,7 +73,7 @@ internal fun biometricRecoveryMessage(reason: BiometricRecoveryReason): Int = wh
     BiometricRecoveryReason.BIOMETRIC_CHANGED -> R.string.command_biometric_changed_recovery
 }
 
-internal enum class CommandActionStage { IDLE, PREPARING, BIOMETRIC, SENDING, AWAITING, UNAVAILABLE, UNCERTAIN }
+internal enum class CommandActionStage { IDLE, PREPARING, BIOMETRIC, SENDING, AWAITING, UNAVAILABLE, UNCERTAIN, REFUSED }
 
 /** All state is in memory. Tickets reject work and callbacks from replaced or stopped views. */
 internal class CommandActionAttempt {
@@ -88,6 +90,9 @@ internal class CommandApprovalViewState {
     var biometricRecovery by mutableStateOf<BiometricRecoveryReason?>(null)
         private set
 
+    var refusal by mutableStateOf<DecisionRefusalFrame.Reason?>(null)
+        private set
+
     fun requireBiometricRecovery(ticket: Any, reason: BiometricRecoveryReason) {
         if (!attempts.owns(ticket)) return
         biometricRecovery = reason
@@ -95,19 +100,31 @@ internal class CommandApprovalViewState {
     }
 
     fun clear() {
-        attempts.invalidate(); retained = null; biometricRecovery = null; stage = CommandActionStage.IDLE
+        attempts.invalidate()
+        retained = null
+        refusal = null
+        biometricRecovery = null
+        stage = CommandActionStage.IDLE
+    }
+
+    fun refuse(ticket: Any, message: ApprovalMessage, reason: DecisionRefusalFrame.Reason) {
+        if (!attempts.owns(ticket) || retained !== message) return
+        retained = null
+        refusal = reason
+        stage = CommandActionStage.REFUSED
     }
 
     suspend fun deliver(ticket: Any, message: ApprovalMessage, send: suspend (ApprovalMessage) -> Unit) {
         if (!attempts.owns(ticket)) return
         val previouslyUncertain = retained != null
         retained = message
+        refusal = null
         stage = CommandActionStage.SENDING
         try {
             send(message)
-            if (attempts.owns(ticket)) stage = CommandActionStage.AWAITING
+            if (attempts.owns(ticket) && retained === message) stage = CommandActionStage.AWAITING
         } catch (_: CommandDecisionNotSent) {
-            if (!attempts.owns(ticket)) return
+            if (!attempts.owns(ticket) || retained !== message) return
             if (previouslyUncertain) {
                 stage = CommandActionStage.UNCERTAIN
             } else {
@@ -115,10 +132,10 @@ internal class CommandApprovalViewState {
                 stage = CommandActionStage.UNAVAILABLE
             }
         } catch (cancelled: CancellationException) {
-            if (attempts.owns(ticket)) stage = CommandActionStage.UNCERTAIN
+            if (attempts.owns(ticket) && retained === message) stage = CommandActionStage.UNCERTAIN
             throw cancelled
         } catch (_: Exception) {
-            if (attempts.owns(ticket)) stage = CommandActionStage.UNCERTAIN
+            if (attempts.owns(ticket) && retained === message) stage = CommandActionStage.UNCERTAIN
         }
     }
 }
@@ -130,7 +147,7 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scope = rememberCoroutineScope()
     key(session, context.record, context.limits, lifecycle) {
-        val sender by rememberUpdatedState(context.send)
+        val sender by rememberUpdatedState(context.sendWithRefusal)
         val connectionState by context.connectionState.collectAsStateWithLifecycle()
         val connected = connectionState == CommandConnectionState.CONNECTED
         val attempts = state.attempts
@@ -156,13 +173,21 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
 
         fun deliver(ticket: Any, message: ApprovalMessage) {
             if (!attempts.owns(ticket)) return
-            job = scope.launch { state.deliver(ticket, message, sender) }
+            job = scope.launch {
+                state.deliver(ticket, message) { decision ->
+                    sender(decision) { reason, isCurrent ->
+                        scope.launch {
+                            if (foreground && isCurrent()) state.refuse(ticket, decision, reason)
+                        }
+                    }
+                }
+            }
         }
 
         fun decide(execute: Boolean) {
             if (!foreground || activity == null || state.retained != null || (execute && state.biometricRecovery != null) ||
                 context.connectionState.value != CommandConnectionState.CONNECTED ||
-                state.stage !in setOf(CommandActionStage.IDLE, CommandActionStage.UNAVAILABLE)) return
+                state.stage !in setOf(CommandActionStage.IDLE, CommandActionStage.UNAVAILABLE, CommandActionStage.REFUSED)) return
             val ticket = attempts.begin()
             state.stage = CommandActionStage.PREPARING
             job = scope.launch {
@@ -224,6 +249,11 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                 CommandActionStage.AWAITING -> R.string.command_action_awaiting
                 CommandActionStage.UNAVAILABLE -> R.string.command_action_unavailable
                 CommandActionStage.UNCERTAIN -> R.string.command_action_uncertain
+                CommandActionStage.REFUSED -> when (state.refusal) {
+                    DecisionRefusalFrame.Reason.REQUEST_CHANGED -> R.string.command_action_refused_request_changed
+                    DecisionRefusalFrame.Reason.ACTION_UNAVAILABLE -> R.string.command_action_refused_action_unavailable
+                    null -> null
+                }
             }
             if (label != null) Text(stringResource(label), style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })

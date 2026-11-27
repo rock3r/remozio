@@ -4,6 +4,8 @@ import dev.remozio.protocol.ApprovalMessage
 import dev.sebastiano.remozio.android.R
 import dev.sebastiano.remozio.android.biometrics.BiometricRecoveryReason
 import dev.remozio.protocol.ApprovalMessageType
+import dev.remozio.protocol.DecisionRefusalFrame
+import dev.remozio.protocol.RequestDeliveryResult
 import dev.remozio.protocol.SigningPurpose
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -58,6 +60,38 @@ class CommandApprovalDeliveryTest {
         state.requireBiometricRecovery(current, BiometricRecoveryReason.BIOMETRIC_CHANGED)
         assertEquals(R.string.command_biometric_changed_recovery, biometricRecoveryMessage(checkNotNull(state.biometricRecovery)))
         assertEquals(R.string.command_biometric_legacy_recovery, biometricRecoveryMessage(BiometricRecoveryReason.LEGACY_POLICY))
+    }
+
+    @Test fun verifiedRefusalInsideTheWriteClearsRetryAndSurvivesCompletion() = runBlocking<Unit> {
+        val state = CommandApprovalViewState()
+        val reason = DecisionRefusalFrame.Reason.REQUEST_CHANGED
+        val ticket = state.attempts.begin()
+        state.deliver(ticket, approval) { state.refuse(ticket, approval, reason) }
+        assertEquals(CommandActionStage.REFUSED, state.stage)
+        assertEquals(reason, state.refusal)
+        assertNull(state.retained)
+    }
+
+    @Test fun lateRefusalForAnOlderAttemptCannotClearTheNewChoice() = runBlocking<Unit> {
+        val state = CommandApprovalViewState()
+        val first = state.attempts.begin()
+        state.deliver(first, approval) {}
+        val next = state.attempts.begin()
+        state.deliver(next, approval) {}
+        state.refuse(first, approval, DecisionRefusalFrame.Reason.ACTION_UNAVAILABLE)
+        assertEquals(CommandActionStage.AWAITING, state.stage)
+        assertSame(approval, state.retained)
+        state.refuse(next, approval, DecisionRefusalFrame.Reason.ACTION_UNAVAILABLE)
+        assertEquals(CommandActionStage.REFUSED, state.stage)
+    }
+
+    @Test fun liveCapabilityAdvertisingRespectsFrameBudgetAndLeavesInspectionUnchanged() {
+        val original = commandInspectionCapabilities()
+        val expected = setOf(RequestDeliveryResult.CAPABILITY, DecisionRefusalFrame.CAPABILITY)
+        assertEquals(original.map { it.schemaVersion }, liveCommandCapabilities(65536).map { it.schemaVersion })
+        assertEquals(setOf(expected), liveCommandCapabilities(65536).map { it.features }.toSet())
+        assertEquals(setOf(setOf(RequestDeliveryResult.CAPABILITY)), liveCommandCapabilities(128).map { it.features }.toSet())
+        assertEquals(setOf(emptySet<ULong>()), commandInspectionCapabilities().map { it.features }.toSet())
     }
 
     @Test fun anInvalidatedAttemptCannotPublishALateResult() = runBlocking<Unit> {

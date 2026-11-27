@@ -12,6 +12,8 @@ class CommandSessionException(val reason: CommandSessionRejection) : IllegalArgu
 internal class CommandCaptureRefused(
     val requestID: CborValue.Bytes,
     val requestDigest: CborValue.Bytes,
+    val schemaVersion: ULong,
+    val reason: RequestDeliveryResult.Reason,
     val reasonCode: String,
 ) : IllegalArgumentException(reasonCode)
 
@@ -173,18 +175,19 @@ class CommandRequestSession private constructor(
             }
             require(negotiatedSchemas.isNotEmpty() && CommandCapturePayload.supportedSchemaVersions.containsAll(negotiatedSchemas))
             val capabilities = ContractCapabilities(negotiatedSchemas.associate { RequestContract(RequestKind.COMMAND, 1u, it) to emptySet<ULong>() })
-            fun refuse(id: CborValue.Bytes, reasonCode: String): Nothing {
+            fun refuse(id: CborValue.Bytes, schemaVersion: ULong, reason: RequestDeliveryResult.Reason,
+                       reasonCode: String): Nothing {
                 val signed = SigningInput.make(1u, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST,
                     canonical, limits.body, limits.signing)
                 val digest = CborValue.Bytes(MessageDigest.getInstance("SHA-256").digest(signed))
-                throw CommandCaptureRefused(id, digest, reasonCode)
+                throw CommandCaptureRefused(id, digest, schemaVersion, reason, reasonCode)
             }
             val request = try {
                 IssuedRequestPayload.decodeScoped(canonical, limits.body, limits.capture, capabilities,
                     expectedMacID, expectedAccountID)
             } catch (failure: IssuedCaptureBudgetException) {
                 if (!isolateCaptureRefusal) throw CborException(failure.reason)
-                refuse(failure.requestID, failure.reason.name)
+                refuse(failure.requestID, failure.schemaVersion, RequestDeliveryResult.Reason.CAPTURE_LIMIT, failure.reason.name)
             } catch (failure: IssuedRequestException) {
                 if (failure.reason == IssuedRequestFailure.WRONG_SCOPE) {
                     throw CommandSessionException(CommandSessionRejection.WRONG_AUTHORITY)
@@ -195,7 +198,8 @@ class CommandRequestSession private constructor(
                 decodeCapture(request.canonicalCapture, limits.capture, request.contract.schemaVersion)
             } catch (failure: CommandCaptureException) {
                 if (!isolateCaptureRefusal) throw failure
-                refuse(CborValue.Bytes(request.requestID), failure.reason.name)
+                refuse(CborValue.Bytes(request.requestID), request.contract.schemaVersion,
+                    RequestDeliveryResult.Reason.UNREADABLE_CAPTURE, failure.reason.name)
             }
             return CommandRequestSession(capture,
                 RequestStatusTracker(request, key, limits.status, limits.signing, limits.body),

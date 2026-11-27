@@ -40,14 +40,18 @@ class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteS
         private set
     val negotiated: NegotiatedChannel get() { check(!closed.get()); return metadata }
 
-    suspend fun send(payload: ByteArray): Unit = operation {
+    suspend fun send(payload: ByteArray) = sendTracked(payload) {}
+
+    internal suspend fun sendTracked(payload: ByteArray, beforeWrite: (ULong) -> Unit): Unit = operation {
         require(payload.size in 1..maximumPayloadBytes)
         check(writeLock.tryLock())
         try {
             active()
             val bytes = payload.copyOf()
             val sequence = outgoing ?: throw IOException("Sequence exhausted")
-            writeFrame(SessionEnvelope(metadata.sessionID.copyBytes(), sequence, bytes).encode(maximumPayloadBytes))
+            val envelope = SessionEnvelope(metadata.sessionID.copyBytes(), sequence, bytes).encode(maximumPayloadBytes)
+            beforeWrite(sequence)
+            writeFrame(envelope)
             outgoing = if (sequence == ULong.MAX_VALUE) null else sequence + 1u
         } finally { writeLock.unlock() }
     }
