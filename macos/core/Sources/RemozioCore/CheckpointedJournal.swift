@@ -102,10 +102,10 @@ final class CheckpointedJournal {
 
     /// The caller must validate the installed reader floor and keep admission closed.
     func installPermanentReplay() throws -> PermanentReplayMigration {
-        let (checkpoint, format, hasGap) = try verifiedRead { checkpoint, transaction in
-            (checkpoint, try transaction.storageFormatVersion, try transaction.hasRecordedHistoryGap())
+        let (checkpoint, installed, hasGap) = try verifiedRead { checkpoint, transaction in
+            (checkpoint, try transaction.hasPermanentReplayStorage(), try transaction.hasRecordedHistoryGap())
         }
-        if format == UInt64(AuthorityJournalSchema.permanentReplayFormat) { return .alreadyInstalled }
+        if installed { return .alreadyInstalled }
         // An authenticated discontinuity is valid legacy state. No storage mutation is needed to skip it.
         if hasGap { return .legacyHistoryGap }
         try write(epoch: checkpoint.journalEpoch, expectedCheckpoint: checkpoint) { transaction in

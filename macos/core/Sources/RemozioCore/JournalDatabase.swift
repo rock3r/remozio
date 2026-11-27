@@ -348,6 +348,12 @@ public final class JournalDatabase {
         return try PermanentReplayJournal.hasRecordedHistoryGap(on: db)
     }
 
+    fileprivate func hasPermanentReplayStorage(_ token: UUID) throws -> Bool {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        return try AuthorityJournalSchema.permanentReplayInstalled(on: db)
+    }
+
     fileprivate func validatePermanentReplayStorage(_ token: UUID) throws {
         _ = try access(token)
         guard let db else { throw JournalDatabaseError.expiredTransaction }
@@ -504,9 +510,9 @@ public final class JournalDatabase {
             throw JournalDatabaseError.incompatibleStore
         }
         let version = try expectedVersion ?? AuthorityJournalSchema.featureTier(on: db)
-        if format >= AuthorityJournalSchema.recoveryFormat {
+        if format >= AuthorityJournalSchema.pairingRecoveryFormat {
             _ = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: true, tier: version,
-                permanentReplay: format == AuthorityJournalSchema.permanentReplayFormat)
+                permanentReplay: format == AuthorityJournalSchema.recoveryFormat)
             try PairingRecoveryStageJournal.validateStorage(on: db)
         } else {
             try statement("""
@@ -715,6 +721,11 @@ public final class JournalTransaction {
     func hasRecordedHistoryGap() throws -> Bool {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.hasRecordedHistoryGap(token)
+    }
+
+    func hasPermanentReplayStorage() throws -> Bool {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.hasPermanentReplayStorage(token)
     }
 
     /// Check the committed replay mapping before starting request recovery.

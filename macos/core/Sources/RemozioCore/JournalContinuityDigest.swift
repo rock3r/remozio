@@ -23,15 +23,12 @@ enum JournalContinuityDigest {
 
     static func read(_ db: OpaquePointer) throws -> JournalContinuityDigests {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
-        let format = try AuthorityJournalSchema.formatVersion(on: db)
-        let recoveryFormat = format >= AuthorityJournalSchema.recoveryFormat
-        let permanentReplay = format == AuthorityJournalSchema.permanentReplayFormat
-        let tier = try AuthorityJournalSchema.featureTier(on: db)
-        let catalog = try requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier, permanentReplay: permanentReplay)
-        let authoritySchema = recoveryFormat ? format : (tier >= 15 ? tier : min(tier, 13))
+        let format = try AuthorityJournalSchema.continuityFormat(on: db)
+        let catalog = try requireCatalog(db, recoveryFormat: format.hasPairingRecovery, tier: format.tier,
+            permanentReplay: format.hasPermanentReplay)
         return try withUnsafeTemporaryAllocation(byteCount: DigestEncoder.capacity, alignment: 1) { buffer in
             try JournalContinuityDigests(
-                authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema, buffer: buffer),
+                authority: digest(db, tables: catalog.authority, domain: "authority", schema: format.authoritySchema, buffer: buffer),
                 ledger: digest(db, tables: catalog.ledger, domain: "ledger", buffer: buffer))
         }
     }

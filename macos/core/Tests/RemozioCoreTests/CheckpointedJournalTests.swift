@@ -180,7 +180,7 @@ final class CheckpointedJournalTests: XCTestCase {
             }
             let restarted = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
             XCTAssertEqual(try restarted.read { try $0.storageFormatVersion },
-                cut == .finalize ? UInt64(AuthorityJournalSchema.permanentReplayFormat) : format)
+                cut == .finalize ? UInt64(AuthorityJournalSchema.recoveryFormat) : format)
             XCTAssertEqual(try restarted.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, value)
             XCTAssertEqual(try restarted.installPermanentReplay(), cut == .finalize ? .alreadyInstalled : .installed)
             XCTAssertTrue(try restarted.read { try $0.commandSubmissionReserved(value.submission) })
@@ -1733,7 +1733,7 @@ private enum PreviousContinuityDigest {
         let recoveryFormat = try AuthorityJournalSchema.recoveryFormatInstalled(on: db)
         let tier = try AuthorityJournalSchema.featureTier(on: db)
         let catalog = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
-        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
+        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.pairingRecoveryFormat : (tier >= 15 ? tier : min(tier, 13))
         return try JournalContinuityDigests(authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema),
                                             ledger: digest(db, tables: catalog.ledger, domain: "ledger"))
     }
@@ -2055,7 +2055,7 @@ private enum LegacyContinuityDigest {
         let recoveryFormat = try AuthorityJournalSchema.recoveryFormatInstalled(on: db)
         let tier = try AuthorityJournalSchema.featureTier(on: db)
         let catalog = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
-        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
+        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.pairingRecoveryFormat : (tier >= 15 ? tier : min(tier, 13))
         return try JournalContinuityDigests(authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema),
                                             ledger: digest(db, tables: catalog.ledger, domain: "ledger"))
     }
