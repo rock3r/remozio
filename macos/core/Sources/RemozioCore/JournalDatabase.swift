@@ -341,6 +341,19 @@ public final class JournalDatabase {
         return try JournalContinuityDigest.read(db)
     }
 
+    fileprivate func hasRecordedHistoryGap(_ token: UUID) throws -> Bool {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        if try AuthorityJournalSchema.featureTierInTransaction(on: db) < 14 { return false }
+        return try PermanentReplayJournal.hasRecordedHistoryGap(on: db)
+    }
+
+    fileprivate func installPermanentReplay(_ token: UUID) throws {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        try AuthorityJournalSchema.installPermanentReplayFormat(on: db)
+    }
+
     fileprivate func ledger(_ token: UUID) throws -> ConsumptionJournal {
         _ = try access(token)
         guard let consumption else { throw JournalDatabaseError.expiredTransaction }
@@ -484,8 +497,9 @@ public final class JournalDatabase {
             throw JournalDatabaseError.incompatibleStore
         }
         let version = try expectedVersion ?? AuthorityJournalSchema.featureTier(on: db)
-        if format == AuthorityJournalSchema.recoveryFormat {
-            _ = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: true, tier: version)
+        if format >= AuthorityJournalSchema.recoveryFormat {
+            _ = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: true, tier: version,
+                permanentReplay: format == AuthorityJournalSchema.permanentReplayFormat)
             try PairingRecoveryStageJournal.validateStorage(on: db)
         } else {
             try statement("""
@@ -689,6 +703,18 @@ public final class JournalTransaction {
     public func continuityDigests() throws -> JournalContinuityDigests {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.continuityDigests(token)
+    }
+
+    func hasRecordedHistoryGap() throws -> Bool {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.hasRecordedHistoryGap(token)
+    }
+
+    func installPermanentReplay() throws {
+        try mutate { _ in
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            try owner.installPermanentReplay(token)
+        }
     }
 
     /// Explicit protected installation. Commit the schema change through CheckpointedJournal before accepting commands.
@@ -1169,6 +1195,11 @@ public final class JournalTransaction {
                 now: now, eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedHead: expectedHead,
                 requestLimits: requestLimits, signingLimits: signingLimits)
         }
+    }
+
+    func hasConsumed(requestID: Data) throws -> Bool {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.ledger(token).hasConsumed(requestID: requestID)
     }
 
     public func consumption(requestID: Data) throws -> ConsumptionReceipt? {

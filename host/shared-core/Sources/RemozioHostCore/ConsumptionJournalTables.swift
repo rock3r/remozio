@@ -22,6 +22,7 @@ public struct ConsumptionReceipt: Equatable, Sendable {
 /// Caller-supplied trust and time must be freshly checked by that owner inside the same write transaction.
 /// A receipt or outcome is historical evidence and never permission to dispatch or retry an action.
 public final class ConsumptionJournalTables {
+    public static let permanentReplayTable = "consumption_replay_v1"
     private let db: OpaquePointer
     private let macID: Data
     private let accountID: Data
@@ -55,7 +56,7 @@ public final class ConsumptionJournalTables {
     public func consume(canonicalDecision: Data, signature: Data, retained: RetainedApprovalRequest,
                  trust: ApprovalTrustSnapshot, now: AuthorityMoment, eventID: Data, receiptTimeMs: UInt64?,
                  writer: AuditEpochWriter, expectedHead: UInt64, audit: AuditJournalTables,
-                 requestLimits: CBORLimits, signingLimits: CBORLimits) throws -> ConsumptionReceipt {
+                 requestLimits: CBORLimits, signingLimits: CBORLimits, permanentReplay: Bool = false) throws -> ConsumptionReceipt {
         try writeTransaction()
         guard audit.matchesConsumptionContext(connection: db, macID: macID, accountID: accountID) else {
             throw ConsumptionJournalError.auditContextMismatch
@@ -64,8 +65,11 @@ public final class ConsumptionJournalTables {
         let verified = try DecisionVerifier.verify(canonicalDecision: canonicalDecision, signature: signature, retained: retained,
             trust: trust, now: now, decisionLimits: decisionLimits, requestLimits: requestLimits, signingLimits: signingLimits)
         let decision = verified.decision
-        guard try receipt(requestID: decision.requestID) == nil else { throw ConsumptionJournalError.alreadyConsumed }
-        try statement("SELECT count(*) FROM main.consumptions_v1 WHERE mac=? AND account=?", [macID, accountID]) {
+        guard try !hasConsumed(requestID: decision.requestID, permanentReplay: permanentReplay) else {
+            throw ConsumptionJournalError.alreadyConsumed
+        }
+        let replayTable = permanentReplay ? Self.permanentReplayTable : "consumptions_v1"
+        try statement("SELECT count(*) FROM main.\(replayTable) WHERE mac=? AND account=?", [macID, accountID]) {
             guard sqlite3_step($0) == SQLITE_ROW else { throw ConsumptionJournalError.storage(sqlite3_errcode(db)) }
             guard sqlite3_column_int64($0, 0) < Int64(maximumRows) else { throw ConsumptionJournalError.capacityExceeded }
         }
@@ -87,12 +91,32 @@ public final class ConsumptionJournalTables {
             droppedEventCount: nil, peerDeviceID: nil)
         let body = try event.encode(limits: recordLimits)
         return try atomic {
+            if permanentReplay {
+                try statement("INSERT INTO main.\(Self.permanentReplayTable) VALUES(?,?,?)", [macID, accountID, decision.requestID]) {
+                    let rc = sqlite3_step($0)
+                    guard rc == SQLITE_DONE else { throw ConsumptionJournalError.storage(rc) }
+                }
+            }
             try statement("INSERT INTO main.consumptions_v1 VALUES(?,?,?,?,?)", [macID, accountID, decision.requestID, canonicalDecision, body]) {
                 let rc = sqlite3_step($0)
                 guard rc == SQLITE_DONE else { throw ConsumptionJournalError.storage(rc) }
             }
             try audit.append(body, writer: writer, expectedHead: expectedHead)
             return ConsumptionReceipt(decision: decision, event: event)
+        }
+    }
+
+    public func hasConsumed(requestID: Data, permanentReplay: Bool) throws -> Bool {
+        guard permanentReplay else { return try receipt(requestID: requestID) != nil }
+        try transaction()
+        guard requestID.count == 16 else { throw ConsumptionJournalError.wrongScope }
+        return try statement("SELECT 1 FROM main.\(Self.permanentReplayTable) WHERE mac=? AND account=? AND request=?",
+                             [macID, accountID, requestID]) {
+            switch sqlite3_step($0) {
+            case SQLITE_DONE: return false
+            case SQLITE_ROW: return true
+            case let code: throw ConsumptionJournalError.storage(code)
+            }
         }
     }
 

@@ -23,10 +23,12 @@ enum JournalContinuityDigest {
 
     static func read(_ db: OpaquePointer) throws -> JournalContinuityDigests {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
-        let recoveryFormat = try AuthorityJournalSchema.recoveryFormatInstalled(on: db)
+        let format = try AuthorityJournalSchema.formatVersion(on: db)
+        let recoveryFormat = format >= AuthorityJournalSchema.recoveryFormat
+        let permanentReplay = format == AuthorityJournalSchema.permanentReplayFormat
         let tier = try AuthorityJournalSchema.featureTier(on: db)
-        let catalog = try requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
-        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
+        let catalog = try requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier, permanentReplay: permanentReplay)
+        let authoritySchema = recoveryFormat ? format : (tier >= 15 ? tier : min(tier, 13))
         return try withUnsafeTemporaryAllocation(byteCount: DigestEncoder.capacity, alignment: 1) { buffer in
             try JournalContinuityDigests(
                 authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema, buffer: buffer),
@@ -34,20 +36,26 @@ enum JournalContinuityDigest {
         }
     }
 
-    static func requireCatalog(_ db: OpaquePointer, recoveryFormat: Bool, tier: Int64) throws -> (authority: [String], ledger: [String]) {
+    static func requireCatalog(_ db: OpaquePointer, recoveryFormat: Bool, tier: Int64,
+                               permanentReplay: Bool = false) throws -> (authority: [String], ledger: [String]) {
         var tables = Set<String>()
         try rows(db, "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             guard let name = sqlite3_column_text(row, 0) else { throw JournalDatabaseError.incompatibleStore }
             tables.insert(String(cString: name))
         }
-        guard (12...18).contains(tier) else { throw JournalDatabaseError.incompatibleStore }
+        guard (12...18).contains(tier), !permanentReplay || (recoveryFormat && tier >= 15) else {
+            throw JournalDatabaseError.incompatibleStore
+        }
+        if permanentReplay { try PermanentReplayJournal.validateStorage(on: db) }
         let authorityTables = Self.authorityTables + (tier >= 13 ? ["authority_code_policy_v1"] : [])
-            + (tier >= 15 ? ["command_submissions_v1"] : [])
+            + (tier >= 15 && !permanentReplay ? ["command_submissions_v1"] : [])
+            + (permanentReplay ? PermanentReplayJournal.tables : [])
             + (tier >= 16 ? ["gateway_submission_outbox_v1"] : [])
             + (tier >= 17 ? ["update_scheduling_state_v1", "update_scheduling_operations_v1"] : [])
             + (tier >= 18 ? [GatewayAuthorityJournal.abandonmentTable] : [])
             + (recoveryFormat ? [AuthorityJournalSchema.tierTable, PairingRecoveryStageJournal.table] : [])
         let ledgerTables = Self.ledgerTables + (tier >= 14 ? ["history_recoveries_v1"] : [])
+            + (permanentReplay ? ["command_submissions_v1"] : [])
         guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
         return (authorityTables, ledgerTables)
     }

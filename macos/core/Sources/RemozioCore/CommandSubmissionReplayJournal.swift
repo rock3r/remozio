@@ -32,11 +32,11 @@ final class CommandSubmissionReplayJournal {
 
     func reserve(_ value: CommandSubmissionReservation) throws -> CommandSubmissionReservation {
         try requireInstalled()
-        return try adapt { try tables.reserve(value) }
+        return try adapt { try tables.reserve(value, permanentReplay: AuthorityJournalSchema.permanentReplayInstalled(on: db)) }
     }
     func contains(_ submission: CapturedSubmission) throws -> Bool {
         try requireInstalled()
-        return try adapt { try tables.contains(submission) }
+        return try adapt { try tables.contains(submission, permanentReplay: AuthorityJournalSchema.permanentReplayInstalled(on: db)) }
     }
     func read(submissionID: Data) throws -> CommandSubmissionReservation? {
         try requireInstalled()

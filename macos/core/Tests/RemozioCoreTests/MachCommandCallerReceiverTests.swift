@@ -4848,7 +4848,8 @@ extension MachCommandCallerReceiverTests {
         defer { raw.caller.close() }
         return try CommandTerminalResultPayload.decode(raw.payload, profile: admission.profile, original: submission, admission: admission)
     }
-    private func ownerDecision(_ request: IssuedRequestPayload, fixture: CommandRequestFixture, decline: Bool) throws -> ConsumptionReceipt {
+    private func ownerDecision(_ request: IssuedRequestPayload, fixture: CommandRequestFixture, decline: Bool,
+                               milliseconds: UInt64 = 120) throws -> ConsumptionReceipt {
         let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
             requestDigest: request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits), challenge: request.challenge,
             phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: decline ? 7 : 6, count: 16),
@@ -4856,7 +4857,7 @@ extension MachCommandCallerReceiverTests {
         let input = try SigningInput.make(wireVersion: 1, messageType: .decision, purpose: decline ? .cancellation : .biometricAuthorization,
             canonicalPayload: body, payloadLimits: fixture.limits, inputLimits: fixture.limits)
         let signature = try (decline ? fixture.decision : fixture.biometric).signature(for: input).rawRepresentation
-        let now = fixture.now(120)
+        let now = fixture.now(milliseconds)
         return try XCTUnwrap(fixture.authority).withRequests {
             try $0.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: Data(repeating: 5, count: 16),
                 authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16), now: now, receiptTimeMs: nil)
@@ -5399,6 +5400,74 @@ extension MachCommandCallerReceiverTests {
         try awaitDispatchCleanup(authority)
         XCTAssertEqual(try nativeDispatchOutcome(first), .exited(0))
         XCTAssertEqual(observations.withLock { $0 }, 6)
+    }
+
+    func testPermanentReplayUnrelatedConsumptionPreservesPreparedDispatchDuringAccountDrain() throws {
+        for draining in [false, true] {
+            let count = OSAllocatedUnfairLock(initialState: 0)
+            let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+            let pool = CommandFilesystemProbePool(beforeWork: {
+                if count.withLock({ $0 += 1; return $0 }) == 2 {
+                    entered.signal()
+                    _ = resume.wait(timeout: .now() + .seconds(4))
+                }
+            })
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true, ready: false, commandFilesystem: pool)
+            let authority = try XCTUnwrap(fixture.authority)
+            XCTAssertEqual(try authority.installPermanentReplay(), .installed)
+            try authority.prepareRequests(clockEpoch: fixture.clock, maximumPayloadBytes: 16384)
+            let gate = try UpdateAdmissionProvisioningFixture(), account = Data(repeating: 2, count: 16)
+            let files = try gate.prepare(account: account)
+            let updater = try gate.open(files, scope: .account(account))
+            try authority.attachReleaseActivityBarrier(gate.activity.open())
+            try authority.attachUpdateAdmissionBoundary(.init(machine: gate.open(files, scope: .machine),
+                account: gate.open(files, scope: .account(account))))
+            let prepared = try nativeDispatchFixture(existingFixture: fixture)
+
+            func admitPending(_ byte: UInt8, terminal: Endpoint) throws -> IssuedRequestPayload {
+                let admission = try Endpoint()
+                let (_, command, submission, profile) = try ownerIOCommand(admission: admission, terminal: terminal,
+                    binding: .init(id: Data(repeating: byte, count: 16), nonce: Data(repeating: byte, count: 32),
+                                   callerBinding: assemblyBinding))
+                let request = try admitOwnedCommand(command, fixture: fixture, now: { fixture.now(120) })
+                _ = try ownerAdmission(admission, submission: submission, profile: profile)
+                return request
+            }
+            let unrelatedTerminal = try Endpoint(), retainedTerminal = try Endpoint()
+            defer { withExtendedLifetime((unrelatedTerminal, retainedTerminal)) {} }
+            let unrelated = try admitPending(0xa7, terminal: unrelatedTerminal)
+            let retained = try admitPending(0xa8, terminal: retainedTerminal)
+            let dispatchTime = OSAllocatedUnfairLock<UInt64>(initialState: 130)
+            defer { resume.signal() }
+            try beginDispatch(fixture, request: prepared.request, launcher: prepared.launcher,
+                clock: { fixture.now(dispatchTime.withLock { $0 }) })
+            guard entered.wait(timeout: .now() + .seconds(2)) == .success else {
+                return XCTFail("The prepared dispatch did not reach the filesystem recheck")
+            }
+
+            let drain = try draining ? updater.beginDrain() : nil
+            defer { drain?.close() }
+            if draining {
+                XCTAssertThrowsError(try authority.withRequests { try $0.acquireUpdateAdmission()?.close() }) {
+                    XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+                }
+            }
+            let trust = try authority.read { try $0.approvalTrustSnapshot().revision }
+            let unrelatedID = unrelated.requestID
+            XCTAssertFalse(try authority.read { try $0.hasConsumed(requestID: unrelatedID) })
+            _ = try ownerDecision(unrelated, fixture: fixture, decline: true, milliseconds: 135)
+            XCTAssertTrue(try authority.read { try $0.hasConsumed(requestID: unrelatedID) })
+            XCTAssertEqual(try authority.read { try $0.approvalTrustSnapshot().revision }, trust)
+            let preparedID = prepared.request.requestID, retainedID = retained.requestID, now = fixture.now(135)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: preparedID).phase }, .authorized)
+            XCTAssertEqual(try authority.withRequests { try $0.markPresented(requestID: retainedID, now: now, receiptTimeMs: nil).phase },
+                .presented)
+
+            dispatchTime.withLock { $0 = 140 }
+            resume.signal()
+            try awaitDispatchCleanup(authority)
+            XCTAssertEqual(try nativeDispatchOutcome(prepared), .exited(0))
+        }
     }
 
     func testNativeDispatchExpiredFinalFilesystemProbeDoesNotRelease() throws {

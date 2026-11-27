@@ -169,6 +169,21 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// The installer validates the reader floor before calling this startup-only migration.
+    func installPermanentReplay() throws -> CheckpointedJournal.PermanentReplayMigration {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard !requestStartupAttempted, requests == nil, !updateHealthOnly, !updateCompletionOnly,
+                  !retainedSetupPolicyOnly, let storage else { throw JournalDatabaseError.unavailable }
+            do {
+                return try CheckpointedJournal(journal: database, continuity: storage.continuity).installPermanentReplay()
+            } catch {
+                try? close()
+                throw error
+            }
+        }
+    }
+
     /// Runs once after host identity validation, before activating a listener or admitting request work.
     /// An incomplete attempt retires both stores. The next attempt must reopen and reconcile them.
     func prepareRequests(clockEpoch: UUID, maximumPayloadBytes: Int) throws {

@@ -32,6 +32,7 @@ public struct CommandSubmissionReservation: Equatable, Sendable {
 /// The caller owns connection lifetime, serialized access, schema migration, durability and recovery.
 /// Publish reservations only after the owner's complete admission transaction and checkpoints commit.
 public final class CommandSubmissionReplayTables {
+    public static let permanentReplayTable = "command_submission_replay_v1"
     private let db: OpaquePointer
     private let macID: Data
     private let accountID: Data
@@ -67,21 +68,28 @@ public final class CommandSubmissionReplayTables {
 
     /// No expiry, replacement or deletion. Failure does not poison the caller's outer transaction;
     /// the owner must roll back the entire admission batch when any required operation fails.
-    public func reserve(_ value: CommandSubmissionReservation) throws -> CommandSubmissionReservation {
+    public func reserve(_ value: CommandSubmissionReservation, permanentReplay: Bool = false) throws -> CommandSubmissionReservation {
         try transaction()
         guard value.macID == macID, value.accountID == accountID else { throw CommandSubmissionReplayError.wrongScope }
         try writeTransaction()
-        try statement("SELECT 1 FROM main.command_submissions_v1 WHERE mac=? AND account=? AND (submission=? OR nonce=?)",
-            values: [macID, accountID, value.submission.id, value.submission.nonce]) {
-            guard try step($0) == SQLITE_DONE else { throw CommandSubmissionReplayError.alreadyReserved }
+        guard try !contains(value.submission, permanentReplay: permanentReplay) else {
+            throw CommandSubmissionReplayError.alreadyReserved
         }
-        try statement("SELECT count(*) FROM main.command_submissions_v1 WHERE mac=? AND account=?", values: [macID, accountID]) {
+        let replayTable = permanentReplay ? Self.permanentReplayTable : "command_submissions_v1"
+        try statement("SELECT count(*) FROM main.\(replayTable) WHERE mac=? AND account=?", values: [macID, accountID]) {
             guard try step($0) == SQLITE_ROW, sqlite3_column_type($0, 0) == SQLITE_INTEGER else {
                 throw CommandSubmissionReplayError.corruptData
             }
             let count = sqlite3_column_int64($0, 0)
             guard count >= 0 else { throw CommandSubmissionReplayError.corruptData }
             guard count < Int64(maximumRows) else { throw CommandSubmissionReplayError.capacityExceeded }
+        }
+        // The Mac owner rolls back its entire admission transaction on either insertion failure.
+        if permanentReplay {
+            try statement("INSERT INTO main.\(Self.permanentReplayTable) VALUES(?,?,?,?)",
+                values: [macID, accountID, value.submission.id, value.submission.nonce]) {
+                guard try step($0) == SQLITE_DONE else { throw CommandSubmissionReplayError.corruptData }
+            }
         }
         try statement("INSERT INTO main.command_submissions_v1 VALUES(?,?,?,?,?,?)",
             values: [macID, accountID, value.submission.id, value.submission.nonce, value.submission.callerBinding, value.captureDigest]) {
@@ -91,13 +99,23 @@ public final class CommandSubmissionReplayTables {
     }
 
     /// A scoped absence observation covers both identifiers. It grants no retry authority by itself.
-    public func contains(_ submission: CapturedSubmission) throws -> Bool {
+    public func contains(_ submission: CapturedSubmission, permanentReplay: Bool = false) throws -> Bool {
         try transaction()
         guard submission.id.count == 16, submission.nonce.count == 32, submission.callerBinding.count == 16 else {
             throw CommandSubmissionReplayError.invalidConfiguration
         }
-        return try statement("SELECT 1 FROM main.command_submissions_v1 WHERE mac=? AND account=? AND (submission=? OR nonce=?) LIMIT 1",
-            values: [macID, accountID, submission.id, submission.nonce]) { try step($0) == SQLITE_ROW }
+        guard permanentReplay else {
+            return try statement("""
+                SELECT 1 FROM main.command_submissions_v1 WHERE mac=? AND account=? AND (submission=? OR nonce=?) LIMIT 1
+                """, values: [macID, accountID, submission.id, submission.nonce]) { try step($0) == SQLITE_ROW }
+        }
+        // The checkpoint authenticates the table rows. A secondary index alone cannot prove nonce absence.
+        return try statement("""
+            SELECT 1 FROM main.\(Self.permanentReplayTable) NOT INDEXED WHERE mac=? AND account=? AND submission=?
+            UNION ALL
+            SELECT 1 FROM main.\(Self.permanentReplayTable) NOT INDEXED WHERE mac=? AND account=? AND nonce=?
+            LIMIT 1
+            """, values: [macID, accountID, submission.id, macID, accountID, submission.nonce]) { try step($0) == SQLITE_ROW }
     }
 
     public func read(submissionID: Data) throws -> CommandSubmissionReservation? {
