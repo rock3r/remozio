@@ -169,7 +169,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             guard AuthorityPermanentReplayStartup.hasReaderFloor(release: release, policy: configuration.codePolicy) else { return }
             try admissionStartup.withReplayInstallationDrain(machine: machine, placement: placement) {
                 try startupActivity.validate()
-                try AuthoritySelfValidation.validate(journal)
+                try AuthoritySelfValidation.validate(journal: journal)
                 guard let policy = try journal.read({ try $0.codePolicy()?.policy }),
                       policy == configuration.codePolicy else { throw InstalledAuthorityCommandError.changedConfiguration }
                 _ = try journal.installPermanentReplay()
