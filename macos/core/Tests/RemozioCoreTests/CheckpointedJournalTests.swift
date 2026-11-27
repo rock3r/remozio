@@ -308,7 +308,7 @@ final class CheckpointedJournalTests: XCTestCase {
             let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
             defer { try? owner.close() }
             XCTAssertThrowsError(try owner.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384), mutation) {
-                XCTAssertEqual($0 as? AuthorityStorageStartupError, .repairRequired, mutation)
+                guard case AuthorityStorageStartupError.repairRequired = $0 else { return XCTFail("\(mutation): \($0)") }
             }
             XCTAssertThrowsError(try owner.withRequests { _ in true }, mutation)
         }
