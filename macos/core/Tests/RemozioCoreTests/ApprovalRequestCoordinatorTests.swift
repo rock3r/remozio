@@ -303,11 +303,19 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
     }
     private func decision(_ request: IssuedRequestPayload, decline: Bool = false) throws -> (Data, Data) {
+        try Self.decision(request, decline: decline, signingKey: decline ? decisionKey : key, limits: limits)
+    }
+
+    private static func decision(_ request: IssuedRequestPayload, decline: Bool, signingKey: P256.Signing.PrivateKey,
+                                 limits: CBORLimits) throws -> (Data, Data) {
         let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
             requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
-            phoneID: id(5), keyID: id(decline ? 7 : 6), action: request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
-        return (body, try (decline ? decisionKey : key).signature(for: SigningInput.make(wireVersion: 1, messageType: .decision, purpose: decline ? .cancellation : .biometricAuthorization,
-            canonicalPayload: body, payloadLimits: limits, inputLimits: limits)).rawRepresentation)
+            phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: decline ? 7 : 6, count: 16),
+            action: request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
+        let input = try SigningInput.make(wireVersion: 1, messageType: .decision,
+            purpose: decline ? .cancellation : .biometricAuthorization,
+            canonicalPayload: body, payloadLimits: limits, inputLimits: limits)
+        return (body, try signingKey.signature(for: input).rawRepresentation)
     }
     private func consume(_ owner: ApprovalRequestCoordinator, _ request: IssuedRequestPayload, time: UInt64 = 110) throws -> ConsumptionReceipt {
         let (body, signature) = try decision(request)
@@ -628,19 +636,27 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         return (db, writer, owner, store)
     }
 
+    private func retirementDecliner() throws -> @Sendable (ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, ConsumptionReceipt) {
+        let draft = try draft(), time = now(), limits = try limits, signer = decisionKey
+        let phoneID = id(5), enrollmentEpoch = id(9)
+        return { owner in
+            let request = try owner.admitFixture(draft, now: time, receiptTimeMs: nil)
+            let (body, signature) = try Self.decision(request, decline: true, signingKey: signer, limits: limits)
+            let receipt = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: phoneID,
+                authenticatedEnrollmentEpoch: enrollmentEpoch, now: time, receiptTimeMs: nil)
+            return (request, receipt)
+        }
+    }
+
     private func declineForRetirement(_ owner: ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, ConsumptionReceipt) {
-        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
-        let (body, signature) = try decision(request, decline: true)
-        let receipt = try owner.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: id(5),
-            authenticatedEnrollmentEpoch: id(9), now: now(), receiptTimeMs: nil)
-        return (request, receipt)
+        try retirementDecliner()(owner)
     }
 
     func testDetailRetirementUsesIdleOwnerAndProtectsRetainedTerminalRequests() throws {
         let fixture = try Fixture(), (_, _, owner, _) = try retirementFixture(fixture)
         let authority = AuthorityJournal(requests: owner)
         defer { try? authority.close() }
-        let (issued, receipt) = try authority.withRequests { try declineForRetirement($0) }
+        let (issued, receipt) = try authority.withRequests(retirementDecliner())
         let request = issued.requestID
         let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
         XCTAssertNil(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { false }))
@@ -665,8 +681,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let fixture = try Fixture(), (_, _, owner, _) = try retirementFixture(fixture)
         let authority = AuthorityJournal(requests: owner)
         defer { try? authority.close() }
+        let decline = try retirementDecliner()
         try authority.withRequests { owner in
-            let (retired, _) = try declineForRetirement(owner)
+            let (retired, _) = try decline(owner)
             try owner.forgetTerminal(requestID: retired.requestID)
         }
         let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
