@@ -37,12 +37,12 @@ private final class MachineReplacementFixture {
          stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, maintenanceWriterFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
          enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
          policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false,
-         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
+         pairingPolicy: SetupPairingPolicy = .disabled, beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
         self.enableSecondReadiness = enableSecondReadiness
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
-            replacement: true, ownedInstalledBundle: true, installedReadiness: readinessAlreadyEnabled))
+            replacement: true, ownedInstalledBundle: true, installedReadiness: readinessAlreadyEnabled, pairingPolicy: pairingPolicy))
         try beforeActivation(files)
         var registration = try files.prepare()
         if admitEveryAccount {
@@ -214,10 +214,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func reserveRestartAccount(_ files: BoundAdmissionRegistrationFixture, offset: UInt32 = 1000,
-                                       initialize: Bool = false, complete: Bool = false) throws -> AccountPreparationIntent {
+                                       initialize: Bool = false, complete: Bool = false,
+                                       pairingPolicy: SetupPairingPolicy = .disabled) throws -> AccountPreparationIntent {
         let fixture = files.machine.f.f
         let identity = LocalAccountIdentity(uid: getuid() + offset, primaryGroupID: getgid(), directoryID: UUID())
-        let account = try fixture.begin(files.machine.store, identity: identity)
+        let account = try fixture.begin(files.machine.store, identity: identity, pairingPolicy: pairingPolicy)
         if complete { return try fixture.resume(files.machine.store, account) }
         if initialize {
             let pinned = try files.machine.store.pinAccountPreparation(expected: account, publicKey: fixture.key)
@@ -871,7 +872,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertNil(try f.machine.store.machineUpdateConfigurationEpoch())
     }
 
-    private func retainFixtureConfigurationEpoch(_ f: Fixture, additionalForeground: [RuntimeActivationPlan] = []) throws
+    private func retainFixtureConfigurationEpoch(_ f: Fixture, additionalForeground: [RuntimeActivationPlan] = [],
+        primaryForeground: RuntimeActivationPlan? = nil) throws
         -> MachineUpdateConfigurationEpochRecord {
         _ = try f.run()
         let previous = try restartSource(f)
@@ -884,7 +886,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             }
             return capture
         }
-        let configurations: [MachineUpdateConfigurationEpoch.Configuration] = try ([f.machine.f.plan] + additionalForeground).map { foreground in
+        let configurations: [MachineUpdateConfigurationEpoch.Configuration] = try ([primaryForeground ?? f.machine.f.plan] + additionalForeground).map { foreground in
             let account = try XCTUnwrap(source.accounts.first { $0.accountID == foreground.accountID })
             let bundle = try RuntimeConfigurationBundle.initial(account: XCTUnwrap(account.preparation),
                 initialization: XCTUnwrap(account.initialization), reference: foreground.reference, inventory: source.replacement.inventory)
@@ -922,6 +924,29 @@ final class MachineUpdateReplacementTests: XCTestCase {
         _ operation: MachineUpdatePublicationOperation) throws -> MachineUpdateConfigurationEpochRecord {
         try f.machine.store.advanceMachineUpdatePublication(record, operation: operation, candidate: f.newRelease,
             directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+    }
+
+    func testSignedReleaseRenewalKeepsEnabledAndColdDisabledPairingBytes() throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        for coldDisable in [false, true] {
+            let f = try Fixture(configurationEpoch: true, pairingPolicy: .v2WithDecisionProof(lanScope: scope),
+                beforeActivation: { files in
+                    guard coldDisable else { return }
+                    let source = files.machine.f.plan, store = files.machine.store
+                    let target = try source.replacingPairingHost(PairingColdDisableConfiguration(source: source.host).target)
+                    try store.markRuntimeJobsRegistered(source)
+                    try store.retainColdDisabledPairing(expected: source, target: target)
+                })
+            let foreground = try XCTUnwrap(f.machine.store.runtimeActivation(accountID: f.machine.account).plan)
+            _ = try retainFixtureConfigurationEpoch(f, primaryForeground: foreground)
+            let archive = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch()?.configuration(accountID: f.machine.account))
+            let pairing = try XCTUnwrap(foreground.host.command.presence.pairing)
+            XCTAssertEqual(pairing.v2ActivationEnabled, !coldDisable)
+            XCTAssertTrue(pairing.decisionProofRequired)
+            XCTAssertEqual(pairing.lanScope, coldDisable ? nil : scope)
+            XCTAssertEqual(archive.startup.host.command.presence.pairing?.canonicalBytes, pairing.canonicalBytes)
+            XCTAssertEqual(archive.completion.host.command.presence.pairing?.canonicalBytes, pairing.canonicalBytes)
+        }
     }
 
     func testConfigurationEpochRetainsTheTypedArchiveAndAdvancesPublication() throws {
@@ -1901,10 +1926,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func prepareSecondForeground(_ files: BoundAdmissionRegistrationFixture, offset: UInt32 = 1000,
-        firstServiceUID: UInt32 = 20002, retainMaterial: Bool = true, didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
+        firstServiceUID: UInt32 = 20002, retainMaterial: Bool = true, pairingPolicy: SetupPairingPolicy = .disabled,
+        didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
         throws -> (account: AccountPreparationIntent, reference: RuntimeMaterialReference) {
         let store = files.machine.store
-        let account = try reserveRestartAccount(files, offset: offset, complete: true)
+        let account = try reserveRestartAccount(files, offset: offset, complete: true, pairingPolicy: pairingPolicy)
         let services = try ServiceAccountPlan(account: account, planID: AccountPreparationIntent.randomID(), claims: [
             .init(accountID: account.accountID, role: .transport, number: firstServiceUID, userID: UUID(), groupID: UUID()),
             .init(accountID: account.accountID, role: .gateway, number: firstServiceUID + 1, userID: UUID(), groupID: UUID())])
@@ -3941,7 +3967,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true, noPolicyChange: Bool = false,
         sharedImportFormats: Bool = false, schema29: Bool = false, setupWriter29: Bool = true,
-        _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
+        pairingPolicy: SetupPairingPolicy = .disabled, _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
         var retained: AccountPreparationIntent?
@@ -3950,7 +3976,10 @@ final class MachineUpdateReplacementTests: XCTestCase {
             promotionReaderFormats: schema29, readinessReaderFormats: schema29, maintenanceReaderFormats: schema29,
             maintenanceWriterFormats: schema29 && setupWriter29, retainedPolicySourceFormats: true,
             unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration, sharedImportFormats: sharedImportFormats,
-            beforeActivation: { retained = try suite.prepareSecondForeground($0, didPrepareMaterial: { runtimeMaterial = $0 }).account }) { fixture, finishing, _ in
+            beforeActivation: {
+                retained = try suite.prepareSecondForeground($0, pairingPolicy: pairingPolicy,
+                    didPrepareMaterial: { runtimeMaterial = $0 }).account
+            }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
             let loan = try suite.stableFixtureLoan(fixture, finishing: finishing)

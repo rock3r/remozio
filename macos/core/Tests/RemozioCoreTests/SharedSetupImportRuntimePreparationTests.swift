@@ -11,8 +11,8 @@ private final class ImportedRuntimeFixture {
     let directory: URL
     var published = 0
     var validated = 0
-    init() throws {
-        runtime = try .init()
+    init(pairingPolicy: SetupPairingPolicy = .disabled) throws {
+        runtime = try .init(pairingPolicy: pairingPolicy)
         directory = runtime.f.root.appendingPathComponent("ImportedRuntimeArtifacts")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     }
@@ -136,6 +136,39 @@ final class SharedSetupImportRuntimePreparationTests: XCTestCase {
         _ = try f.run(allowPublication: false)
         XCTAssertEqual(try f.progress(), completed); XCTAssertEqual(f.published, count); XCTAssertEqual(f.validated, 2)
     }
+    func testPublishedOptInAcceptsOnlyTheExactCompletedColdDisabledCommand() throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        let f = try ImportedRuntimeFixture(pairingPolicy: .v2WithDecisionProof(lanScope: scope))
+        let intent = try f.retain(), bundle = try f.bundle(intent)
+        try f.write(bundle)
+        _ = try f.run(allowPublication: false)
+        let runtime = f.runtime
+        let source = try RuntimeActivationPlan(account: runtime.account,
+            initialization: XCTUnwrap(runtime.machine.initialization(accountID: runtime.account.accountID)),
+            runtime: f.state(), inventory: XCTUnwrap(runtime.machine.inventory()), importIntent: f.progress())
+        try runtime.machine.retainRuntimeActivation(source)
+        _ = try runtime.machine.enrollRuntimeActivation(source)
+        try runtime.machine.markRuntimeJobsRegistered(source)
+        let disabled = try PairingColdDisableConfiguration(source: source.host)
+        let target = try source.replacingPairingHost(disabled.target)
+        try runtime.machine.retainColdDisabledPairing(expected: source, target: target)
+        let command = try XCTUnwrap(RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: runtime.material)
+            .first { $0.path == bundle.paths.commandConfiguration })
+        let path = f.path(command)
+        let bytes = target.host.command.canonicalBytes
+        try bytes.write(to: path)
+        let recorded = try XCTUnwrap(runtime.machine.runtimeActivation(accountID: runtime.account.accountID).plan)
+        let pending = try PairingColdDisableIntent(disabled).encoded
+        XCTAssertThrowsError(try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: runtime.material,
+            verifyCurrent: {}, read: f.read))
+        XCTAssertThrowsError(try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: runtime.material,
+            verifyCurrent: {}, read: f.read, retainedColdDisable: { (recorded.host.command, pending) }))
+        try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: runtime.material,
+            verifyCurrent: {}, read: f.read, retainedColdDisable: { (recorded.host.command, nil) })
+        XCTAssertEqual(try f.read(command), bytes)
+        XCTAssertTrue(try XCTUnwrap(recorded.host.command.presence.pairing).decisionProofRequired)
+    }
+
     func testMissingOrChangedPublishedArtifactDoesNotRepairOrAdvanceImport() throws {
         for missing in [false, true] {
             let f = try ImportedRuntimeFixture(), intent = try f.retain(), bundle = try f.bundle(intent)

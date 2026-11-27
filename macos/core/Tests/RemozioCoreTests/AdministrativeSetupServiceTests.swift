@@ -57,6 +57,32 @@ final class AdministrativeSetupServiceTests: XCTestCase {
         }
         XCTAssertThrowsError(try AdministrativeSetupConfiguration.decode(Data(repeating: 0, count: 16385)))
     }
+    func testPairingOptInMustBeCompleteInTheProtectedStartupRecord() throws {
+        let disabled = try configuration(release())
+        let limits = try CBORLimits(maxBytes: 16384, maxDepth: 2, maxItems: 32)
+        guard case .map(let fields) = try DeterministicCBOR.decode(disabled.canonicalBytes, limits: limits) else {
+            return XCTFail("Expected the Setup configuration map")
+        }
+        XCTAssertEqual(fields[0], .unsigned(1))
+        XCTAssertEqual(Set(fields.keys), Set(UInt64(0)...7))
+        XCTAssertEqual(try AdministrativeSetupConfiguration.decode(disabled.canonicalBytes).pairingPolicy, .disabled)
+        let lan = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        for scope in [nil, lan] as [PairingLANScope?] {
+            let enabled = try AdministrativeSetupConfiguration(machineDirectory: disabled.machineDirectory,
+                macID: mac, installationID: installation, releaseDigest: disabled.releaseDigest, codePolicy: disabled.codePolicy,
+                pairingPolicy: .v2WithDecisionProof(lanScope: scope))
+            let decoded = try AdministrativeSetupConfiguration.decode(enabled.canonicalBytes)
+            XCTAssertEqual(decoded.pairingPolicy, .v2WithDecisionProof(lanScope: scope))
+            XCTAssertEqual(decoded.canonicalBytes, enabled.canonicalBytes)
+        }
+        let incompleteValues: [CBORValue?] = [nil, .boolean(true), .array([.text("en0")])]
+        for incomplete in incompleteValues {
+            var fields = fields; fields[0] = .unsigned(2); fields[8] = incomplete
+            let bytes = try DeterministicCBOR.encode(.map(fields), limits: limits)
+            XCTAssertThrowsError(try AdministrativeSetupConfiguration.decode(bytes))
+        }
+    }
+
     func testMissingActiveRolesUnsafePathsAndConnectionLimitsAreRejected() throws {
         let release = try release(), digest = try InstallationInventory.digest(release)
         for policy in [try policy(active: false), try policy(app: false)] {

@@ -60,9 +60,9 @@ final class AccountPreparationFixture {
             allowedContracts: [contract], installCommandReplay: replay)
     }
     func begin(_ machine: PreparationIntentStore, identity: LocalAccountIdentity? = nil, targets: Set<UInt32> = [0],
-               accepted: Bool = true) throws -> AccountPreparationIntent {
+               accepted: Bool = true, pairingPolicy: SetupPairingPolicy = .disabled) throws -> AccountPreparationIntent {
         try machine.beginAccountPreparation(owner: identity ?? self.identity, allowedTargetUIDs: targets, disclosureAccepted: accepted,
-            expectedInventoryRevision: XCTUnwrap(machine.inventory()).revision, makeInitial: { try self.initial(mac: $0, account: $1) })
+            expectedInventoryRevision: XCTUnwrap(machine.inventory()).revision, pairingPolicy: pairingPolicy, makeInitial: { try self.initial(mac: $0, account: $1) })
     }
     func directory(_ value: AccountPreparationIntent) -> String { value.accountID.map { String(format: "%02x", $0) }.joined() }
     func beginStores(_ machine: PreparationIntentStore, _ value: AccountPreparationIntent) throws -> AuthorityInitializationIntent {

@@ -17,8 +17,9 @@ final class RetainedSetupInitialPublicationWriterTests: XCTestCase {
         let journal = try f.openPolicyJournal(.readOnly); defer { try? journal.close() }
         return try journal.captureRetainedSetupPolicyBoundary(expected: XCTUnwrap(f.source.runtime.setup.account?.initialization))
     }
-    private func fixture(_ body: (Fixture, Snapshot) throws -> Void) throws {
-        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture { f in
+    private func fixture(pairingPolicy: SetupPairingPolicy = .disabled,
+        _ body: (Fixture, Snapshot) throws -> Void) throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(pairingPolicy: pairingPolicy) { f in
             let before = try snapshot(f)
             let recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: before, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, useMachine: { body in
@@ -45,12 +46,13 @@ final class RetainedSetupInitialPublicationWriterTests: XCTestCase {
     }
 
     /// Seeds only owned import storage. The body receives a fresh snapshot after the seed, never a proposed native receipt.
-    static func withRecordedInitialSelectionFixture(seed: (RetainedPolicyWriterFixture) throws -> Void = { _ in },
+    static func withRecordedInitialSelectionFixture(pairingPolicy: SetupPairingPolicy = .disabled,
+        seed: (RetainedPolicyWriterFixture) throws -> Void = { _ in },
         body: (RetainedPolicyWriterFixture, MachineUpdateRetainedSetupPolicySnapshot,
             AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
         let suite = RetainedSetupInitialPublicationWriterTests(selector: NSSelectorFromString(
             "testOneActualUpdateRereadsTheExactPublicationTransitionAndClosesPolicyWriters"))
-        try suite.fixture { f, _ in
+        try suite.fixture(pairingPolicy: pairingPolicy) { f, _ in
             try seed(f); let before = try suite.snapshot(f)
             try body(f, before, suite.pair(f)); try suite.snapshot(f).requireSame(as: before)
         }

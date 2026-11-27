@@ -15,9 +15,9 @@ final class RetainedSetupInitialSelectionTests: XCTestCase {
     private enum Fault: Error { case stopped }
     private struct Seed { let intent: SharedSetupImportIntent; let relay: SharedSetupImportRelayPlan?; let path: String }
     private func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
-    private func fixture(seed: (Fixture) throws -> Void = { _ in },
+    private func fixture(pairingPolicy: SetupPairingPolicy = .disabled, seed: (Fixture) throws -> Void = { _ in },
         body: (Fixture, Snapshot, Boundary) throws -> Void) throws {
-        try RetainedSetupInitialPublicationWriterTests.withRecordedInitialSelectionFixture(seed: seed, body: body)
+        try RetainedSetupInitialPublicationWriterTests.withRecordedInitialSelectionFixture(pairingPolicy: pairingPolicy, seed: seed, body: body)
     }
     private func journal(_ f: Fixture, initialize: Bool) throws -> SharedSetupImportJournal {
         let machine = URL(fileURLWithPath: f.directory.path), anchor = machine.deletingLastPathComponent().path
@@ -77,6 +77,23 @@ final class RetainedSetupInitialSelectionTests: XCTestCase {
             guard count > 0 else { throw Fault.stopped }; offset += count
         }
         guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+    }
+
+    func testRetainedSetupDerivesTheRecordedPairingOptInOnEveryRead() throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        let policy = SetupPairingPolicy.v2WithDecisionProof(lanScope: scope)
+        try fixture(pairingPolicy: policy) { f, snapshot, pair in
+            XCTAssertEqual(snapshot.activation.runtime.preparation.pairingPolicy, policy)
+            func commandBytes() throws -> Data {
+                try withSelection(f, snapshot, pair) { selection, _ in selection.configuration.bundle.command.canonicalBytes }
+            }
+            let initial = try commandBytes()
+            let pairing = try XCTUnwrap(AuthorityCommandStartupConfiguration.decode(initial).presence.pairing)
+            XCTAssertEqual(pairing.v2ActivationEnabled, true)
+            XCTAssertTrue(pairing.decisionProofRequired)
+            XCTAssertEqual(pairing.lanScope, scope)
+            XCTAssertEqual(try commandBytes(), initial)
+        }
     }
 
     func testActualJournalAbsenceSelectsDefaultsWithoutCreatingStorageAndRepeatsExactBytes() throws {
