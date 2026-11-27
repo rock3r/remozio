@@ -37,7 +37,8 @@ private final class MachineReplacementFixture {
          stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, maintenanceWriterFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
          enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
          policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false,
-         pairingPolicy: SetupPairingPolicy = .disabled, beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
+         pairingPolicy: SetupPairingPolicy = .disabled, consumerHealthFormats: Bool = false,
+         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
         self.enableSecondReadiness = enableSecondReadiness
@@ -73,6 +74,8 @@ private final class MachineReplacementFixture {
             }
             if backendEpoch {
                 requiredFormats += try MachineUpdateBackendEpochRecord.requirements + MachineUpdateBackendEpochRecord.publicationRequirements
+            }
+            if backendEpoch || consumerHealthFormats {
                 requiredFormats += try MachineUpdateConsumerHealthReleaseValidation.formatRequirements
             }
             if completionIntent {
@@ -930,7 +933,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
         for coldDisable in [false, true] {
             let f = try Fixture(configurationEpoch: true, pairingPolicy: .v2WithDecisionProof(lanScope: scope),
-                beforeActivation: { files in
+                consumerHealthFormats: coldDisable, beforeActivation: { files in
                     guard coldDisable else { return }
                     let source = files.machine.f.plan, store = files.machine.store
                     let target = try source.replacingPairingHost(PairingColdDisableConfiguration(source: source.host).target)
