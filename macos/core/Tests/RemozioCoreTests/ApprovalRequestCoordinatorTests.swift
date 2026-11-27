@@ -36,15 +36,18 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let db = try open(fixture, initialize: true, routingPolicy: routingPolicy)
         let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
         let writer = try db.write { try $0.createEpoch(descriptor(3)) }
-        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+        let enrollment = try fixtureEnrollment()
+        _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+            eventID: id(30), receiptTimeMs: 900, writer: writer, expectedAuditHead: 0) }
+        return (db, writer)
+    }
+    private func fixtureEnrollment() throws -> StoredApprovalEnrollment {
+        try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
             identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
             approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities, keys: [
                 EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
                 EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation),
             ]))
-        _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
-            eventID: id(30), receiptTimeMs: 900, writer: writer, expectedAuditHead: 0) }
-        return (db, writer)
     }
     private func owner(_ db: JournalDatabase, _ writer: AuditEpochWriter, maximum: Int = 8, bytes: Int = 32768,
                        wakes: Int = 1024) throws -> ApprovalRequestCoordinator {
@@ -318,12 +321,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     private func checkpointedOwner(_ fixture: Fixture, _ db: JournalDatabase, _ writer: AuditEpochWriter) throws -> (ApprovalRequestCoordinator, ContinuityStore) {
-        let directory = fixture.root.appendingPathComponent("continuity")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        for name in ["writer.lock", "continuity.sqlite"] {
-            let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
-            guard fd >= 0 else { throw Failure.fixture }; Darwin.close(fd)
-        }
+        try fixture.createContinuityFiles()
         let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
             generation: 1, authorityGeneration: 3) }
         let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path, relativeDirectory: "continuity", owner: getuid()),
@@ -1639,6 +1637,14 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
         deinit { try? FileManager.default.removeItem(at: root) }
         func lease() throws -> ProtectedJournalLease { try .init(anchor: root.path, relativeDirectory: "store", owner: getuid()) }
+        func createContinuityFiles() throws {
+            let directory = root.appendingPathComponent("continuity")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            for name in ["writer.lock", "continuity.sqlite"] {
+                let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+                guard fd >= 0 else { throw Failure.fixture }; Darwin.close(fd)
+            }
+        }
         func continuitySnapshot() throws -> ContinuityState {
             let path = root.appendingPathComponent("continuity/continuity.sqlite").path
             var connection: OpaquePointer?
@@ -2359,10 +2365,67 @@ extension ApprovalRequestCoordinatorTests {
         XCTAssertEqual(batch.queryNonce, nonce); XCTAssertEqual(batch.macID, id(1)); XCTAssertEqual(batch.accountID, id(2))
         return batch
     }
+    private func idleRetentionJournal(_ fixture: Fixture, cyclePolicy: AuditRetention.Policy? = nil)
+        throws -> (AuthorityJournal, AuthorityPeerBinding) {
+        let limits = try limits, capabilities = try capabilities, contract = try contract
+        let anchor = fixture.root.path, clock = clock, mac = id(1), account = id(2)
+        let original = try descriptor(3), enrollment = try fixtureEnrollment(), enrollmentEvent = id(30)
+        try fixture.createContinuityFiles()
+        let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+            macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits,
+            decisionLimits: limits, maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+        let firstWriter = try db.write { transaction in
+            let revision = try transaction.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract])
+            let writer = try transaction.createEpoch(original)
+            _ = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+                eventID: enrollmentEvent, receiptTimeMs: 900, writer: writer, expectedAuditHead: 0)
+            return writer
+        }
+        let writer: AuditEpochWriter
+        if let cyclePolicy {
+            let oldEvent = try AuditEventMetadata(eventID: id(80), macID: mac, accountID: account,
+                journalEpoch: original.epoch, sequence: 2, requestID: nil, eventTimeMs: nil,
+                authorityReceiptTimeMs: nil, kind: .requestCreated, category: .command, action: nil,
+                decisionPhoneID: nil, authentication: .system, outcome: .pending, reason: .none,
+                droppedEventCount: nil, peerDeviceID: nil).encode(limits: limits)
+            // The two empty epochs form a cycle. The checkpoint still matches the journal bytes.
+            func linked(_ epoch: UInt8, previous: UInt8) throws -> AuditEpochDescriptor {
+                try .decode(DeterministicCBOR.encode(.map([
+                    0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(Data(repeating: epoch, count: 16)),
+                    4: .unsigned(UInt64(epoch)), 5: .unsigned(AuditEpochCause.restart.rawValue),
+                    6: .bytes(Data(repeating: previous, count: 16)), 7: .unsigned(0), 8: .null,
+                ]), limits: limits), limits: limits)
+            }
+            let previous = try linked(4, previous: 5), active = try linked(5, previous: 4)
+            writer = try db.write { transaction in
+                try transaction.append(oldEvent, writer: firstWriter, expectedHead: 1)
+                _ = try transaction.createEpoch(previous)
+                return try transaction.createEpoch(active)
+            }
+            XCTAssertThrowsError(try db.read {
+                try AuditRetention.plan(transaction: $0, activeEpoch: active.epoch, policy: cyclePolicy, continuing: false)
+            }) {
+                XCTAssertEqual($0 as? AuditRetention.PlanningFailure, .cyclicLineage)
+            }
+        } else {
+            writer = firstWriter
+        }
+        let epoch = writer.epoch
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        let binding = AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision)
+        let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch,
+            generation: 1, authorityGeneration: 3) }
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
+            macID: mac, accountID: account, initialize: initial)
+        let requests = try ApprovalRequestCoordinator(database: db, continuity: continuity, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        return (AuthorityJournal(requests: requests), binding)
+    }
+
     func testIdleAuditRetentionSkipsRequestExchangeAndExecutionWork() throws {
-        let fixture = try Fixture(), (db, writer) = try setup(fixture)
-        let (requests, _) = try checkpointedOwner(fixture, db, writer)
-        let journal = AuthorityJournal(requests: requests)
+        let fixture = try Fixture()
+        let (journal, _) = try idleRetentionJournal(fixture)
         defer { try? journal.close() }
         let epoch = id(3), initial = now(), deadline = now(200), draft = try draft()
         let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 3, maximumRowsPerBatch: 1)
@@ -2393,30 +2456,10 @@ extension ApprovalRequestCoordinatorTests {
     }
 
     func testIdleAuditRetentionSuspendsPlanningFailureAndKeepsRequestsAvailable() throws {
-        let fixture = try Fixture(), (db, firstWriter) = try setup(fixture)
-        let oldEvent = try AuditEventMetadata(eventID: id(80), macID: id(1), accountID: id(2),
-            journalEpoch: firstWriter.epoch, sequence: 2, requestID: nil, eventTimeMs: nil,
-            authorityReceiptTimeMs: nil, kind: .requestCreated, category: .command, action: nil,
-            decisionPhoneID: nil, authentication: .system, outcome: .pending, reason: .none,
-            droppedEventCount: nil, peerDeviceID: nil).encode(limits: limits)
-        try db.write { try $0.append(oldEvent, writer: firstWriter, expectedHead: 1) }
-        // This fixture has a matching checkpoint, but the two empty epochs form a cycle.
-        func linked(_ epoch: UInt8, previous: UInt8) throws -> AuditEpochDescriptor {
-            try .decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(id(1)), 2: .bytes(id(2)), 3: .bytes(id(epoch)),
-                4: .unsigned(UInt64(epoch)), 5: .unsigned(AuditEpochCause.restart.rawValue),
-                6: .bytes(id(previous)), 7: .unsigned(0), 8: .null]), limits: limits), limits: limits)
-        }
-        _ = try db.write { try $0.createEpoch(linked(4, previous: 5)) }
-        let writer = try db.write { try $0.createEpoch(linked(5, previous: 4)) }
+        let fixture = try Fixture()
         let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 2, maximumRowsPerBatch: 10)
-        XCTAssertThrowsError(try db.read {
-            try AuditRetention.plan(transaction: $0, activeEpoch: writer.epoch, policy: policy, continuing: false)
-        }) {
-            XCTAssertEqual($0 as? AuditRetention.PlanningFailure, .cyclicLineage)
-        }
-        let (requests, _) = try checkpointedOwner(fixture, db, writer)
+        let (journal, _) = try idleRetentionJournal(fixture, cyclePolicy: policy)
         let before = try fixture.continuitySnapshot()
-        let journal = AuthorityJournal(requests: requests)
         defer { try? journal.close() }
         XCTAssertNil(try journal.pruneAuditHistoryIfIdle(policy: policy))
         XCTAssertEqual(try fixture.continuitySnapshot(), before)
@@ -2434,9 +2477,8 @@ extension ApprovalRequestCoordinatorTests {
 
     func testIdleAuditRetentionLeavesStorageAndIntegrityFailuresFailClosed() throws {
         for changeJournal in [false, true] {
-            let fixture = try Fixture(), (db, writer) = try setup(fixture)
-            let (requests, _) = try checkpointedOwner(fixture, db, writer)
-            let journal = AuthorityJournal(requests: requests)
+            let fixture = try Fixture()
+            let (journal, _) = try idleRetentionJournal(fixture)
             defer { try? journal.close() }
             let draft = try draft(), initial = now(), deadline = now(210), later = now(220), epoch = id(3)
             _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
@@ -2468,10 +2510,8 @@ extension ApprovalRequestCoordinatorTests {
     }
 
     func testIdleAuditRetentionTransfersVerifiedBoundaryAndRetainedRecords() throws {
-        let fixture = try Fixture(), (db, writer) = try setup(fixture)
-        let binding = try frameBinding(db), signer = key
-        let (requests, _) = try checkpointedOwner(fixture, db, writer)
-        let journal = AuthorityJournal(requests: requests)
+        let fixture = try Fixture(), signer = key
+        let (journal, binding) = try idleRetentionJournal(fixture)
         defer { try? journal.close() }
         let initial = now(), deadline = now(210), draft = try draft()
         _ = try journal.withRequests { try $0.admitFixture(draft, now: initial, receiptTimeMs: nil) }
