@@ -7,10 +7,12 @@ public typealias ConsumptionReceipt = RemozioHostCore.ConsumptionReceipt
 
 /// Private adapter for the Mac connection owner; keep its storage errors and transaction failure handling.
 final class ConsumptionJournal {
+    private let db: OpaquePointer
     private let tables: ConsumptionJournalTables
 
     init(connection: OpaquePointer, macID: Data, accountID: Data, decisionLimits: CBORLimits,
          recordLimits: CBORLimits, maximumRows: Int) throws {
+        db = connection
         tables = try ConsumptionJournalTables(connection: connection, macID: macID, accountID: accountID,
             decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumRows)
     }
@@ -25,7 +27,14 @@ final class ConsumptionJournal {
         try adapt {
             try tables.consume(canonicalDecision: canonicalDecision, signature: signature, retained: retained,
                 trust: trust, now: now, eventID: eventID, receiptTimeMs: receiptTimeMs, writer: writer,
-                expectedHead: expectedHead, audit: audit, requestLimits: requestLimits, signingLimits: signingLimits)
+                expectedHead: expectedHead, audit: audit, requestLimits: requestLimits, signingLimits: signingLimits,
+                permanentReplay: AuthorityJournalSchema.permanentReplayInstalled(on: db))
+        }
+    }
+
+    func hasConsumed(requestID: Data) throws -> Bool {
+        try adapt {
+            try tables.hasConsumed(requestID: requestID, permanentReplay: AuthorityJournalSchema.permanentReplayInstalled(on: db))
         }
     }
 

@@ -454,11 +454,12 @@ class ReleaseManifestBuildTests(unittest.TestCase):
 
     def test_journal_declarations_match_the_storage_format_range(self):
         source = (ROOT / 'macos/core/Sources/RemozioCore/AuthorityJournalSchema.swift').read_text()
-        match = re.search(r'static let supportedFormats: ClosedRange<Int64> = (\d+)\.\.\.recoveryFormat', source)
+        match = re.search(r'static let supportedFormats: ClosedRange<Int64> = (\d+)\.\.\.(\w+)', source)
         self.assertIsNotNone(match, 'AuthorityJournalSchema must declare its accepted storage format range')
-        recovery = re.search(r'static let recoveryFormat: Int64 = (\d+)', source)
-        self.assertIsNotNone(recovery, 'AuthorityJournalSchema must declare its recovery format')
-        expected = list(range(int(match.group(1)), int(recovery.group(1)) + 1))
+        upper_name = re.escape(match.group(2))
+        upper = re.search(rf'^\s*static let {upper_name}: Int64 = (\d+)\s*$', source, re.MULTILINE)
+        self.assertIsNotNone(upper, 'AuthorityJournalSchema must declare the upper storage format')
+        expected = list(range(int(match.group(1)), int(upper.group(1)) + 1))
         for role in (2, 8):
             with self.subTest(role=role):
                 declaration = next(value for value in MANIFEST.declarations(role) if value[0] == 'authority.journal')

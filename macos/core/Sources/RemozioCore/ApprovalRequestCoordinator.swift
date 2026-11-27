@@ -681,7 +681,7 @@ public final class ApprovalRequestCoordinator {
             let trust = try tx.approvalTrustSnapshot()
             guard trust.allowedContracts.contains(payload.contract), let features = trust.authorityCapabilities.contracts[payload.contract],
                   payload.requiredFeatures.isSubset(of: features) else { throw DecisionVerificationError.unsupportedContract }
-            guard try tx.consumption(requestID: payload.requestID) == nil else { throw ApprovalCoordinatorError.invalidDraft }
+            guard try !tx.hasConsumed(requestID: payload.requestID) else { throw ApprovalCoordinatorError.invalidDraft }
             if let command {
                 let reservation = try CommandSubmissionReservation(macID: mac, accountID: account, submission: command.capture.submission,
                     captureDigest: Data(SHA256.hash(data: command.capture.canonicalBytes)))

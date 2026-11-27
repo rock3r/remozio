@@ -4,6 +4,8 @@ import Foundation
 import SQLite3
 import XCTest
 import RemozioProtocol
+import class RemozioHostCore.CommandSubmissionReplayTables
+import class RemozioHostCore.ConsumptionJournalTables
 @testable import RemozioCore
 
 final class CheckpointedJournalTests: XCTestCase {
@@ -143,6 +145,216 @@ final class CheckpointedJournalTests: XCTestCase {
         }
         XCTAssertFalse(restarted.retired)
         XCTAssertEqual(try fixture.store.read().committed, after)
+    }
+
+    func testPermanentReplayMigrationReconcilesEveryCheckpointFailure() throws {
+        enum Cut: CaseIterable { case prepare, journalCommit, finalize }
+        for cut in Cut.allCases {
+            let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+            _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
+            let before = try fixture.store.read().committed
+            let format = try fixture.journal.read { try $0.storageFormatVersion }
+            if cut == .journalCommit {
+                try fixture.withJournalReader {
+                    XCTAssertThrowsError(try commits.installPermanentReplay()) {
+                        XCTAssertEqual($0 as? JournalDatabaseError, .storage(SQLITE_BUSY))
+                    }
+                }
+            } else {
+                let condition = cut == .prepare ? "NEW.pending IS NOT NULL" : "NEW.pending IS NULL"
+                try fixture.sql("""
+                    CREATE TRIGGER fail_seed BEFORE UPDATE ON continuity_v1 WHEN \(condition)
+                    BEGIN SELECT RAISE(ABORT,'injected'); END
+                    """)
+                XCTAssertThrowsError(try commits.installPermanentReplay())
+                try fixture.sql("DROP TRIGGER fail_seed")
+            }
+            XCTAssertTrue(commits.retired)
+            let pending = try fixture.store.read().pending
+            try fixture.reopen()
+            let result = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
+            switch cut {
+            case .prepare: XCTAssertNil(pending); XCTAssertEqual(result, .unchanged(before))
+            case .journalCommit: XCTAssertNotNil(pending); XCTAssertEqual(result, .discarded(before))
+            case .finalize: XCTAssertEqual(result, .finalized(try XCTUnwrap(pending)))
+            }
+            let restarted = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+            XCTAssertEqual(try restarted.read { try $0.storageFormatVersion },
+                cut == .finalize ? UInt64(AuthorityJournalSchema.permanentReplayFormat) : format)
+            XCTAssertEqual(try restarted.read { try $0.commandSubmissionReservation(submissionID: value.submission.id) }, value)
+            XCTAssertEqual(try restarted.installPermanentReplay(), cut == .finalize ? .alreadyInstalled : .installed)
+            XCTAssertTrue(try restarted.read { try $0.commandSubmissionReserved(value.submission) })
+        }
+    }
+
+    func testPermanentReplayDoesNotSeedAcrossUnresolvedOrPendingHistoryGap() throws {
+        for prepared in [false, true] {
+            let fixture = try Fixture(), commits = try installCommandReplay(fixture)
+            let before = try fixture.store.read().committed
+            let format = try fixture.journal.read { try $0.storageFormatVersion }
+            try fixture.journal.write { try fixture.append($0) }
+            if prepared {
+                let digests = try fixture.journal.read { try $0.continuityDigests() }
+                try fixture.store.prepareHistoryRecovery(HistoryRecoveryIntent(previous: .init(committed: before,
+                    pending: nil, recoveryRequired: false), authorityDigest: digests.authority,
+                    ledgerDigest: digests.ledger, recoveryEpoch: Data(repeating: 19, count: 16)))
+            }
+            XCTAssertThrowsError(try commits.installPermanentReplay())
+            XCTAssertEqual(try fixture.journal.read { try $0.storageFormatVersion }, format)
+            XCTAssertEqual(try fixture.store.historyRecovery() != nil, prepared)
+        }
+    }
+
+    func testPermanentReplaySkipsFinalizedHistoryGapAndKeepsLegacyAdmissionOpen() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture)
+        let contract = try RequestContract(requestKind: .onePasswordAccess, wireVersion: 1, schemaVersion: 1)
+        _ = try commits.write(epoch: fixture.epoch) {
+            try $0.configureApprovalAuthority(capabilities: .init(contracts: [contract: []]), allowedContracts: [contract])
+        }
+        let format = try fixture.journal.read { try $0.storageFormatVersion }
+        try fixture.journal.write { try fixture.append($0) }
+        let recovered = try recoverHistory(fixture)
+        try fixture.journal.close()
+        fixture.store.close()
+        let authority = try AuthorityJournal(storage: fixture.openTransferredStorage())
+        defer { try? authority.close() }
+        XCTAssertEqual(try authority.installPermanentReplay(), .legacyHistoryGap)
+        XCTAssertEqual(try authority.read { try $0.storageFormatVersion }, format)
+        let epoch = UUID(), observed = AuthorityMoment(epoch: epoch, milliseconds: 100)
+        try authority.prepareRequests(clockEpoch: epoch, maximumPayloadBytes: 16384)
+        let draft = ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]),
+            actions: [.init(choice: .approveAccess, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+            firstObservedAt: observed, deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+        let payload = try authority.withRequests { try $0.admit(draft, now: observed, receiptTimeMs: nil) }
+        XCTAssertEqual(payload.contract, contract)
+        XCTAssertEqual(try authority.read { try $0.storageFormatVersion }, format)
+        let gapEpoch = recovered.journalEpoch
+        XCTAssertNotNil(try authority.read { try $0.historyRecovery(epoch: gapEpoch) })
+    }
+
+    func testPermanentReplayKeepsNonceAfterLedgerHistoryRecovery() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), prior = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(prior) }
+        XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+        let before = try fixture.store.read().committed
+        try fixture.sql("DELETE FROM command_submissions_v1", journal: true)
+        let recovered = try recoverHistory(fixture)
+        XCTAssertEqual(recovered.authorityDigest, before.authorityDigest)
+        try fixture.reopen()
+        let restarted = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        XCTAssertNil(try restarted.read { try $0.commandSubmissionReservation(submissionID: prior.submission.id) })
+
+        for nonceOnly in [true, false] {
+            let candidate = try CommandSubmissionReservation(macID: prior.macID, accountID: prior.accountID,
+                submission: CapturedSubmission(id: nonceOnly ? Data(repeating: 40, count: 16) : prior.submission.id,
+                    nonce: nonceOnly ? prior.submission.nonce : Data(repeating: 41, count: 32),
+                    callerBinding: Data(repeating: 42, count: 16)), captureDigest: Data(repeating: 43, count: 32))
+            XCTAssertTrue(try restarted.read { try $0.commandSubmissionReserved(candidate.submission) })
+            XCTAssertThrowsError(try restarted.write(epoch: recovered.journalEpoch, recoverRejectedBody: true) {
+                try $0.reserveCommandSubmission(candidate)
+            }) { XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved) }
+            XCTAssertFalse(restarted.retired)
+        }
+        let fresh = try CommandSubmissionReservation(macID: prior.macID, accountID: prior.accountID,
+            submission: CapturedSubmission(id: Data(repeating: 40, count: 16), nonce: Data(repeating: 41, count: 32),
+                callerBinding: Data(repeating: 42, count: 16)), captureDigest: Data(repeating: 43, count: 32))
+        XCTAssertEqual(try restarted.write(epoch: recovered.journalEpoch) { try $0.reserveCommandSubmission(fresh) }, fresh)
+    }
+
+    func testPermanentReplayMissingKeyRequiresRepair() throws {
+        for mutation in [
+            "DELETE FROM command_submission_replay_v1",
+            "DELETE FROM command_nonce_replay_v1",
+            "UPDATE command_submission_replay_v1 SET nonce=zeroblob(32)",
+            "UPDATE command_nonce_replay_v1 SET submission=zeroblob(16)",
+        ] {
+            let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+            _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
+            XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+            let checkpoint = try fixture.store.read()
+            try fixture.sql(mutation, journal: true)
+            try fixture.reopen()
+            XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                .repairRequired, mutation)
+            XCTAssertThrowsError(try recoverHistory(fixture), mutation)
+            XCTAssertEqual(try fixture.store.read(), checkpoint, mutation)
+
+            // Model an already committed inconsistent pair in this fixture to isolate the startup check.
+            // The ordinary checkpoint comparison rejected the same bytes above.
+            let observed = try fixture.journal.read { try $0.continuityDigests() }
+            let old = checkpoint.committed
+            let candidate = try old.successor(authorityDigest: observed.authority, ledgerDigest: observed.ledger,
+                journalEpoch: old.journalEpoch, journalHead: old.journalHead)
+            try fixture.store.prepare(expected: old, candidate: candidate)
+            try fixture.store.finalize(expected: ContinuityState(committed: old, pending: candidate, recoveryRequired: false))
+            XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                .unchanged(candidate), mutation)
+            let startup = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+                maximumRecords: 10, maximumBytes: fixture.limits.maxBytes)
+            let next = Data(repeating: 6, count: 16)
+            let descriptor = try fixture.descriptor(next, generation: candidate.currentAuthorityGeneration)
+            guard case .repairRequired = try startup.start(descriptor: descriptor) else {
+                return XCTFail("Startup accepted inconsistent command replay keys: " + mutation)
+            }
+            XCTAssertThrowsError(try startup.completedWriter(), mutation)
+            XCTAssertNil(try fixture.journal.read { try $0.epoch(next) }, mutation)
+            XCTAssertEqual(try fixture.store.read().committed, candidate, mutation)
+        }
+    }
+
+    private final class ReplaySQLTrace {
+        var statements: [String] = []
+    }
+
+    func testPermanentReplayLookupsUseOnlyPrimaryKeys() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
+        XCTAssertEqual(try commits.installPermanentReplay(), .installed)
+        let path = fixture.root.appendingPathComponent("journal/journal.sqlite").path
+        var connection: OpaquePointer?
+        guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db = connection else {
+            throw Fault.injected
+        }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+
+        let trace = ReplaySQLTrace(), context = Unmanaged.passUnretained(trace).toOpaque()
+        XCTAssertEqual(sqlite3_trace_v2(db, UInt32(SQLITE_TRACE_STMT), { _, context, rawStatement, _ in
+            guard let context, let rawStatement, let sql = sqlite3_sql(OpaquePointer(rawStatement)) else { return 0 }
+            Unmanaged<ReplaySQLTrace>.fromOpaque(context).takeUnretainedValue().statements.append(String(cString: sql))
+            return 0
+        }, context), SQLITE_OK)
+        defer { sqlite3_trace_v2(db, 0, nil, nil) }
+        let commands = try CommandSubmissionReplayTables(connection: db, macID: value.macID, accountID: value.accountID, maximumRows: 10)
+        let consumptions = try ConsumptionJournalTables(connection: db, macID: value.macID, accountID: value.accountID,
+            decisionLimits: fixture.limits, recordLimits: fixture.limits, maximumRows: 10)
+        XCTAssertTrue(try commands.contains(value.submission, permanentReplay: true))
+        XCTAssertFalse(try consumptions.hasConsumed(requestID: value.submission.id, permanentReplay: true))
+        XCTAssertEqual(sqlite3_trace_v2(db, 0, nil, nil), SQLITE_OK)
+        XCTAssertEqual(trace.statements.count, 2)
+
+        let searches = try trace.statements.flatMap { sql -> [String] in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "EXPLAIN QUERY PLAN " + sql, -1, &statement, nil) == SQLITE_OK,
+                  let row = statement else { throw Fault.injected }
+            defer { sqlite3_finalize(row) }
+            var details: [String] = []
+            var step = sqlite3_step(row)
+            while step == SQLITE_ROW {
+                details.append(String(cString: try XCTUnwrap(sqlite3_column_text(row, 3))))
+                step = sqlite3_step(row)
+            }
+            XCTAssertEqual(step, SQLITE_DONE)
+            XCTAssertFalse(details.contains { $0.contains("SCAN ") || $0.contains(" INDEX ") }, details.joined(separator: "\n"))
+            return details.filter { $0.hasPrefix("SEARCH ") }
+        }
+        XCTAssertEqual(searches.count, 3)
+        for (name, key) in [("command_submission_replay_v1", "submission"), ("command_nonce_replay_v1", "nonce"),
+                            ("consumption_replay_v1", "request")] {
+            XCTAssertTrue(searches.contains { detail in
+                detail.contains(name + " USING PRIMARY KEY") && detail.contains(key + "=?")
+            }, searches.joined(separator: "\n"))
+        }
     }
 
     func testCommandReplayMalformedSubmissionFieldsAreRejectedBeforeCheckpointWork() throws {

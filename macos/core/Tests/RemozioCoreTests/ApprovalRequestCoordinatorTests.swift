@@ -561,6 +561,38 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertEqual(try store.read().committed.currentAuthorityGeneration, 3)
     }
 
+    func testPermanentReplaySeedsExistingSignedConsumptionAndAdvancesAuthorityGeneration() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture)
+        let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEF1234",
+            identifier: "dev.sebastiano.remozio.macos.authority", installedGeneration: 1, minimumGeneration: 1,
+            codeDirectoryHash: id(8, 20), active: true)])
+        try db.write {
+            _ = try $0.installCodePolicy(policy, expectedRevision: nil)
+            try $0.installCommandSubmissionReplay()
+        }
+        let (legacy, store) = try checkpointedOwner(fixture, db, writer)
+        defer { try? db.close(); store.close() }
+        let oldRequest = try legacy.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let retained = try consume(legacy, oldRequest)
+        legacy.close()
+        let writerAfterMigration = CheckpointedJournal(journal: db, continuity: store)
+        XCTAssertEqual(try writerAfterMigration.installPermanentReplay(), .installed)
+        XCTAssertEqual(try writerAfterMigration.read { try $0.consumption(requestID: oldRequest.requestID) }, retained)
+        XCTAssertTrue(try writerAfterMigration.read { try $0.hasConsumed(requestID: oldRequest.requestID) })
+        // Construct a fresh request coordinator over the installed checkpoint.
+        let owner = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        let pending = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let independent = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        let before = try store.read().committed
+        _ = try consume(owner, independent)
+        XCTAssertEqual(try store.read().committed.currentAuthorityGeneration, before.currentAuthorityGeneration + 1)
+        XCTAssertTrue(try writerAfterMigration.read { try $0.hasConsumed(requestID: independent.requestID) })
+        XCTAssertEqual(try owner.markPresented(requestID: pending.requestID, now: now(120), receiptTimeMs: nil).phase, .presented)
+        try assertCheckpoint(db, store, writer)
+    }
+
     func testInvalidSignatureDoesNotRetireHealthyCheckpointedRequestOwner() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (owner, store) = try checkpointedOwner(fixture, db, writer)

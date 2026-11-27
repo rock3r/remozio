@@ -38,8 +38,15 @@ final class JournalStartupRecovery {
         }
         let checkpoint = try continuity.read().committed
         guard descriptor.generation == checkpoint.currentAuthorityGeneration,
-              descriptor.cause == .restart || descriptor.cause == .recovery,
-              try journal.read({ try $0.epoch(descriptor.epoch) }) == nil else { throw Failure.invalidEpoch }
+              descriptor.cause == .restart || descriptor.cause == .recovery else { throw Failure.invalidEpoch }
+        do {
+            try journal.read { transaction in
+                guard try transaction.epoch(descriptor.epoch) == nil else { throw Failure.invalidEpoch }
+                try transaction.validatePermanentReplayStorage()
+            }
+        } catch PermanentReplayJournal.Failure.inconsistentCommandKeys {
+            return .repairRequired
+        }
         let commits = CheckpointedJournal(journal: journal, continuity: continuity)
         let writer = try commits.write(epoch: descriptor.epoch) { try $0.createEpoch(descriptor) }
         self.commits = commits; self.writer = writer

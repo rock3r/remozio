@@ -6,6 +6,9 @@ final class CheckpointedJournal {
     enum Failure: Error, Equatable {
         case retired, reentrant, unresolvedPreparation, boundaryMismatch, generationExhausted, missingEpoch
     }
+    enum PermanentReplayMigration: Equatable {
+        case installed, alreadyInstalled, legacyHistoryGap
+    }
     private let journal: JournalDatabase
     private let continuity: ContinuityStore
     private(set) var retired = false
@@ -95,6 +98,20 @@ final class CheckpointedJournal {
             } catch { retired = true; throw error }
             return try body(checkpoint.committed, transaction)
         }
+    }
+
+    /// The caller must validate the installed reader floor and keep admission closed.
+    func installPermanentReplay() throws -> PermanentReplayMigration {
+        let (checkpoint, installed, hasGap) = try verifiedRead { checkpoint, transaction in
+            (checkpoint, try transaction.hasPermanentReplayStorage(), try transaction.hasRecordedHistoryGap())
+        }
+        if installed { return .alreadyInstalled }
+        // An authenticated discontinuity is valid legacy state. No storage mutation is needed to skip it.
+        if hasGap { return .legacyHistoryGap }
+        try write(epoch: checkpoint.journalEpoch, expectedCheckpoint: checkpoint) { transaction in
+            try transaction.installPermanentReplay()
+        }
+        return .installed
     }
 
     /// Run one bounded maintenance batch under the caller's exclusive journal ownership.
