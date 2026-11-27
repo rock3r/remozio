@@ -1160,10 +1160,14 @@ def _label(pid, tag):
 def label_kind(raw, tag):
     """An AppArmor label from attr/current. systemd 257 on Ubuntu attaches AppArmorProfile= as a stack
     with unconfined ("rmzso-owner-<tag>//&unconfined (enforce)"); a stack confines by the intersection
-    of its parts and unconfined adds no rule, so it counts as the profile. Any other stack is "other"."""
+    of its parts and unconfined adds no rule, so it counts as the profile. The mode must be enforce: a
+    profile in complain mode confines nothing. Any other stack or mode is "other"."""
     if raw == "unconfined":
         return "unconfined"
-    parts = raw.split(" ")[0].split("//&")
+    label, separator, mode = raw.partition(" ")
+    if not separator or mode != "(enforce)":
+        return "other"
+    parts = label.split("//&")
     if parts[0] == PROFILE_PREFIX + tag and all(part == "unconfined" for part in parts[1:]):
         return "profile"
     return "other"

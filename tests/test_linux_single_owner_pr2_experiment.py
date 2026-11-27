@@ -1415,6 +1415,10 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(EXPERIMENT.label_kind(f"{name}//&snap.other (enforce)", TAG), "other")
         self.assertEqual(EXPERIMENT.label_kind(f"unconfined//&{name} (enforce)", TAG), "other")
         self.assertEqual(EXPERIMENT.label_kind(f"{EXPERIMENT.PROFILE_PREFIX}00000000 (enforce)", TAG), "other")
+        self.assertEqual(EXPERIMENT.label_kind(f"{name} (complain)", TAG), "other")
+        self.assertEqual(EXPERIMENT.label_kind(f"{name}//&unconfined (complain)", TAG), "other")
+        self.assertEqual(EXPERIMENT.label_kind(f"{name}//&unconfined (mixed)", TAG), "other")
+        self.assertEqual(EXPERIMENT.label_kind(name, TAG), "other")
 
     def test_a_soname_symlink_is_hashed_through_its_resolved_system_file(self):
         resolved = {"/lib/x86_64-linux-gnu/libsqlite3.so.0": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6",
