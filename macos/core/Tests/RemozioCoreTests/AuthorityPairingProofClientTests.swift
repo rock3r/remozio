@@ -11,6 +11,31 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
     private final class CloseCount: Sendable {
         let value = Mutex(0)
     }
+    private final class NativeReceiptSend: Sendable {
+        private let completed = XCTestExpectation(description: "Server finished sending the receipt")
+        private let result = Mutex<Result<Void, any Error>?>(nil)
+
+        init() { completed.assertForOverFulfill = true }
+
+        var hasCompleted: Bool { result.withLock { $0 != nil } }
+
+        func record(_ send: @Sendable () async throws -> Void) async throws {
+            defer { completed.fulfill() }
+            do {
+                try await send()
+                result.withLock { $0 = .success(()) }
+            } catch {
+                result.withLock { $0 = .failure(error) }
+                throw error
+            }
+        }
+
+        func wait(in test: AuthorityPairingProofClientTests) async throws {
+            await test.fulfillment(of: [completed], timeout: 3)
+            try XCTUnwrap(result.withLock { $0 }, "The server did not finish sending the receipt").get()
+        }
+    }
+
     private typealias RegistrationReply = @Sendable (Data?, Data?) -> Void
 
     /// Script reply delivery over an anonymous connection with no TCP or installed service.
@@ -224,7 +249,11 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         try await expiredNativeCandidate(duringVerification: true)
     }
 
-    private func expiredNativeCandidate(duringVerification: Bool) async throws {
+    func testNativeListenerFinishesSendingAfterThePeerVerifiesTheReceipt() async throws {
+        try await expiredNativeCandidate(duringVerification: false, holdCompletionUntilPeerVerifies: true)
+    }
+
+    private func expiredNativeCandidate(duringVerification: Bool, holdCompletionUntilPeerVerifies: Bool = false) async throws {
         let replies = try Replies()
         replies.holdRegistration.withLock { $0 = !duringVerification }
         replies.holdVerification.withLock { $0 = duringVerification }
@@ -234,10 +263,13 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         let fixture = try TransportPairingFixture()
         let invitation = try PairingInvitationV2(invitation: fixture.invitation, windowID: Data(repeating: 2, count: 16),
             secret: Data(repeating: 3, count: 32), lifetimeMilliseconds: 15_000)
-        let served = Mutex(false)
+        let receipt = NativeReceiptSend()
+        let peerVerified = holdCompletionUntilPeerVerifies ? XCTestExpectation(description: "Peer verified the receipt") : nil
         let (listener, port) = try await listen(fixture, invitation: invitation, client: client) { session in
-            try await Self.serveNativePairing(session, fixture: fixture)
-            served.withLock { $0 = true }
+            try await receipt.record {
+                try await Self.serveNativePairing(session, fixture: fixture)
+                if let peerVerified { await self.fulfillment(of: [peerVerified], timeout: 3) }
+            }
         }
         do {
             do {
@@ -252,16 +284,19 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
                 replies.deliverOldRegistration()
             }
             XCTAssertEqual(closes.value.withLock { $0 }, 0)
-            XCTAssertFalse(served.withLock { $0 })
+            XCTAssertFalse(receipt.hasCompleted)
             replies.holdRegistration.withLock { $0 = false }
             replies.holdVerification.withLock { $0 = false }
-            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation)
+            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation, afterVerifiedReceipt: {
+                peerVerified?.fulfill()
+                // Keep the channel open until the server completes its post-write check.
+                try await receipt.wait(in: self)
+            })
         } catch {
             await listener.closeAndWait()
             throw error
         }
         await listener.closeAndWait()
-        XCTAssertTrue(served.withLock { $0 })
     }
 
     func testNativeListenerExpiresAQueuedRegistrationAndAcceptsTheNextPeer() async throws {
@@ -285,10 +320,9 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
         let fixture = try TransportPairingFixture()
         let invitation = try PairingInvitationV2(invitation: fixture.invitation, windowID: Data(repeating: 2, count: 16),
             secret: Data(repeating: 3, count: 32), lifetimeMilliseconds: 15_000)
-        let served = Mutex(false)
+        let receipt = NativeReceiptSend()
         let (listener, port) = try await listen(fixture, invitation: invitation, client: client, registrationLane: lane) { session in
-            try await Self.serveNativePairing(session, fixture: fixture)
-            served.withLock { $0 = true }
+            try await receipt.record { try await Self.serveNativePairing(session, fixture: fixture) }
         }
         let queued = Task { try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation) }
         defer { queued.cancel() }
@@ -307,17 +341,18 @@ final class AuthorityPairingProofClientTests: XCTestCase, @unchecked Sendable {
             try await holder.value
             XCTAssertNil(replies.registered.withLock { $0 })
             XCTAssertEqual(lane.waitingCount, 0)
-            XCTAssertFalse(served.withLock { $0 })
+            XCTAssertFalse(receipt.hasCompleted)
             XCTAssertEqual(closes.value.withLock { $0 }, 0)
 
             replies.holdRegistration.withLock { $0 = false }
-            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation)
+            try await AndroidPairingMacLoopbackTests.pairNativeClient(port: port, invitation: invitation, afterVerifiedReceipt: {
+                try await receipt.wait(in: self)
+            })
         } catch {
             await listener.closeAndWait()
             throw error
         }
         await listener.closeAndWait()
-        XCTAssertTrue(served.withLock { $0 })
     }
 
     private static func serveNativePairing(_ session: PairingSetupNetworkSession, fixture: TransportPairingFixture) async throws {
