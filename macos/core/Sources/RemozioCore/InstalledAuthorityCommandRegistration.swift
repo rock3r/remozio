@@ -114,7 +114,8 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         self.path = path; self.selfPath = selfPath; self.bundle = bundle
         self.requirement = requirement; self.placement = placement; self.machine = machine
     }
-    private func validate() throws {
+    @discardableResult
+    private func validate() throws -> SignedReleaseEvidence {
         guard !closed, getuid() == 0, geteuid() == 0 else { throw InstalledAuthorityCommandError.unavailable }
         guard try InstalledAuthorityCommandConfiguration.load(path: path).canonicalBytes == configuration.canonicalBytes else {
             throw InstalledAuthorityCommandError.changedConfiguration
@@ -156,7 +157,27 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         try placement.validate()
         try startupActivity?.validate()
         try admissionStartup?.validate()
+        return release
     }
+
+    /// Only the protected installed startup can move the journal to the final replay catalog.
+    func preparePermanentReplay(_ journal: AuthorityJournal) throws {
+        try lock.withLock {
+            guard !taken, let startupActivity, let admissionStartup,
+                  admissionStartup.boundary.accountID == configuration.command.accountID else { return }
+            let release = try validate()
+            guard AuthorityPermanentReplayStartup.hasReaderFloor(release: release, policy: configuration.codePolicy) else { return }
+            try admissionStartup.withReplayInstallationDrain(machine: machine, placement: placement) {
+                try startupActivity.validate()
+                try AuthoritySelfValidation.validate(journal)
+                guard let policy = try journal.read({ try $0.codePolicy()?.policy }),
+                      policy == configuration.codePolicy else { throw InstalledAuthorityCommandError.changedConfiguration }
+                _ = try journal.installPermanentReplay()
+                try startupActivity.validate()
+            }
+        }
+    }
+
     /// The startup writer is closed after check-in. Runtime checks retain the original protected inputs and signed identity.
     func validateRuntime() throws {
         try lock.withLock {
@@ -707,6 +728,7 @@ extension AuthorityRuntimeRunner {
                         takingRegisteredReceiveRight: { try registration.takeReceiveRight() },
                         releaseActivity: registration.releaseActivity,
                         updateAdmission: registration.admissionStartup?.boundary, updateSchedulingFactory: schedulingFactory,
+                        preparePermanentReplay: { try registration.preparePermanentReplay($0) },
                         reconcileExpired: Self.reconcileCoordinatorExpiration)
                     let recovery = AuthorityGatewaySettingsStartupRecovery(snapshot: optionalStartup, service: service,
                         reload: { try registration.reloadGatewaySettingsStartup() })

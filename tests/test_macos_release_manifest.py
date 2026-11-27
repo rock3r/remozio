@@ -35,6 +35,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'authority.machine-update-completion-intent', 'authority.machine-update-policy-intent',
                  'authority.machine-update-completion-publication', 'authority.installed-release-state',
                  'authority.stable-release-state', 'authority.retained-setup-policy-intent',
+                 'authority.journal-replay-counters',
                  'authority.retained-setup-completion-intent', 'authority.retained-setup-promotion-intent',
                  'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record', 'authority.maintenance-channel', 'authority.maintenance-gate', 'authority.maintenance-close-marker', 'authority.maintenance-unbound-release', 'authority.maintenance-unbound-gate',
                  'runtime.retained-setup-release', 'runtime.retained-setup-completion',
@@ -728,6 +729,14 @@ class RetainedRuntimeManifestReaderTests(unittest.TestCase):
     def by_role(self):
         return {role: {item[0]: item for item in MANIFEST.declarations(role)}
                 for role, *_ in MANIFEST.COMPONENTS}
+
+    def test_final_replay_catalog_has_only_authority_and_setup_readers(self):
+        name = 'authority.journal-replay-counters'
+        for role, declarations in self.by_role().items():
+            if role in (2, 8):
+                self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
+            else:
+                self.assertNotIn(name, declarations)
 
     def test_startup_and_completion_bindings_have_only_the_four_readers(self):
         for role, declarations in self.by_role().items():

@@ -48,6 +48,27 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
         try validate()
     }
 
+    /// Both stores stay closed to ordinary work while the registered account is drained for migration.
+    func withReplayInstallationDrain(machine: PreparationIntentStore, placement: ReleaseDestinationLease,
+                                     _ install: () throws -> Void) throws {
+        try requireCurrent(machine: machine)
+        guard initial.activation?.phase.blocksMachineWrites != true, let accountID = boundary.accountID,
+              let account = registration.accounts.first(where: { $0.accountID == accountID }) else { return }
+        let drain: UpdateDrainToken
+        do {
+            try maintenanceHold?.requireOpen()
+            drain = try boundary.beginAccountDrain()
+        } catch UpdateAdmissionBarrierError.busy {
+            return
+        }
+        defer { drain.close() }
+        try drain.validateAccountBoundary(directory: placement, accountID: accountID, expected: account.identity)
+        try requireCurrent(machine: machine)
+        try install()
+        try drain.validateAccountBoundary(directory: placement, accountID: accountID, expected: account.identity)
+        try requireCurrent(machine: machine)
+    }
+
     func validate() throws {
         try maintenanceHold?.validate(); try boundary.validate()
         try recovery.validate()

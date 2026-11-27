@@ -261,12 +261,15 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(try restarted.write(epoch: recovered.journalEpoch) { try $0.reserveCommandSubmission(fresh) }, fresh)
     }
 
-    func testPermanentReplayMissingKeyRequiresRepair() throws {
+    func testPermanentReplayInconsistentAuthorityRequiresRepair() throws {
         for mutation in [
             "DELETE FROM command_submission_replay_v1",
             "DELETE FROM command_nonce_replay_v1",
             "UPDATE command_submission_replay_v1 SET nonce=zeroblob(32)",
             "UPDATE command_nonce_replay_v1 SET submission=zeroblob(16)",
+            "UPDATE permanent_replay_counts_v1 SET command_submissions=0",
+            "UPDATE permanent_replay_counts_v1 SET consumed_requests=1",
+            "DELETE FROM permanent_replay_counts_v1",
         ] {
             let fixture = try Fixture(), commits = try installCommandReplay(fixture), value = try commandReservation()
             _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(value) }
@@ -279,7 +282,7 @@ final class CheckpointedJournalTests: XCTestCase {
             XCTAssertThrowsError(try recoverHistory(fixture), mutation)
             XCTAssertEqual(try fixture.store.read(), checkpoint, mutation)
 
-            // Model an already committed inconsistent pair in this fixture to isolate the startup check.
+            // Model already committed inconsistent replay evidence in this fixture to isolate the startup check.
             // The ordinary checkpoint comparison rejected the same bytes above.
             let observed = try fixture.journal.read { try $0.continuityDigests() }
             let old = checkpoint.committed
@@ -294,7 +297,7 @@ final class CheckpointedJournalTests: XCTestCase {
             let next = Data(repeating: 6, count: 16)
             let descriptor = try fixture.descriptor(next, generation: candidate.currentAuthorityGeneration)
             guard case .repairRequired = try startup.start(descriptor: descriptor) else {
-                return XCTFail("Startup accepted inconsistent command replay keys: " + mutation)
+                return XCTFail("Startup accepted inconsistent replay evidence: " + mutation)
             }
             XCTAssertThrowsError(try startup.completedWriter(), mutation)
             XCTAssertNil(try fixture.journal.read { try $0.epoch(next) }, mutation)
@@ -302,11 +305,16 @@ final class CheckpointedJournalTests: XCTestCase {
         }
     }
 
-    func testPermanentReplayRejectsRetirementSchemaChanges() throws {
+    func testPermanentReplayRejectsRetirementAndCounterSchemaChanges() throws {
         for mutation in [
             "CREATE INDEX retirement_request_idx ON replay_detail_retirement_v1(request)",
             "CREATE TRIGGER retirement_insert AFTER INSERT ON replay_detail_retirement_v1 BEGIN SELECT 1; END",
             "ALTER TABLE replay_detail_retirement_v1 ADD COLUMN unexpected BLOB",
+            "CREATE INDEX replay_counter_idx ON permanent_replay_counts_v1(consumed_requests)",
+            "CREATE TRIGGER replay_counter_update AFTER UPDATE ON permanent_replay_counts_v1 BEGIN SELECT 1; END",
+            "ALTER TABLE permanent_replay_counts_v1 ADD COLUMN unexpected BLOB",
+            "CREATE INDEX receipt_counter_idx ON replay_live_receipt_count_v1(live_receipts)",
+            "ALTER TABLE replay_live_receipt_count_v1 ADD COLUMN unexpected BLOB",
         ] {
             let fixture = try Fixture(), commits = try installCommandReplay(fixture)
             XCTAssertEqual(try commits.installPermanentReplay(), .installed)
@@ -825,6 +833,30 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(epoch.descriptor.generation, checkpoint.currentAuthorityGeneration)
         XCTAssertEqual(epoch.head, 1)
         XCTAssertNil(try fixture.store.read().pending)
+    }
+
+    func testInstalledReplayMustBeVerifiedBeforeOpeningRequestsOnEveryStartup() throws {
+        let fixture = try Fixture()
+        _ = try installCommandReplay(fixture)
+        let owner = try requestStartupOwner(fixture)
+        XCTAssertEqual(try owner.installPermanentReplay(), .installed)
+        XCTAssertThrowsError(try owner.withRequests { _ in true })
+        try owner.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)
+        XCTAssertTrue(try owner.withRequests { _ in true })
+        try owner.close()
+
+        let unverified = try AuthorityJournal(storage: fixture.openTransferredStorage())
+        XCTAssertThrowsError(try unverified.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+        }
+        XCTAssertThrowsError(try unverified.withRequests { _ in true })
+        try unverified.close()
+
+        let verified = try AuthorityJournal(storage: fixture.openTransferredStorage())
+        XCTAssertEqual(try verified.installPermanentReplay(), .alreadyInstalled)
+        try verified.prepareRequests(clockEpoch: AuthorityClock().epoch, maximumPayloadBytes: 16384)
+        XCTAssertTrue(try verified.withRequests { _ in true })
+        try verified.close()
     }
 
     func testRequestAdmissionReservesCarrierSpaceWithinConfiguredPayloadBudget() throws {

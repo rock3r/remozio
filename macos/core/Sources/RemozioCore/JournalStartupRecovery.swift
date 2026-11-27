@@ -46,6 +46,8 @@ final class JournalStartupRecovery {
             }
         } catch PermanentReplayJournal.Failure.inconsistentCommandKeys {
             return .repairRequired
+        } catch PermanentReplayJournal.Failure.inconsistentCounters {
+            return .repairRequired
         }
         let commits = CheckpointedJournal(journal: journal, continuity: continuity)
         let writer = try commits.write(epoch: descriptor.epoch) { try $0.createEpoch(descriptor) }

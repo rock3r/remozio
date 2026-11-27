@@ -799,6 +799,11 @@ public final class JournalTransaction {
         }
     }
 
+    func recountLiveReceiptsAfterHistoryLoss() throws {
+        guard try hasPermanentReplayStorage() else { return }
+        try withReplayDetails(write: true) { try $0.recountLiveReceipts() }
+    }
+
     private func withReplayDetails<Value>(write: Bool, _ body: (ReplayDetailJournal) throws -> Value) throws -> Value {
         do {
             _ = try tables(write: write)

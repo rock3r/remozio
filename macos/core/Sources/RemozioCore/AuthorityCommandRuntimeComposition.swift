@@ -24,6 +24,7 @@ extension AuthorityWakeService {
         releaseActivity: ReleaseActivityBarrier?,
         updateAdmission: UpdateAdmissionBoundary?,
         updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory?,
+        preparePermanentReplay: (@Sendable (AuthorityJournal) throws -> Void)? = nil,
         reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
         onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
         reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in },
@@ -33,7 +34,7 @@ extension AuthorityWakeService {
             onAdmission: onAdmission, report: reportReceiver)
         let executionFactory = try configuration.executionFactory(report: reportExecution)
         return try openInstalledPresence(configuration: configuration.presence, updateSchedulingFactory: updateSchedulingFactory,
-            reconcileExpired: reconcileExpired,
+            preparePermanentReplay: preparePermanentReplay, reconcileExpired: reconcileExpired,
             commandReceiverFactory: { journal, clock in
                 if let releaseActivity { try journal.attachReleaseActivityBarrier(releaseActivity) }
                 if let updateAdmission { try journal.attachUpdateAdmissionBoundary(updateAdmission) }
