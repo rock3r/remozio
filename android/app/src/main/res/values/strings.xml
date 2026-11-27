@@ -483,6 +483,7 @@
     <string name="pairing_setup_complete">This Mac is paired. Open it from Your Macs to see its requests.</string>
     <string name="pairing_setup_incomplete">Could not confirm pairing or finish cleanup. Return to Your Macs to check the saved state. Keep incomplete setup records.</string>
     <string name="pairing_setup_failed">Could not connect or verify this Mac. Check the invitation and LAN connection, then close this sheet and try again.</string>
+    <string name="pairing_setup_protection_unavailable">Could not protect the comparison window. Close it and try again.</string>
     <string name="pairing_setup_expired">This setup expired. Close this sheet and check Your Macs before starting another setup.</string>
     <string name="pairing_setup_closing">Closing this setup…</string>
     <string name="pairing_setup_done">Done</string>
