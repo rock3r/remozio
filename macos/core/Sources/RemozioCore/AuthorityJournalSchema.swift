@@ -23,8 +23,8 @@ enum AuthorityJournalSchema {
     }
 
     private static func featureTier(on db: OpaquePointer, format: Int64) throws -> Int64 {
-        guard supportedFormats.contains(format) else { throw JournalDatabaseError.incompatibleStore }
         if format < recoveryFormat { return format }
+        guard supportedFormats.contains(format) else { throw JournalDatabaseError.incompatibleStore }
         var statement: OpaquePointer?
         let result = sqlite3_prepare_v2(db, "SELECT id,tier FROM main.\(tierTable)", -1, &statement, nil)
         guard result == SQLITE_OK, let statement else { throw JournalDatabaseError.storage(result) }
