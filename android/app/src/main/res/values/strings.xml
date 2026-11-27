@@ -392,7 +392,9 @@
     <string name="notification_action_failed">The notification action could not complete. Try again or open Android settings.</string>
     <string name="notification_test_cleared">The local test notification was cleared.</string>
     <string name="command_biometric_title">Approve command</string>
-    <string name="command_biometric_subtitle">Authorize the command you just reviewed</string>
+    <string name="command_request_reference">Request %1$s</string>
+    <string name="command_biometric_description">%1$s on %2$s (%3$s)</string>
+    <string name="command_biometric_description_fallback">Approve only if the request reference matches the command you reviewed</string>
     <string name="command_biometric_cancel">Cancel</string>
     <string name="command_action_approve">Approve with biometrics</string>
     <string name="command_action_decline">Decline</string>

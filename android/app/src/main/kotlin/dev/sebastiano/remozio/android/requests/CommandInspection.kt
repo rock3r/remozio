@@ -68,6 +68,7 @@ internal fun CommandInspection(
     sample: Boolean = false,
     status: TrackedRequestStatus? = null,
     requestKey: Any? = null,
+    requestReference: String? = null,
     actions: (@Composable () -> Unit)? = null,
 ) {
     val pixels = LocalWindowInfo.current.containerSize
@@ -87,6 +88,7 @@ internal fun CommandInspection(
                 ProtectedInspection(sample, onDismiss) {
                     InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status,
                         Modifier.heightIn(max = window.second * 0.9f),
+                        requestReference = requestReference,
                         actions = if (!sample && visibleCapture != null) actions else null)
                 }
             }
@@ -99,6 +101,7 @@ internal fun CommandInspection(
                 ) {
                     ProtectedInspection(sample, onDismiss) {
                         InspectionContent(visibleCapture, macName, accountName, sample, onDismiss, status,
+                            requestReference = requestReference,
                             actions = if (!sample && visibleCapture != null) actions else null)
                     }
                 }
@@ -141,6 +144,7 @@ private fun InspectionContent(
     capture: CommandCapturePayload?, macName: String, accountName: String, sample: Boolean, onDismiss: () -> Unit,
     status: TrackedRequestStatus?,
     modifier: Modifier = Modifier,
+    requestReference: String? = null,
     actions: (@Composable () -> Unit)? = null,
 ) {
     var raw by remember { mutableStateOf(false) }
@@ -165,6 +169,9 @@ private fun InspectionContent(
             if (status != null) item { RequestStatusCard(status) }
             item {
                 Section(R.string.request_context) {
+                    if (requestReference != null && capture != null) {
+                        Text(stringResource(R.string.command_request_reference, requestReference))
+                    }
                     TextValue(R.string.host_label, macName, raw)
                     TextValue(R.string.account_label, accountName, raw)
                 }
