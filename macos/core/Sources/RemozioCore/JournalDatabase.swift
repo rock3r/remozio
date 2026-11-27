@@ -1317,11 +1317,10 @@ public final class JournalTransaction {
     }
 
     /// Startup only, after authority continuity checks and fresh epoch creation. Never use for live requests.
-    func reconcileInterruptedConsumptions(afterRequestID: Data? = nil, maximumRecords: Int, maximumBytes: Int,
-                                          writer: AuditEpochWriter, expectedHead: UInt64) throws -> ConsumptionRecoveryBatch {
+    func reconcileInterruptedConsumptions(in page: ConsumptionOutcomePage, writer: AuditEpochWriter,
+                                          expectedHead: UInt64) throws -> ConsumptionRecoveryBatch {
         try mutate { audit in
             guard try audit.epoch(writer.epoch)?.head == expectedHead else { throw AuditJournalError.headMismatch }
-            let page = try consumptionOutcomes(afterRequestID: afterRequestID, maximumRecords: maximumRecords, maximumBytes: maximumBytes)
             let unresolved = page.outcomes.filter { $0.phase == .authorized || $0.phase == .executing }
             guard unresolved.allSatisfy({ $0.event.journalEpoch != writer.epoch }) else {
                 throw ConsumptionJournalError.invalidConfiguration
