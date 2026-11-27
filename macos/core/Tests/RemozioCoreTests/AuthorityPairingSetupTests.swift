@@ -495,6 +495,15 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         return (channel, driver)
     }
 
+    private func pairForRepairNotices(_ fixture: Fixture, decision: P256.Signing.PrivateKey) async throws
+        -> (AuthorityPairingChannel, AuthorityMaintenancePairingOwners) {
+        let (channel, driver) = try await pairForRevocation(fixture, decision: decision)
+        let owners = AuthorityMaintenancePairingOwners(admission: fixture.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        return (channel, owners)
+    }
+
     private func rePairProposal(_ fixture: Fixture, predecessor: PairingReplacement,
                                 biometric: P256.Signing.PrivateKey, transportPoint: Data? = nil,
                                 epoch: UInt8 = 50, keyBase: UInt8 = 52,
@@ -1424,7 +1433,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
 
     func testPhoneRepairNoticeIsAuthenticatedAndCannotChangePairingState() async throws {
         let fixture = try Fixture(), key = P256.Signing.PrivateKey()
-        let (channel, _) = try await pairForRevocation(fixture, decision: key)
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
         let before = try await channel.pairedPhonesWithRepairNotices()
         let recipient = try XCTUnwrap(before.phones.first)
         let originalSelection = try XCTUnwrap(before.selection(for: recipient))
@@ -1467,7 +1477,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
 
     func testBrokenPhoneRepairNoticeLeavesPairedPhoneManagementUsable() async throws {
         let fixture = try Fixture(), key = P256.Signing.PrivateKey()
-        let (channel, _) = try await pairForRevocation(fixture, decision: key)
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
         let before = try await channel.pairedPhonesWithRepairNotices()
         let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
         let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
@@ -1503,7 +1514,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
 
     func testPhoneRepairNoticeIsLocalToTheOriginalJournalDirectory() async throws {
         let fixture = try Fixture(), key = P256.Signing.PrivateKey()
-        let (channel, _) = try await pairForRevocation(fixture, decision: key)
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
         let before = try await channel.pairedPhonesWithRepairNotices()
         let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
         let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
@@ -1708,7 +1720,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let negotiated = Box<UInt64>(0)
         second.pairedPhoneHello { negotiated.value = $0 }
         XCTAssertEqual(negotiated.value, 1)
-        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (UInt64.max, 2)]
+        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (3, 2), (4, 2), (UInt64.max, 2)]
         for (maximum, expected) in versions {
             second.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
             XCTAssertEqual(negotiated.value, expected)
@@ -1717,6 +1729,30 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         second.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: Data(repeating: 0, count: 129),
             authorization: authorization) { malformed.value = $0 }
         XCTAssertNil(malformed.value)
+        XCTAssertEqual(f.environment.authorized.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+
+        let installed = try f.endpoint()
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        installed.attachInstalledPairing(to: owners)
+        try owners.retain(installed, id: UUID())
+        defer { installed.close(); withExtendedLifetime(owners) {} }
+        try hello(installed)
+        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (UInt64.max, 4)]
+        for (maximum, expected) in installedVersions {
+            installed.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
+            XCTAssertEqual(negotiated.value, expected)
+        }
+
+        let repairNoticeList = Box<Data?>(nil)
+        installed.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue,
+            selection: Data(), authorization: Data()) { repairNoticeList.value = $0 }
+        XCTAssertNotNil(repairNoticeList.value)
+        installed.pairedPhoneHello(maximumVersion: 3) { negotiated.value = $0 }
+        XCTAssertEqual(negotiated.value, 3)
+        installed.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue,
+            selection: Data(), authorization: Data()) { repairNoticeList.value = $0 }
+        XCTAssertNil(repairNoticeList.value)
         XCTAssertEqual(f.environment.authorized.value, 0)
         XCTAssertEqual(try f.records(), 0)
     }

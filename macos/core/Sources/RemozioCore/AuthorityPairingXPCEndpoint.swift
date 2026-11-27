@@ -144,8 +144,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         replyWithPhoneManagementVersion(1, reply: reply)
     }
     func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
-        // Version 4 adds a read-only list with notices. A client capped at version 3 keeps its prior negotiation.
-        let version = maximumVersion >= 4 ? 4 : min(maximumVersion, owners == nil ? 2 : 3)
+        // Versions 3 and 4 require the installed pairing owners.
+        let version = min(maximumVersion, owners == nil ? 2 : 4)
         replyWithPhoneManagementVersion(version, reply: reply)
     }
     private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
