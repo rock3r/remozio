@@ -17,7 +17,11 @@ class PairingReplacement(phoneID: ByteArray, epoch: ByteArray) {
     override fun toString() = "PairingReplacement(redacted)"
 }
 
-enum class PairingProofPurpose(val tag: ULong) { PHONE_BIOMETRIC(0u), MAC_COMMIT(1u) }
+enum class PairingProofPurpose(val tag: ULong) {
+    PHONE_BIOMETRIC(0u),
+    MAC_COMMIT(1u),
+    PHONE_DECISION(2u),
+}
 
 /** Untrusted setup claims. Parsing or signature verification does not authorize enrollment. */
 class PairingTranscript(

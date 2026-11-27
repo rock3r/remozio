@@ -28,6 +28,22 @@ final class PinnedTLSPeerTests: XCTestCase {
         }
     }
 
+    func testAndroidRenewalKeepsThePinAndUsesTheReplacementValidity() throws {
+        let peer = try PinnedTLSPeer(subjectPublicKeyInfo: fixture("android-renewal.spki"))
+        let old = try fixture("android-original.der")
+        let renewed = try fixture("android-renewed.der")
+        let (_, oldExpiry) = try interval(old)
+        let (renewedStart, renewedExpiry) = try interval(renewed)
+        let overlap = renewedStart.addingTimeInterval(1)
+        XCTAssertLessThan(overlap, oldExpiry)
+        XCTAssertTrue(peer.accepts(certificate: old, at: overlap))
+        XCTAssertTrue(peer.accepts(certificate: renewed, at: overlap))
+        let afterOriginal = oldExpiry.addingTimeInterval(1)
+        XCTAssertFalse(peer.accepts(certificate: old, at: afterOriginal))
+        XCTAssertTrue(peer.accepts(certificate: renewed, at: afterOriginal))
+        XCTAssertFalse(peer.accepts(certificate: renewed, at: renewedExpiry.addingTimeInterval(1)))
+    }
+
     func testValidityBoundariesAreInclusiveAndRejectInvalidTime() throws {
         let peer = try PinnedTLSPeer(subjectPublicKeyInfo: fixture("peer.spki"))
         let data = try fixture("peer.der")

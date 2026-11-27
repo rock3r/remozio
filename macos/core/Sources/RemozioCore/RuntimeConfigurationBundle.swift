@@ -238,7 +238,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
         let presence = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: account.ownerUID,
             appServiceName: paths.presenceService, teamID: app.teamID, appIdentifier: app.identifier,
             appHashes: [app.codeDirectoryHash], policy: presencePolicy,
-            pairing: .init(transportPublicKey: reference.transportPublicKeyX963))
+            pairing: account.pairingPolicy.configuration(transportPublicKey: reference.transportPublicKeyX963))
         let execution = try AuthorityCommandExecutionConfiguration(
             monitorPath: inventory.bundlePath + "/Contents/Helpers/RemozioCommandMonitor",
             childPath: inventory.bundlePath + "/Contents/Helpers/RemozioCommandChild")

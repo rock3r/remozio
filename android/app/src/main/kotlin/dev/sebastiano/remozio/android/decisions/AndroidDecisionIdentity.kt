@@ -54,42 +54,10 @@ class AndroidDecisionIdentity internal constructor(
     private var key: PrivateKey?,
     val security: DecisionKeySecurity,
 ) : AutoCloseable {
-    /** Call only for an explicit decline of the displayed request. This method does not establish request freshness. */
-    @WorkerThread
-    @Synchronized
-    fun declineCommand(body: ByteArray, authoritySignature: ByteArray, limits: RequestLimits): ApprovalMessage {
-        try {
-            val signingKey = key ?: throw DecisionIdentityUnavailable()
-            require(body.size <= limits.body.maxBytes && authoritySignature.size == 64)
-            val captured = body.copyOf()
-            CommandRequestSession.open(captured, authoritySignature, enrollment.macID.copyBytes(),
-                enrollment.accountID.copyBytes(), enrollment.authorityPublicKey.copyBytes(), limits).use {
-                val request = IssuedRequestPayload.decode(captured, limits.body, limits.capture,
-                    ContractCapabilities(mapOf(RequestContract(RequestKind.COMMAND, 1u, 1u) to emptySet())))
-                val action = CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)
-                check(ActionPolicy.requirement(action, request.contract.requestKind, request.permittedActions.toSet()) ==
-                    ActionRequirement(ApprovalKeyClass.DECISION, ApprovalPurpose.CANCELLATION, ActionEffect.RESOLVE_REQUEST))
-                val decision = DecisionPayload(request.macID, request.accountID, request.requestID,
-                    request.requestDigest(limits.body, limits.signing), request.challenge, enrollment.phoneID.copyBytes(),
-                    enrollment.decisionKey.keyID.copyBytes(), action).encode(limits.body)
-                val input = SigningInput.make(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION,
-                    decision, limits.body, limits.signing)
-                val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
-                    initSign(signingKey)
-                    update(input)
-                    sign()
-                })
-                check(ApprovalSignature.verify(signature, enrollment.decisionKey.publicKey.copyBytes(), 1u,
-                    ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, decision, limits.body, limits.signing))
-                return ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, decision, signature)
-            }
-        } catch (_: Exception) { throw DecisionIdentityUnavailable() }
-    }
-
     /** Declines the retained displayed session without biometrics. The Mac remains authoritative for consumption. */
     @WorkerThread
     @Synchronized
-    fun declineSession(session: CommandRequestSession, now: ElapsedInstant, limits: RequestLimits): ApprovalMessage {
+    fun declineSession(session: CommandRequestSession, now: () -> ElapsedInstant, limits: RequestLimits): ApprovalMessage {
         try {
             val signingKey = key ?: throw DecisionIdentityUnavailable()
             require(session.isBoundToAuthority(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),
@@ -107,6 +75,23 @@ class AndroidDecisionIdentity internal constructor(
                     ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body, limits.body, limits.signing))
                 ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.CANCELLATION, body, signature)
             }
+        } catch (_: Exception) { throw DecisionIdentityUnavailable() }
+    }
+
+    /** Uses the decision key only for an advisory for this enrollment. */
+    @WorkerThread
+    @Synchronized
+    internal fun phoneRepairNotice(reason: PhoneRepairNoticeFrame.Reason): PhoneRepairNoticeFrame {
+        try {
+            val signingKey = key ?: throw DecisionIdentityUnavailable()
+            val scope = ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),
+                enrollment.phoneID.copyBytes(), enrollment.epoch.copyBytes())
+            val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                initSign(signingKey)
+                update(PhoneRepairNoticeFrame.signingInput(scope, reason))
+                sign()
+            })
+            return PhoneRepairNoticeFrame(scope, reason, signature)
         } catch (_: Exception) { throw DecisionIdentityUnavailable() }
     }
 

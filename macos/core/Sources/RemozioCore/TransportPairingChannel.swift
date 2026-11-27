@@ -6,7 +6,8 @@ import RemozioProtocol
 enum TransportPairingCall: Sendable {
     case hello, waitForRePairDrain(Data), begin(Data), snapshot, stage(Data, Data), receipt(Data, Data), cancel(Data), stop
     case v2Hello, prepareV2(Data)
-    case beginV2(rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64, requiresLAN: Bool)
+    case beginV2(rendezvousID: Data, windowID: Data, invitation: Data, lifetimeMilliseconds: UInt64, requiresLAN: Bool,
+                 requiresDecisionProof: Bool)
 }
 enum TransportPairingLANStartReply: UInt64 { case unavailableInterface = 65_536 }
 enum TransportPairingReply: Sendable { case number(UInt64), bytes(Data?), flag(Bool), failed }
@@ -42,9 +43,12 @@ final class NativeTransportPairingDriver: TransportPairingDriver, @unchecked Sen
             proxy.setupV2Hello { [self] in checked(.number($0), reply) }
         case .prepareV2(let rendezvousID):
             proxy.preparePairingV2(rendezvousID) { [self] in checked(.flag($0), reply) }
-        case let .beginV2(rendezvousID, windowID, invitation, lifetime, requiresLAN):
+        case let .beginV2(rendezvousID, windowID, invitation, lifetime, requiresLAN, requiresDecisionProof):
             let complete: @Sendable (UInt64) -> Void = { [self] in checked(.number($0), reply) }
-            if requiresLAN {
+            if requiresDecisionProof {
+                proxy.beginDecisionProofSetup(rendezvousID, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime,
+                    requiresLAN: requiresLAN, reply: complete)
+            } else if requiresLAN {
                 proxy.beginPairingV2LAN(rendezvousID, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime, reply: complete)
             } else {
                 proxy.beginPairingV2(rendezvousID, windowID: windowID, invitation: invitation, lifetimeMilliseconds: lifetime, reply: complete)
@@ -80,6 +84,7 @@ public actor TransportPairingChannel {
     private var invitation: PairingInvitation?
     private var rePair: RePairInvitation?
     private var rendezvousID: Data?
+    private var requiresDecisionProof = false
     private var port: UInt16?
     private var candidates: [Data: TransportPairingCandidate] = [:]
     private var staged: [Data: PairingTranscript] = [:]
@@ -135,7 +140,7 @@ public actor TransportPairingChannel {
         } catch { close(); throw error }
     }
 
-    func beginV2(_ window: MacPairingV2PublicWindow, requiresLAN: Bool = false) async throws {
+    func beginV2(_ window: MacPairingV2PublicWindow, requiresLAN: Bool = false, requiresDecisionProof: Bool = false) async throws {
         let invitation = window.invitation
         guard state == .opening, let rendezvousID, window.id.count == 16, invitation.macID == configuration.macID,
               invitation.accountID == configuration.accountID, invitation.minimumEnvelopeVersion == 1 else {
@@ -145,7 +150,8 @@ public actor TransportPairingChannel {
             let rePair = window.replacement.map { RePairInvitation(invitation: invitation, predecessor: $0) }
             let encoded = try rePair?.encode() ?? invitation.encode()
             guard case .number(let value) = try await perform(.beginV2(rendezvousID: rendezvousID,
-                windowID: window.id, invitation: encoded, lifetimeMilliseconds: window.lifetimeMilliseconds, requiresLAN: requiresLAN)) else {
+                windowID: window.id, invitation: encoded, lifetimeMilliseconds: window.lifetimeMilliseconds,
+                requiresLAN: requiresLAN, requiresDecisionProof: requiresDecisionProof)) else {
                 throw TransportPairingControlError.invalidMessage
             }
             if requiresLAN, value == TransportPairingLANStartReply.unavailableInterface.rawValue {
@@ -153,6 +159,7 @@ public actor TransportPairingChannel {
             }
             guard let port = UInt16(exactly: value), port > 0 else { throw TransportPairingControlError.invalidMessage }
             self.rendezvousID = nil
+            self.requiresDecisionProof = requiresDecisionProof
             self.invitation = invitation; self.rePair = rePair; self.port = port; state = .open
         } catch { close(); throw error }
     }
@@ -180,10 +187,9 @@ public actor TransportPairingChannel {
                 if candidate.phase != .proposed {
                     guard let transcript = staged[candidate.id] else { throw TransportPairingControlError.invalidMessage }
                     try proposal.validate(transcript)
-                    if let proof = candidate.biometricProof {
-                        guard try transcript.verify(signature: proof, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric) else {
-                            throw TransportPairingControlError.invalidMessage
-                        }
+                    if let proof = candidate.phoneProof {
+                        do { try proof.verify(in: transcript, requiresDecisionProof: requiresDecisionProof) }
+                        catch { throw TransportPairingControlError.invalidMessage }
                     }
                 }
                 next[candidate.id] = candidate

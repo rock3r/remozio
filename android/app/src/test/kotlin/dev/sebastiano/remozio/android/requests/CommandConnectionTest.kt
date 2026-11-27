@@ -1,5 +1,8 @@
 package dev.sebastiano.remozio.android.requests
 
+import dev.sebastiano.remozio.android.biometrics.BiometricRecoveryReason
+import dev.sebastiano.remozio.android.decisions.AndroidDecisionIdentity
+import dev.sebastiano.remozio.android.decisions.DecisionKeySecurity
 import dev.sebastiano.remozio.android.decisions.decisionPublicPoint
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.*
@@ -23,15 +26,22 @@ class CommandConnectionTest {
     private val decision = pair()
     private val biometric = pair()
     private fun point(pair: KeyPair) = decisionPublicPoint(pair.public as ECPublicKey)
-    private fun reference(role: EnrollmentKeyRole, pair: KeyPair) = EnrollmentKeyReference(role, id(10 + role.ordinal),
-        "remozio.${role.aliasPart}.v1.${"%032x".format(10 + role.ordinal)}", if (role == EnrollmentKeyRole.TRANSPORT) pair.public.encoded else point(pair))
-    private val record = StoredPhoneEnrollment(PhoneEnrollment(id(1), id(2), id(3), id(4), id(5), "Synthetic Mac",
+    private fun reference(role: EnrollmentKeyRole, pair: KeyPair, legacy: Boolean = false): EnrollmentKeyReference {
+        val keyID = id(10 + role.ordinal)
+        val alias = if (role == EnrollmentKeyRole.BIOMETRIC && !legacy) EnrollmentKeyReference.biometricEnrollmentAlias(keyID)
+        else "remozio.${role.aliasPart}.v1.${"%032x".format(10 + role.ordinal)}"
+        return EnrollmentKeyReference(role, keyID, alias, if (role == EnrollmentKeyRole.TRANSPORT) pair.public.encoded else point(pair))
+    }
+    private fun enrollmentRecord(legacy: Boolean = false) = StoredPhoneEnrollment(PhoneEnrollment(id(1), id(2), id(3), id(4), id(5), "Synthetic Mac",
         point(authority), pair().public.encoded, reference(EnrollmentKeyRole.TRANSPORT, pair()),
-        reference(EnrollmentKeyRole.DECISION, decision), reference(EnrollmentKeyRole.BIOMETRIC, biometric), id(6, 32), null), EnrollmentPhase.ACTIVE)
+        reference(EnrollmentKeyRole.DECISION, decision), reference(EnrollmentKeyRole.BIOMETRIC, biometric, legacy), id(6, 32), null), EnrollmentPhase.ACTIVE)
+    private val record = enrollmentRecord()
     private val decline = CapturedAction(ActionChoice.DECLINE, ActionScope.CurrentRequest)
     private val execute = CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)
-    private val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(2), id(3), id(7), id(8, 32), emptySet(),
-        1u, 60001u, File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes(), listOf(decline, execute), bound, bound)
+    private val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
+    private val request = request(capture)
+    private fun request(capture: ByteArray) = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u),
+        id(2), id(3), id(7), id(8, 32), emptySet(), 1u, 60001u, capture, listOf(decline, execute), bound, bound)
     private var time = ElapsedInstant(0, 100u)
     private fun sign(body: ByteArray, key: KeyPair, type: ApprovalMessageType, purpose: SigningPurpose) =
         P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
@@ -42,19 +52,24 @@ class CommandConnectionTest {
         return enrollment.accept(body, sign(body, authority, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)).also {
             val status = RequestStatusPayload(id(2), id(3), id(7), request.requestDigest(bound, bound), request.challenge,
                 1u, RequestPhase.PRESENTED, RequestStatusReason.NONE, id(20), 1000u, 59000u, null, false, null, null).encode(bound)
-            it.observe(status, sign(status, authority, ApprovalMessageType.STATUS, SigningPurpose.STATUS), time)
+            it.observe(status, sign(status, authority, ApprovalMessageType.STATUS, SigningPurpose.STATUS), time) { time }
         }
     }
     private fun message(session: CommandRequestSession, execute: Boolean = false, signingKey: KeyPair = if (execute) biometric else decision): ApprovalMessage {
         val e = record.enrollment
         val key = if (execute) e.biometricKey else e.decisionKey
-        val body = session.withPendingDecision(time, e.phoneID.copyBytes(), key.keyID.copyBytes(), if (execute) this.execute else decline) { it.encode(bound) }
+        val body = session.withPendingDecision({ time }, e.phoneID.copyBytes(), key.keyID.copyBytes(), if (execute) this.execute else decline) { it.encode(bound) }
         val purpose = if (execute) SigningPurpose.BIOMETRIC_AUTHORIZATION else SigningPurpose.CANCELLATION
         return ApprovalMessage(1u, ApprovalMessageType.DECISION, purpose, body, sign(body, signingKey, ApprovalMessageType.DECISION, purpose))
     }
-    private class Wire : CommandConnectionWire {
+    private class Wire(override val supportsPhoneRepairNotices: Boolean = false) : CommandConnectionWire {
         val end = CompletableDeferred<Unit>()
         val sent = mutableListOf<ByteArray>()
+        val notices = mutableListOf<PhoneRepairNoticeFrame>()
+        override suspend fun sendPhoneRepairNotice(notice: PhoneRepairNoticeFrame) {
+            check(supportsPhoneRepairNotices && !closed)
+            notices += notice
+        }
         var closed = false
         var write: suspend () -> Unit = {}
         override suspend fun receive() { end.await() }
@@ -64,6 +79,72 @@ class CommandConnectionTest {
     private fun owner(snapshot: (suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire)? = null,
                       open: suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire) =
         CommandConnection(record, limits, open, { time }, dispatcher = Dispatchers.Unconfined, openSnapshot = snapshot)
+
+    @Test fun biometricRecoveryReportsOnceOnTheNegotiatedForegroundWire() = runBlocking<Unit> {
+        for (supported in listOf(false, true)) {
+            val wire = Wire(supported)
+            lateinit var session: CommandRequestSession
+            var signs = 0
+            val owner = CommandConnection(record, limits, { _, enrollment -> wire.also { session = issued(enrollment) } },
+                { time }, dispatcher = Dispatchers.Unconfined, signRepairNotice = { reason ->
+                    signs++
+                    AndroidDecisionIdentity(record.enrollment, decision.private, DecisionKeySecurity.TRUSTED_ENVIRONMENT)
+                        .use { it.phoneRepairNotice(reason) }
+                })
+            val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
+            try {
+                owner.approval(session).reportRepair(BiometricRecoveryReason.BIOMETRIC_CHANGED)
+                owner.approval(session).reportRepair(BiometricRecoveryReason.LEGACY_POLICY)
+                assertEquals(if (supported) 1 else 0, signs)
+                assertEquals(signs, wire.notices.size)
+                assertTrue(wire.sent.isEmpty())
+                assertEquals(RequestPhase.PRESENTED, session.snapshot { time }.status!!.status.phase)
+                if (supported) {
+                    val notice = wire.notices.single()
+                    assertEquals(PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED, notice.reason)
+                    assertEquals(ChannelScope(id(2), id(3), id(4), id(5)), notice.scope)
+                    assertTrue(notice.verify(point(decision)))
+                }
+            } finally { owner.close(); running.cancelAndJoin() }
+        }
+    }
+
+    @Test fun phoneRepairNoticeCapabilityIsBoundedAndLimitedToLiveOffers() {
+        val feature = PhoneRepairNoticeFrame.CAPABILITY
+        assertTrue(liveCommandCapabilities(PhoneRepairNoticeFrame.MAXIMUM_BYTES).all { feature in it.features })
+        assertTrue(liveCommandCapabilities(PhoneRepairNoticeFrame.MAXIMUM_BYTES - 1).none { feature in it.features })
+        assertTrue(commandInspectionCapabilities().none { feature in it.features })
+    }
+
+    @Test fun anUnrecoverableCertificateOffersPairingButAnOfflinePeerDoesNot() = runBlocking<Unit> {
+        val recovery = owner { _, _ ->
+            throw dev.sebastiano.remozio.android.transport.TransportCertificateRecoveryRequired()
+        }
+        recovery.use {
+            assertFailsWith<dev.sebastiano.remozio.android.transport.TransportCertificateRecoveryRequired> { recovery.run() }
+            assertEquals(CommandConnectionState.RECOVERY_REQUIRED, recovery.connectionState.value)
+        }
+        val offline = owner { _, _ -> throw java.io.IOException("Offline") }
+        offline.use {
+            assertFailsWith<java.io.IOException> { offline.run() }
+            assertEquals(CommandConnectionState.DISCONNECTED, offline.connectionState.value)
+        }
+    }
+
+    @Test fun ordinaryCaptureWithAnExtraArgumentFitsTheProductionBudget() {
+        val fields = (DeterministicCbor.decode(capture, bound) as CborValue.Fields).values
+        val arguments = fields.getValue(2uL) as CborValue.ArrayValue
+        val extraArgument = CborValue.Bytes("fixture".encodeToByteArray())
+        val longer = DeterministicCbor.encode(CborValue.Fields(
+            fields + (2uL to CborValue.ArrayValue(arguments.values + extraArgument))), bound)
+        val body = request(longer).encode(bound)
+        val signature = sign(body, authority, ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        CommandRequestInbox(1, 2).use { inbox ->
+            val enrollment = inbox.add(id(2), id(3), point(authority), commandRequestLimits())
+            val session = enrollment.accept(body, signature)
+            assertEquals(extraArgument, assertNotNull(session.snapshot { time }.capture).arguments.last())
+        }
+    }
 
     @Test fun sendsExactEnrolledDecisionWithoutInventingAcceptance() = runBlocking<Unit> {
         val wire = Wire(); lateinit var session: CommandRequestSession
@@ -75,10 +156,25 @@ class CommandConnectionTest {
             owner.approval(session).send(message)
             assertContentEquals(message.encode(bound.maxBytes), wire.sent.last())
         }
-        assertEquals(RequestPhase.PRESENTED, session.snapshot(time).status!!.status.phase)
+        assertEquals(RequestPhase.PRESENTED, session.snapshot { time }.status!!.status.phase)
         owner.close(); running.cancelAndJoin()
         assertTrue(session.closed.value); assertTrue(wire.closed)
         assertEquals(CommandConnectionState.CLOSED, owner.connectionState.value)
+    }
+
+    @Test fun legacyPairingCannotSendEvenAValidApproveButCanDecline() = runBlocking<Unit> {
+        val wire = Wire()
+        lateinit var session: CommandRequestSession
+        val owner = CommandConnection(enrollmentRecord(legacy = true), limits,
+            { _, enrollment -> wire.also { session = issued(enrollment) } }, { time }, dispatcher = Dispatchers.Unconfined)
+        val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
+        try {
+            assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message(session, execute = true)) }
+            assertTrue(wire.sent.isEmpty())
+            val declined = message(session)
+            owner.approval(session).send(declined)
+            assertContentEquals(declined.encode(bound.maxBytes), wire.sent.single())
+        } finally { owner.close(); running.cancelAndJoin() }
     }
 
     @Test fun rejectsWrongKeyUnownedSessionAndExpiredRequestBeforeWriting() = runBlocking<Unit> {
@@ -87,11 +183,11 @@ class CommandConnectionTest {
         val running = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         val otherInbox = CommandRequestInbox(1, 2)
         val other = issued(otherInbox.add(id(2), id(3), point(authority), limits))
-        assertFails { owner.approval(other).send(message(other)) }
-        assertFails { owner.approval(session).send(message(session, signingKey = biometric)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(other).send(message(other)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message(session, signingKey = biometric)) }
         val pending = message(session)
         time = ElapsedInstant(0, 60100u)
-        assertFails { owner.approval(session).send(pending) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(pending) }
         assertTrue(wire.sent.isEmpty())
         owner.close(); running.cancelAndJoin(); otherInbox.close()
     }
@@ -102,11 +198,12 @@ class CommandConnectionTest {
         val firstRun = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         val retained = session; val message = message(session)
         wires.single().write = { throw java.io.IOException("Synthetic uncertain write") }
-        assertFails { owner.approval(session).send(message) }
+        val failure = assertFailsWith<java.io.IOException> { owner.approval(session).send(message) }
+        assertFalse(failure is CommandDecisionNotSent)
         wires.single().end.complete(Unit); firstRun.await()
         assertEquals(CommandConnectionState.DISCONNECTED, owner.connectionState.value)
         assertFalse(retained.closed.value)
-        assertFails { owner.approval(session).send(message) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(session).send(message) }
         val secondRun = async(start = CoroutineStart.UNDISPATCHED) { owner.run() }
         assertSame(retained, session)
         assertTrue(wires.last().sent.isEmpty())
@@ -162,7 +259,7 @@ class CommandConnectionTest {
         }
         val fetch = async(start = CoroutineStart.UNDISPATCHED) { owner.fetchSnapshot() }
         assertEquals(CommandConnectionState.DISCONNECTED, owner.connectionState.value)
-        assertFails { owner.approval(captured).send(message(captured)) }
+        assertFailsWith<CommandDecisionNotSent> { owner.approval(captured).send(message(captured)) }
         assertTrue(background.sent.isEmpty())
         background.end.complete(Unit)
         assertTrue(fetch.await()); assertTrue(background.closed)

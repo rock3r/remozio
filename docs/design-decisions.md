@@ -22,6 +22,14 @@ The following protections remain required:
 
 The [journal experiment](experiments/macos-authority-journal.md) still demonstrates a real limitation: a matching old database and checkpoint are indistinguishable locally. The accepted boundary does not turn that observation into successful rollback detection. It also does not authorize an unprivileged caller to restore arbitrary files.
 
+## Android approval keys after biometric changes
+
+The owner chose to invalidate the approval key when the phone enrolls a new fingerprint or face. A person who learns the phone PIN could otherwise add a fingerprint and use the existing approval key on paired Macs. The approval key requires a strong biometric on every use. Knowing the PIN does not directly authorize a request.
+
+Adding a biometric may stop approvals on each paired Mac until the user pairs again. A legacy key requires one explicit re-pair per Mac at the first approval attempt after upgrade. Android cannot change that key in place. We rejected keeping legacy keys available until the next ordinary pairing because it would leave this risk in place.
+
+The decision follows the pairing lifecycle in #851, #840, and #831. It reuses authorized re-pairing and its receipt and recovery checks. The signed notice in #834 explains why approval stopped on the Mac. The notice has no effect on approvals, revocation, or pairing. See [what to do on the phone](android-biometric-keys.md#pair-again-after-a-change).
+
 ## Abandoned gateway grants
 
 A stale candidate or activation can leave an unrecorded revision. A later grant can advance the gateway beyond that revision. Recovery requires complete signed history, so the missing record prevents reconciliation.
@@ -90,6 +98,16 @@ Shared setup imports do not transfer machine-specific elevation grants.
 The [policy component](macos-command-elevation-policy.md) implements canonical configuration, grant checks and native target resolution.
 Setup, protected installation and command-dispatch composition remain pending.
 The 1Password and Little Snitch adapter contracts remain unchanged.
+
+## Decision-key proof during pairing
+
+A dedicated ALPN profile requires two phone signatures over the exact pairing transcript. The biometric key signs with purpose 0. The decision key signs with purpose 2. TLS already verifies possession of the transport key. The new setup frame carries both signatures as separate 64-byte P-256 signatures. The transcript, comparison code and commit receipt formats keep their existing bytes.
+
+The Root verifies both signatures inside the commit transaction before it changes trust or signs the receipt. This applies to initial pairing and re-pairing. When the requirement is active, the Root refuses new commits on both legacy setup profiles. An incompatible client must update before starting enrollment. Existing enrollments and receipt recovery continue to work.
+
+The protected Root configuration sets the proof requirement independently of the installed v2 listener setting. The decision-proof listener uses the `remozio-pairing/3` ALPN and the existing invitation prelude. If the requirement is active and the listener is disabled, new setup stays closed. Cold disable retains the proof requirement.
+
+The extra signature proves possession of the enrolled decision key for the exact setup. It provides no hardware attestation or proof that the keys reside on the same device. The journal needs no format change. Historical enrollment records retain their original evidence. See [#847](https://github.com/rock3r/remozio/issues/847).
 
 ## Test order and signing
 

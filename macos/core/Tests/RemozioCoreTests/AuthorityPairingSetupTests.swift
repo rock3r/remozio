@@ -50,7 +50,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
              accountByte: UInt8 = 2, configureTransport: Bool = false, pairingLifetime: UInt64 = 1000,
              v2ActivationEnabled: Bool? = nil, lanScope: PairingLANScope? = nil, transportIdentity: P256.Signing.PrivateKey? = nil,
-             observePairingContention: @escaping @Sendable () -> Void = {},
+             decisionProofRequired: Bool = false, observePairingContention: @escaping @Sendable () -> Void = {},
              readColdDisableIntent: @escaping @Sendable () throws -> Data? = { nil }) throws {
             transport = transportIdentity ?? P256.Signing.PrivateKey()
             self.account = Data(repeating: accountByte, count: 16)
@@ -104,7 +104,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: getuid())
             let journal = journal, environment = environment, authority = authority
             pairingConfiguration = try .init(transportPublicKey: transport.publicKey.x963Representation,
-                lifetimeMilliseconds: pairingLifetime, v2ActivationEnabled: v2ActivationEnabled, lanScope: lanScope)
+                lifetimeMilliseconds: pairingLifetime, v2ActivationEnabled: v2ActivationEnabled, lanScope: lanScope,
+                decisionProofRequired: decisionProofRequired)
             access = try .init(journal: journal, macID: mac, accountID: account, authorityPublicKey: authority.publicKey.x963Representation,
                 appPolicy: policy, configuration: pairingConfiguration,
                 minimumEnvelopeVersion: 1, auditVersions: auditVersions, now: { environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in
@@ -138,7 +139,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             }, invalidate: { environment.invalidated.value += 1 })
         }
         func proposal(phone: UInt8 = 8, epoch: UInt8 = 9, keyBase: UInt8 = 32,
-                      biometric: P256.Signing.PrivateKey? = nil, keyNamespace: UInt8? = nil) throws -> PairingTranscript {
+                      biometric: P256.Signing.PrivateKey? = nil, keyNamespace: UInt8? = nil,
+                      decision: P256.Signing.PrivateKey? = nil) throws -> PairingTranscript {
             func keyID(_ offset: UInt8) -> Data {
                 var id = Data(repeating: keyBase + offset, count: 16)
                 if let keyNamespace { id[0] = keyNamespace }
@@ -155,7 +157,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: authority.publicKey.x963Representation,
                 macTransportKey: transport.publicKey.x963Representation,
                 transportKey: .init(keyID: keyID(0), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
-                decisionKey: .init(keyID: keyID(1), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                decisionKey: .init(keyID: keyID(1),
+                    publicKey: (decision ?? P256.Signing.PrivateKey()).publicKey.x963Representation),
                 biometricKey: .init(keyID: keyID(2), publicKey: (biometric ?? self.biometric).publicKey.x963Representation),
                 enrollmentTag: Data(repeating: 35, count: 32), replacement: nil,
                 expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1, expiresAtUnixMillis: 2)
@@ -200,6 +203,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let endpoint: AuthorityPairingXPCEndpoint
         let sends = Box(0), stageSends = Box(0), commitSends = Box(0), revocationSends = Box(0)
         let discardSends = Box(0)
+        let rejectCommitBeforeSend = Box(false)
         let hold = Box(Hold.none)
         let late = Box<(@Sendable () -> Void)?>(nil)
         private let transform: @Sendable (PairingClientCall, PairingClientReply) throws -> PairingClientReply
@@ -208,6 +212,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         }
         func start(closed: @escaping @Sendable () -> Void) {}
         func invoke(_ call: PairingClientCall, onSend: () -> Void, reply: @escaping @Sendable (PairingClientReply) -> Void) {
+            if case .commit = call, rejectCommitBeforeSend.value {
+                reply(.failed)
+                return
+            }
             onSend()
             sends.value += 1
             let complete: @Sendable (PairingClientReply) -> Void = { [self] value in
@@ -228,8 +236,13 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .commit(let setup, let digest, let proof, let authorization):
                 commitSends.value += 1
                 endpoint.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
+            case .commitDual(let setup, let digest, let proof, let authorization):
+                guard let decision = proof.decision else { complete(.failed); return }
+                commitSends.value += 1
+                endpoint.commitPairingWithDecisionProof(setup, confirmedDigest: digest, biometricProof: proof.biometric,
+                    decisionProof: decision, authorization: authorization) { complete(.bytes($0)) }
             case .setupHello:
-                endpoint.pairingSetupHello(maximumVersion: 3) { complete(.setupVersion($0, $1)) }
+                endpoint.pairingSetupHello(maximumVersion: 5) { complete(.setupVersion($0, $1)) }
             case let .openV2(label, predecessor, rendezvousID):
                 if let rendezvousID {
                     do {
@@ -365,8 +378,12 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .stage(let proposal, let authorization): proxy.stagePairing(proposal, authorization: authorization) { complete(.bytes($0)) }
             case .commit(let setup, let digest, let proof, let authorization):
                 proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { complete(.bytes($0)) }
+            case .commitDual(let setup, let digest, let proof, let authorization):
+                guard let decision = proof.decision else { complete(.failed); return }
+                proxy.commitPairingWithDecisionProof(setup, confirmedDigest: digest, biometricProof: proof.biometric,
+                    decisionProof: decision, authorization: authorization) { complete(.bytes($0)) }
             case .setupHello:
-                proxy.pairingSetupHello(maximumVersion: 3) { [trace] version, id in
+                proxy.pairingSetupHello(maximumVersion: 5) { [trace] version, id in
                     trace?.setupReply.value = version
                     complete(.setupVersion(version, id))
                 }
@@ -469,18 +486,28 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
         await channel.close()
     }
-    private func pairForRevocation(_ fixture: Fixture) async throws -> (AuthorityPairingChannel, ClientDriver) {
+    private func pairForRevocation(_ fixture: Fixture, decision: P256.Signing.PrivateKey? = nil) async throws -> (AuthorityPairingChannel, ClientDriver) {
         let driver = try ClientDriver(fixture), channel = client(fixture, driver: driver)
         _ = try await channel.start()
-        let transcript = try await channel.stage(fixture.proposal(), authorization: authorization)
+        let transcript = try await channel.stage(fixture.proposal(decision: decision), authorization: authorization)
         _ = try await channel.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, fixture),
             authorization: authorization)
         return (channel, driver)
     }
 
+    private func pairForRepairNotices(_ fixture: Fixture, decision: P256.Signing.PrivateKey) async throws
+        -> (AuthorityPairingChannel, AuthorityMaintenancePairingOwners) {
+        let (channel, driver) = try await pairForRevocation(fixture, decision: decision)
+        let owners = AuthorityMaintenancePairingOwners(admission: fixture.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        return (channel, owners)
+    }
+
     private func rePairProposal(_ fixture: Fixture, predecessor: PairingReplacement,
                                 biometric: P256.Signing.PrivateKey, transportPoint: Data? = nil,
-                                epoch: UInt8 = 50, keyBase: UInt8 = 52) throws -> PairingPhoneProposal {
+                                epoch: UInt8 = 50, keyBase: UInt8 = 52,
+                                decision: P256.Signing.PrivateKey? = nil) throws -> PairingPhoneProposal {
         let scope = try ChannelScope(macID: fixture.mac, accountID: fixture.account,
             phoneID: predecessor.phoneID, enrollmentEpoch: Data(repeating: epoch, count: 16))
         let offer = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 51, count: 32),
@@ -489,7 +516,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             transportKey: .init(keyID: Data(repeating: keyBase, count: 16),
                 publicKey: transportPoint ?? P256.Signing.PrivateKey().publicKey.x963Representation),
             decisionKey: .init(keyID: Data(repeating: keyBase + 1, count: 16),
-                publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                publicKey: (decision ?? P256.Signing.PrivateKey()).publicKey.x963Representation),
             biometricKey: .init(keyID: Data(repeating: keyBase + 2, count: 16), publicKey: biometric.publicKey.x963Representation),
             replacement: predecessor)
     }
@@ -666,7 +693,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
     }
 
     func testRePairEligibilityRefusesARestrictedRevokedPhoneAtTheCurrentRevision() async throws {
-        let f = try Fixture(configureGateway: true), (channel, _) = try await pairForRevocation(f)
+        let f = try Fixture(configureGateway: true), (channel, driver) = try await pairForRevocation(f)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        defer { withExtendedLifetime(owners) {} }
         let firstList = try await channel.pairedPhones()
         let phone = try XCTUnwrap(firstList.phones.first)
         let selection = try XCTUnwrap(firstList.selection(for: phone))
@@ -700,7 +731,105 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let after = try await channel.pairedPhonesForRePair()
         XCTAssertEqual(after.revision, result.trustRevision)
         XCTAssertTrue(after.rePairablePhones.isEmpty)
+        let oldView = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertTrue(oldView.phonesRequiringNewPairing.isEmpty)
+        let current = try await channel.pairedPhonesForManagement()
+        XCTAssertEqual(current.revision, result.trustRevision)
+        XCTAssertEqual(current.phonesRequiringNewPairing, [phone.phoneID])
+        XCTAssertNil(current.rePairSelection(for: phone))
+        XCTAssertNil(current.selection(for: phone))
+        let restrictionAfterRefresh = try await channel.requiresNewPairing(eligible)
+        XCTAssertTrue(restrictionAfterRefresh)
+        XCTAssertEqual(try f.records(), 3)
         await channel.close()
+    }
+
+    func testManagementV5ShowsARestrictedActivePhoneWithoutActions() async throws {
+        let f = try Fixture(configureGateway: true), (channel, driver) = try await pairForRevocation(f)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(driver.endpoint, id: UUID())
+        defer { withExtendedLifetime(owners) {} }
+        let listed = try await channel.pairedPhonesForManagement()
+        let phone = try XCTUnwrap(listed.phones.first)
+        let registration = try XCTUnwrap(f.gatewayRevocations?.registration)
+        let binding = try GatewayTokenBinding(ownerID: registration.ownerID, macID: registration.macID,
+            accountID: registration.accountID, gatewayID: registration.gatewayID, lifecycleEpoch: registration.lifecycleEpoch,
+            phoneID: phone.phoneID, enrollmentEpoch: Data(repeating: 97, count: 16), candidateID: Data(repeating: 98, count: 16),
+            tokenDigest: Data(repeating: 95, count: 32), challenge: Data(repeating: 96, count: 32),
+            enrollmentTag: Data(repeating: 97, count: 32))
+        let unknown = try GatewayTokenCandidate(binding: binding, revision: 99, operationID: Data(repeating: 99, count: 16),
+            issuedAtUnixMillis: 100, expiresAtUnixMillis: 200)
+        let payload = try unknown.encode(limits: f.limits)
+        let signature = try f.authority.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+            canonicalPayload: payload, payloadLimits: f.limits, inputLimits: f.limits)).rawRepresentation
+        let result = try f.journal.write {
+            try $0.restrictUnknownGatewayTrust(kind: .candidate, canonicalPayload: payload, signature: signature,
+                registration: registration, expectedTrustRevision: listed.revision, eventID: Data(repeating: 100, count: 16),
+                receiptTimeMs: 1000, writer: f.writer, expectedAuditHead: 1)
+        }
+        XCTAssertEqual(result.disposition, .restricted)
+
+        let oldView = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertEqual(oldView.phones, [phone])
+        XCTAssertTrue(oldView.phonesRequiringNewPairing.isEmpty)
+        let current = try await channel.pairedPhonesForManagement()
+        XCTAssertEqual(current.phonesRequiringNewPairing, [phone.phoneID])
+        XCTAssertTrue(current.phones.isEmpty)
+        XCTAssertTrue(current.rePairablePhones.isEmpty)
+        XCTAssertNil(current.selection(for: phone))
+        XCTAssertNil(current.rePairSelection(for: phone))
+        XCTAssertEqual(try f.records(), 2)
+        await channel.close()
+    }
+
+    func testManagementV5RejectsDuplicateAndActionableRestrictedPhoneIDs() throws {
+        let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16)
+        let phoneID = Data(repeating: 3, count: 16)
+        let phone = DeliveryRecipient(phoneID: phoneID, enrollmentEpoch: Data(repeating: 4, count: 16))
+        for (phones, restricted) in [([], [phoneID, phoneID]), ([phone], [phoneID])] {
+            let snapshot = PairedPhoneSnapshot(macID: mac, accountID: account, revision: UUID(),
+                phones: phones, rePairablePhones: [], revocationAvailability: .available, gatewayRevocationHealth: .clear,
+                gatewayInconclusiveSinceUnixMillis: nil, phonesRequiringNewPairing: restricted)
+            let encoded = try snapshot.encode(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
+            XCTAssertThrowsError(try PairedPhoneSnapshot.decode(encoded, macID: mac, accountID: account, includeRePair: true,
+                includeRepairNotices: true, includeRePairRestrictions: true))
+        }
+    }
+
+    func testManagementV5FitsMixedAndLargestSnapshotsAtTheEnrollmentLimit() throws {
+        let mac = Data(repeating: 1, count: 16)
+        let account = Data(repeating: 2, count: 16)
+        let revision = UUID()
+        func identifier(_ value: Int, kind: UInt8) -> Data {
+            var bytes = Data([kind, UInt8(value >> 8), UInt8(truncatingIfNeeded: value)])
+            bytes.append(Data(count: 13))
+            return bytes
+        }
+        let rows = (0..<1024).map {
+            DeliveryRecipient(phoneID: identifier($0, kind: 3), enrollmentEpoch: identifier($0, kind: 4))
+        }
+        for (activeCount, revokedCount) in [(512, 256), (1024, 0)] {
+            let active = Array(rows.prefix(activeCount))
+            let revoked = Array(rows.dropFirst(activeCount).prefix(revokedCount))
+            let restricted = rows.dropFirst(activeCount + revokedCount).map(\.phoneID)
+            let notices = Dictionary(uniqueKeysWithValues: active.map { ($0, PhoneRepairNoticeFrame.Reason.biometricChanged) })
+            let snapshot = PairedPhoneSnapshot(macID: mac, accountID: account, revision: revision, phones: active,
+                rePairablePhones: revoked, revocationAvailability: .available, gatewayRevocationHealth: .grantAbandonmentInconclusive,
+                gatewayInconclusiveSinceUnixMillis: UInt64.max, repairNotices: notices, phonesRequiringNewPairing: restricted)
+
+            let bytes = try snapshot.encode(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
+            XCTAssertLessThanOrEqual(bytes.count, 38_000)
+            if activeCount == 1024 { XCTAssertEqual(bytes.count, 36_935) }
+            let decoded = try PairedPhoneSnapshot.decode(bytes, macID: mac, accountID: account, includeRePair: true,
+                includeRepairNotices: true, includeRePairRestrictions: true)
+            XCTAssertEqual(decoded.revision, revision)
+            XCTAssertEqual(decoded.phones, active)
+            XCTAssertEqual(decoded.rePairablePhones, revoked)
+            XCTAssertEqual(decoded.phonesRequiringNewPairing, restricted)
+            XCTAssertEqual(decoded.repairNotices, notices)
+            XCTAssertEqual(decoded.gatewayInconclusiveSinceUnixMillis, UInt64.max)
+        }
     }
 
     func testRePairRejectsActiveMissingAndReusedPredecessorMaterial() async throws {
@@ -1393,6 +1522,128 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             setupID: Data(repeating: 3, count: 16), transcriptDigest: Data(repeating: 4, count: 32))
     }
 
+    private func signedPhoneRepairNotice(_ reason: PhoneRepairNoticeFrame.Reason, using signer: P256.Signing.PrivateKey,
+                                         scope: ChannelScope) throws -> PhoneRepairNoticeFrame {
+        let input = try PhoneRepairNoticeFrame.signingInput(scope: scope, reason: reason)
+        return try .init(scope: scope, reason: reason, signature: signer.signature(for: input).rawRepresentation)
+    }
+
+    private func phoneRepairNoticeFile(_ fixture: Fixture, scope: ChannelScope) -> URL {
+        let file = AdministrativeSetupPublication.File.phoneRepairNotice(phone: scope.phoneID, epoch: scope.enrollmentEpoch)
+        return fixture.root.appendingPathComponent("store").appendingPathComponent(file.name)
+    }
+
+    func testPhoneRepairNoticeIsAuthenticatedAndCannotChangePairingState() async throws {
+        let fixture = try Fixture(), key = P256.Signing.PrivateKey()
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
+        let before = try await channel.pairedPhonesWithRepairNotices()
+        let recipient = try XCTUnwrap(before.phones.first)
+        let originalSelection = try XCTUnwrap(before.selection(for: recipient))
+        XCTAssertTrue(before.repairNotices.isEmpty)
+        let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
+        let wrongSigner = try signedPhoneRepairNotice(.biometricChanged, using: fixture.biometric, scope: peer.scope)
+        XCTAssertFalse(try fixture.journal.retainPhoneRepairNotice(wrongSigner, binding: binding, validateTransport: { _ in }))
+        let wrongEpoch = try ChannelScope(macID: fixture.mac, accountID: fixture.account, phoneID: recipient.phoneID,
+            enrollmentEpoch: Data(repeating: 77, count: 16))
+        let wrongScope = try signedPhoneRepairNotice(.biometricChanged, using: key, scope: wrongEpoch)
+        XCTAssertFalse(try fixture.journal.retainPhoneRepairNotice(wrongScope, binding: binding, validateTransport: { _ in }))
+        let first = try signedPhoneRepairNotice(.biometricChanged, using: key, scope: peer.scope)
+        XCTAssertThrowsError(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in throw Failure.denied }))
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in }))
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in }))
+        let later = try signedPhoneRepairNotice(.legacyPolicy, using: key, scope: peer.scope)
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(later, binding: binding, validateTransport: { _ in }))
+
+        let after = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertEqual(after.repairNotices, [recipient: .biometricChanged])
+        XCTAssertEqual(after.phones, before.phones)
+        XCTAssertEqual(after.rePairablePhones, before.rePairablePhones)
+        XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(try fixture.records(), 1)
+        try fixture.assertCheckpoint()
+        let legacy = try await channel.pairedPhones()
+        XCTAssertTrue(legacy.repairNotices.isEmpty)
+
+        let revoked = try await channel.revokePhone(originalSelection, authorization: authorization)
+        XCTAssertEqual(revoked, .revokedOnMac)
+        let retired = try await channel.pairedPhonesWithRepairNotices()
+        XCTAssertTrue(retired.repairNotices.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: phoneRepairNoticeFile(fixture, scope: peer.scope)), try first.encode())
+        XCTAssertThrowsError(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in })) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        }
+        await channel.close()
+    }
+
+    func testBrokenPhoneRepairNoticeLeavesPairedPhoneManagementUsable() async throws {
+        let fixture = try Fixture(), key = P256.Signing.PrivateKey()
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
+        let before = try await channel.pairedPhonesWithRepairNotices()
+        let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
+        let original = try signedPhoneRepairNotice(.legacyPolicy, using: key, scope: peer.scope)
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(original, binding: binding, validateTransport: { _ in }))
+        let file = phoneRepairNoticeFile(fixture, scope: peer.scope)
+        let unverified = try signedPhoneRepairNotice(.biometricChanged, using: fixture.biometric, scope: peer.scope)
+        var diagnostics = 0
+        let storage = PhoneRepairNoticeStorage(anchor: fixture.root.path, relativeDirectory: "store", owner: getuid(),
+            reportInvalidNotice: { diagnostics += 1 })
+        let decisionKey = key.publicKey.x963Representation
+        XCTAssertEqual(try storage.read(scope: peer.scope, decisionKey: decisionKey), .legacyPolicy)
+        XCTAssertEqual(diagnostics, 0)
+        for (index, invalid) in [Data([0xff]), try unverified.encode()].enumerated() {
+            try invalid.write(to: file)
+            XCTAssertThrowsError(try storage.read(scope: peer.scope, decisionKey: decisionKey))
+            XCTAssertEqual(diagnostics, index + 1)
+            let listed = try await channel.pairedPhonesWithRepairNotices()
+            XCTAssertTrue(listed.repairNotices.isEmpty)
+            XCTAssertEqual(listed.phones, before.phones)
+            XCTAssertEqual(listed.revision, before.revision)
+            XCTAssertThrowsError(try fixture.journal.retainPhoneRepairNotice(original, binding: binding, validateTransport: { _ in }))
+            XCTAssertEqual(try Data(contentsOf: file), invalid)
+            XCTAssertTrue(try fixture.journal.validatePeer(binding))
+            try fixture.assertCheckpoint()
+        }
+        let recipient = try XCTUnwrap(before.phones.first)
+        let selection = try XCTUnwrap(before.selection(for: recipient))
+        let revoked = try await channel.revokePhone(selection, authorization: authorization)
+        XCTAssertEqual(revoked, .revokedOnMac)
+        await channel.close()
+    }
+
+    func testPhoneRepairNoticeIsLocalToTheOriginalJournalDirectory() async throws {
+        let fixture = try Fixture(), key = P256.Signing.PrivateKey()
+        let (channel, owners) = try await pairForRepairNotices(fixture, decision: key)
+        defer { withExtendedLifetime(owners) {} }
+        let before = try await channel.pairedPhonesWithRepairNotices()
+        let peer = try XCTUnwrap(fixture.journal.read { try $0.directApprovalTrust(maximumPayloadBytes: 1024).peers.first })
+        let binding = AuthorityPeerBinding(peer: peer, revision: before.revision)
+        let first = try signedPhoneRepairNotice(.legacyPolicy, using: key, scope: peer.scope)
+        XCTAssertTrue(try fixture.journal.retainPhoneRepairNotice(first, binding: binding, validateTransport: { _ in }))
+        let oldFile = phoneRepairNoticeFile(fixture, scope: peer.scope)
+        await channel.close()
+        try fixture.journal.close()
+
+        let target = fixture.root.appendingPathComponent("replacement")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let lock = Darwin.open(target.appendingPathComponent("writer.lock").path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+        guard lock >= 0 else { throw Failure.denied }
+        Darwin.close(lock)
+        try FileManager.default.copyItem(at: oldFile.deletingLastPathComponent().appendingPathComponent("journal.sqlite"),
+            to: target.appendingPathComponent("journal.sqlite"))
+        let reopened = try JournalDatabase(lease: .init(anchor: fixture.root.path, relativeDirectory: "replacement", owner: getuid()),
+            macID: fixture.mac, accountID: fixture.account, recordLimits: fixture.limits, descriptorLimits: fixture.limits,
+            decisionLimits: fixture.limits, maximumConsumptions: 20, busyMilliseconds: 100, initialize: false)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.approvalTrustSnapshot().revision }, before.revision)
+        let scope = peer.scope, publicKey = key.publicKey.x963Representation
+        XCTAssertNil(try reopened.read { try $0.phoneRepairNotice(scope: scope, decisionKey: publicKey) })
+        XCTAssertEqual(try Data(contentsOf: oldFile), try first.encode())
+    }
+
     func testPairedPhoneRevocationIsCheckpointedAndRejectsOldSelection() async throws {
         let f = try Fixture(), (channel, driver) = try await pairForRevocation(f)
         let listed = try await channel.pairedPhones()
@@ -1571,7 +1822,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let negotiated = Box<UInt64>(0)
         second.pairedPhoneHello { negotiated.value = $0 }
         XCTAssertEqual(negotiated.value, 1)
-        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (UInt64.max, 2)]
+        let versions: [(UInt64, UInt64)] = [(0, 0), (1, 1), (2, 2), (3, 2), (4, 2), (UInt64.max, 2)]
         for (maximum, expected) in versions {
             second.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
             XCTAssertEqual(negotiated.value, expected)
@@ -1580,6 +1831,30 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         second.managePairedPhone(PairedPhoneOperation.revoke.rawValue, selection: Data(repeating: 0, count: 129),
             authorization: authorization) { malformed.value = $0 }
         XCTAssertNil(malformed.value)
+        XCTAssertEqual(f.environment.authorized.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+
+        let installed = try f.endpoint()
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        installed.attachInstalledPairing(to: owners)
+        try owners.retain(installed, id: UUID())
+        defer { installed.close(); withExtendedLifetime(owners) {} }
+        try hello(installed)
+        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (5, 5), (UInt64.max, 5)]
+        for (maximum, expected) in installedVersions {
+            installed.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
+            XCTAssertEqual(negotiated.value, expected)
+        }
+
+        let repairNoticeList = Box<Data?>(nil)
+        installed.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue,
+            selection: Data(), authorization: Data()) { repairNoticeList.value = $0 }
+        XCTAssertNotNil(repairNoticeList.value)
+        installed.pairedPhoneHello(maximumVersion: 3) { negotiated.value = $0 }
+        XCTAssertEqual(negotiated.value, 3)
+        installed.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue,
+            selection: Data(), authorization: Data()) { repairNoticeList.value = $0 }
+        XCTAssertNil(repairNoticeList.value)
         XCTAssertEqual(f.environment.authorized.value, 0)
         XCTAssertEqual(try f.records(), 0)
     }
@@ -1657,15 +1932,35 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         } catch {}
         XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1)
     }
+    func testClientCommitDoesNotMarkDispatchWhenDriverRejectsBeforeSend() async throws {
+        let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver)
+        _ = try await channel.start()
+        let value = try await channel.stage(f.proposal(), authorization: authorization)
+        let dispatched = Box(false)
+        driver.rejectCommitBeforeSend.value = true
+        do {
+            _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f),
+                authorization: authorization, onSend: { dispatched.value = true })
+            XCTFail("Confirmed a commit without sending it")
+        } catch AuthorityPairingChannelError.closed {}
+        XCTAssertFalse(dispatched.value)
+        XCTAssertEqual(driver.commitSends.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+        try f.assertCheckpoint()
+    }
+
     func testClientLostCommitReplyRemainsAmbiguousAndNeverRetries() async throws {
         let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver, timeout: 20)
         _ = try await channel.start()
         let value = try await channel.stage(f.proposal(), authorization: authorization)
         driver.hold.value = .commit
+        let dispatched = Box(false)
         do {
-            _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f), authorization: authorization)
+            _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f),
+                authorization: authorization, onSend: { dispatched.value = true })
             XCTFail("Confirmed lost reply")
         } catch { XCTAssertEqual(error as? AuthorityPairingChannelError, .timedOut) }
+        XCTAssertTrue(dispatched.value)
         driver.late.value?()
         do {
             _ = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f), authorization: authorization)
@@ -2339,6 +2634,111 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(fixture.environment.signed.value, 0)
             try fixture.assertCheckpoint()
         }
+    }
+
+    private func stageDecisionProof(_ endpoint: AuthorityPairingXPCEndpoint, proposal: PairingPhoneProposal,
+                                    predecessor: PairedPhoneSelection? = nil) throws -> PairingTranscript {
+        let invitation = try openV2(endpoint, predecessor: predecessor)
+        let proof = try bindingV2(invitation, proposal: proposal)
+        try endpoint.reservePairingV2(proof)
+        let result = Box<Data?>(nil)
+        endpoint.stagePairingV2(try proposal.encode(), connection: proof.connection, authorization: authorization) {
+            result.value = $0
+        }
+        return try PairingTranscript.decode(XCTUnwrap(result.value))
+    }
+
+    private func commitDecisionProof(_ endpoint: AuthorityPairingXPCEndpoint, transcript: PairingTranscript,
+                                     biometric: Data, decision: Data) throws -> Data? {
+        let receipt = Box<Data?>(nil)
+        endpoint.commitPairingWithDecisionProof(transcript.setupID, confirmedDigest: try transcript.digest(),
+            biometricProof: biometric, decisionProof: decision, authorization: authorization) { receipt.value = $0 }
+        return receipt.value
+    }
+
+    func testDecisionProofFloorBlocksBothLegacySetupPathsInCompatibilityMode() throws {
+        let fixture = try Fixture(decisionProofRequired: true)
+        XCTAssertNil(fixture.pairingConfiguration.v2ActivationEnabled)
+        XCTAssertTrue(try AuthorityPairingSetupConfiguration.decode(fixture.pairingConfiguration.canonicalBytes).decisionProofRequired)
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        let installed = try AuthorityPairingSetupConfiguration(transportPublicKey: fixture.transport.publicKey.x963Representation,
+            v2ActivationEnabled: true, lanScope: scope, decisionProofRequired: true)
+        let roundTrip = try AuthorityPairingSetupConfiguration.decode(installed.canonicalBytes)
+        XCTAssertTrue(roundTrip.decisionProofRequired)
+        XCTAssertEqual(roundTrip.lanScope, scope)
+        let legacy = try fixture.endpoint()
+        try hello(legacy)
+        let staged = Box<Data?>(nil)
+        let draft = try fixture.proposal()
+        legacy.stagePairing(try draft.encode(), authorization: authorization) { staged.value = $0 }
+        XCTAssertNil(staged.value)
+        XCTAssertEqual(fixture.environment.authorized.value, 0)
+        legacy.close()
+
+        // A v2 invitation proof alone cannot satisfy the Root's enrollment proof requirement.
+        let oldV2 = try fixture.endpoint()
+        let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        let transcript = try stageDecisionProof(oldV2, proposal: proposal)
+        XCTAssertNil(try commit(oldV2, transcript: transcript, fixture: fixture))
+        XCTAssertEqual(fixture.environment.signed.value, 0)
+        XCTAssertEqual(try fixture.records(), 0)
+        XCTAssertTrue(try fixture.access.pairedPhones().phones.isEmpty)
+        try fixture.assertCheckpoint()
+    }
+
+    func testDecisionProofRootRequiresBothSignaturesBeforeTheCommit() throws {
+        for mode in 0...2 {
+            let fixture = try Fixture(decisionProofRequired: true), endpoint = try fixture.endpoint()
+            let decision = P256.Signing.PrivateKey()
+            let draft = try fixture.proposal(decision: decision)
+            let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+                decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+            let transcript = try stageDecisionProof(endpoint, proposal: proposal)
+            let biometric = try proof(transcript, fixture)
+            let decisionSignature = try decision.signature(for: transcript.signingInput(purpose: .phoneDecision)).rawRepresentation
+            let receipt = try commitDecisionProof(endpoint, transcript: transcript,
+                biometric: mode == 1 ? decisionSignature : biometric, decision: mode == 2 ? biometric : decisionSignature)
+            if mode == 0 {
+                XCTAssertTrue(try transcript.verify(signature: XCTUnwrap(receipt),
+                    publicKey: fixture.authority.publicKey.x963Representation, purpose: .macCommit))
+            } else {
+                XCTAssertNil(receipt)
+            }
+            XCTAssertEqual(try fixture.records(), mode == 0 ? 1 : 0)
+            XCTAssertEqual(fixture.environment.signed.value, mode == 0 ? 1 : 0)
+            XCTAssertEqual(try fixture.access.pairedPhones().phones.count, mode == 0 ? 1 : 0)
+            try fixture.assertCheckpoint()
+        }
+    }
+
+    func testDecisionProofRootRechecksTheReplacementTranscriptBeforeRePair() throws {
+        let fixture = try Fixture(decisionProofRequired: true), decision = P256.Signing.PrivateKey()
+        let original = try fixture.endpoint(), draft = try fixture.proposal(decision: decision)
+        let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        let first = try stageDecisionProof(original, proposal: proposal)
+        let firstDecision = try decision.signature(for: first.signingInput(purpose: .phoneDecision)).rawRepresentation
+        XCTAssertNotNil(try commitDecisionProof(original, transcript: first,
+            biometric: proof(first, fixture), decision: firstDecision))
+        let paired = try fixture.access.pairedPhones()
+        let selected = try XCTUnwrap(paired.selection(for: XCTUnwrap(paired.phones.first)))
+        _ = try fixture.access.revokePhone(selected, authorize: {})
+        let snapshot = try fixture.access.pairedPhones(includeRePair: true)
+        let predecessor = try XCTUnwrap(snapshot.rePairSelection(for: selected.phone))
+        let replacementBio = P256.Signing.PrivateKey(), replacementDecision = P256.Signing.PrivateKey()
+        let claims = try rePairProposal(fixture, predecessor: predecessor.predecessor,
+            biometric: replacementBio, decision: replacementDecision)
+        let second = try fixture.endpoint()
+        let transcript = try stageDecisionProof(second, proposal: claims, predecessor: predecessor)
+        let biometric = try replacementBio.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let before = try fixture.records()
+        XCTAssertNil(try commitDecisionProof(second, transcript: transcript, biometric: biometric, decision: firstDecision))
+        XCTAssertEqual(try fixture.records(), before)
+        XCTAssertEqual(fixture.environment.signed.value, 1)
+        XCTAssertTrue(try fixture.access.pairedPhones().phones.isEmpty)
+        XCTAssertNotNil(try fixture.journal.read { try $0.recoveryStage(setupID: transcript.setupID) })
+        try fixture.assertCheckpoint()
     }
 
     func testV2ProofReservesOnlyTheExactProposalAndUsesExistingCommit() throws {
@@ -3158,6 +3558,32 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertEqual(version.value, 1)
         XCTAssertEqual(try fixture.access.requestV2Activation(revision: revision, compositionReady: true), .active)
         XCTAssertNoThrow(try fixture.access.admitPairingVersion(.v2))
+    }
+
+    func testDecisionProofFloorPreservesHistoricalReceiptRecovery() throws {
+        let fixture = try Fixture()
+        let transport = P256.Signing.PrivateKey()
+        let (claims, biometric) = try proposal(fixture, transportKey: transport.publicKey)
+        let attempt = try stage(fixture, claims)
+        _ = try commit(fixture, attempt, key: biometric)
+
+        let protectedConfiguration = try AuthorityPairingSetupConfiguration(
+            transportPublicKey: fixture.transport.publicKey.x963Representation, decisionProofRequired: true)
+        let restricted = try AuthorityPairingSetupAccess(journal: fixture.journal, macID: fixture.mac, accountID: fixture.account,
+            authorityPublicKey: fixture.authority.publicKey.x963Representation, appPolicy: fixture.policy,
+            configuration: protectedConfiguration, minimumEnvelopeVersion: 1, auditVersions: [1],
+            now: { fixture.environment.now() }, unixMilliseconds: { 1000 }, validateSelf: { _ in },
+            commit: { _, _, _, _, _ in throw PairingEnrollmentError.invalidProof })
+        XCTAssertThrowsError(try restricted.admitPairingVersion(.legacy))
+        let before = try files(fixture)
+        let query = try lookupQuery(attempt.transcript)
+        guard case let .committed(signature) = try PairingRecoveryFrame.decode(recover(fixture, query: query, key: transport)) else {
+            return XCTFail("Expected the historical receipt")
+        }
+        XCTAssertTrue(try attempt.transcript.verify(signature: signature,
+            publicKey: fixture.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(try files(fixture), before)
+        try fixture.assertCheckpoint()
     }
 
     func testColdDisableLeavesCommittedPairingReceiptAvailable() throws {

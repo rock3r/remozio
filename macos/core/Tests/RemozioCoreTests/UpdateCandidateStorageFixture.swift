@@ -17,8 +17,9 @@ final class UpdateCandidateStorageFixture {
     var account: Data { f.account.accountID }
 
     init(enable: Bool = true, enroll: Bool = true, admission: Bool = false, activation: Bool = false, replacement: Bool = false,
-        ownedInstalledBundle: Bool = false, installedReadiness: Bool = false) throws {
-        f = try RuntimeActivationFixture(nativeConsumerHosts: true, ownedInstalledBundle: ownedInstalledBundle, phoneAudit: true, auditDelivery: true) { component in
+        ownedInstalledBundle: Bool = false, installedReadiness: Bool = false, pairingPolicy: SetupPairingPolicy = .disabled) throws {
+        f = try RuntimeActivationFixture(nativeConsumerHosts: true, ownedInstalledBundle: ownedInstalledBundle, phoneAudit: true,
+            auditDelivery: true, pairingPolicy: pairingPolicy) { component in
             guard [.authority, .setupController].contains(component.role) else { return component }
             let versions: Set<UInt64> = replacement ? [15, 16, 17, 18] : (activation ? [15, 16, 17] : (admission ? [15, 16] : [15]))
             var formats = try component.formats.map { format in

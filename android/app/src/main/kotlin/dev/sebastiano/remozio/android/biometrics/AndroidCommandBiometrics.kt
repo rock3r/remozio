@@ -1,5 +1,6 @@
 package dev.sebastiano.remozio.android.biometrics
 
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import androidx.annotation.WorkerThread
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.CommandRequestSession
@@ -8,8 +9,21 @@ import dev.remozio.phone.requests.RequestLimits
 import dev.remozio.protocol.*
 import java.security.PrivateKey
 import java.security.Signature
+import kotlinx.coroutines.CancellationException
 
 class BiometricAuthorizationUnavailable : IllegalStateException("Biometric authorization unavailable")
+
+enum class BiometricRecoveryReason { LEGACY_POLICY, BIOMETRIC_CHANGED }
+
+internal class BiometricRecoveryRequired(val reason: BiometricRecoveryReason) :
+    IllegalStateException("Biometric approval requires re-pairing")
+
+private fun biometricAuthorizationFailure(failure: Exception): Exception {
+    if (failure is CancellationException || failure is BiometricRecoveryRequired) return failure
+    return if (generateSequence<Throwable>(failure) { it.cause }.take(8).any { it is KeyPermanentlyInvalidatedException }) {
+        BiometricRecoveryRequired(BiometricRecoveryReason.BIOMETRIC_CHANGED)
+    } else BiometricAuthorizationUnavailable()
+}
 
 /** One enrolled identity and one displayed session. Close when the screen or enrollment owner changes. */
 class AndroidCommandBiometrics internal constructor(
@@ -53,7 +67,7 @@ class AndroidCommandBiometrics internal constructor(
             val body = pending { it.encode(limits.body) }
             val signature = Signature.getInstance("SHA256withECDSA").apply { initSign(signingKey) }
             return CommandBiometricOperation(this, signature).also { current = it; decision = body }
-        } catch (_: Exception) { throw BiometricAuthorizationUnavailable() }
+        } catch (failure: Exception) { throw biometricAuthorizationFailure(failure) }
     }
 
     @Synchronized
@@ -75,11 +89,11 @@ class AndroidCommandBiometrics internal constructor(
                     ApprovalMessageType.DECISION, SigningPurpose.BIOMETRIC_AUTHORIZATION, body, limits.body, limits.signing))
                 ApprovalMessage(1u, ApprovalMessageType.DECISION, SigningPurpose.BIOMETRIC_AUTHORIZATION, body, signed)
             }
-        } catch (_: Exception) { throw BiometricAuthorizationUnavailable() }
+        } catch (failure: Exception) { throw biometricAuthorizationFailure(failure) }
         finally { cancel(operation) }
     }
 
-    private fun <T> pending(block: (DecisionPayload) -> T): T = session.withPendingDecision(now(),
+    private fun <T> pending(block: (DecisionPayload) -> T): T = session.withPendingDecision(now,
         enrollment.phoneID.copyBytes(), enrollment.biometricKey.keyID.copyBytes(), action, block)
 
     @Synchronized
@@ -104,9 +118,15 @@ class AndroidCommandBiometrics internal constructor(
                  now: () -> ElapsedInstant): AndroidCommandBiometrics {
             try {
                 require(record.phase == EnrollmentPhase.ACTIVE)
-                val material = loadBiometricKey(record.enrollment.biometricKey)
-                return AndroidCommandBiometrics(record.enrollment, session, material.key, material.publicKey, limits, now)
-            } catch (_: Exception) { throw BiometricAuthorizationUnavailable() }
+                val enrolled = record.enrollment
+                require(session.isBoundToAuthority(enrolled.macID.copyBytes(), enrolled.accountID.copyBytes(),
+                    enrolled.authorityPublicKey.copyBytes()))
+                if (!enrolled.biometricKey.hasBiometricEnrollmentInvalidationPolicy) {
+                    throw BiometricRecoveryRequired(BiometricRecoveryReason.LEGACY_POLICY)
+                }
+                val material = loadBiometricKey(enrolled.biometricKey)
+                return AndroidCommandBiometrics(enrolled, session, material.key, material.publicKey, limits, now)
+            } catch (failure: Exception) { throw biometricAuthorizationFailure(failure) }
         }
     }
 }

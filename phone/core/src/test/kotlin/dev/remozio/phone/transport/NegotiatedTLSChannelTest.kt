@@ -21,6 +21,7 @@ class NegotiatedTLSChannelTest {
         val input = ArrayDeque<ByteArray>()
         var phase = 0
         var closes = 0
+        var onApplicationFrame: (SessionEnvelope) -> Unit = {}
         val waiting = CompletableDeferred<Unit>()
         override suspend fun awaitOpen() { }
         override suspend fun send(bytes: ByteArray) {
@@ -43,6 +44,7 @@ class NegotiatedTLSChannelTest {
                 else -> {
                     val envelope = SessionEnvelope.decode(body, 64)
                     check(envelope.sessionID == owner.confirmed().sessionID)
+                    onApplicationFrame(envelope)
                     frame(SessionEnvelope(envelope.sessionID.copyBytes(), envelope.sequence + 1u, envelope.payload.copyBytes()).encode(64))
                 }
             }
@@ -69,6 +71,24 @@ class NegotiatedTLSChannelTest {
         channel.closeAndJoin(); channel.close(); assertEquals(1, peer.closes)
         assertFails { channel.send(byteArrayOf(1)) }
     }
+    @Test fun trackedWritesBindTheNextSequenceBeforeThePeerCanRespond() = runTest {
+        val peer = Peer()
+        val channel = connect(peer)
+        try {
+            val registered = mutableListOf<ULong>()
+            val received = mutableListOf<ULong>()
+            peer.onApplicationFrame = { envelope ->
+                received.add(envelope.sequence)
+                if (envelope.sequence != 0uL) assertEquals(envelope.sequence, registered.last())
+            }
+            channel.send(byteArrayOf(1))
+            channel.sendTracked(byteArrayOf(2)) { registered.add(it) }
+            channel.sendTracked(byteArrayOf(3)) { registered.add(it) }
+            assertEquals(listOf(0uL, 1uL, 2uL), received)
+            assertEquals(listOf(1uL, 2uL), registered)
+        } finally { channel.closeAndJoin() }
+    }
+
     @Test fun singleByteFragmentationPreservesFrames() = runTest {
         val peer = Peer(fragment = 1); val channel = connect(peer)
         assertContentEquals(byteArrayOf(7, 8), channel.receive()); channel.closeAndJoin()

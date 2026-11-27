@@ -2,12 +2,39 @@ package dev.remozio.phone.requests
 
 import dev.remozio.protocol.*
 import java.util.Collections
+import java.util.logging.Logger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** In-memory ownership errors. These are not remote request outcomes. */
-enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST, UNKNOWN_REQUEST, RETIRED_REQUEST }
+enum class InboxRejection { CLOSED, ALREADY_ENROLLED, STALE_ENROLLMENT, CAPACITY, CONFLICTING_REQUEST, UNKNOWN_REQUEST, RETIRED_REQUEST, REJECTION_LIMIT }
 class InboxException(val reason: InboxRejection) : IllegalStateException(reason.name)
+
+internal sealed interface CommandDeliveryOutcome {
+    data object Delivered : CommandDeliveryOutcome
+    data object CapacityOmitted : CommandDeliveryOutcome
+    data class CaptureOmitted(val schemaVersion: ULong, val result: RequestDeliveryResult?) : CommandDeliveryOutcome
+}
+
+/** One receiver owns these digests. They are retained only for the life of its connection. */
+internal class RejectedCommandCaptures(private val maximum: Int = 128) {
+    private val digests = mutableMapOf<CborValue.Bytes, CborValue.Bytes>()
+
+    operator fun get(id: CborValue.Bytes): CborValue.Bytes? = digests[id]
+
+    fun requireMatching(id: CborValue.Bytes, digest: CborValue.Bytes) {
+        val known = digests[id]
+        if (known != null && known != digest) reject(InboxRejection.CONFLICTING_REQUEST)
+    }
+
+    fun remember(id: CborValue.Bytes, digest: CborValue.Bytes): Boolean {
+        requireMatching(id, digest)
+        if (id in digests) return false
+        if (digests.size >= maximum) reject(InboxRejection.REJECTION_LIMIT)
+        digests[id] = digest
+        return true
+    }
+}
 
 /**
  * Local trusted code installs enrollment handles. Request delivery cannot create or replace enrollment.
@@ -98,13 +125,22 @@ class CommandRequestEnrollment internal constructor(
     fun accept(body: ByteArray, signature: ByteArray): CommandRequestSession = acceptNegotiated(body, signature, setOf(1u))
 
     @Synchronized
-    private fun acceptNegotiated(body: ByteArray, signature: ByteArray, schemas: Set<ULong>): CommandRequestSession =
-        memoryBudget?.parse { acceptParsed(body, signature, schemas) } ?: acceptParsed(body, signature, schemas)
+    private fun acceptNegotiated(body: ByteArray, signature: ByteArray, schemas: Set<ULong>,
+        rejected: RejectedCommandCaptures? = null,
+    ): CommandRequestSession = memoryBudget?.parse { acceptParsed(body, signature, schemas, rejected) }
+        ?: acceptParsed(body, signature, schemas, rejected)
 
-    private fun acceptParsed(body: ByteArray, signature: ByteArray, schemas: Set<ULong>): CommandRequestSession {
+    private fun acceptParsed(body: ByteArray, signature: ByteArray, schemas: Set<ULong>,
+        rejected: RejectedCommandCaptures?,
+    ): CommandRequestSession {
         if (closed) reject(InboxRejection.CLOSED)
-        val candidate = CommandRequestSession.open(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits, schemas)
+        val candidate = if (rejected == null) {
+            CommandRequestSession.open(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits, schemas)
+        } else {
+            CommandRequestSession.openForDelivery(body, signature, macID.copyBytes(), accountID.copyBytes(), authorityKey, limits, schemas)
+        }
         try {
+            rejected?.requireMatching(candidate.identity.requestID, candidate.requestDigest)
             val existing = requests[candidate.identity]
             if (existing != null) {
                 candidate.close()
@@ -172,16 +208,43 @@ class CommandRequestEnrollment internal constructor(
     @Synchronized
     internal fun detach(owner: AutoCloseable) { if (receiver === owner) receiver = null }
 
+    @Synchronized
+    internal fun verifyDecisionRefusal(owner: AutoCloseable, frame: DecisionRefusalFrame) {
+        if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
+        require(frame.verify(authorityKey))
+    }
+
     /** The identity check and state update share the enrollment monitor with replacement and removal. */
     @Synchronized
-    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant, schemas: Set<ULong>): Boolean {
+    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant,
+        schemas: Set<ULong>, rejected: RejectedCommandCaptures, clock: () -> ElapsedInstant,
+    ): CommandDeliveryOutcome {
         if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
         val body = message.body.copyBytes()
         val signature = message.signature.copyBytes()
         when (message.type) {
-            ApprovalMessageType.REQUEST -> try { acceptNegotiated(body, signature, schemas) } catch (failure: InboxException) {
+            ApprovalMessageType.REQUEST -> try {
+                acceptNegotiated(body, signature, schemas, rejected)
+            } catch (failure: CommandCaptureRefused) {
+                val id = failure.requestID
+                val known = requests[CommandRequestIdentity(macID, accountID, id)]?.requestDigest
+                    ?: retired?.lookup(id.copyBytes())?.let { CborValue.Bytes(it) }
+                if (known != null) {
+                    if (known != failure.requestDigest) reject(InboxRejection.CONFLICTING_REQUEST)
+                    return CommandDeliveryOutcome.Delivered
+                }
+                val result = if (rejected.remember(id, failure.requestDigest)) {
+                    logger.warning("Command capture refused: requestId=${id.copyBytes().toHexString()} " +
+                        "digest=${failure.requestDigest.copyBytes().toHexString()} reason=${failure.reasonCode}")
+                    RequestDeliveryResult(id.copyBytes(), failure.requestDigest.copyBytes(), failure.reason)
+                } else null
+                return CommandDeliveryOutcome.CaptureOmitted(failure.schemaVersion, result)
+            } catch (failure: InboxException) {
                 when (failure.reason) {
-                    InboxRejection.CAPACITY -> limited.value = true
+                    InboxRejection.CAPACITY -> {
+                        limited.value = true
+                        return CommandDeliveryOutcome.CapacityOmitted
+                    }
                     InboxRejection.RETIRED_REQUEST -> Unit
                     else -> throw failure
                 }
@@ -191,12 +254,13 @@ class CommandRequestEnrollment internal constructor(
                 val key = CommandRequestIdentity(CborValue.Bytes(claim.macID), CborValue.Bytes(claim.accountID),
                     CborValue.Bytes(claim.requestID))
                 val session = requests[key]
-                if (session != null) session.observe(body, signature, receivedAt)
+                if (session != null) session.observe(body, signature, receivedAt, clock)
                 else {
-                    val digest = retired?.lookup(claim.requestID)
+                    val digest = rejected[key.requestID]
+                        ?: retired?.lookup(claim.requestID)?.let { CborValue.Bytes(it) }
                     if (digest == null && !limited.value) reject(InboxRejection.UNKNOWN_REQUEST)
-                    require(claim.macID.contentEquals(macID.copyBytes()) && claim.accountID.contentEquals(accountID.copyBytes()))
-                    if (digest != null) require(claim.requestDigest.contentEquals(digest))
+                    require(key.macID == macID && key.accountID == accountID)
+                    if (digest != null) require(digest == CborValue.Bytes(claim.requestDigest))
                     require(ApprovalSignature.verify(signature, authorityKey, 1u, ApprovalMessageType.STATUS, SigningPurpose.STATUS,
                         body, limits.status, limits.signing))
                     // Unowned statuses are authenticated but cannot create a request or grant action authority.
@@ -204,7 +268,7 @@ class CommandRequestEnrollment internal constructor(
             }
             ApprovalMessageType.DECISION -> throw IllegalArgumentException("Unexpected inbound decision")
         }
-        return limited.value
+        return CommandDeliveryOutcome.Delivered
     }
 
     /** Snapshot of owned handles, including terminal tombstones. Capture contents remain owned by each session. */
@@ -221,6 +285,10 @@ class CommandRequestEnrollment internal constructor(
         requests.clear()
         publishedSessions.value = emptyList()
         retired?.close()
+    }
+
+    private companion object {
+        val logger: Logger = Logger.getLogger(CommandRequestEnrollment::class.java.name)
     }
 }
 

@@ -15,7 +15,7 @@ final class AuthorityRequestExchangeTests: XCTestCase, @unchecked Sendable {
         private var callback: (@Sendable (AuthorityXPCReply) -> Void)?
         let sent = XCTestExpectation(description: "exchange sent")
         var counts: (Int, Int) { lock.withLock { (versions, exchanges) } }
-        init(version: UInt64 = 1, response: Data = Data(), hold: Bool = false) {
+        init(version: UInt64 = AuthorityRequestExchange.version, response: Data = Data(), hold: Bool = false) {
             self.version = version; self.response = response; self.hold = hold
         }
         func start(invalidated: @escaping @Sendable () -> Void) {}
@@ -60,6 +60,44 @@ final class AuthorityRequestExchangeTests: XCTestCase, @unchecked Sendable {
             XCTAssertThrowsError(try AuthorityRequestExchange.decode(bytes))
         }
     }
+    func testVersionTwoCorrelatesARefusalWithItsExactDecisionAndAttempt() async throws {
+        let peer = try binding()
+        let attempt = try DecisionRefusalFrame.Attempt(sessionID: Data(repeating: 8, count: 32), sequence: 4)
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 4, maxItems: 64)
+        let digest = Data(repeating: 9, count: 32)
+        let decision = try DecisionPayload(macID: peer.scope.macID, accountID: peer.scope.accountID, requestID: request,
+            requestDigest: digest, challenge: Data(repeating: 10, count: 32), phoneID: peer.scope.phoneID,
+            keyID: Data(repeating: 11, count: 16), action: .init(choice: .execute, scope: .currentRequest)).encode(limits: limits)
+        let frame = try ApprovalMessage(wireVersion: 1, type: .decision, purpose: .biometricAuthorization,
+            body: decision, signature: Data(repeating: 12, count: 64)).encode(maximumBodyBytes: 3968)
+        let query = try AuthorityRequestExchange.decode(AuthorityRequestExchange.encode(requestID: request,
+            decisionFrame: frame, refusalAttempt: attempt))
+        XCTAssertEqual(query.refusalAttempt, attempt)
+        XCTAssertThrowsError(try AuthorityRequestExchange.encode(requestID: request, refusalAttempt: attempt))
+        let payload = try DecisionRefusalFrame.Payload(scope: peer.scope, attempt: attempt, requestID: request,
+            requestDigest: digest, decisionFrameDigest: Data(SHA256.hash(data: frame)), reason: .actionUnavailable)
+        let authority = P256.Signing.PrivateKey()
+        let refusal = try DecisionRefusalFrame(payload: payload, signature: authority.signature(for: payload.signingInput()).rawRepresentation)
+        let response = try refusal.encode()
+        XCTAssertTrue(try DecisionRefusalFrame.decode(response).verify(authorityPublicKey: authority.publicKey.x963Representation))
+        let driver = Driver(response: response), channel = AuthorityXPCChannel(driver: driver)
+        try await channel.start()
+        let received = try await channel.exchangeRequest(binding: peer, requestID: request, decisionFrame: frame, refusalAttempt: attempt)
+        XCTAssertEqual(received, response)
+        await channel.close()
+
+        let wrong = try DecisionRefusalFrame.Attempt(sessionID: attempt.sessionID, sequence: attempt.sequence + 1)
+        for uncorrelated in [nil, wrong] {
+            let channel = AuthorityXPCChannel(driver: Driver(response: response))
+            try await channel.start()
+            do {
+                _ = try await channel.exchangeRequest(binding: peer, requestID: request, decisionFrame: frame, refusalAttempt: uncorrelated)
+                XCTFail("A refusal escaped an unmatched attempt")
+            } catch {}
+            do { _ = try await channel.trustSnapshot(); XCTFail("An uncorrelated response kept the IPC open") } catch {}
+        }
+    }
+
     func testClientNegotiatesBeforeQueryAndCachesVersion() async throws {
         let bytes = try status(), driver = Driver(response: bytes), channel = AuthorityXPCChannel(driver: driver), peer = try binding()
         try await channel.start()
@@ -70,7 +108,7 @@ final class AuthorityRequestExchangeTests: XCTestCase, @unchecked Sendable {
         await channel.close()
     }
     func testUnsupportedVersionSendsNoRequestAndLeavesCommonOperationsUsable() async throws {
-        for version: UInt64 in [0, 2, UInt64.max] {
+        for version: UInt64 in [0, 1, UInt64.max] {
             let driver = Driver(version: version), channel = AuthorityXPCChannel(driver: driver)
             try await channel.start()
             do { _ = try await channel.exchangeRequest(binding: binding(), requestID: request, decisionFrame: Data([1])); XCTFail() }
@@ -113,7 +151,7 @@ final class AuthorityRequestExchangeTests: XCTestCase, @unchecked Sendable {
         for hello in [false, true] {
             let endpoint = try AuthorityXPCEndpoint(macID: mac, accountID: account, budget: AuthorityXPCWorkBudget(),
                 verify: {}, invalidate: {}, snapshot: { trust }, validate: { _ in true },
-                exchangeRequest: { _, _, _ in XCTFail("unnegotiated exchange"); return nil })
+                exchangeRequest: { _, _ in XCTFail("unnegotiated exchange"); return nil })
             if hello { endpoint.hello { XCTAssertEqual($0, 1) } }
             endpoint.exchangeRequest(try AuthorityTrustCodec.encodeBinding(binding()),
                 query: try AuthorityRequestExchange.encode(requestID: request)) { XCTAssertNil($0) }
@@ -124,9 +162,13 @@ final class AuthorityRequestExchangeTests: XCTestCase, @unchecked Sendable {
         for bytes: Data? in [nil, try status(), try status(requestID: Data(repeating: 9, count: 16))] {
             let endpoint = try AuthorityXPCEndpoint(macID: mac, accountID: account, budget: AuthorityXPCWorkBudget(),
                 verify: {}, invalidate: {}, snapshot: { trust }, validate: { _ in true },
-                exchangeRequest: { _, id, decision in XCTAssertEqual(id, request); XCTAssertEqual(decision, Data([1])); return bytes })
+                exchangeRequest: { _, query in
+                    XCTAssertEqual(query.requestID, request); XCTAssertEqual(query.decisionFrame, Data([1]))
+                    XCTAssertNil(query.refusalAttempt)
+                    return bytes
+                })
             endpoint.hello { XCTAssertEqual($0, 1) }
-            endpoint.requestExchangeVersion { XCTAssertEqual($0, 1) }
+            endpoint.requestExchangeVersion { XCTAssertEqual($0, AuthorityRequestExchange.version) }
             let expected = try status()
             let valid = bytes == nil || bytes == expected
             endpoint.exchangeRequest(try AuthorityTrustCodec.encodeBinding(binding()),

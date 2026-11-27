@@ -57,6 +57,13 @@ public final class PairingSetupListener: @unchecked Sendable {
             self.source = source
         }
     }
+    private struct AcceptedSlot {
+        let id: UUID
+        let slot: Slot
+        let acceptedAt: AuthorityMoment?
+        let deadline: ContinuousClock.Instant
+    }
+
     private let listener: NWListener
     var requiredLocalEndpoint: NWEndpoint? { listener.parameters.requiredLocalEndpoint }
     private let queue = DispatchQueue(label: "dev.remozio.pairing-listener")
@@ -105,6 +112,7 @@ public final class PairingSetupListener: @unchecked Sendable {
     init(identity: SecIdentity, invitation: PairingInvitation, binding: DirectApprovalListener.Binding,
          maximumConnections: Int, handshakeTimeoutMilliseconds: UInt64, setupTimeoutMilliseconds: UInt64,
          v2: PairingSetupV2Ingress?, lanRoute: PairingLANRoute? = nil, lanBinding: PairingLANBinding? = nil,
+         requiresDecisionProof: Bool = false,
          proofTime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
          registrationLane: PairingSetupV2RegistrationLane = PairingSetupV2RegistrationLane(),
          sourceKey: @escaping @Sendable (NWEndpoint) -> PairingSetupV2Source? = { PairingSetupV2Source($0) },
@@ -113,7 +121,7 @@ public final class PairingSetupListener: @unchecked Sendable {
          handler: @escaping @Sendable (PairingSetupNetworkSession) async throws -> Void) throws {
         guard (1...64).contains(maximumConnections), (1...60_000).contains(handshakeTimeoutMilliseconds),
               (1...300_000).contains(setupTimeoutMilliseconds) else { throw DirectListenerError.invalidConfiguration }
-        guard (lanRoute == nil) == (lanBinding == nil),
+        guard !requiresDecisionProof || v2 != nil, (lanRoute == nil) == (lanBinding == nil),
               ingressFixture == nil || (lanRoute == nil && v2 != nil && binding == .loopback) else {
             throw DirectListenerError.invalidConfiguration
         }
@@ -151,7 +159,9 @@ public final class PairingSetupListener: @unchecked Sendable {
             intakeNow = nil
         }
         channelAllocated = ingressFixture?.channelAllocated
-        let applicationProtocol = v2 == nil ? PairingSetupFrame.applicationProtocol : PairingSetupPreludeV2.applicationProtocol
+        let applicationProtocol: String = if requiresDecisionProof { PairingSetupPreludeV2.decisionProofApplicationProtocol }
+            else if v2 != nil { PairingSetupPreludeV2.applicationProtocol }
+            else { PairingSetupFrame.applicationProtocol }
         self.applicationProtocol = applicationProtocol
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
         sec_protocol_options_set_local_identity(options, local)
@@ -260,16 +270,26 @@ public final class PairingSetupListener: @unchecked Sendable {
         }
     }
     private func accept(_ connection: NWConnection) {
+        let applicationProtocol = applicationProtocol
+        routeConnection(endpoint: { connection.endpoint }, accepted: ContinuousClock.now, reject: { connection.cancel() },
+            makeChannel: {
+                NetworkByteChannel(connection: connection) {
+                    Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
+                        .flatMap { Self.candidatePoint(metadata: $0) } != nil
+                }
+            }, start: { beginSession($0, connection: connection) })
+    }
+
+    private func routeConnection(endpoint: () -> NWEndpoint, accepted: ContinuousClock.Instant,
+                                 reject: () -> Void, makeChannel: () -> NetworkByteChannel,
+                                 start: (AcceptedSlot) -> Void) {
         let id = UUID()
-        let accepted = ContinuousClock.now
         let deadline = accepted.advanced(by: PairingSetupV2Admissions.proofTimeout)
         let acceptedAt: AuthorityMoment?
         do { acceptedAt = try intakeNow?() }
-        catch { connection.cancel(); return }
-        let source = v2 == nil ? nil : sourceKey(connection.endpoint)
+        catch { reject(); return }
+        let source = v2 == nil ? nil : sourceKey(endpoint())
         let peerIsOnLink = peerSubnet.map { subnet in source.map(subnet.contains) ?? false } ?? true
-        let applicationProtocol = applicationProtocol
-        let registrations = registrationLane
         var evicted: Slot?
         let slot = lock.withLock { () -> Slot? in
             guard started, !closed else { return nil }
@@ -288,17 +308,39 @@ public final class PairingSetupListener: @unchecked Sendable {
                     if let victim { evicted = retireProof(victim) }
                 }
             }
-            let channel = NetworkByteChannel(connection: connection) {
-                Self.metadata(connection: $0, applicationProtocol: applicationProtocol)
-                    .flatMap { Self.candidatePoint(metadata: $0) } != nil
-            }
+            let channel = makeChannel()
             channelAllocated?()
             let value = Slot(channel, source: source)
             slots[id] = value
             return value
         }
         if let evicted { cancel(evicted) }
-        guard let slot else { connection.cancel(); return }
+        guard let slot else { reject(); return }
+        start(.init(id: id, slot: slot, acceptedAt: acceptedAt, deadline: deadline))
+    }
+
+    /// Uses the loopback ingress fixture with a fake driver and no session task or proof timer.
+    func acceptFixtureConnection(_ driver: any ByteConnectionDriver, endpoint: NWEndpoint,
+                                 at accepted: ContinuousClock.Instant) -> UUID? {
+        guard channelAllocated != nil else { return nil }
+        var id: UUID?
+        routeConnection(endpoint: { endpoint }, accepted: accepted, reject: { driver.cancel() },
+            makeChannel: { NetworkByteChannel(driver: driver) }, start: { admitted in
+                id = admitted.id
+                driver.start { _ in }
+            })
+        return id
+    }
+
+    func releaseFixtureConnection(_ id: UUID) {
+        guard channelAllocated != nil else { return }
+        release(id)
+    }
+
+    private func beginSession(_ accepted: AcceptedSlot, connection: NWConnection) {
+        let id = accepted.id, slot = accepted.slot, acceptedAt = accepted.acceptedAt, deadline = accepted.deadline
+        let applicationProtocol = applicationProtocol
+        let registrations = registrationLane
         let channel = slot.channel, invitation = invitation, timeout = setupTimeoutMilliseconds
         let windowV2 = self.v2
         let handshakeTimeout = windowV2 == nil ? handshakeTimeoutMilliseconds : 3_000
@@ -344,7 +386,8 @@ public final class PairingSetupListener: @unchecked Sendable {
                             }, retire: candidate.retire)
                     } else { proof = nil }
                     let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
-                        peerPoint: point, timeoutMilliseconds: timeout, v2: proof)
+                        peerPoint: point, timeoutMilliseconds: timeout, v2: proof,
+                        requiresDecisionProof: applicationProtocol == PairingSetupPreludeV2.decisionProofApplicationProtocol)
                     confirmed = proof != nil
                     do { try Task.checkCancellation() }
                     catch { session.retireVerifiedProof(); await session.closeAndWait(); throw error }

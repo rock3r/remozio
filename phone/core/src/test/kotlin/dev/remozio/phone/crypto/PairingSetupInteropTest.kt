@@ -4,15 +4,20 @@ import dev.remozio.pairing.PairingSetupChannel
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.transport.*
 import dev.remozio.protocol.*
+import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.Security
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
@@ -29,10 +34,12 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.serialization.json.*
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
+import org.conscrypt.Conscrypt
 import org.junit.Test
 import kotlin.test.*
 
-/** Real native/JVM TLS on loopback with disposable software keys. No Root, administrator consent, hardware biometric or durable enrollment. */
+/** Native/JVM TLS with disposable software keys. Decision-proof cases use the checkpointed Root owner
+ * with logical authorization and no installed services or hardware. */
 class PairingSetupInteropTest {
     private fun key(): KeyPair = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
     private fun point(pair: KeyPair): ByteArray {
@@ -44,16 +51,25 @@ class PairingSetupInteropTest {
         val failure = assertFails { withTimeout(timeoutMillis) { operation() } }
         assertFalse(failure is TimeoutCancellationException, "A timeout does not prove rejection")
     }
-    private inner class Fixture(private val holdPairingStage: Boolean = false, rePair: Boolean = false, dropRePairReceipt: Boolean = false) : AutoCloseable {
+    private inner class Fixture(
+        holdPairingStage: Boolean = false,
+        rePair: Boolean = false,
+        dropRePairReceipt: Boolean = false,
+        decisionProof: Boolean = false,
+        legacyCommit: Boolean = false,
+        private val pairingV2: Boolean = decisionProof,
+    ) : AutoCloseable {
         val phone = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-phone").build()
         val mac = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-mac").build()
         val biometric = key(); val decision = key()
         val directory = Files.createTempDirectory("remozio-pairing-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         private val process: Process
+        private val stdout: BufferedReader
         val port: Int
         val receiptPort: Int?
         val invitation: PairingInvitation
         val rePairInvitation: RePairInvitation?
+        val v2Invitation: PairingInvitationV2?
         val keys: Array<KeyManager> = arrayOf(HandshakeCertificates.Builder().heldCertificate(phone).build().keyManager)
         init {
             var started: Process? = null
@@ -68,41 +84,49 @@ class PairingSetupInteropTest {
                 started = ProcessBuilder(System.getProperty("remozio.test.tlsPeer"), identity.toString())
                     .redirectError(directory.resolve("stderr.log").toFile()).start()
                 process = started
+                stdout = process.inputStream.bufferedReader()
                 val arguments = buildJsonObject {
                     put("peerPublicKey", Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded))
                     put("pairing", true)
                     put("holdPairingStage", holdPairingStage)
                     put("rePair", rePair)
                     put("dropRePairReceipt", dropRePairReceipt)
+                    put("pairingV2", pairingV2)
+                    put("decisionProof", decisionProof)
+                    put("legacyCommit", legacyCommit)
                 }
                 process.outputStream.write((arguments.toString() + "\n").encodeToByteArray())
                 process.outputStream.flush()
-                val executor = Executors.newSingleThreadExecutor()
-                val output = try {
-                    executor.submit<Map<String, JsonElement>> {
-                        val reader = process.inputStream.bufferedReader()
-                        buildMap {
-                            repeat(if (dropRePairReceipt) 2 else 1) {
-                                putAll(Json.parseToJsonElement(reader.readLine()).jsonObject)
-                            }
-                        }
-                    }.get(10, TimeUnit.SECONDS)
-                } finally { executor.shutdownNow() }
+                val output = buildMap {
+                    repeat(if (dropRePairReceipt) 2 else 1) { putAll(readPeerLine()) }
+                }
                 receiptPort = output["receiptPort"]?.jsonPrimitive?.int
                 port = output.getValue("port").jsonPrimitive.int
                 val text = output.getValue("invitation").jsonPrimitive.content
-                rePairInvitation = if (rePair) RePairInvitation.importText(text) else null
-                invitation = rePairInvitation?.invitation ?: PairingInvitation.importText(text)
+                rePairInvitation = if (rePair && !pairingV2) RePairInvitation.importText(text) else null
+                v2Invitation = if (pairingV2) PairingInvitationV2.importText(text) else null
+                invitation = v2Invitation?.invitation ?: rePairInvitation?.invitation ?: PairingInvitation.importText(text)
             } catch (failure: Throwable) {
                 started?.destroyForcibly(); started?.waitFor(5, TimeUnit.SECONDS)
                 directory.toFile().deleteRecursively(); throw failure
             }
         }
+        fun readPeerLine(): JsonObject {
+            val executor = Executors.newSingleThreadExecutor()
+            return try {
+                executor.submit<JsonObject> {
+                    val line = checkNotNull(stdout.readLine()) { "Native pairing fixture ended before reporting its result" }
+                    Json.parseToJsonElement(line).jsonObject
+                }.get(10, TimeUnit.SECONDS)
+            } finally { executor.shutdownNow() }
+        }
+
         fun proposal(invite: PairingInvitation = invitation, transport: KeyPair = phone.keyPair,
                      replacement: PairingReplacement? = null): PairingPhoneProposal {
+            val requests = if (pairingV2) listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())) else emptyList()
             val offer = ChannelOffer(ChannelRole.PHONE, ChannelScope(invite.macID.copyBytes(), invite.accountID.copyBytes(),
                 ByteArray(16) { 3 }, ByteArray(16) { 4 }), ByteArray(32).also(java.security.SecureRandom()::nextBytes),
-                setOf(1u), emptyList(), emptySet())
+                setOf(1u), requests, emptySet())
             return PairingPhoneProposal(offer, PairingKey(ByteArray(16) { 5 }, point(transport)),
                 PairingKey(ByteArray(16) { 6 }, point(decision)), PairingKey(ByteArray(16) { 7 }, point(biometric)), replacement)
         }
@@ -111,6 +135,13 @@ class PairingSetupInteropTest {
         fun proof(transcript: PairingTranscript): ByteArray = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
             initSign(biometric.private); update(transcript.signingInput(PairingProofPurpose.PHONE_BIOMETRIC)); sign()
         })
+        fun decisionProof(transcript: PairingTranscript, signer: KeyPair = decision): ByteArray =
+            P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                initSign(signer.private)
+                update(transcript.signingInput(PairingProofPurpose.PHONE_DECISION))
+                sign()
+            })
+
         override fun close() {
             runCatching { process.outputStream.write('q'.code); process.outputStream.flush(); process.outputStream.close() }
             val drained = process.waitFor(5, TimeUnit.SECONDS)
@@ -120,6 +151,160 @@ class PairingSetupInteropTest {
             assertEquals(0, process.exitValue(), "Native setup fixture did not stop cleanly")
         }
     }
+    private inline fun <T> withNativeExporter(body: (PairingV2TLSProvider) -> T): T {
+        val provider = Conscrypt.newProvider()
+        check(Security.insertProviderAt(provider, 1) == 1)
+        try {
+            val exporter = object : PairingV2TLSProvider {
+                override fun configure(engine: SSLEngine) = Conscrypt.setUseSessionTickets(engine, false)
+                override fun export(engine: SSLEngine): ByteArray? =
+                    Conscrypt.exportKeyingMaterial(engine, PairingInvitationV2.EXPORTER_LABEL, ByteArray(0), 32)
+            }
+            return body(exporter)
+        } finally {
+            Security.removeProvider(provider.name)
+        }
+    }
+
+    private enum class RootOutcome(val phase: Int, val committed: Int) {
+        PROOF_REJECTED(1, 0),
+        COMMIT_REJECTED(2, 0),
+        RECEIPT(3, 1),
+    }
+
+    private fun assertRootOutcome(fixture: Fixture, outcome: RootOutcome, rePair: Boolean = false) {
+        val report = fixture.readPeerLine()
+        assertEquals(outcome.phase, report["phase"]?.jsonPrimitive?.int, report.toString())
+        for (name in listOf("commits", "auditDelta", "active", "receiptSignatures", "receipts")) {
+            assertEquals(outcome.committed, report.getValue(name).jsonPrimitive.int, name)
+        }
+        assertEquals(if (rePair) 1 else 0, report.getValue("predecessorRevoked").jsonPrimitive.int)
+    }
+
+    private suspend fun assertV2Pairing(scope: CoroutineScope, rePair: Boolean, decisionProof: Boolean) {
+        Fixture(rePair = rePair, decisionProof = decisionProof, pairingV2 = true).use { fixture ->
+            withNativeExporter { provider ->
+                val invitation = checkNotNull(fixture.v2Invitation)
+                assertEquals(rePair, invitation.replacement != null)
+                val proposal = fixture.proposal(replacement = invitation.replacement)
+                val channel = authenticatePairingV2Routes(scope, flowOf(ApprovalCarrierRoute { owner -> fixture.open(owner) }),
+                    fixture.keys, invitation, proposal, 5_000, provider, offerDecisionProof = true)
+                try {
+                    assertEquals(decisionProof, channel.requiresDecisionProof)
+                    val transcript = withTimeout(8_000) { channel.awaitTranscriptV2(invitation) }
+                    assertEquals(invitation.replacement?.phoneID, transcript.replacement?.phoneID)
+                    assertEquals(invitation.replacement?.epoch, transcript.replacement?.epoch)
+                    val receipt = withTimeout(8_000) {
+                        val biometric = fixture.proof(transcript)
+                        if (decisionProof) {
+                            channel.submitDualProof(transcript.digest(), biometric, fixture.decisionProof(transcript))
+                        } else {
+                            channel.submitProof(transcript.digest(), biometric)
+                        }
+                    }
+                    assertTrue(transcript.verify(receipt, fixture.invitation.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
+                    assertRootOutcome(fixture, RootOutcome.RECEIPT, rePair)
+                } finally {
+                    channel.closeAndJoin()
+                }
+            }
+        }
+    }
+
+    @Test fun decisionProofPairingCommitsAndReturnsAVerifiedReceipt(): Unit = runBlocking {
+        assertV2Pairing(this, rePair = false, decisionProof = true)
+    }
+
+    @Test fun decisionProofRePairCommitsTheNewEpochAndKeepsThePredecessorRevoked(): Unit = runBlocking {
+        assertV2Pairing(this, rePair = true, decisionProof = true)
+    }
+
+    @Test fun nativeV2SelectsBiometricProofWhenClientOffersBothProfiles(): Unit = runBlocking {
+        assertV2Pairing(this, rePair = false, decisionProof = false)
+    }
+
+    private suspend fun readPairingFrame(session: TLSRecordSession, limit: Int): ByteArray {
+        val bytes = ByteArrayOutputStream()
+        while (true) {
+            val chunk = session.receive() ?: throw IOException("Incomplete pairing frame")
+            require(chunk.size <= limit + Int.SIZE_BYTES - bytes.size())
+            bytes.write(chunk)
+            if (bytes.size() < Int.SIZE_BYTES) continue
+            val framed = bytes.toByteArray()
+            val size = ByteBuffer.wrap(framed).int
+            require(size in 1..limit && framed.size <= Int.SIZE_BYTES + size)
+            if (framed.size == Int.SIZE_BYTES + size) return framed.copyOfRange(Int.SIZE_BYTES, framed.size)
+        }
+    }
+
+    private suspend fun sendPairingFrame(session: TLSRecordSession, payload: ByteArray) {
+        // Every fixture proposal and proof fits within one record-session chunk.
+        session.send(ByteBuffer.allocate(Int.SIZE_BYTES + payload.size).putInt(payload.size).put(payload).array())
+    }
+
+    private enum class RejectedProof { MISSING, WRONG_KEY, LEGACY_COMMIT }
+
+    private suspend fun assertDecisionProofRejection(scope: CoroutineScope, rejection: RejectedProof) {
+        Fixture(decisionProof = true, legacyCommit = rejection == RejectedProof.LEGACY_COMMIT).use { fixture ->
+            withNativeExporter { provider ->
+                val invitation = requireNotNull(fixture.v2Invitation)
+                val proposal = fixture.proposal()
+                val engine = PinnedTLSClient.forPairingV2(fixture.keys, fixture.mac.certificate.publicKey.encoded,
+                    provider, offerDecisionProof = true)
+                val carrier = try { fixture.open(scope) } catch (failure: Throwable) { engine.close(); throw failure }
+                val session = TLSRecordSession(scope, engine, carrier, handshakeTimeoutMillis = 5_000)
+                try {
+                    withTimeout(8_000) {
+                        session.awaitOpen()
+                        val challenge = assertIs<PairingSetupPreludeV2.Challenge>(PairingSetupPreludeV2.decode(
+                            readPairingFrame(session, PairingSetupPreludeV2.MAXIMUM_BYTES)))
+                        val exporter = engine.pairingExporter()
+                        val tag = try { invitation.proof(proposal, challenge.value.copyBytes(), exporter) }
+                            finally { exporter.fill(0) }
+                        sendPairingFrame(session, PairingSetupPreludeV2.Proposal(proposal, tag).encode())
+                        val transcript = assertIs<PairingSetupFrame.Transcript>(PairingSetupFrame.decode(
+                            readPairingFrame(session, PairingSetupFrame.MAXIMUM_BYTES))).value
+                        proposal.validate(transcript)
+                        fixture.invitation.validateMacClaims(transcript)
+                        val biometric = fixture.proof(transcript)
+                        val id = transcript.setupID.copyBytes()
+                        val digest = transcript.digest()
+                        val invalid = when (rejection) {
+                            RejectedProof.MISSING -> PairingSetupFrame.Proof(id, digest, biometric)
+                            RejectedProof.WRONG_KEY -> PairingSetupFrame.DualProof(id, digest, biometric,
+                                fixture.decisionProof(transcript, signer = fixture.biometric))
+                            RejectedProof.LEGACY_COMMIT -> PairingSetupFrame.DualProof(id, digest, biometric,
+                                fixture.decisionProof(transcript))
+                        }
+                        // Exercise the Swift boundary directly. The ordinary Kotlin API already blocks malformed proofs.
+                        sendPairingFrame(session, invalid.encode())
+                        try {
+                            assertNull(session.receive(), "Rejected pairing emitted a receipt or other data")
+                        } catch (_: IOException) {
+                            // An abrupt TLS close also rejects the exchange. The Swift report below identifies the boundary.
+                        }
+                    }
+                    assertRootOutcome(fixture, if (rejection == RejectedProof.LEGACY_COMMIT) RootOutcome.COMMIT_REJECTED
+                        else RootOutcome.PROOF_REJECTED)
+                } finally {
+                    session.closeAndJoin()
+                }
+            }
+        }
+    }
+
+    @Test fun missingDecisionProofLeavesNoCommitOrReceipt(): Unit = runBlocking {
+        assertDecisionProofRejection(this, RejectedProof.MISSING)
+    }
+
+    @Test fun wrongDecisionSigningKeyLeavesNoCommitOrReceipt(): Unit = runBlocking {
+        assertDecisionProofRejection(this, RejectedProof.WRONG_KEY)
+    }
+
+    @Test fun legacyRootCommitIsRefusedEvenAfterTheTransportVerifiedDualProof(): Unit = runBlocking {
+        assertDecisionProofRejection(this, RejectedProof.LEGACY_COMMIT)
+    }
+
     @Test fun unpairedTLSCandidateReceivesAndVerifiesTheExactSetupReceipt(): Unit = runBlocking {
         Fixture().use { f ->
             val owner = SupervisorJob(); val scope = CoroutineScope(owner)

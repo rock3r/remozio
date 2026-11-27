@@ -17,6 +17,9 @@ import Synchronization
 @objc public protocol AuthorityInstalledPairingXPCProtocol {
     @objc(pairingSetupHelloWithMaximumVersion:reply:)
     func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void)
+    @objc(commitPairingWithDecisionProof:confirmedDigest:biometricProof:decisionProof:authorization:reply:)
+    func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                       decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     @objc(openPairingV2:rendezvousID:predecessor:reply:)
     func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?, reply: @escaping @Sendable (Data?) -> Void)
     @objc(stagePairingV2:connectionID:authorization:reply:)
@@ -46,7 +49,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private let onHandshake: @Sendable () -> Void
     private struct WorkState {
         var ready = false, closed = false, busy = false
-        var phoneManagement = false
+        var phoneManagementVersion: UInt64 = 0
         var attempt: PairingEnrollmentAttempt?
         var activity: ReleaseActivityToken?
         var stage: AuthorityMaintenancePairingAdmission.Stage?
@@ -141,13 +144,14 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         replyWithPhoneManagementVersion(1, reply: reply)
     }
     func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
-        // Version 3 adds discovery for the installed setup extension. Versions 1 and 2 keep their original behavior.
-        replyWithPhoneManagementVersion(min(maximumVersion, owners == nil ? 2 : 3), reply: reply)
+        // Versions 3 through 5 require the installed pairing owners.
+        let version = min(maximumVersion, owners == nil ? 2 : 5)
+        replyWithPhoneManagementVersion(version, reply: reply)
     }
     private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
         do {
             let completed = try work {
-                if version > 0 { state.withLock { $0.phoneManagement = true } }
+                if version > 0 { state.withLock { $0.phoneManagementVersion = version } }
             }
             defer { completed.completion.close() }
             send { reply(version) }
@@ -156,7 +160,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func managePairedPhone(_ operation: UInt64, selection: Data, authorization: Data,
                            reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
-            guard state.withLock({ $0.phoneManagement }), let operation = PairedPhoneOperation(rawValue: operation) else {
+            guard state.withLock({ $0.phoneManagementVersion > 0 }), let operation = PairedPhoneOperation(rawValue: operation) else {
                 throw AuthorityPairingSetupError.unavailable
             }
             switch operation {
@@ -166,6 +170,18 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             case .listForRePair:
                 guard selection.isEmpty, authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try access.pairedPhones(includeRePair: true).encode(includeRePair: true)
+            case .listWithRepairNotices:
+                guard state.withLock({ $0.phoneManagementVersion >= 4 }), selection.isEmpty, authorization.isEmpty else {
+                    throw AuthorityPairingSetupError.unavailable
+                }
+                return try access.pairedPhones(includeRePair: true, includeRepairNotices: true)
+                    .encode(includeRePair: true, includeRepairNotices: true)
+            case .listWithRePairRestrictions:
+                guard state.withLock({ $0.phoneManagementVersion >= 5 }), selection.isEmpty, authorization.isEmpty else {
+                    throw AuthorityPairingSetupError.unavailable
+                }
+                return try access.pairedPhones(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
+                    .encode(includeRePair: true, includeRepairNotices: true, includeRePairRestrictions: true)
             case .validateRePair:
                 guard authorization.isEmpty else { throw AuthorityPairingSetupError.unavailable }
                 return try Data([access.canRePair(.decode(selection)) ? 1 : 0])
@@ -215,8 +231,9 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             let completed = try work { () -> (UInt64, Data?) in
                 try access.requirePairingOpen()
                 guard maximumVersion >= 1, let owners else { return (0, nil) }
-                guard access.requiresInstalledV2 else { return (1, nil) }
-                let version: UInt64 = access.lanScope == nil ? 2 : 3
+                guard access.requiresInstalledV2 else { return (access.requiresDecisionProof ? 0 : 1, nil) }
+                let version: UInt64 = if access.requiresDecisionProof { access.lanScope == nil ? 4 : 5 }
+                    else { access.lanScope == nil ? 2 : 3 }
                 guard maximumVersion >= version, rendezvous == nil, v2Window == nil, attempt == nil else { return (0, nil) }
                 let pending = AuthorityPairingRendezvous(revision: access.activationRevision, lanScope: access.lanScope)
                 owners.register(pending)
@@ -363,6 +380,16 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     }
     func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, authorization: Data,
                        reply: @escaping @Sendable (Data?) -> Void) {
+        commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: nil,
+                      authorization: authorization, reply: reply)
+    }
+    func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                       decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: decisionProof,
+                      authorization: authorization, reply: reply)
+    }
+    private func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, decisionProof: Data?,
+                               authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
             guard let pending = attempt, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
                 throw AuthorityPairingSetupError.unavailable
@@ -371,7 +398,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             clearAttempt()
             defer { closeV2Window() }
             return try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
-                window: v2Window, authorize: { [authorize] in try authorize(authorization) })
+                decisionProof: decisionProof, window: v2Window, authorize: { [authorize] in try authorize(authorization) })
         }
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
@@ -506,6 +533,11 @@ final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @uncheck
     func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, authorization: Data,
                        reply: @escaping @Sendable (Data?) -> Void) {
         pairing.commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, authorization: authorization, reply: reply)
+    }
+    func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                       decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        pairing.commitPairingWithDecisionProof(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof,
+                                               decisionProof: decisionProof, authorization: authorization, reply: reply)
     }
     func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void) {
         pairing.pairingSetupHello(maximumVersion: maximumVersion, reply: reply)

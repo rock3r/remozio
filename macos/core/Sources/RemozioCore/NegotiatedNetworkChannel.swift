@@ -57,6 +57,7 @@ public actor NegotiatedNetworkChannel {
     public nonisolated let purpose: EnrolledChannelPurpose
     private let stream: any ApprovalByteStream
     private let maximumPayloadBytes: Int
+    private let localRequests: [ChannelRequestCapability]
     private let cancellation = ChannelCancellation()
     private var state = State.negotiating
     private var metadata: NegotiatedChannel?
@@ -67,12 +68,36 @@ public actor NegotiatedNetworkChannel {
     private var incoming: UInt64? = 0
     private var outgoing: UInt64? = 0
 
-    private init(stream: any ApprovalByteStream, maximumPayloadBytes: Int, purpose: EnrolledChannelPurpose) {
+    private init(stream: any ApprovalByteStream, maximumPayloadBytes: Int, purpose: EnrolledChannelPurpose,
+                 localRequests: [ChannelRequestCapability]) {
         self.stream = stream; self.maximumPayloadBytes = maximumPayloadBytes; self.purpose = purpose
+        self.localRequests = localRequests
     }
     public func negotiated() throws -> NegotiatedChannel {
         try active(); guard state == .open, let metadata else { throw ApprovalChannelError.closed }; return metadata
     }
+    func requestDeliveryResultSchemas() throws -> Set<UInt64> {
+        try resultSchemas(feature: RequestDeliveryResult.capability)
+    }
+
+    func supportsDecisionRefusals() throws -> Bool {
+        try !resultSchemas(feature: DecisionRefusalFrame.capability).isEmpty
+    }
+
+    func supportsPhoneRepairNotices() throws -> Bool {
+        try !resultSchemas(feature: PhoneRepairNoticeFrame.capability).isEmpty
+    }
+
+    private func resultSchemas(feature: UInt64) throws -> Set<UInt64> {
+        guard purpose == .approvals else { return [] }
+        func supported(_ capabilities: [ChannelRequestCapability]) -> Set<UInt64> {
+            Set(capabilities.filter {
+                $0.kind == 0 && $0.wireVersion == 1 && $0.features.contains(feature)
+            }.map(\.schemaVersion))
+        }
+        return try supported(localRequests).intersection(supported(negotiated().peer.requests))
+    }
+
     /// Takes exclusive ownership, including on failure. The caller configures enrolled TLS pins and admission.
     public static func accept(channel: NetworkByteChannel, scope: ChannelScope, requests: [ChannelRequestCapability],
                               auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
@@ -95,7 +120,8 @@ public actor NegotiatedNetworkChannel {
                        auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
                        trustedMinimum: UInt64 = 1, timeoutMilliseconds: UInt64 = 15_000,
                               purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
-        let owner = NegotiatedNetworkChannel(stream: stream, maximumPayloadBytes: maximumPayloadBytes, purpose: purpose)
+        let owner = NegotiatedNetworkChannel(stream: stream, maximumPayloadBytes: maximumPayloadBytes,
+            purpose: purpose, localRequests: requests)
         try await owner.negotiate(scope: scope, requests: requests, auditVersions: auditVersions,
             trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds)
         return owner
@@ -112,6 +138,10 @@ public actor NegotiatedNetworkChannel {
         } catch { await finish(); throw error }
     }
     public func receive(maximumBytes: Int? = nil) async throws -> Data? {
+        try await receiveEnvelope(maximumBytes: maximumBytes)?.payload
+    }
+
+    func receiveEnvelope(maximumBytes: Int? = nil) async throws -> SessionEnvelope? {
         do {
             try active()
             let maximum = maximumBytes ?? maximumPayloadBytes
@@ -123,7 +153,7 @@ public actor NegotiatedNetworkChannel {
             let envelope = try SessionEnvelope.decode(frame, maximumPayloadBytes: maximum)
             guard envelope.sessionID == metadata.sessionID, envelope.sequence == incoming else { throw ApprovalChannelError.invalidInput }
             incoming = envelope.sequence == .max ? nil : envelope.sequence + 1
-            try active(); return envelope.payload
+            try active(); return envelope
         } catch { await finish(); throw error }
     }
     /// Invalidates the incarnation immediately, then closes pending native I/O.

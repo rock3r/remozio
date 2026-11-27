@@ -6,11 +6,17 @@ final class ApprovalMessageTests: XCTestCase {
     func testExactOpaqueBytesAndSignatureUseSharedWireEncoding() throws {
         let message = try ApprovalMessage(wireVersion: 1, type: .request, purpose: .issuedRequest,
             body: Data([1, 2, 3]), signature: Data(repeating: 0xaa, count: 64))
-        let encoded = try message.encode(maximumBodyBytes: 3)
-        XCTAssertEqual(encoded.map { String(format: "%02x", $0) }.joined(),
-            "a600010101020103010443010203055840" + String(repeating: "aa", count: 64))
+        let rows = try CommandCarrierVectors.load().approvalMessage.valid
+        XCTAssertEqual(rows.count, 1)
+        let row = try XCTUnwrap(rows.first)
+        let encoded = try row.bytes()
+        XCTAssertEqual(try message.encode(maximumBodyBytes: 3), encoded, row.name)
         let decoded = try ApprovalMessage.decode(encoded, maximumBodyBytes: 3)
-        XCTAssertEqual(message.body, decoded.body); XCTAssertEqual(message.signature, decoded.signature)
+        XCTAssertEqual(decoded.wireVersion, message.wireVersion)
+        XCTAssertEqual(decoded.type, message.type)
+        XCTAssertEqual(decoded.purpose, message.purpose)
+        XCTAssertEqual(decoded.body, message.body)
+        XCTAssertEqual(decoded.signature, message.signature)
         XCTAssertEqual(decoded.description, "ApprovalMessage(redacted)")
     }
     func testOnlyDefinedSigningDomainsAndWireVersionsAreCarried() throws {
@@ -32,16 +38,12 @@ final class ApprovalMessageTests: XCTestCase {
         let message = try ApprovalMessage(wireVersion: 1, type: .request, purpose: .issuedRequest,
             body: Data([1]), signature: Data(count: 64))
         let encoded = try message.encode(maximumBodyBytes: 1)
-        let limits = try CBORLimits(maxBytes: 256, maxDepth: 2, maxItems: 20)
-        guard case let .map(fields) = try DeterministicCBOR.decode(encoded, limits: limits) else { return XCTFail() }
-        let changes: [(UInt64, CBORValue)] = [(0, .unsigned(2)), (1, .unsigned(2)), (2, .unsigned(99)), (3, .unsigned(99)),
-            (3, .unsigned(5)), (4, .bytes(Data())), (4, .bytes(Data(count: 2))), (5, .bytes(Data(count: 63))), (6, .unsigned(1))]
-        for (key, value) in changes {
-            var changed = fields; changed[key] = value
-            let bytes = try DeterministicCBOR.encode(.map(changed), limits: limits)
-            XCTAssertThrowsError(try ApprovalMessage.decode(bytes, maximumBodyBytes: 1))
+        let rows = try CommandCarrierVectors.load().approvalMessage.invalid
+        XCTAssertEqual(rows.count, 10)
+        for row in rows {
+            let bytes = try row.bytes()
+            XCTAssertThrowsError(try ApprovalMessage.decode(bytes, maximumBodyBytes: 1), row.name)
         }
-        XCTAssertThrowsError(try ApprovalMessage.decode(encoded + Data([0]), maximumBodyBytes: 1))
         XCTAssertThrowsError(try ApprovalMessage.decode(encoded, maximumBodyBytes: Int.max))
         XCTAssertThrowsError(try message.encode(maximumBodyBytes: 0))
     }

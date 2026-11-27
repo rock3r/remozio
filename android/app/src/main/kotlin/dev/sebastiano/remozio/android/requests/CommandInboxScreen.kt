@@ -19,12 +19,14 @@ import dev.sebastiano.remozio.android.RemozioApplication
 import dev.sebastiano.remozio.android.enrollment.StoredMac
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.CommandRequestSnapshot
+import dev.remozio.protocol.CborValue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 /** Screens observe application-owned connections without opening or stopping their transports. */
 @Composable
-internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit, navigation: CommandInboxNavigation) {
+internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit, navigation: CommandInboxNavigation,
+    onRepair: (CborValue.Bytes) -> Unit) {
     val runtime = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val runtimeState by runtime.state.collectAsState()
     val selectedOwner = (runtimeState as? ForegroundCommandState.Ready)?.owners?.singleOrNull { it.recordID == mac.recordID }
@@ -51,8 +53,11 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit, navigation: 
                 CommandConnectionState.CONNECTED -> R.string.commands_connected
                 CommandConnectionState.DISCONNECTED -> R.string.commands_disconnected
                 CommandConnectionState.CLOSED -> R.string.commands_enrollment_unavailable
+                CommandConnectionState.RECOVERY_REQUIRED -> R.string.commands_certificate_recovery
             }))
-            if (limited || state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED) {
+            if (state == CommandConnectionState.RECOVERY_REQUIRED) {
+                TextButton(onClick = { onRepair(mac.recordID) }) { Text(stringResource(R.string.commands_pair_again)) }
+            } else if (limited || state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED) {
                 TextButton(onClick = { runtime.reconnect(connection) }) { Text(stringResource(R.string.commands_reconnect)) }
             }
         } ?: run { if (failure == null) CircularProgressIndicator() }
@@ -80,7 +85,7 @@ internal fun CommandRequestRow(session: CommandRequestSession, number: Int, onOp
     LaunchedEffect(session, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             try {
-                while (isActive) { snapshot = session.snapshot(RequestElapsedClock.now()); delay(1000) }
+                while (isActive) { snapshot = session.snapshot(RequestElapsedClock::now); delay(1000) }
             } finally { snapshot = null }
         }
     }

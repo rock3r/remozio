@@ -40,7 +40,7 @@ internal suspend fun androidMacUpdateProgressWire(
         currentCoroutineContext().ensureActive()
         require(current.phase == EnrollmentPhase.ACTIVE && record.sameConnectionAs(current))
         val enrollment = record.enrollment
-        identity = AndroidTransportIdentities.load(enrollment.transportKey.alias, enrollment.transportKey.publicKey.copyBytes())
+        identity = AndroidTransportIdentities.load(context, enrollment.transportKey)
         val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), enrollment.transportPublicKey.copyBytes(),
             ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(), enrollment.phoneID.copyBytes(),
                 enrollment.epoch.copyBytes()), emptyList(), emptySet(), PhoneUpdateProgressFrame.MAXIMUM_BYTES,

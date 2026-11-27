@@ -1,11 +1,12 @@
 import Foundation
+import RemozioHostCore
 import RemozioProtocol
 import Synchronization
 
 public enum MacPairingSessionError: Error { case invalidConfiguration, invalidState, closed, expired, changedCandidate, ineligiblePredecessor }
 public enum MacPairingSessionPhase: Sendable {
     case idle, connecting, waitingForPhone, authorizing, comparing, waitingForBiometric, committing
-    case registeredOnMac, receiptSent, expired, unavailable, unavailableInterface, outcomeUnknown, closed
+    case registeredOnMac, receiptSent, expired, unavailable, unavailableInterface, newPairingRequired, outcomeUnknown, closed
 }
 
 /// Display data only. A receipt write never claims that the phone activated its enrollment.
@@ -25,10 +26,23 @@ public struct MacPairingSessionSnapshot: Sendable {
 protocol MacPairingRootControl: Sendable {
     func start() async throws -> AuthorityPairingContext
     func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool
+    func requiresNewPairing(_ selection: PairedPhoneSelection) async throws -> Bool
     func stage(_ proposal: PairingPhoneProposal, authorization: Data) async throws -> PairingTranscript
-    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) async throws -> Data
+    /// Call onSend immediately before submitting the commit to Root.
+    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data
+    func commit(confirmedDigest: Data, phoneProof: PairingPhoneProof, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data
     nonisolated func abort()
     func close() async
+}
+extension MacPairingRootControl {
+    func commit(confirmedDigest: Data, phoneProof: PairingPhoneProof, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data {
+        guard phoneProof.decision == nil else { throw AuthorityPairingChannelError.unsupportedVersion }
+        return try await commit(confirmedDigest: confirmedDigest, biometricProof: phoneProof.biometric,
+                                authorization: authorization, onSend: onSend)
+    }
 }
 protocol MacPairingTransportControl: Sendable {
     func start(invitation: PairingInvitation) async throws -> UInt16
@@ -84,11 +98,12 @@ public actor MacPairingSession {
     private let predecessor: PairedPhoneSelection?
     private var v2: MacPairingV2Control?
     private var installedLAN = false
+    private var requiresDecisionProof = false
     private let openInstalledRoot: (@Sendable () throws -> AuthorityPairingChannel)?
     private let installedTransport: TransportPairingChannel?
     private let cancellation = ChannelCancellation()
     private let unixMilliseconds: @Sendable () -> UInt64
-    private let elapsedMilliseconds: @Sendable () -> UInt64
+    private let elapsedMilliseconds: @Sendable () throws -> UInt64
     private var phase = MacPairingSessionPhase.idle
     private var context: AuthorityPairingContext?
     private var invitation: PairingInvitation?
@@ -98,7 +113,7 @@ public actor MacPairingSession {
     private var selected: TransportPairingCandidate?
     private var transcript: PairingTranscript?
     private var deadline: UInt64?
-    private var proof: Data?
+    private var proof: PairingPhoneProof?
     private var busy = false
     private var commitAttempted = false
     private var humanConfirmed = false
@@ -112,17 +127,18 @@ public actor MacPairingSession {
               rootConfiguration.accountID == transportConfiguration.accountID,
               rootConfiguration.ownerUID == transportConfiguration.ownerUID,
               rootConfiguration.serviceName != transportConfiguration.serviceName else { throw MacPairingSessionError.invalidConfiguration }
+        let clock = try SleepInclusiveClock()
         try self.init(openInstalledRoot: { try AuthorityPairingChannel(configuration: rootConfiguration) },
             installedTransport: TransportPairingChannel(configuration: transportConfiguration),
             administrator: NativePairingAdministrator(), predecessor: predecessor,
             unixMilliseconds: { UInt64(max(0, Date().timeIntervalSince1970 * 1000)) },
-            elapsedMilliseconds: { UInt64(ProcessInfo.processInfo.systemUptime * 1000) })
+            elapsedMilliseconds: { try clock.milliseconds() })
     }
 
     // Run the installed session sequence with alternate native endpoints in the wire tests.
     init(openInstalledRoot: @escaping @Sendable () throws -> AuthorityPairingChannel, installedTransport: TransportPairingChannel,
          administrator: any MacPairingAdministrator, predecessor: PairedPhoneSelection? = nil,
-         unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () -> UInt64) throws {
+         unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () throws -> UInt64) throws {
         rootOwner = Mutex(try openInstalledRoot() as any MacPairingRootControl)
         self.openInstalledRoot = openInstalledRoot
         self.installedTransport = installedTransport
@@ -136,7 +152,7 @@ public actor MacPairingSession {
     // Logical drivers cannot establish installed identity, native administrator consent or hardware custody.
     init(root: any MacPairingRootControl, transport: any MacPairingTransportControl, administrator: any MacPairingAdministrator,
          predecessor: PairedPhoneSelection? = nil, v2: MacPairingV2Control? = nil,
-         unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () -> UInt64) {
+         unixMilliseconds: @escaping @Sendable () -> UInt64, elapsedMilliseconds: @escaping @Sendable () throws -> UInt64) {
         rootOwner = Mutex(root); self.transport = transport; self.administrator = administrator
         self.predecessor = predecessor
         self.v2 = v2
@@ -166,10 +182,12 @@ public actor MacPairingSession {
         if let negotiation {
             let rendezvousID = negotiation.rendezvousID
             installedLAN = negotiation.requiresLAN
+            requiresDecisionProof = negotiation.requiresDecisionProof
             v2 = MacPairingV2Control(open: { label, predecessor in
                 try await transport.prepareV2(rendezvousID: rendezvousID)
                 return try await channel.openV2(label: label, predecessor: predecessor, rendezvousID: rendezvousID)
-            }, listen: { try await transport.beginV2($0, requiresLAN: negotiation.requiresLAN) }, stage: {
+            }, listen: { try await transport.beginV2($0, requiresLAN: negotiation.requiresLAN,
+                                                   requiresDecisionProof: negotiation.requiresDecisionProof) }, stage: {
                 try await channel.stageV2($0, connection: $1, authorization: $2)
             })
         }
@@ -183,7 +201,7 @@ public actor MacPairingSession {
             let context = try await startRoot(); try active()
             let invitation = try context.invitation(label: label)
             if let v2 {
-                let elapsed = elapsedMilliseconds()
+                let elapsed = try elapsedMilliseconds()
                 let exported = try await v2.open(label, predecessor); try active()
                 guard try exported.invitation.encode() == invitation.encode(),
                       exported.replacement == (try predecessor?.predecessor),
@@ -193,6 +211,7 @@ public actor MacPairingSession {
                 let result = elapsed.addingReportingOverflow(exported.lifetimeMilliseconds)
                 guard !result.overflow else { throw MacPairingSessionError.expired }
                 deadline = result.partialValue
+                try checkDeadline()
                 try await v2.listen(.init(id: exported.windowID, invitation: invitation, replacement: exported.replacement,
                                           lifetimeMilliseconds: exported.lifetimeMilliseconds))
                 try active(); try checkDeadline()
@@ -223,21 +242,20 @@ public actor MacPairingSession {
         busy = true; defer { busy = false }
         do {
             try checkDeadline()
-            let current = try await transport.current(); try active()
+            let current = try await transport.current(); try active(); try checkDeadline()
             candidates = current.candidates.filter { matchesSession($0.proposal) }
             if !candidates.isEmpty { invitationV2 = nil }
             if let selected {
                 guard let candidate = candidates.first(where: { $0.id == selected.id }),
                       try candidate.proposal.encode() == selected.proposal.encode() else { throw MacPairingSessionError.changedCandidate }
-                if let signature = candidate.biometricProof, let transcript {
-                    guard try transcript.verify(signature: signature, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric) else {
-                        throw MacPairingSessionError.changedCandidate
-                    }
-                    proof = signature
+                if let phoneProof = candidate.phoneProof, let transcript {
+                    do { try phoneProof.verify(in: transcript, requiresDecisionProof: requiresDecisionProof) }
+                    catch { throw MacPairingSessionError.changedCandidate }
+                    proof = phoneProof
                 }
             }
             return snapshot()
-        } catch { await fail(); throw error }
+        } catch { await fail(error); throw error }
     }
     /// The user selects this current phone. Administrator rights are requested only after the Root handshake.
     public func select(candidateID: Data) async throws -> MacPairingSessionSnapshot {
@@ -247,14 +265,15 @@ public actor MacPairingSession {
         }
         busy = true; phase = .authorizing; defer { busy = false }
         do {
-            let authorization = try await administrator.authorization(); try active()
-            let current = try await transport.current(); try active()
+            try checkDeadline()
+            let authorization = try await administrator.authorization(); try active(); try checkDeadline()
+            let current = try await transport.current(); try active(); try checkDeadline()
             guard let actual = current.candidates.first(where: { $0.id == candidateID && $0.phase == .proposed }),
                   matchesSession(actual.proposal),
                   try actual.proposal.encode() == candidate.proposal.encode() else { throw MacPairingSessionError.changedCandidate }
             if let predecessor {
                 guard try await root.canRePair(predecessor) else { throw MacPairingSessionError.ineligiblePredecessor }
-                try active()
+                try active(); try checkDeadline()
             }
             let staged: PairingTranscript
             if let v2 {
@@ -267,7 +286,7 @@ public actor MacPairingSession {
             if let predecessor, GatewayHostSnapshot.bytes(predecessor.revision) != staged.expectedTrustRevision {
                 throw MacPairingSessionError.ineligiblePredecessor
             }
-            let wall = unixMilliseconds(), elapsed = elapsedMilliseconds()
+            let wall = unixMilliseconds(), elapsed = try elapsedMilliseconds()
             guard wall >= staged.issuedAtUnixMillis, wall < staged.expiresAtUnixMillis else { throw MacPairingSessionError.expired }
             let remaining = min(context.lifetimeMilliseconds, staged.expiresAtUnixMillis - wall)
             let (end, overflow) = elapsed.addingReportingOverflow(remaining)
@@ -276,20 +295,29 @@ public actor MacPairingSession {
             try await transport.stage(candidateID: candidateID, transcript: staged); try active(); try checkDeadline()
             phase = .comparing
             return snapshot()
-        } catch SetupAdministratorAuthorizationError.cancelled { phase = .waitingForPhone; throw SetupAdministratorAuthorizationError.cancelled }
-        catch { await fail(); throw error }
+        } catch SetupAdministratorAuthorizationError.cancelled {
+            do {
+                try active(); try checkDeadline()
+                phase = .waitingForPhone
+            } catch { await fail(error); throw error }
+            throw SetupAdministratorAuthorizationError.cancelled
+        }
+        catch { await fail(error); throw error }
     }
     /// Invoke only for an explicit comparison of the complete transcript on both setup surfaces.
-    public func confirmComparison() throws -> MacPairingSessionSnapshot {
-        try active(); try checkDeadline()
+    public func confirmComparison() async throws -> MacPairingSessionSnapshot {
+        try active()
         guard !busy, phase == .comparing, transcript != nil else { throw MacPairingSessionError.invalidState }
+        do { try checkDeadline() }
+        catch { await fail(error); throw error }
         humanConfirmed = true; phase = .waitingForBiometric; return snapshot()
     }
     /// Requires the explicit human confirmation and the current phone proof. A lost Root reply is never retried.
     public func commit() async throws -> MacPairingSessionSnapshot {
-        try active(); try checkDeadline()
+        try active()
         guard !busy, phase == .waitingForBiometric, humanConfirmed, !commitAttempted,
               let transcript, let selected, let proof else { throw MacPairingSessionError.invalidState }
+        let submitted = Mutex(false)
         busy = true
         defer {
             busy = false
@@ -298,17 +326,20 @@ public actor MacPairingSession {
             for waiter in waiters { waiter.resume() }
         }
         do {
+            try checkDeadline()
             let authorization = try await administrator.authorization(); try active(); try checkDeadline()
             let current = try await transport.current(); try active(); try checkDeadline()
             guard let candidate = current.candidates.first(where: { $0.id == selected.id }),
-                  candidate.phase == .proofReady, candidate.biometricProof == proof,
+                  candidate.phase == .proofReady, candidate.phoneProof == proof,
                   try candidate.proposal.encode() == selected.proposal.encode() else { throw MacPairingSessionError.changedCandidate }
-            guard try transcript.verify(signature: proof, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric) else {
-                throw MacPairingSessionError.changedCandidate
-            }
+            do { try proof.verify(in: transcript, requiresDecisionProof: requiresDecisionProof) }
+            catch { throw MacPairingSessionError.changedCandidate }
             guard !closingForRePair else { throw MacPairingSessionError.closed }
+            let digest = try transcript.digest()
+            try checkDeadline()
             phase = .committing; commitAttempted = true
-            let receipt = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof, authorization: authorization)
+            let receipt = try await root.commit(confirmedDigest: digest, phoneProof: proof, authorization: authorization,
+                onSend: { submitted.withLock { $0 = true } })
             guard try transcript.verify(signature: receipt, publicKey: transcript.macAuthorityKey, purpose: .macCommit) else {
                 throw MacPairingSessionError.invalidState
             }
@@ -320,7 +351,12 @@ public actor MacPairingSession {
             } catch { /* Root returned a verified durable receipt; phone delivery remains uncertain. */ }
             await releaseChannels()
             return snapshot()
-        } catch { await fail(); throw error }
+        } catch {
+            // Keep the attempted flag during the call so re-pair waits for it to drain.
+            if !submitted.withLock({ $0 }) { commitAttempted = false }
+            await fail(error)
+            throw error
+        }
     }
     private func matchesSession(_ proposal: PairingPhoneProposal) -> Bool {
         if let rePairInvitation { return rePairInvitation.matches(proposal) }
@@ -349,18 +385,53 @@ public actor MacPairingSession {
         guard cancellation.ifActive({}) else { throw MacPairingSessionError.closed }
     }
     private func checkDeadline() throws {
-        if let deadline, elapsedMilliseconds() >= deadline { throw MacPairingSessionError.expired }
+        if try remainingTime() == 0 { throw MacPairingSessionError.expired }
     }
-    private func fail(_ error: (any Error)? = nil) async {
+    private func remainingTime() throws -> UInt64? {
+        guard let deadline else { return nil }
+        let elapsed = try elapsedMilliseconds()
+        return deadline > elapsed ? deadline - elapsed : 0
+    }
+    private func fail(_ error: any Error) async {
         if phase != .registeredOnMac && phase != .receiptSent {
             if commitAttempted { phase = .outcomeUnknown }
             else if !cancellation.ifActive({}) { phase = .closed }
-            else if let deadline, elapsedMilliseconds() >= deadline { phase = .expired }
+            else if error as? MacPairingSessionError == .expired || (try? remainingTime()) == 0 {
+                phase = .expired
+                invitation = nil; rePairInvitation = nil
+                candidates = []; selected = nil; transcript = nil; proof = nil; humanConfirmed = false
+            }
             else if error as? TransportPairingControlError == .unavailableInterface { phase = .unavailableInterface }
             else { phase = .unavailable }
         }
         await releaseChannels()
+        if phase == .unavailable, let predecessor, await refreshRePairRestriction(predecessor),
+           cancellation.ifActive({}) {
+            phase = .newPairingRequired
+            invitation = nil
+            rePairInvitation = nil
+            candidates = []
+            selected = nil
+            transcript = nil
+            proof = nil
+            humanConfirmed = false
+        }
     }
+
+    private func refreshRePairRestriction(_ selection: PairedPhoneSelection) async -> Bool {
+        guard let openInstalledRoot else { return (try? await root.requiresNewPairing(selection)) == true }
+        guard let channel = try? openInstalledRoot() else { return false }
+        let restricted: Bool
+        do {
+            _ = try await channel.start()
+            restricted = try await channel.requiresNewPairing(selection)
+        } catch {
+            restricted = false
+        }
+        await channel.close()
+        return restricted
+    }
+
     private func releaseChannels() async {
         invitationV2 = nil
         root.abort()
@@ -371,11 +442,10 @@ public actor MacPairingSession {
         await administrator.close()
     }
     public func snapshot() -> MacPairingSessionSnapshot {
-        let elapsed = elapsedMilliseconds()
-        let remaining = deadline.map { $0 > elapsed ? $0 - elapsed : 0 }
+        let remaining = phase == .expired ? 0 : (try? remainingTime()) ?? deadline.map { _ in 0 }
         return .init(phase: phase, invitation: v2 == nil ? invitation : nil, rePairInvitation: v2 == nil ? rePairInvitation : nil,
             invitationV2: phase == .waitingForPhone ? invitationV2 : nil,
             usesLoopbackOnlyV2: installedTransport != nil && v2 != nil && !installedLAN, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
-            comparisonCode: try? transcript?.verificationCode(), remainingMilliseconds: remaining, phoneProofAvailable: proof != nil)
+            comparisonCode: try? transcript?.verificationCode(), remainingMilliseconds: remaining, phoneProofAvailable: proof != nil && remaining != 0)
     }
 }

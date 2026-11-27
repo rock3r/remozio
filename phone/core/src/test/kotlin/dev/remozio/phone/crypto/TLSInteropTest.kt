@@ -30,6 +30,7 @@ import dev.remozio.phone.transport.EncryptedRecordTransport
 import dev.remozio.phone.transport.TLSRecordSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -578,7 +579,7 @@ class TLSInteropTest {
             }
         }
 
-    @Test fun signedMessagesReachTheInboxThroughTheNegotiatedHttpsRelay(): Unit = Fixture(negotiate = true, commandMessages = true).use { f ->
+    @Test fun signedMessagesReachTheInboxAfterACaptureRefusalThroughTheNegotiatedHttpsRelay(): Unit = Fixture(negotiate = true, commandMessages = true).use { f ->
         val limits = CborLimits(32768, 32, 4096)
         val key = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         fun id(value: Int, count: Int = 16) = ByteArray(count) { value.toByte() }
@@ -586,45 +587,212 @@ class TLSInteropTest {
         val point = (key.public as ECPublicKey).w
         val authority = byteArrayOf(4) + scalar(point.affineX) + scalar(point.affineY)
         val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
-        val request = IssuedRequestPayload(RequestContract(RequestKind.COMMAND, 1u, 1u), id(1), id(2), id(8), id(9, 32),
-            emptySet(), 1000u, 61000u, capture, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), limits, limits)
+        val captures = CommandCaptureBudgetFixture(capture, limits)
+        fun request(requestID: Int, bytes: ByteArray) = IssuedRequestPayload(
+            RequestContract(RequestKind.COMMAND, 1u, 1u), id(1), id(2), id(requestID), id(9, 32),
+            emptySet(), 1000u, 61000u, bytes, listOf(CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)), limits, limits)
         fun message(body: ByteArray, type: ApprovalMessageType, purpose: SigningPurpose): ByteArray {
             val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
                 initSign(key.private); update(SigningInput.make(1u, type, purpose, body, limits, limits)); sign()
             })
             return ApprovalMessage(1u, type, purpose, body, signature).encode(limits.maxBytes)
         }
-        val issued = message(request.encode(limits), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
-        val terminal = message(RequestStatusPayload(id(1), id(2), id(8), request.requestDigest(limits, limits), request.challenge,
-            2u, RequestPhase.EXPIRED, RequestStatusReason.AUTHORIZATION_EXPIRED, id(10), 60000u, null, null, false, 60000u, null).encode(limits),
+        fun issued(request: IssuedRequestPayload) =
+            message(request.encode(limits), ApprovalMessageType.REQUEST, SigningPurpose.ISSUED_REQUEST)
+        fun terminal(request: IssuedRequestPayload) = message(RequestStatusPayload(id(1), id(2), request.requestID,
+            request.requestDigest(limits, limits), request.challenge, 2u, RequestPhase.EXPIRED,
+            RequestStatusReason.AUTHORIZATION_EXPIRED, id(10), 60000u, null, null, false, 60000u, null).encode(limits),
             ApprovalMessageType.STATUS, SigningPurpose.STATUS)
-        val enrollment = CommandRequestInbox(1, 4).add(id(1), id(2), authority, RequestLimits(limits, limits, limits, limits))
-        WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+        val refused = request(7, captures.longCapture)
+        CommandRequestInbox(1, 4).use { inbox ->
+            val enrollment = inbox.add(id(1), id(2), authority, captures.receiverLimits)
             runBlocking {
-                withTimeout(10_000) {
-                    val carrier = relay.connector.connect(this, relay.endpoint,
-                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
-                    val session = TLSRecordSession(this, f.engine(), carrier, handshakeTimeoutMillis = 4_000)
-                    try {
-                        val channel = NegotiatedTLSChannel.connect(session, ChannelScope(id(1), id(2), id(3), id(4)),
-                            listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 65536, timeoutMillis = 4_000)
-                        try {
-                            val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4)) { ElapsedInstant(0, 100u) }
-                            val receiving = async { receiver.run() }
-                            channel.send(issued)
-                            val owner = enrollment.requestSessions.first { it.isNotEmpty() }.single()
-                            assertNotNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
-                            channel.send(terminal)
-                            owner.revisions.first { it == 2uL }
-                            assertNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
-                            assertEquals(RequestPhase.EXPIRED, owner.snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
-                            receiver.close(); receiving.await()
-                        } finally { channel.closeAndJoin() }
-                    } finally { session.closeAndJoin() }
+                repeat(2) { attempt ->
+                    WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+                        withTimeout(10_000) {
+                            val next = request(8 + attempt, captures.shortCapture)
+                            val carrier = relay.connector.connect(this, relay.endpoint,
+                                RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                            val session = TLSRecordSession(this, f.engine(), carrier, handshakeTimeoutMillis = 4_000)
+                            try {
+                                val channel = NegotiatedTLSChannel.connect(session, ChannelScope(id(1), id(2), id(3), id(4)),
+                                    listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 65536, timeoutMillis = 4_000)
+                                try {
+                                    val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4),
+                                        queryRetainedOnStart = false) { ElapsedInstant(0, 100u) }
+                                    val receiving = async { receiver.run() }
+                                    try {
+                                        channel.send(issued(refused))
+                                        channel.send(terminal(refused))
+                                        channel.send(issued(next))
+                                        val id = CborValue.Bytes(next.requestID)
+                                        val owner = enrollment.requestSessions.first { rows -> rows.any { it.identity.requestID == id } }
+                                            .single { it.identity.requestID == id }
+                                        assertNotNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
+                                        channel.send(terminal(next))
+                                        owner.revisions.first { it == 2uL }
+                                        assertNull(owner.snapshot(ElapsedInstant(0, 100u)).capture)
+                                        assertEquals(RequestPhase.EXPIRED, owner.snapshot(ElapsedInstant(0, 100u)).status!!.status.phase)
+                                        assertTrue(receiver.captureOmitted)
+                                        assertTrue(receiving.isActive)
+                                        assertEquals(attempt + 1, enrollment.sessions().size)
+                                    } finally {
+                                        receiver.close()
+                                        receiving.await()
+                                    }
+                                } finally { channel.closeAndJoin() }
+                            } finally { session.closeAndJoin() }
+                        }
+                    }
                 }
             }
         }
     }
+
+    @Test fun phoneRepairNoticeIsAcceptedBySwiftAndVisibleInSetupV4() =
+        Fixture(negotiate = true, commandExchange = true, repairNotices = true).use { fixture ->
+            fun id(byte: Byte) = ByteArray(16) { byte }
+            val scope = ChannelScope(id(1), id(2), id(3), id(4))
+            val bounds = CborLimits(16_000, 12, 1024)
+            val limits = RequestLimits(bounds, bounds, bounds, bounds)
+            val requests = listOf(ChannelRequestCapability(0u, 1u, 1u, setOf(PhoneRepairNoticeFrame.CAPABILITY)))
+            val connector = ApprovalChannelConnector(fixture.phone.keyManagers, fixture.mac.certificate.publicKey.encoded,
+                scope, requests, emptySet(), 16_384)
+            val started = System.nanoTime()
+            fun clock() = ElapsedInstant(0, ((System.nanoTime() - started) / 1_000_000).toULong())
+            CommandRequestInbox(1, 2).use { inbox ->
+                val enrollment = inbox.add(id(1), id(2), requireNotNull(fixture.routingAuthorityPublicKey), limits)
+                runBlocking {
+                    withTimeout(15_000) {
+                        val channel = connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", fixture.port))
+                        }), null)
+                        val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4),
+                            queryRetainedOnStart = false, clock = ::clock)
+                        val reading = async { receiver.run() }
+                        try {
+                            assertTrue(receiver.supportsPhoneRepairNotices)
+                            val empty = fixture.routingControl("phone-repair-snapshot")
+                            assertEquals(4, empty.getValue("version").jsonPrimitive.int)
+                            assertEquals(1, empty.getValue("active").jsonPrimitive.int)
+                            assertEquals(0, empty.getValue("reason").jsonPrimitive.int)
+                            val session = enrollment.requestSessions.first { it.isNotEmpty() }.single()
+                            val initial = session.revisions.first { it > 0uL }
+                            val decision = requireNotNull(fixture.routingDecision).private
+                            fun notice(reason: PhoneRepairNoticeFrame.Reason): PhoneRepairNoticeFrame {
+                                val signature = Signature.getInstance("SHA256withECDSA").run {
+                                    initSign(decision)
+                                    update(PhoneRepairNoticeFrame.signingInput(scope, reason))
+                                    P256SignatureEncoding.fromDer(sign())
+                                }
+                                return PhoneRepairNoticeFrame(scope, reason, signature)
+                            }
+                            receiver.sendPhoneRepairNotice(notice(PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED))
+                            receiver.sendPhoneRepairNotice(notice(PhoneRepairNoticeFrame.Reason.LEGACY_POLICY))
+                            // A following query proves that Swift has consumed both earlier frames.
+                            channel.send(RequestStatusQuery(session.identity.requestID.copyBytes()).encode())
+                            session.revisions.first { it > initial }
+                            val listed = fixture.routingControl("phone-repair-snapshot")
+                            assertEquals(4, listed.getValue("version").jsonPrimitive.int)
+                            assertEquals(1, listed.getValue("active").jsonPrimitive.int)
+                            assertEquals(2, listed.getValue("reason").jsonPrimitive.int)
+                            val command = fixture.routingControl("command-snapshot")
+                            assertEquals(0, command.getValue("consumed").jsonPrimitive.int)
+                            assertEquals(0, command.getValue("dispatched").jsonPrimitive.int)
+                        } finally {
+                            receiver.close()
+                            reading.cancelAndJoin()
+                            channel.closeAndJoin()
+                        }
+                    }
+                }
+            }
+        }
+
+    @Test fun phoneBuiltDeclineReachesTheNativeRequestExchange() =
+        nativeCommandDecision(ActionChoice.DECLINE, RequestPhase.DECLINED)
+
+    @Test fun phoneBuiltExecuteAuthorizesWithoutDispatchInTheNativeRequestExchange() =
+        nativeCommandDecision(ActionChoice.EXECUTE, RequestPhase.AUTHORIZED)
+
+    @Test fun nativeRequestExchangeRejectsADecisionFromAnUnenrolledKey() =
+        nativeCommandDecision(ActionChoice.DECLINE, expectedPhase = null)
+
+    private fun nativeCommandDecision(choice: ActionChoice, expectedPhase: RequestPhase?): Unit =
+        Fixture(negotiate = true, commandExchange = true).use { fixture ->
+            fun id(byte: Byte) = ByteArray(16) { byte }
+            val scope = ChannelScope(id(1), id(2), id(3), id(4))
+            val bodyLimits = CborLimits(16_000, 12, 1024)
+            val limits = RequestLimits(bodyLimits, bodyLimits, bodyLimits, bodyLimits)
+            val connector = ApprovalChannelConnector(fixture.phone.keyManagers, fixture.mac.certificate.publicKey.encoded,
+                scope, listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 16_384)
+            val started = System.nanoTime()
+            fun clock() = ElapsedInstant(0, ((System.nanoTime() - started) / 1_000_000).toULong())
+            CommandRequestInbox(1, 2).use { inbox ->
+                val enrollment = inbox.add(id(1), id(2), requireNotNull(fixture.routingAuthorityPublicKey), limits)
+                runBlocking {
+                    withTimeout(15_000) {
+                        val channel = connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", fixture.port))
+                        }), null)
+                        try {
+                            val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4),
+                                queryRetainedOnStart = false, clock = ::clock)
+                            val receiving = async {
+                                try { receiver.run() }
+                                catch (failure: IOException) { if (expectedPhase != null) throw failure }
+                            }
+                            try {
+                                val session = enrollment.requestSessions.first { it.isNotEmpty() }.single()
+                                val initialRevision = session.revisions.first { it > 0uL }
+                                val requestID = session.identity.requestID.copyBytes()
+                                channel.send(RequestStatusQuery(requestID).encode())
+                                val queryRevision = session.revisions.first { it > initialRevision }
+                                val pending = requireNotNull(session.snapshot(clock()).status).status
+                                assertTrue(pending.phase in setOf(RequestPhase.QUEUED, RequestPhase.PRESENTED))
+
+                                val execute = choice == ActionChoice.EXECUTE
+                                val keyID: Byte = if (execute) 7 else 6
+                                val purpose = if (execute) SigningPurpose.BIOMETRIC_AUTHORIZATION else SigningPurpose.CANCELLATION
+                                val enrolledKey = requireNotNull(if (execute) fixture.routingBiometric else fixture.routingDecision)
+                                val signingKey = if (expectedPhase != null) enrolledKey.private else KeyPairGenerator.getInstance("EC")
+                                    .apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair().private
+                                val action = CapturedAction(choice, ActionScope.CurrentRequest)
+                                val message = session.withPendingDecision(clock(), id(3), id(keyID), action) { decision ->
+                                    val body = decision.encode(limits.body)
+                                    val signature = Signature.getInstance("SHA256withECDSA").run {
+                                        initSign(signingKey)
+                                        update(SigningInput.make(1u, ApprovalMessageType.DECISION, purpose, body, limits.body, limits.signing))
+                                        P256SignatureEncoding.fromDer(sign())
+                                    }
+                                    ApprovalMessage(1u, ApprovalMessageType.DECISION, purpose, body, signature)
+                                }
+                                receiver.sendDecision(message.encode(limits.body.maxBytes))
+
+                                if (expectedPhase == null) {
+                                    receiving.await()
+                                    assertEquals(queryRevision, session.revisions.value)
+                                } else {
+                                    session.revisions.first { it > queryRevision }
+                                    val observed = requireNotNull(session.snapshot(clock()).status).status
+                                    assertEquals(expectedPhase, observed.phase)
+                                    assertArrayEquals(requestID, observed.requestID)
+                                    assertArrayEquals(id(3), observed.decisionPhoneID)
+                                }
+                                val snapshot = fixture.routingControl("command-snapshot")
+                                val consumed = if (expectedPhase == null) 0 else 1
+                                assertEquals(consumed, snapshot.getValue("receipt").jsonPrimitive.int)
+                                assertEquals(consumed, snapshot.getValue("consumed").jsonPrimitive.int)
+                                assertEquals(0, snapshot.getValue("dispatched").jsonPrimitive.int)
+                            } finally {
+                                receiver.close()
+                                receiving.await()
+                            }
+                        } finally { channel.closeAndJoin() }
+                    }
+                }
+            }
+        }
 
     @Test fun negotiatedNativeHostRejectsWrongEnrollmentScope(): Unit = Fixture(negotiate = true).use { f ->
         runBlocking {
@@ -1059,7 +1227,7 @@ class TLSInteropTest {
         }
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true, private val commandExchange: Boolean = false, private val repairNotices: Boolean = false) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -1067,8 +1235,8 @@ class TLSInteropTest {
         private val process: Process
         val port: Int
         val routingAuthorityPublicKey: ByteArray?
-        val routingDecision = if (routing || audit) routingKey() else null
-        val routingBiometric = if (routing || audit) routingKey() else null
+        val routingDecision = if (routing || audit || commandExchange) routingKey() else null
+        val routingBiometric = if (routing || audit || commandExchange) routingKey() else null
         private val routingStarted = System.nanoTime()
         fun routingElapsedNanos(): Long = System.nanoTime() - routingStarted
         private lateinit var controllerReader: java.io.BufferedReader
@@ -1087,10 +1255,14 @@ class TLSInteropTest {
                 controllerReader = process.inputStream.bufferedReader()
                 controllerWriter.also {
                     val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
-                    val routingFields = if (routing || audit) ",\"routing\":" + routing + ",\"routingSupported\":" + routingSupported + ",\"decisionPublicKey\":\"" +
+                    val routingFields = if (routing || audit || commandExchange) ",\"routing\":" + routing + ",\"routingSupported\":" + routingSupported + ",\"decisionPublicKey\":\"" +
                         Base64.getEncoder().encodeToString(requireNotNull(routingDecision).public.encoded.takeLast(65).toByteArray()) +
                         "\",\"biometricPublicKey\":\"" + Base64.getEncoder().encodeToString(requireNotNull(routingBiometric).public.encoded.takeLast(65).toByteArray()) + "\"" else ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + "}\n")
+                    val commandField = if (commandExchange) {
+                        val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
+                        ",\"commandCapture\":\"" + Base64.getEncoder().encodeToString(capture) + "\""
+                    } else ""
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + commandField + ",\"repairNotices\":" + repairNotices + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

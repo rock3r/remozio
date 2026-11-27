@@ -15,21 +15,33 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
     public let transportPublicKey: Data
     public let lifetimeMilliseconds: UInt64
     public let v2ActivationEnabled: Bool?
+    public let decisionProofRequired: Bool
     public let lanScope: PairingLANScope?
     public let canonicalBytes: Data
     public var description: String { "AuthorityPairingSetupConfiguration(redacted)" }
     public init(transportPublicKey: Data, lifetimeMilliseconds: UInt64 = 120_000,
-                v2ActivationEnabled: Bool? = nil, lanScope: PairingLANScope? = nil) throws {
+                v2ActivationEnabled: Bool? = nil, lanScope: PairingLANScope? = nil,
+                decisionProofRequired: Bool = false) throws {
         guard transportPublicKey.count == 65, transportPublicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: transportPublicKey)) != nil,
               (1...Self.maximumLifetimeMilliseconds).contains(lifetimeMilliseconds),
               lanScope == nil || v2ActivationEnabled == true else { throw AuthorityPairingSetupError.invalidConfiguration }
         self.transportPublicKey = transportPublicKey; self.lifetimeMilliseconds = lifetimeMilliseconds
         self.v2ActivationEnabled = v2ActivationEnabled; self.lanScope = lanScope
-        let version: UInt64 = lanScope != nil ? 3 : v2ActivationEnabled == nil ? 1 : 2
+        self.decisionProofRequired = decisionProofRequired
+        let version: UInt64 = if decisionProofRequired { 4 }
+            else if lanScope != nil { 3 }
+            else if v2ActivationEnabled != nil { 2 }
+            else { 1 }
         var fields: [UInt64: CBORValue] = [0: .unsigned(version), 1: .bytes(transportPublicKey), 2: .unsigned(lifetimeMilliseconds)]
-        if let v2ActivationEnabled { fields[3] = .boolean(v2ActivationEnabled) }
-        if let lanScope { fields[4] = lanScope.cborValue }
+        if decisionProofRequired {
+            fields[3] = v2ActivationEnabled.map(CBORValue.boolean) ?? .null
+            fields[4] = lanScope?.cborValue ?? .null
+            fields[5] = .boolean(true)
+        } else {
+            if let v2ActivationEnabled { fields[3] = .boolean(v2ActivationEnabled) }
+            if let lanScope { fields[4] = lanScope.cborValue }
+        }
         canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
     public static func decode(_ bytes: Data) throws -> Self {
@@ -39,6 +51,7 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
         }
         let activation: Bool?
         let lanScope: PairingLANScope?
+        let decisionProofRequired = fields[0] == .unsigned(4)
         switch fields[0] {
         case .unsigned(1) where Set(fields.keys) == Set(UInt64(0)...2):
             activation = nil; lanScope = nil
@@ -48,13 +61,24 @@ public struct AuthorityPairingSetupConfiguration: Sendable, CustomStringConverti
         case .unsigned(3) where Set(fields.keys) == Set(UInt64(0)...4):
             guard fields[3] == .boolean(true), let scope = fields[4] else { throw AuthorityPairingSetupError.invalidConfiguration }
             activation = true; lanScope = try PairingLANScope.decode(scope)
+        case .unsigned(4) where Set(fields.keys) == Set(UInt64(0)...5):
+            guard fields[5] == .boolean(true), let scope = fields[4] else {
+                throw AuthorityPairingSetupError.invalidConfiguration
+            }
+            switch fields[3] {
+            case .some(.null): activation = nil
+            case .boolean(let flag): activation = flag
+            default: throw AuthorityPairingSetupError.invalidConfiguration
+            }
+            lanScope = scope == .null ? nil : try PairingLANScope.decode(scope)
         default:
             throw AuthorityPairingSetupError.invalidConfiguration
         }
-        let result = try Self(transportPublicKey: key, lifetimeMilliseconds: lifetime, v2ActivationEnabled: activation, lanScope: lanScope)
+        let result = try Self(transportPublicKey: key, lifetimeMilliseconds: lifetime,
+            v2ActivationEnabled: activation, lanScope: lanScope, decisionProofRequired: decisionProofRequired)
         guard result.canonicalBytes == bytes else { throw AuthorityPairingSetupError.invalidConfiguration }; return result
     }
-    private static var limits: CBORLimits { get throws { try .init(maxBytes: 512, maxDepth: 2, maxItems: 13) } }
+    private static var limits: CBORLimits { get throws { try .init(maxBytes: 512, maxDepth: 2, maxItems: 15) } }
 }
 
 /// Trusted local app access to the existing authority. It owns no database, key creation or network listener.
@@ -166,6 +190,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     var requiresInstalledV2: Bool { configuration.v2ActivationEnabled == true }
+    var requiresDecisionProof: Bool { configuration.decisionProofRequired }
     var lanScope: PairingLANScope? { configuration.lanScope }
 
     func requirePairingOpen() throws {
@@ -175,6 +200,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     /// Endpoints retain the admission through the attempt and its in-flight replies.
     func admitPairingVersion(_ version: PairingVersion) throws -> VersionAdmission {
         try requirePairingOpen()
+        if version == .legacy, requiresDecisionProof { throw LegacyAdmissionError.disabled }
         return try pairingVersions.withLock { state in
             switch state.mode {
             case .compatibility:
@@ -283,7 +309,8 @@ final class AuthorityPairingSetupAccess: Sendable {
     /// The proposal supplies phone claims only. Root chooses fresh setup identity, challenge, tag, nonce and expiry.
     /// The app and phone must compare the returned transcript before producing the biometric proof.
     func stage(_ proposalBytes: Data, authorize: () throws -> Void = {}) throws -> PairingEnrollmentAttempt {
-        try stage(Self.decodeLegacyProposal(proposalBytes), proposalBytes: proposalBytes, window: nil, authorize: authorize)
+        guard !requiresDecisionProof else { throw LegacyAdmissionError.disabled }
+        return try stage(Self.decodeLegacyProposal(proposalBytes), proposalBytes: proposalBytes, window: nil, authorize: authorize)
     }
 
     static func decodeLegacyProposal(_ proposalBytes: Data) throws -> PairingPhoneProposal {
@@ -375,21 +402,32 @@ final class AuthorityPairingSetupAccess: Sendable {
     }
 
     func commit(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data, proof: Data,
-                window: AuthorityPairingV2Window? = nil, authorize: @escaping () throws -> Void) throws -> Data {
+                decisionProof: Data? = nil, window: AuthorityPairingV2Window? = nil,
+                authorize: @escaping () throws -> Void) throws -> Data {
         guard setupID.count == 16, confirmedDigest.count == 32, proof.count == 64,
               setupID == attempt.transcript.setupID, try confirmedDigest == attempt.transcript.digest() else {
             throw AuthorityPairingSetupError.invalidConfirmation
         }
+        let phoneProof = try PairingPhoneProof(biometric: proof, decision: decisionProof)
         return try commitPairing(attempt, proof, random(16), {
             try authorize()
             try window?.requireStaging(self.now())
         }, { tx in
             try self.requireCurrent(tx)
+            // The coordinator calls this inside its write transaction before changing enrollment,
+            // re-pair staging or audit state. Receipt recovery uses its own unchanged verifier.
+            if self.requiresDecisionProof {
+                guard window != nil else { throw PairingEnrollmentError.invalidProof }
+                try phoneProof.verify(in: attempt.transcript, requiresDecisionProof: true)
+            } else if phoneProof.decision != nil {
+                throw PairingEnrollmentError.invalidProof
+            }
             try window?.validateTransport(tx)
             try window?.requireStaging(self.now())
         })
     }
-    func pairedPhones(includeRePair: Bool = false) throws -> PairedPhoneSnapshot {
+    func pairedPhones(includeRePair: Bool = false, includeRepairNotices: Bool = false,
+                      includeRePairRestrictions: Bool = false) throws -> PairedPhoneSnapshot {
         try journal.read { tx in
             try self.requireCurrent(tx)
             let trust = try tx.requestDeliveryTrust()
@@ -403,11 +441,27 @@ final class AuthorityPairingSetupAccess: Sendable {
             let health = inconclusiveSince != nil && (liveHealth == .clear || liveHealth == .pending)
                 ? .grantAbandonmentInconclusive : liveHealth
             let rePairable = try includeRePair ? tx.rePairPredecessors(in: trust.enrollments) : []
+            let restricted = try includeRePairRestrictions
+                ? tx.approvalTrustRestrictions().intersection(trust.enrollments.map { $0.approval.phoneID })
+                : Set<Data>()
+            let active = trust.enrollments.filter { $0.approval.active && !restricted.contains($0.approval.phoneID) }
+            var notices: [DeliveryRecipient: PhoneRepairNoticeFrame.Reason] = [:]
+            if includeRepairNotices {
+                for enrollment in active {
+                    let phone = DeliveryRecipient(enrollment)
+                    let scope = try ChannelScope(macID: self.macID, accountID: self.accountID,
+                        phoneID: phone.phoneID, enrollmentEpoch: phone.enrollmentEpoch)
+                    if let key = enrollment.repairNoticeDecisionKey {
+                        notices[phone] = try tx.phoneRepairNotice(scope: scope, decisionKey: key)
+                    }
+                }
+            }
             return PairedPhoneSnapshot(macID: self.macID, accountID: self.accountID, revision: trust.approval.revision,
-                phones: trust.enrollments.filter { $0.approval.active }.map(DeliveryRecipient.init),
+                phones: active.map(DeliveryRecipient.init),
                 rePairablePhones: rePairable,
                 revocationAvailability: availability, gatewayRevocationHealth: health,
-                gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil)
+                gatewayInconclusiveSinceUnixMillis: health == .grantAbandonmentInconclusive ? inconclusiveSince : nil,
+                repairNotices: notices, phonesRequiringNewPairing: restricted.sorted { $0.lexicographicallyPrecedes($1) })
         }
     }
 

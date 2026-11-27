@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 import RemozioMach
 import RemozioProtocol
 
@@ -19,6 +20,8 @@ final class CommandExecution {
     }
     private let validation: Validation?
     private var monitor: OpaquePointer?
+    private(set) var executableLaunch: CommandExecutableLaunch?
+    private static let dispatchAudit = Logger(subsystem: "dev.sebastiano.remozio.macos.authority", category: "command-dispatch")
     private var pump: CommandPTYStreamPump?
     private var pipeControls: CommandPipeControlChannel?
     private var monitorOwned = false
@@ -29,6 +32,8 @@ final class CommandExecution {
     private var releaseSucceeded = false
     private var cancelledBeforeRelease = false
     private var observationUncertain = false
+    private var monitorPollFailed = false
+    private var loggedExecutableRejection = false
     private var disposed = false
     private var terminalDeliveryPending = false
     private var terminalDeliveryFinished = false
@@ -67,21 +72,24 @@ final class CommandExecution {
 
     /// A failed spawn can return a live monitor. Retain it until actual reaping or ownership loss.
     func prepare(monitorPath: String, childPath: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32,
-                 releaseActivity: ReleaseActivityToken? = nil, filesystemChecked: Bool = false) throws {
+                 releaseActivity: ReleaseActivityToken? = nil, filesystemProof: CommandFilesystemCapture.MetadataProof) throws {
         guard validation != nil, !disposed, !released, !cancelledBeforeRelease, monitor == nil,
               (resources.capture.ioMode == .pipes && !resources.requiresStreamPump ||
                resources.capture.ioMode == .pty && resources.requiresStreamPump) else { throw CommandExecutionError.unavailable }
-        let frame = try CommandChildLaunchSpecification(capture: resources.capture,
-            resolvedExecutablePath: resources.resolvedExecutablePath,
-            preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask).canonicalBytes
         try validateLauncher(); try validateElevation(resources.capture)
-        try recheck(filesystemChecked: filesystemChecked)
+        try recheck(filesystemChecked: true)
+        let launch = try resources.executableLaunch(from: filesystemProof)
+        let frame = try CommandChildLaunchSpecification(capture: resources.capture,
+            resolvedExecutablePath: resources.resolvedExecutablePath, launch: launch,
+            preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask).canonicalBytes
+        executableLaunch = launch
         if resources.requiresPipeControls {
             pipeControls = try CommandPipeControlChannel(channel: resources.makeStreamAuthority())
         }
         let status = try resources.withBorrowedDescriptors { input, output, error, directory in
             let pty: RetainedCommandPTY?
             if resources.requiresStreamPump {
+                let target = resources.capture.target
                 let privatePTY = try resources.withBorrowedCallerTerminal { callerTerminal in
                     let source = resources.requiresMappedLayout ? callerTerminal : input
                     var attributes = termios(), size = winsize()
@@ -91,7 +99,8 @@ final class CommandExecution {
                             throw RetainedCommandPTYError.native(errno)
                         }
                     }
-                    return try RetainedCommandPTY(attributes: hasTerminal ? attributes : nil, size: hasTerminal ? size : nil)
+                    return try RetainedCommandPTY(attributes: hasTerminal ? attributes : nil,
+                        size: hasTerminal ? size : nil, target: (target.uid, target.gid))
                 }
                 pty = privatePTY
                 pump = try CommandPTYStreamPump(pty: privatePTY, channel: resources.makeStreamAuthority())
@@ -137,9 +146,19 @@ final class CommandExecution {
             auditSessionID: validation.callerSessionID, filesystemChecked: filesystemChecked)
     }
 
+    static func requireCurrentExecutable(_ prepared: CommandExecutableLaunch, observed: CommandExecutableLaunch) throws {
+        guard prepared.accepts(observed) else { throw CommandFilesystemCaptureError.changed }
+    }
+
     /// Call only after the dispatch transition commits and all final checks pass.
     func release() throws {
-        guard !disposed, !released, !cancelledBeforeRelease, let monitor else { throw CommandExecutionError.unavailable }
+        guard !disposed, !released, !cancelledBeforeRelease, let monitor, let executableLaunch else {
+            throw CommandExecutionError.unavailable
+        }
+        let requestID = LowercaseHexadecimal.encode(resources.request.requestID)
+        let mode = executableLaunch.mode == .protectedPath ? "protected-path" : "path-bound"
+        let pathBoundReason = executableLaunch.pathBoundReason?.rawValue ?? "none"
+        Self.dispatchAudit.notice("Command dispatch attempt request=\(requestID, privacy: .public) launch=\(mode, privacy: .public) fallback=\(pathBoundReason, privacy: .public)")
         released = true
         let status = remozio_command_monitor_release(monitor)
         if status != 0 { pendingSignals.removeAll(); observationUncertain = true; cancelOwned(); throw CommandExecutionError.native(status) }
@@ -202,6 +221,7 @@ final class CommandExecution {
         let status = remozio_command_monitor_poll(monitor, &observation)
         if status != 0 {
             observationUncertain = true
+            monitorPollFailed = true
             if !released { cancelBeforeRelease() }
         }
         monitorOwned = !observation.monitor_reaped && !observation.monitor_ownership_lost
@@ -252,6 +272,17 @@ final class CommandExecution {
         if observation.monitor_ownership_lost { return .terminal(.unknown) }
         if observation.monitor_reaped {
             guard observation.status_closed || observation.protocol_failed else { return released ? .running : .preparing }
+            let checkErrno = remozio_child_executable_check_errno(observation.status.failure_error)
+            if releaseSucceeded, !monitorPollFailed, observation.status_closed, !observation.protocol_failed,
+               observation.target_kernel_registered, observation.target_exit_observed, !observation.target_exec_observed,
+               observation.status.reaped, observation.status.target_release_attempted, checkErrno != 0 {
+                if !loggedExecutableRejection {
+                    loggedExecutableRejection = true
+                    let id = LowercaseHexadecimal.encode(resources.request.requestID)
+                    Self.dispatchAudit.notice("Command executable changed or no longer valid before exec request=\(id, privacy: .public) errno=\(checkErrno)")
+                }
+                return .terminal(.failedBeforeStart)
+            }
             if observationUncertain && released { return .terminal(.unknown) }
             if !released { return .terminal(.failedBeforeStart) }
             guard observation.status_closed, !observation.protocol_failed, observation.target_kernel_registered,

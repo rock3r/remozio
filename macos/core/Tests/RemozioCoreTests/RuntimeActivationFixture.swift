@@ -15,7 +15,7 @@ final class RuntimeActivationFixture {
     init(firstServiceUID: UInt32 = 20000, nativeConsumerHosts: Bool = false, ownedInstalledBundle: Bool = false,
          phoneRouting: Bool = false, phoneAudit: Bool = false, auditDelivery: Bool = false,
          phoneUpdateScheduling: Bool = false, materialAuditDelivery: Bool? = nil,
-         releaseEdit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws {
+         pairingPolicy: SetupPairingPolicy = .disabled, releaseEdit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws {
         let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild, .setupController]
         let policy = try AuthorityCodePolicy(entries: roles.map { role in
             try .init(role: role, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.role-\(role.rawValue)",
@@ -26,7 +26,7 @@ final class RuntimeActivationFixture {
             phoneUpdateScheduling: phoneUpdateScheduling, edit: releaseEdit) : nil
         f = try .init(policy: policy, releaseDigest: nativeRelease.map { try InstallationInventory.digest($0) }, ownedInstalledBundle: ownedInstalledBundle)
         machine = try f.open(initialize: true)
-        account = try f.resume(machine, f.begin(machine))
+        account = try f.resume(machine, f.begin(machine, pairingPolicy: pairingPolicy))
         services = try .init(account: account, planID: AccountPreparationIntent.randomID(), claims: [
             .init(accountID: account.accountID, role: .transport, number: firstServiceUID, userID: UUID(), groupID: UUID()),
             .init(accountID: account.accountID, role: .gateway, number: firstServiceUID + 1, userID: UUID(), groupID: UUID())])

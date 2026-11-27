@@ -5,6 +5,24 @@ import SQLite3
 public enum JournalDatabaseError: Error, Equatable {
     case invalidConfiguration, incompatibleStore, wrongScope, closed, unavailable, transactionActive, expiredTransaction, readOnly, transactionFailed
     case storage(Int32)
+    case databaseIntegrity(Int32)
+
+    static func sqliteFailure(_ result: Int32, on db: OpaquePointer) -> Self {
+        let primary = result & 0xff
+        let extended = sqlite3_extended_errcode(db)
+        let code = result == primary && extended & 0xff == primary ? extended : result
+        return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB ? .databaseIntegrity(code) : .storage(code)
+    }
+
+    static func requireRow(_ result: Int32, on db: OpaquePointer, missing: any Error) throws {
+        if result == SQLITE_DONE { throw missing }
+        guard result == SQLITE_ROW else { throw sqliteFailure(result, on: db) }
+    }
+
+    fileprivate var isDatabaseIntegrityFailure: Bool {
+        if case .databaseIntegrity = self { return true }
+        return false
+    }
 }
 
 /// One Mac/account's journal connection. The root authority owns this object and serializes its calls.
@@ -14,8 +32,28 @@ public final class JournalDatabase {
     func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
         try lease.directoryIdentities()
     }
+    func retainPhoneRepairNotice(_ notice: PhoneRepairNoticeFrame, decisionKey: Data) throws {
+        guard !readOnlyForCutover, !retired else { throw JournalDatabaseError.readOnly }
+        try validateLease()
+        do {
+            try lease.phoneRepairNotices.retain(notice, decisionKey: decisionKey, verify: validateLease)
+        } catch {
+            if !retired { try validateLease() }
+            throw error
+        }
+    }
+
+    func readPhoneRepairNotice(scope: ChannelScope, decisionKey: Data) throws -> PhoneRepairNoticeFrame.Reason? {
+        try validateLease()
+        // An unreadable or invalid advisory must leave the paired phone list usable.
+        let reason = try? lease.phoneRepairNotices.read(scope: scope, decisionKey: decisionKey)
+        try validateLease()
+        return reason
+    }
+
     let readOnlyForCutover: Bool
     private let lease: ProtectedJournalLease
+    private let journalStep: (OpaquePointer) -> Int32
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?
     private var consumption: ConsumptionJournal?
@@ -56,8 +94,10 @@ public final class JournalDatabase {
          maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
          maximumCommandSubmissions: Int = 1_000_000, initialAuthority: AuthorityJournalInitialization? = nil,
          updateSchedulingPolicy: UpdateSchedulingJournalPolicy? = nil,
-         didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }, readOnlyForCutover: Bool = false) throws {
+         didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }, readOnlyForCutover: Bool = false,
+         journalStep: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws {
         self.lease = lease; self.readOnlyForCutover = readOnlyForCutover
+        self.journalStep = journalStep
         self.recordLimits = recordLimits
         self.descriptorLimits = descriptorLimits
         do {
@@ -88,6 +128,9 @@ public final class JournalDatabase {
             _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(max(max(recordLimits.maxBytes + decisionLimits.maxBytes, descriptorLimits.maxBytes) + 4096, max((gatewayPolicy?.payloadLimits.maxBytes ?? 0) + 32768, 136096))))
             try exec("PRAGMA trusted_schema=OFF")
             try exec("PRAGMA foreign_keys=ON")
+            guard try integer(SQLiteSchemaCatalog.containsUnsupportedObjectsSQL) == 0 else {
+                throw JournalDatabaseError.incompatibleStore
+            }
             if initialize { try requireEmptyStore() }
             else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion) }
             if readOnlyForCutover { try exec("PRAGMA query_only=ON") }
@@ -104,10 +147,15 @@ public final class JournalDatabase {
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
             commandReplay = try CommandSubmissionReplayJournal(connection: connection, macID: macID, accountID: accountID, maximumRows: maximumCommandSubmissions)
-            enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
-            if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
+            enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID, step: journalStep)
+            if let routingPolicy {
+                routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy, step: journalStep)
+            }
             if let updateSchedulingPolicy { updateScheduling = UpdateSchedulingJournal(connection: connection, macID: macID, accountID: accountID, policy: updateSchedulingPolicy); configuredUpdateSchedulingPolicy = updateSchedulingPolicy }
-            if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy); configuredGatewayPolicy = gatewayPolicy }
+            if let gatewayPolicy {
+                gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy, step: journalStep)
+                configuredGatewayPolicy = gatewayPolicy
+            }
             if initialize {
                 try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption,
                     initialAuthority: initialAuthority, didInitializeAuthority: didInitializeAuthority)
@@ -136,7 +184,7 @@ public final class JournalDatabase {
             guard current.sameConfiguration(as: policy) else { throw GatewayAuthorityError.invalidConfiguration }
             return false
         }
-        gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: policy)
+        gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: policy, step: journalStep)
         configuredGatewayPolicy = policy
         return true
     }
@@ -832,7 +880,8 @@ public final class JournalTransaction {
             return try body(owner.enrollmentLedger(token))
         } catch {
             failed = true
-            if error as? EnrollmentJournalError == .corruptData || error as? AuditJournalError == .headMismatch { headMismatch = true }
+            if (error as? JournalDatabaseError)?.isDatabaseIntegrityFailure == true ||
+                error as? EnrollmentJournalError == .corruptData || error as? AuditJournalError == .headMismatch { headMismatch = true }
             throw error
         }
     }
@@ -851,12 +900,13 @@ public final class JournalTransaction {
     }
     /// One protected read for a listener incarnation. The host supplies current local protocol policy and resource limits.
     public func directApprovalTrust(maximumPayloadBytes: Int, minimumEnvelopeVersion: UInt64 = 1,
-                                    auditVersions: Set<UInt64> = []) throws -> DirectApprovalTrust {
+                                    auditVersions: Set<UInt64> = [], supportsPhoneRepairNotices: Bool = false) throws -> DirectApprovalTrust {
         guard (1...16_777_216).contains(maximumPayloadBytes), minimumEnvelopeVersion > 0,
               auditVersions.count <= 16, !auditVersions.contains(0) else { throw DirectListenerError.invalidConfiguration }
         return try withEnrollment(write: false) {
             try $0.directApprovalTrust(maximumPayloadBytes: maximumPayloadBytes,
-                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
+                minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions,
+                supportsPhoneRepairNotices: supportsPhoneRepairNotices)
         }
     }
     /// Rechecks the protected revision and peer binding. It grants no approval or execution authority.
@@ -873,6 +923,12 @@ public final class JournalTransaction {
 
     public func approvalEnrollments() throws -> [StoredApprovalEnrollment] {
         try withEnrollment(write: false) { ledger in _ = try ledger.snapshot(); return try ledger.all() }
+    }
+
+    func phoneRepairNotice(scope: ChannelScope, decisionKey: Data) throws -> PhoneRepairNoticeFrame.Reason? {
+        _ = try tables()
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.readPhoneRepairNotice(scope: scope, decisionKey: decisionKey)
     }
 
     func rePairPredecessors(in rows: [StoredApprovalEnrollment]) throws -> [DeliveryRecipient] {
@@ -1169,7 +1225,8 @@ public final class JournalTransaction {
             return try body(owner.routingLedger(token))
         } catch {
             failed = true
-            if error as? RoutingJournalError == .corruptData || error as? RoutingJournalError == .invalidClock ||
+            if (error as? JournalDatabaseError)?.isDatabaseIntegrityFailure == true ||
+                error as? RoutingJournalError == .corruptData || error as? RoutingJournalError == .invalidClock ||
                 error as? AuditJournalError == .headMismatch { headMismatch = true }
             throw error
         }
@@ -1242,7 +1299,11 @@ public final class JournalTransaction {
             return try body(owner.gatewayLedger(token))
         } catch {
             failed = true
-            if let error = error as? GatewayAuthorityError, [.headMismatch, .invalidClock, .corruptData].contains(error) { headMismatch = true }
+            if (error as? JournalDatabaseError)?.isDatabaseIntegrityFailure == true {
+                headMismatch = true
+            } else if let error = error as? GatewayAuthorityError, [.headMismatch, .invalidClock, .corruptData].contains(error) {
+                headMismatch = true
+            }
             throw error
         }
     }

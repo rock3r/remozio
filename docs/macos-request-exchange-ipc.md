@@ -27,11 +27,13 @@ sequenceDiagram
 
 ## Local IPC contract
 
-After common hello, negotiate `requestExchangeVersion`. Version one enables `exchangeRequest(binding, query)`. Zero or unknown versions send no binding or decision and leave common operations available. An older server without the selector can retire the connection before query dispatch.
+After common hello, negotiate `requestExchangeVersion`. Version two enables `exchangeRequest(binding, query)`. An unsupported version sends no binding or decision. Common operations remain available.
 
-The canonical query has three fields: key zero is schema one, key one is the 16-byte request ID, and key two is a signed decision carrier or null. The complete decision carrier is at most 4096 bytes. The query is at most 4352 bytes. Empty decision bytes are invalid.
+The supported installed Authority and Transport come from the same signed app bundle. The update path exchanges the bundle under quiescence and requires both candidate roles before reopening admission. Source inspection supports this compatibility decision. It does not prove an installed update or rollback.
 
-A nonempty reply is a status carrier of at most 4096 bytes. Both IPC ends check its type, status structure, Mac/account scope, and request ID. The phone must verify its authority signature and retained digest/challenge. Empty Data means no retained live state. Nil, malformed bytes, or wrong scope retires the connection. Absence never proves expiry or a terminal result.
+The canonical query has four fields. Key zero is schema two. Key one is the 16-byte request ID. Key two is a signed decision carrier or null. Key three is null or a two-item array with the 32-byte live session ID and the decision envelope sequence. Only a negotiated decision can carry an attempt. The complete decision carrier is at most 4096 bytes. The query is at most 4352 bytes. Empty decision bytes are invalid.
+
+A nonempty reply is a status carrier of at most 4096 bytes or an authority-signed refusal of at most 384 bytes. Refusals require a matching negotiated attempt, enrolled scope, and exact decision digest. An older phone still uses the original signed status frame and failure behavior. Both IPC ends check its type, status structure, Mac/account scope, and request ID. The phone must verify its authority signature and retained digest/challenge. Empty Data means no retained live state. Nil, malformed bytes, or wrong scope retires the connection. Absence never proves expiry or a terminal result.
 
 The endpoint uses the existing OS identity guard and shared work budget. The standard listener rechecks current transport code policy and enrollment inside the shared authority lock. The feed keeps its bounded ordered queue and refresh priority. The service rejects replies after channel replacement, closure, or cancellation. It never retries a decision automatically.
 
@@ -48,6 +50,14 @@ Every submitted decision must match the retained request and authenticated phone
 Consumption can commit before signing fails or the reply is lost. Reconcile with a read-only status query. A returned Authorized state grants no separate execution permit. The existing executor checks remain required.
 
 Terminal capture bytes are released. Bounded status metadata remains until the owner forgets that terminal request. It is not reconstructed after restart. Durable consumption history stays in the journal; live request restart reconciliation remains separate assembly work.
+
+## Phone repair notices
+
+A phone can report a legacy approval key or a change to its fingerprints or faces. Both peers must advertise support on the live approval channel. The phone signs the Mac, account, phone, enrollment epoch, and reason with its enrolled decision key. Root checks the signature and the current enrollment before it retains the first notice for that epoch. The paired phones list in Setup displays the notice for the active enrollment.
+
+Each report is an advisory. The pairing lifecycle still requires the normal re-pair flow and authorization. Revocation removes the enrollment from the active list. A replacement starts a new epoch and uses a new notice. Earlier notice files stay in their original directory. A journal cutover that uses a new directory carries the journal data without these notices. The phone can report again for its current epoch.
+
+If a notice file is unreadable or fails signature validation, Setup leaves its status empty and keeps the paired phones list available. Root records a local diagnostic without identifiers, file contents, or the reason. It rejects a new report for that file and preserves its bytes. Damage to the journal lease still closes the existing journal path.
 
 ## Evidence and remaining work
 

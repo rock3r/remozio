@@ -7,6 +7,7 @@ public enum PairingSetupFrame: Sendable, CustomStringConvertible {
     case transcript(PairingTranscript)
     case proof(setupID: Data, digest: Data, signature: Data)
     case receipt(setupID: Data, digest: Data, signature: Data)
+    case dualProof(setupID: Data, digest: Data, biometricSignature: Data, decisionSignature: Data)
     public static let maximumBytes = 132_256
     public static let applicationProtocol = "remozio-pairing/1"
     public var description: String { "PairingSetupFrame(redacted)" }
@@ -19,13 +20,22 @@ public enum PairingSetupFrame: Sendable, CustomStringConvertible {
         case .transcript(let value): kind = 2; body = .bytes(try value.encode())
         case .proof(let id, let digest, let signature): kind = 3; body = try Self.proofValue(id, digest, signature)
         case .receipt(let id, let digest, let signature): kind = 4; body = try Self.proofValue(id, digest, signature)
+        case .dualProof(let id, let digest, let biometric, let decision):
+            kind = 6
+            body = try Self.proofValue(id, digest, biometric, decisionSignature: decision)
         }
         return try DeterministicCBOR.encode(.map([0: .text("dev.remozio.pairing.exchange"),
             1: .unsigned(1), 2: .unsigned(kind), 3: body]), limits: Self.limits)
     }
-    private static func proofValue(_ id: Data, _ digest: Data, _ signature: Data) throws -> CBORValue {
+    private static func proofValue(_ id: Data, _ digest: Data, _ signature: Data,
+                                   decisionSignature: Data? = nil) throws -> CBORValue {
         guard id.count == 16, digest.count == 32, signature.count == 64 else { throw PairingError.invalidTranscript }
-        return .array([.bytes(id), .bytes(digest), .bytes(signature)])
+        var fields: [CBORValue] = [.bytes(id), .bytes(digest), .bytes(signature)]
+        if let decisionSignature {
+            guard decisionSignature.count == 64 else { throw PairingError.invalidTranscript }
+            fields.append(.bytes(decisionSignature))
+        }
+        return .array(fields)
     }
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...3),
@@ -42,6 +52,11 @@ public enum PairingSetupFrame: Sendable, CustomStringConvertible {
             _ = try proofValue(id, digest, signature)
             result = kind == 3 ? .proof(setupID: id, digest: digest, signature: signature) :
                 .receipt(setupID: id, digest: digest, signature: signature)
+        case (6, .array(let row)):
+            guard row.count == 4, case .bytes(let id) = row[0], case .bytes(let digest) = row[1],
+                  case .bytes(let biometric) = row[2], case .bytes(let decision) = row[3]
+            else { throw PairingError.invalidTranscript }
+            result = .dualProof(setupID: id, digest: digest, biometricSignature: biometric, decisionSignature: decision)
         default: throw PairingError.invalidTranscript
         }
         guard try result.encode() == bytes else { throw PairingError.invalidTranscript }; return result

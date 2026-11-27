@@ -45,6 +45,7 @@ public enum AdministrativeSetupPublication {
     }
 
     enum File {
+        case phoneRepairNotice(phone: Data, epoch: Data)
         case startup, bootstrapIntent, bootstrapCompletion
         case maintenanceCloseMarker, pairingColdDisableIntent
         case auditUpgradeStartupFence
@@ -77,6 +78,8 @@ public enum AdministrativeSetupPublication {
             case .runtimeRecord: "runtime-material.cbor"
             case .maintenanceCloseMarker: AuthorityMaintenanceCloseMarker.fileName
             case .pairingColdDisableIntent: PairingColdDisableIntent.fileName
+            case .phoneRepairNotice(let phone, let epoch):
+                "phone-repair-" + LowercaseHexadecimal.encode(phone) + "-" + LowercaseHexadecimal.encode(epoch) + ".cbor"
             case .auditUpgradeStartupFence: RuntimeAuditUpgradeStartupFence.fileName
             case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + LowercaseHexadecimal.encode(id) + "-" + LowercaseHexadecimal.encode(digest) + ".cbor"
             case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + LowercaseHexadecimal.encode(id) + ".cbor"
@@ -109,6 +112,7 @@ public enum AdministrativeSetupPublication {
         }
         var maximumBytes: Int {
             if case .auditUpgradeGraph = self { return RuntimeAuditUpgradeGraph.maximumBytes }
+            if case .phoneRepairNotice = self { return PhoneRepairNoticeFrame.maximumBytes }
             return ProtectedServiceConfiguration.maximumBytes
         }
         var mode: mode_t {
@@ -138,6 +142,9 @@ public enum AdministrativeSetupPublication {
         func validate() throws {
             let uid: uid_t
             switch self {
+            case .phoneRepairNotice(let phone, let epoch):
+                guard phone.count == 16, epoch.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }
+                return
             case .transportIdentity(let value, let group), .transportTunnelToken(let value, let group), .gatewayProvider(let value, let group),
                  .gatewayReceiptKey(let value, let group), .transportWakeKey(let value, let group):
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }

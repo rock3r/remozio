@@ -7,6 +7,8 @@ import dev.sebastiano.remozio.android.decisions.AndroidDecisionKeyCreation
 import dev.sebastiano.remozio.android.requests.RequestElapsedClock
 import dev.sebastiano.remozio.android.requests.commandInspectionCapabilities
 import dev.sebastiano.remozio.android.transport.AndroidTransportKeyCreation
+import dev.sebastiano.remozio.android.transport.AndroidTransportLeaves
+import dev.sebastiano.remozio.android.transport.TRANSPORT_LEAF_LIFETIME_DAYS
 import dev.sebastiano.remozio.android.transport.CreatedTransportIdentity
 import dev.sebastiano.remozio.android.transport.LocalNetworkSettings
 import dev.sebastiano.remozio.android.transport.androidPairingRoutes
@@ -33,7 +35,7 @@ internal class AndroidPairingAttempt(
     constructor(context: Context, parent: CoroutineScope, store: StoredPairingHost) : this(
         parent, store, { context.applicationContext }, { now, keyID ->
             AndroidTransportKeyCreation.createForEnrollment(context.applicationContext,
-                now.minusSeconds(300), now.plusSeconds(31_536_000), keyID)
+                now.minusSeconds(300), now.plus(TRANSPORT_LEAF_LIFETIME_DAYS, java.time.temporal.ChronoUnit.DAYS), keyID)
         },
     )
     private val job = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
@@ -62,20 +64,23 @@ internal class AndroidPairingAttempt(
     val phoneSuffix: String get() = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
     val transcript: PairingTranscript get() = checkNotNull(channel).transcript
 
-    suspend fun connect(text: String): PairingTranscript {
+    suspend fun connect(text: String, recoveryRecordID: CborValue.Bytes? = null): PairingTranscript {
         val imported = text.trim()
         val rePair = if (imported.startsWith("remozio-repair:")) RePairInvitation.importText(imported) else null
-        return connect(rePair?.invitation ?: PairingInvitation.importText(imported), rePair, null)
+        return connect(rePair?.invitation ?: PairingInvitation.importText(imported), rePair, null, recoveryRecordID)
     }
 
-    suspend fun connectV2(invitation: PairingInvitationV2): PairingTranscript = connect(
-        invitation.invitation, invitation.replacement?.let { RePairInvitation(invitation.invitation, it) }, invitation,
+    suspend fun connectV2(invitation: PairingInvitationV2, offerDecisionProof: Boolean,
+        recoveryRecordID: CborValue.Bytes? = null): PairingTranscript = connect(
+        invitation.invitation, invitation.replacement?.let { RePairInvitation(invitation.invitation, it) },
+        invitation, recoveryRecordID, offerDecisionProof,
     )
 
     private suspend fun connect(selected: PairingInvitation, rePair: RePairInvitation?,
-        v2: PairingInvitationV2?,
+        v2: PairingInvitationV2?, recoveryRecordID: CborValue.Bytes?, offerDecisionProof: Boolean = false,
     ): PairingTranscript = operation {
         check(invitation == null)
+        require(recoveryRecordID == null || rePair != null)
         val keyIDs = EnrollmentKeyRole.entries.map { CborValue.Bytes(randomID()) }
         if (rePair == null) {
             val snapshot = store.setupSnapshot()
@@ -91,7 +96,7 @@ internal class AndroidPairingAttempt(
             phoneID = rePair.predecessor.phoneID.copyBytes()
             val recordID = randomID()
             withContext(NonCancellable) {
-                val reserved = store.reserveRePair(rePair, recordID, epoch, keyIDs)
+                val reserved = store.reserveRePair(rePair, recordID, epoch, keyIDs, recoveryRecordID)
                 rePairRecordID = reserved.recordID
             }
         }
@@ -127,7 +132,8 @@ internal class AndroidPairingAttempt(
         val keys = arrayOf<javax.net.ssl.KeyManager>(checkNotNull(identity).identity.keyManager)
         val timeout = LocalNetworkSettings(application()).timeoutSeconds() * 1000L
         val opened = if (v2 == null) authenticatePairingRoutes(scope, routes, keys, selected, proposal, timeout)
-            else authenticatePairingV2Routes(scope, routes, keys, v2, proposal, timeout, AndroidInvitationExporter)
+            else authenticatePairingV2Routes(scope, routes, keys, v2, proposal, timeout, AndroidInvitationExporter,
+                offerDecisionProof = offerDecisionProof)
         channel = opened; active()
         val prepareProposal: suspend () -> Unit = {
             rePairRecordID?.let { store.prepareRePairProposal(it, RePairProposalMaterial(proposal, ownedKeys)) }
@@ -187,18 +193,30 @@ internal class AndroidPairingAttempt(
         }
     }
 
-    /** The exact confirmed transcript and fresh hardware proof are submitted once. A lost reply retains PREPARED storage. */
+    /** Submit the confirmed transcript once. A lost reply retains PREPARED storage. */
     suspend fun submit(proof: ByteArray) = operation {
-        check(prepared && !proofSubmitted && checkNotNull(preparedAccess).lease.isCurrent())
+        val access = checkNotNull(preparedAccess)
+        check(prepared && !proofSubmitted && access.lease.isCurrent())
         requireOpenDeadline()
-        val current = transcript
-        require(current.verify(proof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
-        val receipt = checkNotNull(channel).submitProof(current.digest(), proof) {
+        val selected = checkNotNull(channel)
+        val current = selected.transcript
+        val digest = current.digest()
+        val biometricProof = proof.copyOf()
+        val beforeProof: suspend () -> Unit = {
+            check(access.lease.isCurrent())
             requireOpenDeadline()
-            if (rePairRecordID != null) preparedAccess = store.markRePairProof(checkNotNull(preparedAccess))
+            if (rePairRecordID != null) preparedAccess = store.markRePairProof(access)
             active()
+            check(access.lease.isCurrent())
             requireOpenDeadline()
             proofSubmitted = true
+        }
+        val receipt = if (selected.requiresDecisionProof) {
+            val decisionProof = signPairingDecisionProof(access, current, biometricProof, deadline, RequestElapsedClock::now)
+            selected.submitDualProof(digest, biometricProof, decisionProof, beforeProof)
+        } else {
+            require(current.verify(biometricProof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+            selected.submitProof(digest, biometricProof, beforeProof)
         }
         active()
         store.activate(checkNotNull(enrollment).recordID, CborValue.Bytes(receipt),
@@ -239,6 +257,7 @@ internal class AndroidPairingAttempt(
             val point = keystore.getCertificate(ref.alias)?.publicKey?.encoded?.takeLast(65)?.toByteArray()
             if (point != null && point.contentEquals(ref.publicKey.copyBytes().takeLast(65).toByteArray())) {
                 keystore.deleteEntry(ref.alias)
+                AndroidTransportLeaves.retire(application(), ref.alias)
             }
         }
     }

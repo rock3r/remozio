@@ -45,7 +45,12 @@ enum RuntimePublicationController {
                             }, publish: { bundle, material, verify in
                                 try publishNative(bundle: bundle, material: material, verifyCurrent: verify)
                             }, validatePublishedImport: { bundle, material, verify in
-                                try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: material, verifyCurrent: verify)
+                                try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: material, verifyCurrent: verify,
+                                    retainedColdDisable: expected.configurationPublished && imported?.phase != .retained ? {
+                                        let activation = try machine.runtimeActivation(accountID: account.accountID)
+                                        guard activation.jobsRegistered, let command = activation.plan?.host.command else { return nil }
+                                        return (command, try PairingColdDisableIntent.read(accountID: account.accountID))
+                                    } : nil)
                             })
                     }
                 }

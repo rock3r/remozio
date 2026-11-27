@@ -165,15 +165,16 @@ public actor AuthorityTrustFeed {
         } catch { await close(); throw error }
     }
     /// Status and signed decisions share the ordered authority connection. No decision is retried after an uncertain reply.
-    public func exchangeRequest(_ peer: DirectApprovalPeer, revision: UUID, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
+    public func exchangeRequest(_ peer: DirectApprovalPeer, revision: UUID, requestID: Data, decisionFrame: Data? = nil,
+                                refusalAttempt: DecisionRefusalFrame.Attempt? = nil) async throws -> Data? {
         guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
-        _ = try AuthorityRequestExchange.encode(requestID: requestID, decisionFrame: decisionFrame)
+        _ = try AuthorityRequestExchange.encode(requestID: requestID, decisionFrame: decisionFrame, refusalAttempt: refusalAttempt)
         inFlightOperations += 1; defer { finishOperation() }
         try await acquire()
         defer { release() }
         do {
             let status = try await activeChannel().exchangeRequest(binding: AuthorityPeerBinding(peer: peer, revision: revision),
-                requestID: requestID, decisionFrame: decisionFrame)
+                requestID: requestID, decisionFrame: decisionFrame, refusalAttempt: refusalAttempt)
             try requireActive()
             return status
         } catch AuthorityXPCError.unsupportedRequestExchange {
@@ -181,6 +182,18 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestExchange
         } catch { await close(); throw error }
     }
+    func recordPhoneRepairNotice(_ peer: DirectApprovalPeer, revision: UUID, notice: PhoneRepairNoticeFrame) async throws -> Bool {
+        guard peer.scope == notice.scope, peer.scope.macID == macID, peer.scope.accountID == accountID else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        inFlightOperations += 1; defer { finishOperation() }
+        try await acquire()
+        defer { release() }
+        let accepted = try await activeChannel().recordPhoneRepairNotice(binding: AuthorityPeerBinding(peer: peer, revision: revision), notice: notice)
+        try requireActive()
+        return accepted
+    }
+
     /// Each network exchange owns a separate Root connection and one challenge.
     func withPairingLookup<Value: Sendable>(
         _ body: @Sendable (AuthorityXPCChannel) async throws -> Value

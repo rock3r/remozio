@@ -6,6 +6,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
+import Synchronization
 @testable import RemozioCore
 
 /// Disposable normal-user Root and IPC shim. Native TLS and the production Transport handler remain real.
@@ -19,6 +20,8 @@ final class RoutingFixture: @unchecked Sendable {
     let authorityPublicKey: Data
     private let auditWriter: AuditEpochWriter
     private let auditEpoch: Data
+    private let commandRequestID: Data?
+    private let repairNotices: Bool
     private let wall = Wall()
     private let limits: CBORLimits
     private final class Wall: @unchecked Sendable {
@@ -33,7 +36,10 @@ final class RoutingFixture: @unchecked Sendable {
         } }
     }
     init(directory: String, phoneTransport: Data, decision: Data, biometric: Data, supported: Bool,
-         auditSupported: Bool = false, maximumPayloadBytes: Int = 16_384) throws {
+         auditSupported: Bool = false, maximumPayloadBytes: Int = 16_384, commandCapture: Data? = nil,
+         repairNotices: Bool = false) throws {
+        self.repairNotices = repairNotices
+        guard !repairNotices || commandCapture != nil else { throw ProbeError.invalidInput }
         guard getuid() != 0, geteuid() != 0, let canonical = realpath(directory, nil) else { throw ProbeError.invalidInput }
         defer { free(canonical) }
         let root = String(cString: canonical), store = root + "/routing-journal"
@@ -56,7 +62,7 @@ final class RoutingFixture: @unchecked Sendable {
             4: .unsigned(7), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
         ]), limits: limits), limits: limits)
         let writer = try database.write { try $0.createEpoch(descriptor) }; self.auditEpoch = writer.epoch; self.auditWriter = writer
-        let phoneContract = try RequestContract(requestKind: .onePasswordAccess, wireVersion: 1, schemaVersion: 1)
+        let phoneContract = try RequestContract(requestKind: commandCapture == nil ? .onePasswordAccess : .command, wireVersion: 1, schemaVersion: 1)
         let enrollment = try StoredApprovalEnrollment(epoch: Self.id(4), notificationTag: Data(repeating: 5, count: 32),
             identityPublicKey: P256.Signing.PublicKey(derRepresentation: phoneTransport).x963Representation,
             approval: ApprovalEnrollment(phoneID: Self.id(3), active: true, capabilities: .init(contracts: [phoneContract: []]), keys: [
@@ -65,9 +71,11 @@ final class RoutingFixture: @unchecked Sendable {
             ]))
         _ = try database.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: trust,
             eventID: Self.id(9), receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
-        _ = try database.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport,
+        let transportEntry = try AuthorityCodeEntry(role: .transport,
             teamID: "SYNTHETIC1", identifier: "dev.remozio.fixture.transport", installedGeneration: 1, minimumGeneration: 1,
-            codeDirectoryHash: Data(repeating: 7, count: 20), active: true)]), expectedRevision: nil) }
+            codeDirectoryHash: Data(repeating: 7, count: 20), active: true)
+        let policy = try AuthorityCodePolicy(entries: repairNotices ? [transportEntry, Self.setupEntry()] : [transportEntry])
+        _ = try database.write { try $0.installCodePolicy(policy, expectedRevision: nil) }
         let owner = try ApprovalRequestCoordinator(database: database, writer: writer, clockEpoch: clock.epoch,
             maximumRequests: 4, maximumRetainedBytes: 65_536, requestLimits: limits, captureLimits: limits,
             decisionLimits: limits, signingLimits: limits, auditLimits: limits)
@@ -87,7 +95,19 @@ final class RoutingFixture: @unchecked Sendable {
             routingWallTime: supported ? { @Sendable in wall.now() } : nil)
         access = try AuthorityTransportAccess(journal: journal, peerPolicy: configuration.transportPolicy, macID: Self.id(1), accountID: Self.id(2),
             maximumPayloadBytes: maximumPayloadBytes, minimumEnvelopeVersion: 1, auditVersions: auditSupported ? [1] : [])
-        _ = try journal.withRequests { try $0.setLocalRoutingMode(.present, expectedRevision: 0, now: clock.now(), receiptTimeMs: nil) }
+        commandRequestID = try journal.withRequests { owner in
+            let now = try clock.now()
+            _ = try owner.setLocalRoutingMode(commandCapture == nil ? .present : .away,
+                expectedRevision: 0, now: now, receiptTimeMs: nil)
+            guard let commandCapture else { return nil }
+            let window: UInt64 = 60_000
+            // This fixture retains only the capture bytes. It has no command target or execution owner.
+            return try owner.admitFixture(ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: commandCapture,
+                actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+                firstObservedAt: now, deadlineMilliseconds: now.milliseconds + window,
+                createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1000 + window),
+                now: now, receiptTimeMs: nil).requestID
+        }
     }
     func driver() throws -> any AuthorityXPCDriver {
         let access = access, providers = providers, clock = clock
@@ -101,9 +121,35 @@ final class RoutingFixture: @unchecked Sendable {
             audit = { binding, frame in try access.phoneAudit(binding: binding, frame: frame,
                 handler: { try provider($0, $1, $2, { try clock.now() }, $3) }) }
         } else { audit = nil }
+        let requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
+        let pending: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
+        let exchange: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
+        if commandRequestID != nil {
+            requestFrame = { binding, id in
+                try access.requestFrame(binding: binding, requestID: id,
+                    handler: { try providers.requestFrame($0, $1, $2, { try clock.now() }) })
+            }
+            pending = { binding in
+                try access.pendingRequestIDs(binding: binding,
+                    handler: { try providers.pendingRequestIDs($0, $1, { try clock.now() }) })
+            }
+            exchange = { binding, query in
+                try access.exchangeRequest(binding: binding, query: query,
+                    handler: { try providers.exchangeRequest($0, $1, $2, { try clock.now() }) })
+            }
+        } else {
+            requestFrame = nil; pending = nil; exchange = nil
+        }
+        let notice: (@Sendable (AuthorityPeerBinding, PhoneRepairNoticeFrame) throws -> Bool)?
+        let supportsNotices = repairNotices
+        if supportsNotices {
+            notice = { try access.recordPhoneRepairNotice(binding: $0, notice: $1) }
+        } else { notice = nil }
         let endpoint = try AuthorityXPCEndpoint(macID: Self.id(1), accountID: Self.id(2), budget: AuthorityXPCWorkBudget(),
             activityJournal: journal, verify: {}, verifyHandshakePolicy: { try access.verifyCurrent() }, invalidate: {},
-            snapshot: { try access.snapshot() }, validate: { try access.validate($0) }, phoneAudit: audit, phoneRouting: routing)
+            snapshot: { try access.snapshot(supportsPhoneRepairNotices: supportsNotices) }, validate: { try access.validate($0) },
+            requestFrame: requestFrame, pendingRequestIDs: pending, exchangeRequest: exchange, recordPhoneRepairNotice: notice,
+            phoneAudit: audit, phoneRouting: routing)
         return RoutingFixtureDriver(endpoint)
     }
     func control(_ command: String) throws -> [String: UInt64] {
@@ -134,6 +180,20 @@ final class RoutingFixture: @unchecked Sendable {
                     receiptTimeMs: nil, writer: self.auditWriter, expectedAuditHead: epoch.head)
             }
         case "expire": wall.advance()
+        case "phone-repair-snapshot":
+            return try phoneRepairSnapshot()
+        case "command-snapshot":
+            guard let requestID = commandRequestID else { throw ProbeError.invalidInput }
+            let epoch = auditEpoch, limits = limits
+            return try journal.read { tx in
+                let receipt = try tx.consumption(requestID: requestID)
+                let page = try tx.page(epoch: epoch, after: 0, maximumRecords: 64, maximumBytes: 16_384)
+                let records = try page.canonicalRecords.map { try AuditEventMetadata.decode($0, limits: limits) }
+                    .filter { $0.requestID == requestID }
+                return ["receipt": receipt == nil ? 0 : 1,
+                    "consumed": UInt64(records.filter { $0.kind == .consumed }.count),
+                    "dispatched": UInt64(records.filter { $0.kind == .dispatched }.count)]
+            }
         case "snapshot": break
         default: throw ProbeError.invalidInput
         }
@@ -146,6 +206,43 @@ final class RoutingFixture: @unchecked Sendable {
                 "head": try tx.epoch(epoch)?.head ?? 0]
         }
     }
+    private func phoneRepairSnapshot() throws -> [String: UInt64] {
+        guard repairNotices else { throw ProbeError.invalidInput }
+        let mac = Self.id(1), account = Self.id(2)
+        let app = try Self.setupEntry()
+        let policy = try XPCPeerPolicy(teamID: app.teamID, componentIdentifier: app.identifier,
+            approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: getuid())
+        let setup = try AuthorityPairingSetupAccess(journal: journal, macID: mac, accountID: account,
+            authorityPublicKey: authorityPublicKey, appPolicy: policy,
+            configuration: .init(transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation, lifetimeMilliseconds: 1000),
+            minimumEnvelopeVersion: 1, auditVersions: [], now: clock.now, unixMilliseconds: { 1000 },
+            validateSelf: { _ in }, commit: { _, _, _, _, _ in throw ProbeError.invalidInput })
+        let endpoint = AuthorityPairingXPCEndpoint(access: setup, budget: try AuthorityXPCWorkBudget(),
+            verify: {}, authorize: { _ in throw ProbeError.invalidInput }, invalidate: {})
+        let owners = AuthorityMaintenancePairingOwners(admission: setup.maintenanceAdmission)
+        endpoint.attachInstalledPairing(to: owners)
+        try owners.retain(endpoint, id: UUID())
+        defer { endpoint.close(); withExtendedLifetime(owners) {} }
+        let version = Mutex<UInt64>(0)
+        endpoint.pairingHello { reply in version.withLock { $0 = reply } }
+        guard version.withLock({ $0 }) == 1 else { throw ProbeError.invalidInput }
+        endpoint.pairedPhoneHello(maximumVersion: 4) { reply in version.withLock { $0 = reply } }
+        guard version.withLock({ $0 }) == 4 else { throw ProbeError.invalidInput }
+        let reply = Mutex<Data?>(nil)
+        endpoint.managePairedPhone(PairedPhoneOperation.listWithRepairNotices.rawValue, selection: Data(), authorization: Data()) { bytes in
+            reply.withLock { $0 = bytes }
+        }
+        guard let bytes = reply.withLock({ $0 }) else { throw ProbeError.invalidInput }
+        let phones = try PairedPhoneSnapshot.decode(bytes, macID: mac, accountID: account, includeRePair: true, includeRepairNotices: true)
+        let enrolled = DeliveryRecipient(phoneID: Self.id(3), enrollmentEpoch: Self.id(4))
+        return ["version": 4, "active": UInt64(phones.phones.count), "reason": phones.repairNotices[enrolled]?.rawValue ?? 0]
+    }
+
+    private static func setupEntry() throws -> AuthorityCodeEntry {
+        try .init(role: .app, teamID: "SYNTHETIC1", identifier: "dev.remozio.fixture.repair",
+            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 8, count: 20), active: true)
+    }
+
     func close() throws { presence.close(); try journal.close() }
     private static func id(_ n: UInt8) -> Data { Data(repeating: n, count: 16) }
 }
@@ -158,6 +255,27 @@ private final class RoutingFixtureDriver: AuthorityXPCDriver, @unchecked Sendabl
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { endpoint.hello { reply(.hello($0)) } }
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { endpoint.trustSnapshot { reply($0.map(AuthorityXPCReply.snapshot) ?? .failed) } }
     func validate(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { endpoint.validatePeer(binding) { reply(.validation($0)) } }
+    func deliveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.requestDeliveryVersion { reply(.deliveryVersion($0)) }
+    }
+    func requestFrame(_ binding: Data, requestID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.requestFrame(binding, requestID: requestID) { reply($0.map(AuthorityXPCReply.requestFrame) ?? .failed) }
+    }
+    func discoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.requestDiscoveryVersion { reply(.discoveryVersion($0)) }
+    }
+    func pendingRequests(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.pendingRequestIDs(binding) { reply($0.map(AuthorityXPCReply.pendingRequests) ?? .failed) }
+    }
+    func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.requestExchangeVersion { reply(.exchangeVersion($0)) }
+    }
+    func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.exchangeRequest(binding, query: query) { reply($0.map(AuthorityXPCReply.exchange) ?? .failed) }
+    }
+    func phoneRepairNotice(_ binding: Data, notice: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        endpoint.recordPhoneRepairNotice(binding, notice: notice) { reply(.phoneRepairNotice($0)) }
+    }
     func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { endpoint.phoneAuditVersion { reply(.auditVersion($0)) } }
     func audit(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         endpoint.phoneAudit(binding, frame: frame) { reply($0.map(AuthorityXPCReply.audit) ?? .failed) }

@@ -16,21 +16,24 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.remozio.protocol.CborValue
 import dev.sebastiano.remozio.android.R
 import dev.sebastiano.remozio.android.RemozioApplication
 
 @Composable
-internal fun CombinedCommandInboxScreen(onPair: () -> Unit, navigation: CommandInboxNavigation) {
+internal fun CombinedCommandInboxScreen(onPair: () -> Unit, navigation: CommandInboxNavigation,
+    onRepair: (CborValue.Bytes) -> Unit) {
     val runtime = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val state by runtime.state.collectAsStateWithLifecycle()
-    CombinedCommandInboxSurface(state, onPair, runtime::refresh, navigation, renderInspection = false, onReconnect = runtime::reconnect)
+    CombinedCommandInboxSurface(state, onPair, runtime::refresh, navigation, renderInspection = false, onReconnect = runtime::reconnect, onRepair = onRepair)
 }
 
 /** Filters and selection belong to the display. All foreground connection jobs remain app-owned. */
 @Composable
 internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: () -> Unit, onRetry: () -> Unit,
     navigation: CommandInboxNavigation = remember { CommandInboxNavigation() }, renderInspection: Boolean = true,
-    onReconnect: (CommandConnection) -> Unit = { onRetry() }) {
+    onReconnect: (CommandConnection) -> Unit = { onRetry() },
+    onRepair: ((CborValue.Bytes) -> Unit)? = null) {
     val owners = (state as? ForegroundCommandState.Ready)?.owners.orEmpty()
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
     val route by navigation.state.collectAsStateWithLifecycle()
@@ -94,19 +97,19 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
                         item { Text(stringResource(R.string.commands_connections), style = MaterialTheme.typography.titleLarge,
                             modifier = Modifier.padding(top = 12.dp).semantics { heading() }) }
                         items(visibleOwners, key = { "connection:${commandIdentityText(it.recordID)}" }) { owner ->
-                            CommandPeerStatus(owner, owners, onRetry, onReconnect)
+                            CommandPeerStatus(owner, owners, onRetry, onReconnect, onRepair)
                         }
                     }
                 }
             }
         }
     }
-    if (renderInspection) CommandInspectionHost(navigation, owners)
+    if (renderInspection) CommandInspectionHost(navigation, owners, onReconnect, onRepair)
 }
 
 @Composable
 private fun CommandPeerStatus(owner: StoredCommandOwner, owners: List<StoredCommandOwner>, onRetry: () -> Unit,
-    onReconnect: (CommandConnection) -> Unit) {
+    onReconnect: (CommandConnection) -> Unit, onRepair: ((CborValue.Bytes) -> Unit)?) {
     val connection = owner.connection
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(commandMacLabel(owner, owners), style = MaterialTheme.typography.titleMedium)
@@ -122,9 +125,14 @@ private fun CommandPeerStatus(owner: StoredCommandOwner, owners: List<StoredComm
                 CommandConnectionState.CONNECTED -> R.string.commands_connected
                 CommandConnectionState.DISCONNECTED -> R.string.commands_disconnected
                 CommandConnectionState.CLOSED -> R.string.commands_enrollment_unavailable
+                CommandConnectionState.RECOVERY_REQUIRED -> R.string.commands_certificate_recovery
             }))
             if (limited) Text(stringResource(R.string.commands_capacity))
-            if (state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED || limited) {
+            if (state == CommandConnectionState.RECOVERY_REQUIRED) {
+                if (onRepair != null) TextButton(onClick = { onRepair(owner.recordID) }) {
+                    Text(stringResource(R.string.commands_pair_again))
+                }
+            } else if (state == CommandConnectionState.DISCONNECTED || state == CommandConnectionState.CLOSED || limited) {
                 TextButton(onClick = { onReconnect(connection) }) { Text(stringResource(R.string.commands_reconnect)) }
             }
         }

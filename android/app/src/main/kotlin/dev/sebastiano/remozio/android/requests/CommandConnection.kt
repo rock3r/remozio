@@ -4,6 +4,8 @@ import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
 import dev.remozio.phone.requests.*
 import dev.remozio.protocol.*
+import dev.sebastiano.remozio.android.biometrics.BiometricRecoveryReason
+import dev.sebastiano.remozio.android.transport.TransportCertificateRecoveryRequired
 import java.io.IOException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,11 +13,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-internal enum class CommandConnectionState { DISCONNECTED, CONNECTING, CONNECTED, CLOSED }
+internal enum class CommandConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECOVERY_REQUIRED, CLOSED }
+
+/** This attempt failed before it called the decision writer. */
+internal class CommandDecisionNotSent : IOException("Command decision was not sent")
 
 internal interface CommandConnectionWire : AutoCloseable {
     suspend fun receive()
     suspend fun send(bytes: ByteArray)
+    suspend fun sendWithRefusal(bytes: ByteArray, onRefusal: (DecisionRefusalFrame.Reason) -> Unit) = send(bytes)
+    val supportsPhoneRepairNotices: Boolean get() = false
+    suspend fun sendPhoneRepairNotice(notice: PhoneRepairNoticeFrame) {
+        throw IOException("Phone repair notices are unsupported")
+    }
 }
 
 /** One trusted enrollment incarnation. The setup owner must close it before changing or removing trust. */
@@ -29,6 +39,7 @@ internal class CommandConnection(
     memoryBudget: CommandMemoryBudget? = null,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val openSnapshot: (suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire)? = null,
+    private val signRepairNotice: ((PhoneRepairNoticeFrame.Reason) -> PhoneRepairNoticeFrame)? = null,
 ) : AutoCloseable {
     private val inbox = CommandRequestInbox(1, maximumRequests, memoryBudget)
     private val enrollment: CommandRequestEnrollment
@@ -36,7 +47,10 @@ internal class CommandConnection(
     private val running = Mutex()
     private val sending = Mutex()
     private var closed = false
-    private class Attempt(val foreground: Boolean, val job: Job) { var wire: CommandConnectionWire? = null }
+    private class Attempt(val foreground: Boolean, val job: Job) {
+        var wire: CommandConnectionWire? = null
+        var repairNoticeSent = false
+    }
     private var attempt: Attempt? = null
     private var foregroundWaiters = 0
     private val state = MutableStateFlow(CommandConnectionState.DISCONNECTED)
@@ -87,6 +101,7 @@ internal class CommandConnection(
         coroutineScope {
             val owner = Attempt(foreground, checkNotNull(coroutineContext[Job]))
             var candidate: CommandConnectionWire? = null
+            var needsRecovery = false
             try {
                 synchronized(monitor) {
                     check(!closed && (foreground || foregroundWaiters == 0))
@@ -105,14 +120,20 @@ internal class CommandConnection(
                 ensureActive()
                 synchronized(monitor) { check(!closed && attempt === owner) }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { throw IOException("Command connection unavailable") }
+            catch (failure: TransportCertificateRecoveryRequired) {
+                needsRecovery = true
+                throw failure
+            } catch (_: Exception) { throw IOException("Command connection unavailable") }
             finally {
                 try { candidate?.close() }
                 finally {
                     synchronized(monitor) {
                         if (attempt === owner) {
                             attempt = null
-                            if (!closed && foreground) state.value = CommandConnectionState.DISCONNECTED
+                            if (!closed && foreground) {
+                                state.value = if (needsRecovery) CommandConnectionState.RECOVERY_REQUIRED
+                                    else CommandConnectionState.DISCONNECTED
+                            }
                         }
                     }
                 }
@@ -120,33 +141,82 @@ internal class CommandConnection(
         }
     }
 
-    fun approval(session: CommandRequestSession) = CommandApprovalContext(record, limits) { send(session, it) }
+    fun approval(session: CommandRequestSession, onRepair: (() -> Unit)? = null, reconnect: () -> Unit = {}) =
+        CommandApprovalContext(record, limits, connectionState, reconnect, onRepair,
+            reportRepair = { reportPhoneRepair(session, it) }) { message, onRefusal ->
+            send(session, message, onRefusal)
+        }
+
+    /** Reports only on the current foreground wire. A local recovery prompt does not depend on delivery. */
+    internal suspend fun reportPhoneRepair(session: CommandRequestSession, reason: BiometricRecoveryReason) {
+        withContext(dispatcher) {
+            sending.withLock {
+                val signer = signRepairNotice ?: return@withLock
+                val owner = synchronized(monitor) { attempt?.takeIf { !closed && it.foreground } } ?: return@withLock
+                val wire = synchronized(monitor) { owner.wire?.takeIf { !closed && attempt === owner } } ?: return@withLock
+                try {
+                    if (owner.repairNoticeSent || !wire.supportsPhoneRepairNotices ||
+                        enrollment.sessions().none { it === session }) return@withLock
+                    val claim = when (reason) {
+                        BiometricRecoveryReason.LEGACY_POLICY -> PhoneRepairNoticeFrame.Reason.LEGACY_POLICY
+                        BiometricRecoveryReason.BIOMETRIC_CHANGED -> PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED
+                    }
+                    val notice = signer(claim)
+                    val e = record.enrollment
+                    val scope = ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes())
+                    check(notice.scope == scope && notice.reason == claim && notice.verify(e.decisionKey.publicKey.copyBytes()))
+                    ensureActive()
+                    synchronized(monitor) { check(!closed && attempt === owner && owner.wire === wire) }
+                    wire.sendPhoneRepairNotice(notice)
+                    owner.repairNoticeSent = true
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Keep the recovery prompt and normal pairing flow available. */ }
+            }
+        }
+    }
 
     /** Rechecks the retained request and enrolled signing role before writing on this incarnation. */
-    internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage) = withContext(dispatcher) {
+    internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage,
+                              onRefusal: ((DecisionRefusalFrame.Reason, () -> Boolean) -> Unit)? = null) = withContext(dispatcher) {
         sending.withLock {
-            val owner = synchronized(monitor) { check(!closed); checkNotNull(attempt?.takeIf { it.foreground }) }
-            val active = synchronized(monitor) { check(!closed && attempt === owner); checkNotNull(owner.wire) }
-            check(enrollment.sessions().any { it === session })
-            val e = record.enrollment
-            check(message.wireVersion == 1uL && message.type == ApprovalMessageType.DECISION)
-            val body = message.body.copyBytes()
-            val claim = DecisionPayload.decode(body, limits.body)
-            val key = when (claim.action.choice) {
-                ActionChoice.EXECUTE -> e.biometricKey.also { check(message.purpose == SigningPurpose.BIOMETRIC_AUTHORIZATION) }
-                ActionChoice.DECLINE -> e.decisionKey.also { check(message.purpose == SigningPurpose.CANCELLATION) }
-                else -> throw IOException("Unsupported command decision")
+            var writeStarted = false
+            try {
+                val owner = synchronized(monitor) { check(!closed); checkNotNull(attempt?.takeIf { it.foreground }) }
+                val active = synchronized(monitor) { check(!closed && attempt === owner); checkNotNull(owner.wire) }
+                check(enrollment.sessions().any { it === session })
+                val e = record.enrollment
+                check(message.wireVersion == 1uL && message.type == ApprovalMessageType.DECISION)
+                val body = message.body.copyBytes()
+                val claim = DecisionPayload.decode(body, limits.body)
+                val key = when (claim.action.choice) {
+                    ActionChoice.EXECUTE -> e.biometricKey.also {
+                        check(it.hasBiometricEnrollmentInvalidationPolicy && message.purpose == SigningPurpose.BIOMETRIC_AUTHORIZATION)
+                    }
+                    ActionChoice.DECLINE -> e.decisionKey.also { check(message.purpose == SigningPurpose.CANCELLATION) }
+                    else -> throw IOException("Unsupported command decision")
+                }
+                session.withPendingDecision(clock, e.phoneID.copyBytes(), key.keyID.copyBytes(), claim.action) {
+                    check(it.encode(limits.body).contentEquals(body))
+                    check(ApprovalSignature.verify(message.signature.copyBytes(), key.publicKey.copyBytes(), 1u,
+                        message.type, message.purpose, body, limits.body, limits.signing))
+                }
+                val bytes = message.encode(limits.body.maxBytes)
+                ensureActive()
+                synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
+                writeStarted = true
+                fun isCurrent() = synchronized(monitor) { !closed && attempt === owner && owner.wire === active }
+                if (onRefusal == null) active.send(bytes)
+                else active.sendWithRefusal(bytes) { reason ->
+                    if (isCurrent()) onRefusal(reason, ::isCurrent)
+                }
+                ensureActive()
+                synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (!writeStarted) throw CommandDecisionNotSent()
+                throw IOException("Command decision delivery is uncertain", failure)
             }
-            session.withPendingDecision(clock(), e.phoneID.copyBytes(), key.keyID.copyBytes(), claim.action) {
-                check(it.encode(limits.body).contentEquals(body))
-                check(ApprovalSignature.verify(message.signature.copyBytes(), key.publicKey.copyBytes(), 1u,
-                    message.type, message.purpose, body, limits.body, limits.signing))
-            }
-            ensureActive()
-            synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
-            active.send(message.encode(limits.body.maxBytes))
-            ensureActive()
-            synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
         }
     }
 

@@ -13,7 +13,7 @@ public typealias AuthorityPendingRequestsProvider = @Sendable (
 
 /// Trusted state/decision provider. Use the supplied authority clock and the configured body budget.
 public typealias AuthorityRequestExchangeProvider = @Sendable (
-    ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?, @Sendable () throws -> AuthorityMoment
+    ApprovalRequestCoordinator, AuthorityPeerBinding, AuthorityRequestExchange.Query, @Sendable () throws -> AuthorityMoment
 ) throws -> Data?
 
 /// Owns one authority listener and its journal for a single service lifetime.
@@ -162,9 +162,9 @@ public final class AuthorityService: @unchecked Sendable {
             if let selectedPending {
                 pendingHandler = { owner, binding in try selectedPending(owner, binding, frameClock) }
             } else { pendingHandler = nil }
-            let exchangeHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+            let exchangeHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
             if let selectedExchange {
-                exchangeHandler = { owner, binding, id, decision in try selectedExchange(owner, binding, id, decision, frameClock) }
+                exchangeHandler = { owner, binding, query in try selectedExchange(owner, binding, query, frameClock) }
             } else { exchangeHandler = nil }
             let auditHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame,
                                         @Sendable (JournalTransaction) throws -> Void) throws -> PhoneAuditFrame)?

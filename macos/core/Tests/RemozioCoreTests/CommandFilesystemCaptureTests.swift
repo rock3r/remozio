@@ -67,6 +67,20 @@ final class CommandFilesystemCaptureTests: XCTestCase {
         XCTAssertThrowsError(try capture.recheck()) { XCTAssertEqual($0 as? CommandFilesystemCaptureError, .closed) }
     }
 
+    func testLaunchProofIsBoundToTheOriginalCapture() throws {
+        let fixture = try Fixture(), original = try fixture.capture(), other = try fixture.capture()
+        let proof = try original.makeRecheck(checkingLaunchPath: true).run(deadline: .now + .seconds(5), checkProbe: {})
+        let launch = try original.executableLaunch(from: proof)
+        XCTAssertEqual(launch.mode, .pathBound)
+        XCTAssertNotNil(launch.pathBoundReason)
+        if geteuid() != 0 { XCTAssertEqual(launch.pathBoundReason, .rootIdentity) }
+        XCTAssertThrowsError(try other.executableLaunch(from: proof)) {
+            XCTAssertEqual($0 as? CommandFilesystemCaptureError, .changed)
+        }
+        original.close()
+        XCTAssertThrowsError(try original.executableLaunch(from: proof))
+    }
+
     func testCapturesThroughSearchOnlyDirectories() throws {
         let fixture = try Fixture()
         XCTAssertEqual(chmod(fixture.root, 0o100), 0)

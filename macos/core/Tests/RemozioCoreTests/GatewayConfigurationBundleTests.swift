@@ -37,6 +37,7 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         return try RuntimeActivationPlan.decode(encode(fields))
     }
     private func fixture(customized: Bool = false, maximumControls: Int = 4096, rootSettingsControl: Bool = false,
+                         pairingPolicy: SetupPairingPolicy = .disabled,
                          _ body: (RuntimeActivationPlan, GatewayPreparationMaterial, InstallationInventory) throws -> Void) throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner configuration fixture") }
         let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild] + (rootSettingsControl ? [.setupController] : [])
@@ -46,7 +47,7 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         })
         let f = try AccountPreparationFixture(policy: policy), machine = try f.open(initialize: true)
         defer { try? machine.close() }
-        let account = try f.resume(machine, f.begin(machine))
+        let account = try f.resume(machine, f.begin(machine, pairingPolicy: pairingPolicy))
         let services = try ServiceAccountPlan(account: account, planID: AccountPreparationIntent.randomID(), claims: [
             .init(accountID: account.accountID, role: .transport, number: 20000, userID: UUID(), groupID: UUID()),
             .init(accountID: account.accountID, role: .gateway, number: 20001, userID: UUID(), groupID: UUID())])
@@ -83,6 +84,23 @@ final class GatewayConfigurationBundleTests: XCTestCase {
     private func bundle(_ foreground: RuntimeActivationPlan, _ material: GatewayPreparationMaterial,
                         _ inventory: InstallationInventory) throws -> GatewayConfigurationBundle {
         try .init(foreground: foreground, material: material.reference, inventory: inventory, settings: settings())
+    }
+
+    func testGatewayRenewalPreservesEnabledAndColdDisabledPairingBytes() throws {
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        try fixture(pairingPolicy: .v2WithDecisionProof(lanScope: scope)) { foreground, material, inventory in
+            let disabledHost = try PairingColdDisableConfiguration(source: foreground.host).target
+            let disabled = try foreground.replacingPairingHost(disabledHost)
+            for source in [foreground, disabled] {
+                let stored = try XCTUnwrap(source.host.command.presence.pairing)
+                let renewed = try self.bundle(source, material, inventory)
+                XCTAssertEqual(renewed.commandHost.command.presence.pairing?.canonicalBytes, stored.canonicalBytes)
+                XCTAssertTrue(stored.decisionProofRequired)
+            }
+            let stopped = try XCTUnwrap(disabled.host.command.presence.pairing)
+            XCTAssertEqual(stopped.v2ActivationEnabled, false)
+            XCTAssertNil(stopped.lanScope)
+        }
     }
 
     func testPushProposalPreservesAnEnabledRootSettingsControlEndpoint() throws {

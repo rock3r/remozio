@@ -91,9 +91,10 @@ public struct AuthorityRequestProviders: Sendable {
             let moment = try clock()
             return try owner.pendingDeliveryRequestIDs(binding: binding, routing: presence?.routing(owner: owner, now: moment) ?? routing(), now: moment)
         }
-        exchangeRequest = { owner, binding, id, decision, clock in
+        exchangeRequest = { owner, binding, query, clock in
             try Self.requireScope(binding, configuration: configuration)
-            return try owner.exchangeRequest(binding: binding, requestID: id, decisionFrame: decision, authorityPublicKey: publicKey,
+            return try owner.exchangeRequest(binding: binding, requestID: query.requestID, decisionFrame: query.decisionFrame,
+                refusalAttempt: query.refusalAttempt, authorityPublicKey: publicKey,
                 maximumBodyBytes: statusBudget, now: clock, receiptTimeMs: receiptTime(), signer: signing)
         }
         if let presence, let routingWallTime {

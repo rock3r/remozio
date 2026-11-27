@@ -1,8 +1,10 @@
 package dev.remozio.phone.requests
 
+import dev.remozio.phone.transport.EnrolledChannelPurpose
 import dev.remozio.phone.transport.NegotiatedTLSChannel
 import dev.remozio.protocol.*
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
@@ -16,14 +18,37 @@ internal interface RequestMessageChannel : AutoCloseable {
     val scope: ChannelScope
     val commandSchemas: Set<ULong>
     val maximumPayloadBytes: Int
+    val deliveryResultSchemas: Set<ULong> get() = emptySet()
+    val refusalSessionID: CborValue.Bytes? get() = null
+    suspend fun sendTracked(bytes: ByteArray, beforeWrite: (ULong) -> Unit) {
+        throw IOException("Tracked sending is unsupported")
+    }
+    val supportsPhoneRepairNotices: Boolean get() = false
     suspend fun receive(): ByteArray?
     suspend fun send(bytes: ByteArray) { throw IOException("Sending is unsupported") }
 }
 private class NegotiatedRequestChannel(private val channel: NegotiatedTLSChannel) : RequestMessageChannel {
     override val scope get() = channel.negotiated.peer.scope
     override val maximumPayloadBytes get() = channel.maximumPayloadBytes
-    override val commandSchemas: Set<ULong> get() = commandChannelSchemas(
-        channel.localRequests, channel.localAuditVersions, channel.negotiated.peer.role, channel.negotiated.peer.requests)
+    private val live = channel.purpose == EnrolledChannelPurpose.APPROVALS
+    override val commandSchemas = commandChannelSchemas(channel.localRequests, channel.localAuditVersions,
+        channel.negotiated.peer.role, channel.negotiated.peer.requests, allowLiveControlFeatures = live)
+    override val deliveryResultSchemas = sharedControlSchemas(RequestDeliveryResult.CAPABILITY, RequestDeliveryResult.MAXIMUM_BYTES)
+    override val refusalSessionID = if (sharedControlSchemas(DecisionRefusalFrame.CAPABILITY,
+            DecisionRefusalFrame.MAXIMUM_BYTES).isNotEmpty()) channel.negotiated.sessionID else null
+
+    override val supportsPhoneRepairNotices =
+        sharedControlSchemas(PhoneRepairNoticeFrame.CAPABILITY, PhoneRepairNoticeFrame.MAXIMUM_BYTES).isNotEmpty()
+
+    private fun sharedControlSchemas(feature: ULong, minimumBytes: Int): Set<ULong> {
+        if (!live || maximumPayloadBytes < minimumBytes) return emptySet()
+        return commandSchemas.filterTo(mutableSetOf()) { schema ->
+            channel.localRequests.any { it.kind == 0uL && it.wireVersion == 1uL && it.schemaVersion == schema && feature in it.features } &&
+                channel.negotiated.peer.requests.any { it.kind == 0uL && it.wireVersion == 1uL && it.schemaVersion == schema && feature in it.features }
+        }
+    }
+
+    override suspend fun sendTracked(bytes: ByteArray, beforeWrite: (ULong) -> Unit) = channel.sendTracked(bytes, beforeWrite)
     override suspend fun receive() = channel.receive()
     override suspend fun send(bytes: ByteArray) = channel.send(bytes)
     override fun close() = channel.close()
@@ -31,10 +56,14 @@ private class NegotiatedRequestChannel(private val channel: NegotiatedTLSChannel
 
 /** Only implemented local contracts can be advertised. Unknown peer contracts do not enable a handler. */
 internal fun commandChannelSchemas(local: List<ChannelRequestCapability>, localAuditVersions: Set<ULong>,
-                                  peerRole: ChannelRole, peer: List<ChannelRequestCapability>): Set<ULong> {
+                                  peerRole: ChannelRole, peer: List<ChannelRequestCapability>,
+                                  allowLiveControlFeatures: Boolean = false): Set<ULong> {
     fun ChannelRequestCapability.known() = kind == 0uL && wireVersion == 1uL &&
         schemaVersion in CommandCapturePayload.supportedSchemaVersions
-    require(peerRole == ChannelRole.MAC && localAuditVersions.isEmpty() && local.all { it.known() && it.features.isEmpty() })
+    val features = if (allowLiveControlFeatures) setOf(
+        RequestDeliveryResult.CAPABILITY, DecisionRefusalFrame.CAPABILITY, PhoneRepairNoticeFrame.CAPABILITY,
+    ) else emptySet()
+    require(peerRole == ChannelRole.MAC && localAuditVersions.isEmpty() && local.all { it.known() && features.containsAll(it.features) })
     val shared = local.map { it.schemaVersion }.toSet().intersect(peer.filter { it.known() }.map { it.schemaVersion }.toSet())
     require(shared.isNotEmpty())
     return shared
@@ -52,7 +81,16 @@ class CommandRequestReceiver private constructor(
     private val closed = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val writing = Mutex()
+    private val rejectedCaptures = RejectedCommandCaptures()
+    private val refusalAttempts = mutableMapOf<CborValue.Bytes, RefusalAttempt>()
+
+    private data class RefusalAttempt(
+        val sequence: ULong, val requestDigest: CborValue.Bytes, val frameDigest: CborValue.Bytes,
+        val receive: (DecisionRefusalFrame.Reason) -> Unit,
+    )
     @Volatile internal var capacityOmitted = false
+        private set
+    @Volatile internal var captureOmitted = false
         private set
 
     /** Run once in the host's connection scope. EOF leaves retained request owners intact. */
@@ -70,9 +108,21 @@ class CommandRequestReceiver private constructor(
                         val bytes = channel.receive() ?: return@coroutineScope
                         kotlin.coroutines.coroutineContext.ensureActive()
                         if (closed.get()) return@coroutineScope
+                        // A canonical refusal has four fields. The approval carrier has six.
+                        if (channel.refusalSessionID != null && bytes.firstOrNull() == 0xa4.toByte()) {
+                            receiveRefusal(DecisionRefusalFrame.decode(bytes))
+                            continue
+                        }
                         val message = ApprovalMessage.decode(bytes, maximumBodyBytes)
                         require(message.type != ApprovalMessageType.DECISION)
-                        capacityOmitted = enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas) || capacityOmitted
+                        when (val outcome = enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas, rejectedCaptures, clock)) {
+                            CommandDeliveryOutcome.Delivered -> Unit
+                            CommandDeliveryOutcome.CapacityOmitted -> capacityOmitted = true
+                            is CommandDeliveryOutcome.CaptureOmitted -> {
+                                captureOmitted = true
+                                if (outcome.schemaVersion in channel.deliveryResultSchemas) outcome.result?.let { send(it.encode()) }
+                            }
+                        }
                     }
                 } finally { queries.cancelAndJoin() }
             }
@@ -84,21 +134,60 @@ class CommandRequestReceiver private constructor(
     }
 
     /** Shares the writer with reconnect queries. This does not retry or authenticate a decision. */
-    suspend fun sendDecision(bytes: ByteArray) {
-        require(ApprovalMessage.decode(bytes, maximumBodyBytes).type == ApprovalMessageType.DECISION)
-        send(bytes)
+    suspend fun sendDecision(bytes: ByteArray, onRefusal: ((DecisionRefusalFrame.Reason) -> Unit)? = null) {
+        val frame = bytes.copyOf()
+        val message = ApprovalMessage.decode(frame, maximumBodyBytes)
+        require(message.type == ApprovalMessageType.DECISION)
+        if (onRefusal == null || channel.refusalSessionID == null) {
+            send(frame)
+            return
+        }
+        val decision = DecisionPayload.decode(message.body.copyBytes(), enrollment.limits.body)
+        val requestID = CborValue.Bytes(decision.requestID)
+        val requestDigest = CborValue.Bytes(decision.requestDigest)
+        val frameDigest = CborValue.Bytes(MessageDigest.getInstance("SHA-256").digest(frame))
+        send(frame) { sequence ->
+            synchronized(refusalAttempts) {
+                if (!closed.get() && (requestID in refusalAttempts || refusalAttempts.size < 128)) {
+                    refusalAttempts[requestID] = RefusalAttempt(sequence, requestDigest, frameDigest, onRefusal)
+                }
+            }
+        }
     }
 
-    private suspend fun send(bytes: ByteArray) = writing.withLock {
+    private fun receiveRefusal(frame: DecisionRefusalFrame) {
+        val payload = frame.payload
+        require(payload.scope == channel.scope)
+        enrollment.verifyDecisionRefusal(this, frame)
+        if (payload.sessionID != channel.refusalSessionID) return
+        val attempt = synchronized(refusalAttempts) {
+            val pending = refusalAttempts[payload.requestID] ?: return
+            if (pending.sequence != payload.sequence || pending.requestDigest != payload.requestDigest ||
+                pending.frameDigest != payload.decisionFrameDigest) return
+            refusalAttempts.remove(payload.requestID)
+        }
+        if (!closed.get()) attempt?.receive?.invoke(payload.reason)
+    }
+
+    val supportsPhoneRepairNotices: Boolean get() = channel.supportsPhoneRepairNotices
+
+    /** A live advisory shares the writer with decisions and queries. A completed write supplies no receipt. */
+    suspend fun sendPhoneRepairNotice(notice: PhoneRepairNoticeFrame) {
+        require(supportsPhoneRepairNotices && notice.scope == channel.scope)
+        send(notice.encode())
+    }
+
+    private suspend fun send(bytes: ByteArray, beforeWrite: ((ULong) -> Unit)? = null) = writing.withLock {
         kotlin.coroutines.coroutineContext.ensureActive()
         check(!closed.get())
-        channel.send(bytes)
+        if (beforeWrite == null) channel.send(bytes) else channel.sendTracked(bytes, beforeWrite)
         kotlin.coroutines.coroutineContext.ensureActive()
         check(!closed.get())
     }
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            synchronized(refusalAttempts) { refusalAttempts.clear() }
             try { channel.close() } finally { enrollment.detach(this) }
         }
     }
@@ -108,7 +197,9 @@ class CommandRequestReceiver private constructor(
         fun bind(enrollment: CommandRequestEnrollment, channel: NegotiatedTLSChannel,
                  phoneID: ByteArray, enrollmentEpoch: ByteArray, queryRetainedOnStart: Boolean = true,
                  clock: () -> ElapsedInstant): CommandRequestReceiver =
-            bind(enrollment, NegotiatedRequestChannel(channel), phoneID, enrollmentEpoch, queryRetainedOnStart, clock = clock)
+            try {
+                bind(enrollment, NegotiatedRequestChannel(channel), phoneID, enrollmentEpoch, queryRetainedOnStart, clock = clock)
+            } catch (failure: Exception) { channel.close(); throw failure }
 
         internal fun bind(enrollment: CommandRequestEnrollment, channel: RequestMessageChannel,
                           phoneID: ByteArray, enrollmentEpoch: ByteArray, queryRetainedOnStart: Boolean = false,

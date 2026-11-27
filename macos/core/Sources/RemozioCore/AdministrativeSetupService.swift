@@ -17,11 +17,13 @@ public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertibl
     public let codePolicy: AuthorityCodePolicy
     public let maximumConnections: Int
     public let handshakeTimeoutMilliseconds: UInt64
+    public let pairingPolicy: SetupPairingPolicy
     public let canonicalBytes: Data
     public var description: String { "AdministrativeSetupConfiguration(redacted)" }
 
     public init(machineDirectory: String, macID: Data, installationID: Data, releaseDigest: Data, codePolicy: AuthorityCodePolicy,
-                maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000) throws {
+                maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
+                pairingPolicy: SetupPairingPolicy = .disabled) throws {
         let parts = machineDirectory.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         guard machineDirectory.hasPrefix("/"), machineDirectory.utf8.count < Int(PATH_MAX), !parts.isEmpty,
               parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
@@ -33,23 +35,37 @@ public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertibl
         self.machineDirectory = machineDirectory; self.macID = macID; self.installationID = installationID
         self.releaseDigest = releaseDigest; self.codePolicy = codePolicy
         self.maximumConnections = maximumConnections; self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds
-        canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(machineDirectory), 2: .bytes(macID),
-            3: .bytes(installationID), 4: .bytes(releaseDigest), 5: .bytes(codePolicy.bytes),
-            6: .unsigned(UInt64(maximumConnections)), 7: .unsigned(handshakeTimeoutMilliseconds)]), limits: Self.limits)
+        self.pairingPolicy = pairingPolicy
+        var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .text(machineDirectory), 2: .bytes(macID),
+            3: .bytes(installationID), 4: .bytes(releaseDigest), 5: .bytes(try codePolicy.bytes),
+            6: .unsigned(UInt64(maximumConnections)), 7: .unsigned(handshakeTimeoutMilliseconds)]
+        if let scope = pairingPolicy.enabledScope {
+            fields[0] = .unsigned(2); fields[8] = scope
+        }
+        canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
     public static func load(path: String) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         return try decode(ProtectedServiceConfiguration.read(path: path))
     }
     public static func decode(_ bytes: Data) throws -> Self {
-        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...7),
-              f[0] == .unsigned(1), case .text(let directory) = f[1], case .bytes(let mac) = f[2],
+        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits),
+              case .text(let directory) = f[1], case .bytes(let mac) = f[2],
               case .bytes(let installation) = f[3], case .bytes(let release) = f[4], case .bytes(let policy) = f[5],
               case .unsigned(let maximum) = f[6], let count = Int(exactly: maximum), case .unsigned(let timeout) = f[7] else {
             throw AdministrativeSetupServiceError.invalidConfiguration
         }
+        let pairingPolicy: SetupPairingPolicy
+        switch f[0] {
+        case .unsigned(1) where Set(f.keys) == Set(UInt64(0)...7):
+            pairingPolicy = .disabled
+        case .unsigned(2) where Set(f.keys) == Set(UInt64(0)...8):
+            guard let scope = f[8] else { throw AdministrativeSetupServiceError.invalidConfiguration }
+            pairingPolicy = try SetupPairingPolicy.decodeEnabledScope(scope)
+        default: throw AdministrativeSetupServiceError.invalidConfiguration
+        }
         let result = try Self(machineDirectory: directory, macID: mac, installationID: installation, releaseDigest: release,
-            codePolicy: .decode(policy), maximumConnections: count, handshakeTimeoutMilliseconds: timeout)
+            codePolicy: .decode(policy), maximumConnections: count, handshakeTimeoutMilliseconds: timeout, pairingPolicy: pairingPolicy)
         guard result.canonicalBytes == bytes else { throw AdministrativeSetupServiceError.invalidConfiguration }; return result
     }
     private static var limits: CBORLimits { get throws { try .init(maxBytes: 16384, maxDepth: 2, maxItems: 32) } }
@@ -218,7 +234,7 @@ public final class AdministrativeSetupService: @unchecked Sendable {
                 try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             }, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost,
-                accountCodePolicy: configuration.codePolicy, prepareRuntime: { machine, account, expected, accepted, verify in
+                accountCodePolicy: configuration.codePolicy, pairingPolicy: configuration.pairingPolicy, prepareRuntime: { machine, account, expected, accepted, verify in
                     let enabled = try GatewaySettingsNativeSupport.serviceActivityEnabled(reference: expected.reference, mode: nativeMode)
                     return try RuntimePublicationController.prepare(machine: machine, account: account, expected: expected,
                         fileCustodyAccepted: accepted, serviceActivityEnabled: enabled, selectAuditDelivery: { reference in

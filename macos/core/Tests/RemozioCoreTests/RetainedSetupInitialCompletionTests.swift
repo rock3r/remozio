@@ -83,8 +83,9 @@ final class RetainedSetupInitialCompletionTests: XCTestCase {
         let journal = try f.openPolicyJournal(.readOnly); defer { try? journal.close() }
         return try journal.captureRetainedSetupPolicyBoundary(expected: XCTUnwrap(f.source.runtime.setup.account?.initialization))
     }
-    private func fixture(_ body: (Fixture, Snapshot, Boundary) throws -> Void) throws {
-        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture { f in
+    private func fixture(pairingPolicy: SetupPairingPolicy = .disabled,
+        _ body: (Fixture, Snapshot, Boundary) throws -> Void) throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(pairingPolicy: pairingPolicy) { f in
             let before = try snapshot(f)
             let recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: before, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, useMachine: { body in
@@ -305,7 +306,8 @@ final class RetainedSetupInitialCompletionTests: XCTestCase {
     }
 
     func testRealInitialPublicationThenCompletionPerformsNoFurtherFileWrites() throws {
-        try fixture { f, before, current in
+        let scope = try PairingLANScope(interfaceName: "en0", family: .ipv6)
+        try fixture(pairingPolicy: .v2WithDecisionProof(lanScope: scope)) { f, before, current in
             let files = try files(f, before, current, seed: false); defer { XCTAssertNoThrow(try files.close()) }
             _ = try MachineUpdateRetainedSetupInitialPublication.prepare(withSelection: { body in
                 try MachineUpdateRetainedSetupInitialSelection.withCurrent(machine: f.machine(), expected: before,
@@ -319,6 +321,13 @@ final class RetainedSetupInitialCompletionTests: XCTestCase {
                 publish: { scope in try scope.withActive {
                     try files.publish(XCTUnwrap(scope.artifact), verify: scope.requireActive)
                 } })
+            let command = try XCTUnwrap(files.artifacts.first { URL(fileURLWithPath: $0.path).lastPathComponent ==
+                AdministrativeSetupPublication.File.commandConfiguration.name })
+            let bytes = try XCTUnwrap(files.read(command))
+            let pairing = try XCTUnwrap(AuthorityCommandStartupConfiguration.decode(bytes).presence.pairing)
+            XCTAssertEqual(pairing.v2ActivationEnabled, true)
+            XCTAssertTrue(pairing.decisionProofRequired)
+            XCTAssertEqual(pairing.lanScope, scope)
             XCTAssertEqual(files.publicationCalls, 8); let stamps = try files.stamps(); var commits = 0
             try f.reopen { commits += 1 }; let actual = try snapshot(f), state = State()
             XCTAssertTrue(try complete(f, actual, files, state: state).activation.runtime.state.configurationPublished)

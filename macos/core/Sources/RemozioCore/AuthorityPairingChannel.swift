@@ -43,10 +43,12 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
 struct InstalledPairingNegotiation: Sendable {
     let rendezvousID: Data
     let requiresLAN: Bool
+    let requiresDecisionProof: Bool
 }
 
 enum PairingClientCall: Sendable {
     case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
+    case commitDual(Data, Data, PairingPhoneProof, Data)
     case setupHello, openV2(String, PairedPhoneSelection?, rendezvousID: Data?), stageV2(Data, UUID, Data)
     case phoneManagementHello, versionedPhoneManagementHello(UInt64)
     case managePhone(PairedPhoneOperation, Data, Data)
@@ -89,8 +91,12 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
             proxy.commitPairing(setup, confirmedDigest: digest, biometricProof: proof, authorization: authorization) {
                 [self] in checked(.bytes($0), reply: reply)
             }
+        case .commitDual(let setup, let digest, let proof, let authorization):
+            guard let decision = proof.decision else { reply(.failed); return }
+            proxy.commitPairingWithDecisionProof(setup, confirmedDigest: digest, biometricProof: proof.biometric,
+                decisionProof: decision, authorization: authorization) { [self] in checked(.bytes($0), reply: reply) }
         case .setupHello:
-            proxy.pairingSetupHello(maximumVersion: 3) { [self] in checked(.setupVersion($0, $1), reply: reply) }
+            proxy.pairingSetupHello(maximumVersion: 5) { [self] in checked(.setupVersion($0, $1), reply: reply) }
         case let .openV2(label, selection, rendezvousID):
             guard let rendezvousID else { reply(.failed); return }
             do {
@@ -180,6 +186,31 @@ public actor AuthorityPairingChannel {
         try await requirePhoneManagement()
         return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(.listForRePair, Data(), Data()))),
             macID: macID, accountID: accountID, includeRePair: true)
+    }
+
+    public func pairedPhonesWithRepairNotices() async throws -> PairedPhoneSnapshot {
+        try await pairedPhoneManagementSnapshot(maximumVersion: 4)
+    }
+
+    public func pairedPhonesForManagement() async throws -> PairedPhoneSnapshot {
+        try await pairedPhoneManagementSnapshot(maximumVersion: 5)
+    }
+
+    private func pairedPhoneManagementSnapshot(maximumVersion: UInt64) async throws -> PairedPhoneSnapshot {
+        guard case .version(let version) = try await perform(.versionedPhoneManagementHello(maximumVersion)),
+              (1...maximumVersion).contains(version) else { throw AuthorityPairingChannelError.unsupportedVersion }
+        managesPhones = true
+        if version < 4 { return try await pairedPhonesForRePair() }
+        let includesRestrictions = version >= 5
+        let operation: PairedPhoneOperation = includesRestrictions ? .listWithRePairRestrictions : .listWithRepairNotices
+        return try PairedPhoneSnapshot.decode(bytes(await perform(.managePhone(operation, Data(), Data()))),
+            macID: macID, accountID: accountID, includeRePair: true, includeRepairNotices: true,
+            includeRePairRestrictions: includesRestrictions)
+    }
+
+    func requiresNewPairing(_ selection: PairedPhoneSelection) async throws -> Bool {
+        try requireScope(selection)
+        return try await pairedPhonesForManagement().phonesRequiringNewPairing.contains(selection.phone.phoneID)
     }
 
     public func canRePair(_ selection: PairedPhoneSelection) async throws -> Bool {
@@ -340,8 +371,9 @@ public actor AuthorityPairingChannel {
         case .version(3):
             switch try await perform(.setupHello) {
             case .setupVersion(1, nil): return nil
-            case .setupVersion(let version, let id?) where (version == 2 || version == 3) && id.count == 16:
-                return InstalledPairingNegotiation(rendezvousID: id, requiresLAN: version == 3)
+            case .setupVersion(let version, let id?) where (2...5).contains(version) && id.count == 16:
+                return InstalledPairingNegotiation(rendezvousID: id, requiresLAN: version == 3 || version == 5,
+                    requiresDecisionProof: version >= 4)
             default: throw AuthorityPairingChannelError.invalidMessage
             }
         default: throw AuthorityPairingChannelError.unsupportedVersion
@@ -378,13 +410,30 @@ public actor AuthorityPairingChannel {
     }
     /// Call only after human transcript confirmation. A lost reply is ambiguous; use the phone's durable receipt recovery.
     public func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data) async throws -> Data {
+        try await commit(confirmedDigest: confirmedDigest, biometricProof: biometricProof, authorization: authorization, onSend: {})
+    }
+
+    func commit(confirmedDigest: Data, biometricProof: Data, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data {
+        guard biometricProof.count == 64 else { throw AuthorityPairingChannelError.invalidMessage }
+        return try await commit(confirmedDigest: confirmedDigest, phoneProof: .init(biometric: biometricProof),
+                                authorization: authorization, onSend: onSend)
+    }
+
+    func commit(confirmedDigest: Data, phoneProof: PairingPhoneProof, authorization: Data,
+                onSend: @Sendable () -> Void) async throws -> Data {
         guard state == .open, let staged, let context else { throw AuthorityPairingChannelError.closed }
-        guard confirmedDigest.count == 32, try confirmedDigest == staged.digest(), biometricProof.count == 64,
+        guard confirmedDigest.count == 32, try confirmedDigest == staged.digest(),
               authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingChannelError.invalidMessage }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }
         self.staged = nil
         do {
-            let receipt = try bytes(await perform(.commit(staged.setupID, confirmedDigest, biometricProof, authorization)))
+            let call: PairingClientCall = if phoneProof.decision != nil {
+                .commitDual(staged.setupID, confirmedDigest, phoneProof, authorization)
+            } else {
+                .commit(staged.setupID, confirmedDigest, phoneProof.biometric, authorization)
+            }
+            let receipt = try bytes(await perform(call, onSend: onSend))
             guard receipt.count == 64, try staged.verify(signature: receipt, publicKey: context.authorityPublicKey, purpose: .macCommit) else {
                 throw AuthorityPairingChannelError.invalidMessage
             }
@@ -408,7 +457,7 @@ public actor AuthorityPairingChannel {
         switch call {
         case .hello: guard state == .opening else { throw AuthorityPairingChannelError.closed }
         case .context: guard state == .opening else { throw AuthorityPairingChannelError.closed }
-        case .setupHello, .openV2, .stageV2, .stage, .commit, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
+        case .setupHello, .openV2, .stageV2, .stage, .commit, .commitDual, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
             guard state == .open else { throw AuthorityPairingChannelError.closed }
         }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }

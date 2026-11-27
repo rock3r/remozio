@@ -6,11 +6,22 @@ import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import androidx.core.widget.doAfterTextChanged
+import dev.remozio.protocol.PairingInvitation
 import dev.remozio.protocol.PairingInvitationV2
+import dev.remozio.protocol.RePairInvitation
 import dev.sebastiano.remozio.android.R
 
+internal fun isLegacyPairingInvitation(text: String): Boolean = runCatching {
+    if (text.startsWith("remozio-repair:")) RePairInvitation.importText(text)
+    else PairingInvitation.importText(text)
+}.isSuccess
+
 /** Treat pasted pairing text as a credential even before it decodes. */
-internal class PairingInvitationV2Editor(context: Context, private val onInvitation: (PairingInvitationV2?) -> Unit) : EditText(context) {
+internal class PairingInvitationV2Editor(
+    context: Context,
+    private val onLegacyInvitation: ((String) -> Unit)? = null,
+    private val onInvitation: (PairingInvitationV2?) -> Unit,
+) : EditText(context) {
     init {
         isSaveEnabled = false
         isSaveFromParentEnabled = false
@@ -22,13 +33,17 @@ internal class PairingInvitationV2Editor(context: Context, private val onInvitat
         var clearing = false
         doAfterTextChanged { value ->
             if (clearing || value == null) return@doAfterTextChanged
-            val oversized = value.length > MAXIMUM_TEXT
+            val oversized = value.length > if (onLegacyInvitation == null) MAXIMUM_V2_TEXT else MAXIMUM_LEGACY_TEXT
             val invitation = if (oversized) null else parse(value)
-            if (invitation != null || oversized) {
+            val legacy = if (!oversized && invitation == null && onLegacyInvitation != null) {
+                value.toString().trim().takeIf(::isLegacyPairingInvitation)
+            } else null
+            if (invitation != null || legacy != null || oversized) {
                 clearing = true
                 try { value.clear() } finally { clearing = false }
             }
             onInvitation(invitation)
+            if (legacy != null) onLegacyInvitation?.invoke(legacy)
         }
     }
 
@@ -50,7 +65,7 @@ internal class PairingInvitationV2Editor(context: Context, private val onInvitat
     }
 
     private fun ClipboardManager.invitationText(): String? = primaryClip
-        ?.takeIf { it.itemCount == 1 }?.getItemAt(0)?.text?.takeIf { it.length <= MAXIMUM_TEXT }?.toString()
+        ?.takeIf { it.itemCount == 1 }?.getItemAt(0)?.text?.takeIf { it.length <= MAXIMUM_V2_TEXT }?.toString()
 
     private fun parse(value: CharSequence): PairingInvitationV2? =
         value.takeIf { it.isNotEmpty() }?.toString()?.trim()?.let {
@@ -58,6 +73,7 @@ internal class PairingInvitationV2Editor(context: Context, private val onInvitat
         }
 
     private companion object {
-        const val MAXIMUM_TEXT = 1043
+        const val MAXIMUM_V2_TEXT = 1043
+        const val MAXIMUM_LEGACY_TEXT = 16_384
     }
 }

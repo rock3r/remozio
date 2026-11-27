@@ -31,7 +31,11 @@ public struct PairingReplacement: Sendable, Equatable, CustomStringConvertible {
     public var description: String { "PairingReplacement(redacted)" }
 }
 
-public enum PairingProofPurpose: UInt64, Sendable { case phoneBiometric = 0, macCommit = 1 }
+public enum PairingProofPurpose: UInt64, Sendable {
+    case phoneBiometric = 0
+    case macCommit = 1
+    case phoneDecision = 2
+}
 
 /// Untrusted setup claims. Parsing or signature verification does not authorize enrollment.
 public struct PairingTranscript: Sendable, CustomStringConvertible {

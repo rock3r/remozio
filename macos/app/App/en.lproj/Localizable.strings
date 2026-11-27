@@ -93,6 +93,9 @@
 "Pair phone %@" = "Pair phone %@";
 "Pairing invitation for this Mac" = "Pairing invitation for this Mac";
 "Pairing is unavailable." = "Pairing is unavailable.";
+"This phone needs a new pairing." = "This phone needs a new pairing.";
+"Phones that need a new pairing" = "Phones that need a new pairing";
+"On your phone, open Your Macs and choose Remove from this phone for this Mac. Then use Pair a Mac to pair as a new phone." = "On your phone, open Your Macs and choose Remove from this phone for this Mac. Then use Pair a Mac to pair as a new phone.";
 "Pairing requires configured Mac services. The complete approval flow is still being connected." = "Pairing requires configured Mac services. The complete approval flow is still being connected.";
 "Saving the enrollment on this Mac…" = "Saving the enrollment on this Mac…";
 "Set up this Mac’s protected services before pairing a phone." = "Set up this Mac’s protected services before pairing a phone.";
@@ -182,6 +185,7 @@
 "Preparing this Mac’s relay…" = "Preparing this Mac’s relay…";
 "Push service and wake settings" = "Push service and wake settings";
 "Reading saved setup…" = "Reading saved setup…";
+"Reading the service account…" = "Reading the service account…";
 "Refresh" = "Refresh";
 "Refresh Mac status" = "Refresh Mac status";
 "Refresh this Mac’s saved setup before continuing." = "Refresh this Mac’s saved setup before continuing.";

@@ -26,6 +26,22 @@ class EnrollmentArchiveGoldenTest {
         assertContentEquals(hex("plaintextSchema2"), encoded)
     }
 
+    @Test fun biometricPolicyMarkerRoundTripsWithoutReclassifyingLegacyKeys() {
+        val row = open(disk("plaintextSchema2")).snapshot().entries.first()
+        val reference = row.enrollment.biometricKey
+        assertFalse(reference.hasBiometricEnrollmentInvalidationPolicy)
+        val alias = EnrollmentKeyReference.biometricEnrollmentAlias(reference.keyID.copyBytes())
+        val fields = (EnrollmentEncoding.encode(row) as CborValue.Fields).values
+        val keyFields = (fields.getValue(10uL) as CborValue.Fields).values
+        val updated = CborValue.Fields(fields + (10uL to CborValue.Fields(keyFields + (1uL to CborValue.Text(alias)))))
+        val decoded = EnrollmentEncoding.decode(updated)
+        assertTrue(decoded.enrollment.biometricKey.hasBiometricEnrollmentInvalidationPolicy)
+        assertEquals(reference.publicKey, decoded.enrollment.biometricKey.publicKey)
+        assertEquals(updated, EnrollmentEncoding.encode(decoded))
+        val otherID = reference.keyID.copyBytes().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        assertFails { EnrollmentKeyReference(EnrollmentKeyRole.BIOMETRIC, otherID, alias, reference.publicKey.copyBytes()) }
+    }
+
     @Test fun schema1LoadsWithoutPairingAndMigratesOnWrite() {
         val disk = disk("plaintextSchema1")
         val store = open(disk)

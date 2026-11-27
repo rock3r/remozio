@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import dev.sebastiano.remozio.android.RemozioApplication
 import dev.sebastiano.remozio.android.biometrics.AndroidPairingBiometrics
 import dev.sebastiano.remozio.android.biometrics.PairingBiometricResult
+import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.PairingInvitationV2
 import dev.remozio.protocol.PairingTranscript
 import dev.remozio.protocol.RePairInvitation
@@ -14,7 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 internal enum class RePairAvailability { ELIGIBLE, PENDING, UNAVAILABLE }
-internal enum class PairingPhase { CLOSED, INPUT, CONNECTING, COMPARING, PREPARING, BIOMETRIC, SUBMITTING, COMPLETE, RECOVERY_PENDING, FAILED, EXPIRED, CLOSING }
+internal enum class PairingPhase { CLOSED, INPUT, CONNECTING, COMPARING, PREPARING, BIOMETRIC, SUBMITTING, COMPLETE, RECOVERY_PENDING, FAILED, RE_PAIR_FAILED, EXPIRED, CLOSING }
 internal data class PairingScreenState(
     val phase: PairingPhase = PairingPhase.CLOSED,
     val phoneSuffix: String = "",
@@ -24,7 +25,21 @@ internal data class PairingScreenState(
     val clockSkewAdvisory: Boolean = false,
     val signer: AndroidPairingBiometrics? = null,
     val mayHaveSavedSetup: Boolean = false,
+    val recoveryRecordID: CborValue.Bytes? = null,
 )
+
+internal fun PairingScreenState.connectionFailed(
+    failure: Exception,
+    isRePair: Boolean,
+    cleanupSucceeded: Boolean,
+): PairingScreenState {
+    val phase = when (failure) {
+        is RePairAlreadyPending -> PairingPhase.RECOVERY_PENDING
+        is PairingDeadlineExpired -> PairingPhase.EXPIRED
+        else -> if (isRePair && cleanupSucceeded) PairingPhase.RE_PAIR_FAILED else PairingPhase.FAILED
+    }
+    return copy(phase = phase, mayHaveSavedSetup = !cleanupSucceeded)
+}
 
 /** Retains one setup owner across rotation. Activity and biometric prompts are never retained here. */
 internal class PairingViewModel(private val app: RemozioApplication) : ViewModel() {
@@ -40,6 +55,12 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
     fun open() {
         if (mutable.value.phase == PairingPhase.CLOSED) mutable.value = PairingScreenState(PairingPhase.INPUT)
     }
+    fun openRecovery(recordID: CborValue.Bytes) {
+        if (mutable.value.phase == PairingPhase.CLOSED) {
+            mutable.value = PairingScreenState(PairingPhase.INPUT, recoveryRecordID = recordID)
+        }
+    }
+
     fun foreground(value: Boolean) {
         foreground = value
         if (!value) foregroundRevision++
@@ -52,7 +73,7 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
 
     private suspend fun inspectRePair(invitation: () -> RePairInvitation): RePairAvailability {
         return try {
-            app.pairing.inspectRePair(invitation())
+            app.pairing.inspectRePair(invitation(), mutable.value.recoveryRecordID)
             RePairAvailability.ELIGIBLE
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -67,11 +88,18 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         val rePairSuffix = if (text.trim().startsWith("remozio-repair:")) runCatching {
             RePairInvitation.importText(text.trim()).predecessor.phoneID.copyBytes().suffix()
         }.getOrDefault("") else null
-        return connect(rePairSuffix) { it.connect(text) }
+        val target = mutable.value.recoveryRecordID
+        if (target != null && rePairSuffix == null) return false
+        return connect(rePairSuffix) { it.connect(text, target) }
     }
 
-    fun connectV2(invitation: PairingInvitationV2) =
-        connect(invitation.replacement?.phoneID?.copyBytes()?.suffix()) { it.connectV2(invitation) }
+    fun connectV2(invitation: PairingInvitationV2, offerDecisionProof: Boolean): Boolean {
+        val target = mutable.value.recoveryRecordID
+        if (target != null && invitation.replacement == null) return false
+        return connect(invitation.replacement?.phoneID?.copyBytes()?.suffix()) {
+            it.connectV2(invitation, offerDecisionProof, recoveryRecordID = target)
+        }
+    }
 
     private fun ByteArray.suffix() = takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
 
@@ -80,7 +108,7 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         val owner = AndroidPairingAttempt(app, scope, app.pairing)
         attempt = owner
         val suffix = rePairSuffix ?: owner.phoneSuffix
-        mutable.value = PairingScreenState(PairingPhase.CONNECTING, suffix)
+        mutable.value = PairingScreenState(PairingPhase.CONNECTING, suffix, recoveryRecordID = mutable.value.recoveryRecordID)
         operation = scope.launch {
             try {
                 val transcript = open(owner)
@@ -94,12 +122,9 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
                 val result = app.retirePairing(owner).await()
                 if (attempt === owner) {
                     if (result.isSuccess) attempt = null
-                    val phase = when (failure) {
-                        is RePairAlreadyPending -> PairingPhase.RECOVERY_PENDING
-                        is PairingDeadlineExpired -> PairingPhase.EXPIRED
-                        else -> PairingPhase.FAILED
-                    }
-                    mutable.value = mutable.value.copy(phase = phase, mayHaveSavedSetup = result.isFailure)
+                    mutable.value = mutable.value.connectionFailed(
+                        failure, isRePair = rePairSuffix != null, cleanupSucceeded = result.isSuccess,
+                    )
                 }
             }
         }

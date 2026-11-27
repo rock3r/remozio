@@ -10,7 +10,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import dev.sebastiano.remozio.android.R
+import dev.sebastiano.remozio.android.requests.CommandPromptContext
 import dev.remozio.protocol.ApprovalMessage
+import java.security.Signature
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,14 +23,16 @@ import kotlinx.coroutines.withContext
 sealed interface CommandBiometricResult {
     data class Signed(val message: ApprovalMessage) : CommandBiometricResult
     data object Cancelled : CommandBiometricResult
+    data class RecoveryRequired(val reason: BiometricRecoveryReason) : CommandBiometricResult
     data object Unavailable : CommandBiometricResult
 }
 
 /** Owns the supplied identity. Close on request replacement or enrollment change, including Compose disposal. */
 @MainThread
-class CommandBiometricPrompt(
+internal class CommandBiometricPrompt(
     private val activity: ComponentActivity,
     private val identity: AndroidCommandBiometrics,
+    private val request: CommandPromptContext,
 ) : DefaultLifecycleObserver, AutoCloseable {
     private var closed = false
     private var token: Any? = null
@@ -51,6 +55,9 @@ class CommandBiometricPrompt(
         activity.lifecycleScope.launch {
             val prepared = try { withContext(Dispatchers.IO) { identity.prepare(attempt) } }
                 catch (cancelled: CancellationException) { finish(attempt, CommandBiometricResult.Cancelled); throw cancelled }
+                catch (failure: BiometricRecoveryRequired) {
+                    finish(attempt, CommandBiometricResult.RecoveryRequired(failure.reason)); return@launch
+                }
                 catch (_: Exception) { finish(attempt, CommandBiometricResult.Unavailable); return@launch }
             if (token !== attempt) { prepared.close(); return@launch }
             operation = prepared
@@ -58,7 +65,10 @@ class CommandBiometricPrompt(
                 val cancellation = CancellationSignal().also { signal = it }
                 val prompt = BiometricPrompt.Builder(activity)
                     .setTitle(activity.getString(R.string.command_biometric_title))
-                    .setSubtitle(activity.getString(R.string.command_biometric_subtitle))
+                    .setSubtitle(activity.getString(R.string.command_request_reference, request.reference))
+                    .setDescription(request.labels?.let {
+                        activity.getString(R.string.command_biometric_description, it.executable, it.host, it.account)
+                    } ?: activity.getString(R.string.command_biometric_description_fallback))
                     .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                     .setNegativeButton(activity.getString(R.string.command_biometric_cancel), activity.mainExecutor) { _, _ ->
                         finish(attempt, CommandBiometricResult.Cancelled)
@@ -66,12 +76,9 @@ class CommandBiometricPrompt(
                 prompt.authenticate(BiometricPrompt.CryptoObject(prepared.signature), cancellation, activity.mainExecutor,
                     object : BiometricPrompt.AuthenticationCallback() {
                         override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                            if (token !== attempt) return
-                            val outcome = try {
-                                check(activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-                                check(result.authenticationType == BiometricPrompt.AUTHENTICATION_RESULT_TYPE_BIOMETRIC)
-                                CommandBiometricResult.Signed(prepared.complete(checkNotNull(result.cryptoObject?.signature)))
-                            } catch (_: Exception) { CommandBiometricResult.Unavailable }
+                            val outcome = commandBiometricSuccess(attempt, token,
+                                activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED), result.authenticationType,
+                                { result.cryptoObject?.signature }, prepared::complete) ?: return
                             finish(attempt, outcome)
                         }
                         override fun onAuthenticationError(code: Int, message: CharSequence) {
@@ -111,5 +118,27 @@ class CommandBiometricPrompt(
         cancel()
         identity.close()
         activity.lifecycle.removeObserver(this)
+    }
+}
+
+/** Ignore a stale callback before reading its signature or invoking the signer. */
+internal fun commandBiometricSuccess(
+    attempt: Any,
+    activeAttempt: Any?,
+    started: Boolean,
+    authenticationType: Int,
+    signature: () -> Signature?,
+    complete: (Signature) -> ApprovalMessage,
+): CommandBiometricResult? {
+    if (activeAttempt !== attempt) return null
+    if (!started || authenticationType != BiometricPrompt.AUTHENTICATION_RESULT_TYPE_BIOMETRIC) {
+        return CommandBiometricResult.Unavailable
+    }
+    return try {
+        CommandBiometricResult.Signed(complete(checkNotNull(signature())))
+    } catch (failure: BiometricRecoveryRequired) {
+        CommandBiometricResult.RecoveryRequired(failure.reason)
+    } catch (_: Exception) {
+        CommandBiometricResult.Unavailable
     }
 }

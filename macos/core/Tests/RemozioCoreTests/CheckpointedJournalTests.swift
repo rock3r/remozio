@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import SQLite3
@@ -18,6 +19,64 @@ final class CheckpointedJournalTests: XCTestCase {
         _ = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) }
         try commits.write(epoch: fixture.epoch) { try $0.installCommandSubmissionReplay() }
         return commits
+    }
+
+    func testCanonicalContinuityDigestsMatchExistingJournalFixtures() throws {
+        let fixture = try Fixture()
+        func verify(_ stage: String, authority: String, ledger: String) throws {
+            let digests = try fixture.journal.read { try $0.continuityDigests() }
+            XCTAssertEqual(digests.authority.map { String(format: "%02x", $0) }.joined(), authority, stage)
+            XCTAssertEqual(digests.ledger.map { String(format: "%02x", $0) }.joined(), ledger, stage)
+        }
+        try verify("empty",
+            authority: "47dc1bbbd5cad6d601906e934261b16fae94e982e3a11b3981d3f8eefb9c11b8",
+            ledger: "442695a40c92b9637d094232cc51df74d729bced98591621a0b36d9b49f6fe5c")
+        let commits = try installCommandReplay(fixture), reservation = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(reservation) }
+        // Fix the generated revisions so the old and new encoders read identical rows.
+        let revision = try XCTUnwrap(UUID(uuidString: "11111111-1111-4111-8111-111111111111"))
+        let entries = try codePolicy()
+        let roleRevisions = Dictionary(uniqueKeysWithValues: entries.entries.map { ($0.role, revision) })
+        let policy = AuthorityCodePolicySnapshot(revision: revision, policy: entries, roleRevisions: roleRevisions)
+        let revisionHex = revision.uuidString.replacingOccurrences(of: "-", with: "")
+        let policyHex = try policy.storedBytes.map { String(format: "%02x", $0) }.joined()
+        try fixture.sql("UPDATE authority_code_policy_v1 SET revision=X'\(revisionHex)', policy=X'\(policyHex)'", journal: true)
+        try verify("replay",
+            authority: "c30b4f04339f442f22f0df08508dce90cd0023f8a638937b155f3804d3e27ef2",
+            ledger: "4e3d71a26bb539efde988540b8267f14b17354da99a04c3694058b65fc4c6a23")
+        try fixture.journal.write { try fixture.append($0) }
+        try verify("audit",
+            authority: "c30b4f04339f442f22f0df08508dce90cd0023f8a638937b155f3804d3e27ef2",
+            ledger: "e4daa4df7e5e7b190c7b8a5ac256ec50d003188d799a69c313ff4e44f80f6a2b")
+        try fixture.sql("""
+            INSERT INTO consumptions_v1(mac, account, request, decision, event)
+            VALUES(X'01010101010101010101010101010101', X'02020202020202020202020202020202',
+                   X'03030303030303030303030303030303', zeroblob(4096), zeroblob(32768));
+            """, journal: true)
+        try verify("largeBlob",
+            authority: "c30b4f04339f442f22f0df08508dce90cd0023f8a638937b155f3804d3e27ef2",
+            ledger: "dd549d1c602964b26834098c8cb7df8b1383afb988591d2f9b39ec37f5abadff")
+    }
+
+    func testBufferedContinuityDigestsMatchLegacyEncoderOnSameSnapshot() throws {
+        let fixture = try Fixture(), commits = try installCommandReplay(fixture), reservation = try commandReservation()
+        _ = try commits.write(epoch: fixture.epoch) { try $0.reserveCommandSubmission(reservation) }
+        try commits.write(epoch: fixture.epoch) { try fixture.append($0) }
+        try fixture.sql("""
+            INSERT INTO consumptions_v1(mac, account, request, decision, event) VALUES
+            (X'01010101010101010101010101010101', X'02020202020202020202020202020202',
+             X'03030303030303030303030303030303', zeroblob(0), zeroblob(16384)),
+            (X'01010101010101010101010101010101', X'02020202020202020202020202020202',
+             X'04040404040404040404040404040404', zeroblob(16385), zeroblob(32769));
+            """, journal: true)
+        var connection: OpaquePointer?
+        let path = fixture.root.appendingPathComponent("journal/journal.sqlite").path
+        XCTAssertEqual(sqlite3_open_v2(path, &connection, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        let db = try XCTUnwrap(connection)
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+        defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
+        XCTAssertEqual(try JournalContinuityDigest.read(db), try LegacyContinuityDigest.read(db))
     }
 
     func testCommandReplayCheckpointAndReservationSurviveRestartWithoutCreatingAnAuditEvent() throws {
@@ -201,6 +260,7 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { _ in XCTFail("retired callback ran") }) {
             XCTAssertEqual($0 as? CheckpointedJournal.Failure, .retired)
         }
+        try fixture.sql("DROP TRIGGER fail_prepare")
         try fixture.reopen()
         XCTAssertEqual(try fixture.store.read(), before)
         XCTAssertEqual(try fixture.observed(generation: 1), before.committed)
@@ -215,6 +275,7 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertEqual(prepared.committed, before.committed)
         XCTAssertEqual(prepared.pending, try fixture.observed(generation: 2))
         XCTAssertFalse(prepared.recoveryRequired)
+        try fixture.sql("DROP TRIGGER fail_finalize")
         try fixture.reopen()
         XCTAssertEqual(try fixture.store.read(), prepared)
         XCTAssertEqual(prepared.pending, try fixture.observed(generation: 2))
@@ -265,9 +326,9 @@ final class CheckpointedJournalTests: XCTestCase {
         try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
         let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
         XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { try fixture.append($0) })
+        try fixture.sql("DROP TRIGGER fail_finalize")
         try fixture.reopen()
         let candidate = try XCTUnwrap(fixture.store.read().pending)
-        try fixture.sql("DROP TRIGGER fail_finalize")
         XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .finalized(candidate))
         XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(candidate))
         XCTAssertNil(try fixture.store.read().pending)
@@ -314,8 +375,8 @@ final class CheckpointedJournalTests: XCTestCase {
         try fixture.sql("CREATE TRIGGER fail_marker BEFORE UPDATE ON continuity_v1 WHEN NEW.repair=1 BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store))
         XCTAssertFalse(try fixture.store.read().recoveryRequired)
-        try fixture.reopen()
         try fixture.sql("DROP TRIGGER fail_marker")
+        try fixture.reopen()
         XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .repairRequired)
         XCTAssertTrue(try fixture.store.read().recoveryRequired)
         try fixture.sql("DELETE FROM approval_enrollments_v1", journal: true)
@@ -528,12 +589,12 @@ final class CheckpointedJournalTests: XCTestCase {
         try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try owner.prepareRequests(clockEpoch: clock.epoch, maximumPayloadBytes: 16384))
         XCTAssertThrowsError(try owner.withRequests { _ in XCTFail("request owner escaped failed startup") })
+        try fixture.sql("DROP TRIGGER fail_finalize")
         try fixture.reopen()
         let prepared = try fixture.store.read()
         XCTAssertNotNil(prepared.pending)
         XCTAssertFalse(prepared.recoveryRequired)
         XCTAssertNotEqual(prepared.pending?.journalEpoch, fixture.epoch)
-        try fixture.sql("DROP TRIGGER fail_finalize")
         _ = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
         XCTAssertNil(try fixture.store.read().pending)
     }
@@ -721,8 +782,8 @@ final class CheckpointedJournalTests: XCTestCase {
         })
         XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 7)
         XCTAssertEqual(try fixture.store.read().pending?.authorityGeneration, 8)
-        try fixture.reopen()
         try fixture.sql("DROP TRIGGER fail_finalize")
+        try fixture.reopen()
         _ = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
         XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 8)
         let recovered = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
@@ -743,8 +804,8 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertThrowsError(try commits.write(epoch: fixture.epoch) { _ in () })
         XCTAssertNil(try fixture.store.read().committed.authorityGeneration)
         XCTAssertEqual(try fixture.store.read().pending?.authorityGeneration, 2)
-        try fixture.reopen()
         try fixture.sql("DROP TRIGGER fail_finalize")
+        try fixture.reopen()
         _ = try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store)
         XCTAssertEqual(try fixture.store.read().committed.authorityGeneration, 2)
         XCTAssertEqual(try fixture.store.read().committed.generation, 3)
@@ -828,6 +889,7 @@ final class CheckpointedJournalTests: XCTestCase {
         try fixture.sql("CREATE TRIGGER fail_prepare BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
         let coordinator = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
         XCTAssertThrowsError(try coordinator.write(epoch: fixture.epoch) { try $0.installCodePolicy(codePolicy(), expectedRevision: nil) })
+        try fixture.sql("DROP TRIGGER fail_prepare")
         try fixture.reopen()
         XCTAssertEqual(try fixture.store.read(), before)
         XCTAssertNil(try fixture.journal.read { try $0.codePolicy() })
@@ -857,9 +919,9 @@ final class CheckpointedJournalTests: XCTestCase {
         let candidate = try XCTUnwrap(fixture.store.read().pending)
         XCTAssertEqual(candidate.authorityGeneration, 8)
         XCTAssertEqual(candidate.ledgerDigest, before.ledgerDigest)
+        try fixture.sql("DROP TRIGGER fail_finalize")
         try fixture.reopen()
         XCTAssertEqual(try fixture.journal.read { try $0.codePolicy()?.policy }, try codePolicy())
-        try fixture.sql("DROP TRIGGER fail_finalize")
         XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .finalized(candidate))
         XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store), .unchanged(candidate))
     }
@@ -1038,11 +1100,14 @@ final class CheckpointedJournalTests: XCTestCase {
 
     func testRecoveringOwnerRetriesFailedFinalizationWithoutAnotherGap() throws {
         let fixture = try Fixture(), intent = try prepareLostHistory(fixture)
-        try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.history IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
-        XCTAssertThrowsError(try recoveringOwner(fixture))
+        XCTAssertThrowsError(try recoveringOwner(fixture, validateSelf: { transaction in
+            let entry = try XCTUnwrap(transaction.codePolicy()?.policy.entries.first { $0.role == .authority })
+            _ = try AuthoritySelfValidation.requirement(for: entry)
+            try fixture.sql("CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.history IS NULL BEGIN SELECT RAISE(ABORT,'injected'); END")
+        })) { XCTAssertEqual($0 as? ContinuityStoreError, .storage(SQLITE_CONSTRAINT)) }
+        try fixture.sql("DROP TRIGGER fail_finalize")
         try fixture.reopen()
         let candidate = try XCTUnwrap(fixture.store.historyRecoveryCandidate())
-        try fixture.sql("DROP TRIGGER fail_finalize")
         let owner = try recoveringOwner(fixture)
         XCTAssertEqual(try owner.read { try $0.epoch(intent.recoveryEpoch)?.head }, 1)
         try owner.close()
@@ -1127,10 +1192,10 @@ final class CheckpointedJournalTests: XCTestCase {
         _ = try fixture.journal.write { try $0.createEpoch(fixture.descriptor(Data(repeating: 6, count: 16))) }
         try fixture.sql("CREATE TRIGGER fail_replace BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try recoverHistory(fixture))
+        try fixture.sql("DROP TRIGGER fail_replace")
         try fixture.reopen()
         XCTAssertEqual(try fixture.store.historyRecovery(), intent)
         XCTAssertNil(try fixture.store.supersededHistoryRecovery(epoch: intent.recoveryEpoch))
-        try fixture.sql("DROP TRIGGER fail_replace")
         let result = try recoverHistory(fixture)
         XCTAssertEqual(try fixture.store.read().committed, result)
         XCTAssertEqual(try fixture.store.supersededHistoryRecovery(epoch: intent.recoveryEpoch)?.intent, intent)
@@ -1225,8 +1290,8 @@ final class CheckpointedJournalTests: XCTestCase {
         XCTAssertThrowsError(try resumeHistory(fixture))
         let candidate = try XCTUnwrap(fixture.store.historyRecoveryCandidate())
         XCTAssertEqual(try fixture.store.historyRecovery(), intent)
-        try fixture.reopen()
         try fixture.sql("DROP TRIGGER fail_finalize")
+        try fixture.reopen()
         XCTAssertEqual(try resumeHistory(fixture), candidate)
         XCTAssertEqual(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch)?.head }, 1)
     }
@@ -1236,10 +1301,10 @@ final class CheckpointedJournalTests: XCTestCase {
         try fixture.sql("CREATE TRIGGER fail_prepare BEFORE UPDATE ON continuity_v1 BEGIN SELECT RAISE(ABORT,'injected'); END")
         XCTAssertThrowsError(try resumeHistory(fixture))
         XCTAssertNil(try fixture.store.historyRecoveryCandidate())
+        try fixture.sql("DROP TRIGGER fail_prepare")
         try fixture.reopen()
         XCTAssertNil(try fixture.journal.read { try $0.epoch(intent.recoveryEpoch) })
         XCTAssertEqual(try fixture.journal.read { try $0.continuityDigests().ledger }, intent.ledgerDigest)
-        try fixture.sql("DROP TRIGGER fail_prepare")
         _ = try resumeHistory(fixture)
     }
 
@@ -1399,6 +1464,80 @@ final class CheckpointedJournalTests: XCTestCase {
                   let connection else { throw Fault.injected }
             defer { sqlite3_close(connection) }
             guard sqlite3_exec(connection, query, nil, nil, nil) == SQLITE_OK else { throw Fault.injected }
+        }
+    }
+}
+
+// Reference encoder for checking byte compatibility on the same journal snapshot.
+private enum LegacyContinuityDigest {
+    static func read(_ db: OpaquePointer) throws -> JournalContinuityDigests {
+        guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
+        let recoveryFormat = try AuthorityJournalSchema.recoveryFormatInstalled(on: db)
+        let tier = try AuthorityJournalSchema.featureTier(on: db)
+        let catalog = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier)
+        let authoritySchema = recoveryFormat ? AuthorityJournalSchema.recoveryFormat : (tier >= 15 ? tier : min(tier, 13))
+        return try JournalContinuityDigests(authority: digest(db, tables: catalog.authority, domain: "authority", schema: authoritySchema),
+                                            ledger: digest(db, tables: catalog.ledger, domain: "ledger"))
+    }
+
+    private static func digest(_ db: OpaquePointer, tables: [String], domain: String, schema: Int64 = 12) throws -> Data {
+        var hash = SHA256()
+        field(Data("remozio/journal-continuity/v1/schema\(schema)/\(domain)".utf8), into: &hash)
+        for table in tables.sorted() {
+            field(Data(table.utf8), into: &hash)
+            var columns = [String]()
+            try rows(db, "PRAGMA main.table_info('\(table)')") { row in
+                guard let name = sqlite3_column_text(row, 1) else { throw JournalDatabaseError.incompatibleStore }
+                columns.append(String(cString: name))
+            }
+            guard !columns.isEmpty else { throw JournalDatabaseError.incompatibleStore }
+            number(UInt64(columns.count), into: &hash)
+            for column in columns { field(Data(column.utf8), into: &hash) }
+            // Ordinals avoid interpreting column names as SQL. Sorting every value also handles composite keys.
+            let order = (1...columns.count).map(String.init).joined(separator: ",")
+            try rows(db, "SELECT * FROM main.\(table) ORDER BY \(order)") { row in
+                hash.update(data: Data([1]))
+                for index in columns.indices {
+                    let column = Int32(index)
+                    switch sqlite3_column_type(row, column) {
+                    case SQLITE_NULL: hash.update(data: Data([0]))
+                    case SQLITE_INTEGER:
+                        hash.update(data: Data([1]))
+                        number(UInt64(bitPattern: sqlite3_column_int64(row, column)), into: &hash)
+                    case SQLITE_TEXT, SQLITE_BLOB:
+                        let text = sqlite3_column_type(row, column) == SQLITE_TEXT
+                        hash.update(data: Data([text ? 2 : 3]))
+                        let pointer = text ? sqlite3_column_text(row, column).map(UnsafeRawPointer.init) : sqlite3_column_blob(row, column)
+                        let size = Int(sqlite3_column_bytes(row, column))
+                        guard size == 0 || pointer != nil else { throw JournalDatabaseError.storage(SQLITE_NOMEM) }
+                        field(size == 0 ? Data() : Data(bytes: pointer!, count: size), into: &hash)
+                    default: throw JournalDatabaseError.incompatibleStore
+                    }
+                }
+            }
+            hash.update(data: Data([0]))
+        }
+        return Data(hash.finalize())
+    }
+
+    private static func field(_ data: Data, into hash: inout SHA256) {
+        number(UInt64(data.count), into: &hash)
+        hash.update(data: data)
+    }
+    private static func number(_ value: UInt64, into hash: inout SHA256) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { hash.update(data: Data($0)) }
+    }
+    private static func rows(_ db: OpaquePointer, _ sql: String, _ body: (OpaquePointer) throws -> Void) throws {
+        var statement: OpaquePointer?
+        let result = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
+        guard result == SQLITE_OK, let statement else { throw JournalDatabaseError.storage(result) }
+        defer { sqlite3_finalize(statement) }
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            try body(statement)
         }
     }
 }

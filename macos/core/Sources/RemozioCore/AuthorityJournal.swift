@@ -52,7 +52,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private typealias ExecutionFilesystemProbe = CommandFilesystemProbe<CommandFilesystemCapture.MetadataProof>
     private struct DeferredCommandPreparation {
         let deadline: ContinuousClock.Instant
-        let finish: (ExecutionFilesystemProbe) throws -> Void
+        let finish: (ExecutionFilesystemProbe, CommandFilesystemCapture.MetadataProof) throws -> Void
     }
     private var deferredCommandPreparations: [Data: DeferredCommandPreparation] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
@@ -749,6 +749,25 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Verify and retain an advisory under the same owner lock as enrollment changes.
+    func retainPhoneRepairNotice(_ notice: PhoneRepairNoticeFrame, binding: AuthorityPeerBinding,
+                                 validateTransport: @Sendable (JournalTransaction) throws -> Void) throws -> Bool {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard !updateHealthOnly, !updateCompletionOnly, notice.scope == binding.scope else { return false }
+            let decisionKey = try validatedRead { tx -> Data? in
+                try validateTransport(tx)
+                try tx.requireDirectApprovalBinding(binding)
+                return try tx.approvalEnrollments().first(where: {
+                    $0.approval.active && $0.approval.phoneID == binding.scope.phoneID && $0.epoch == binding.scope.enrollmentEpoch
+                })?.repairNoticeDecisionKey
+            }
+            guard let decisionKey, try notice.verify(decisionPublicKey: decisionKey) else { return false }
+            try withStorageFailureCleanup { try database.retainPhoneRepairNotice(notice, decisionKey: decisionKey) }
+            return true
+        }
+    }
+
     /// Reads paired update health state before request startup. The native owner must separately verify code and closed admission.
     func readForUpdateHealth<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {
@@ -1203,7 +1222,7 @@ extension AuthorityJournal {
             commandExecutions[requestID] = execution
             commandActivity[requestID] = activity; transferredActivity = true
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
-            let prepare: (ExecutionFilesystemProbe) throws -> Void = { probe in
+            let prepare: (ExecutionFilesystemProbe, CommandFilesystemCapture.MetadataProof) throws -> Void = { probe, proof in
                 guard self.commandExecutions[requestID] === execution, self.requests === requests, execution.canPrepare else {
                     throw CommandExecutionError.unavailable
                 }
@@ -1216,7 +1235,7 @@ extension AuthorityJournal {
                 guard ContinuousClock.now < probe.deadline else { throw CommandFilesystemProbeError.expired }
                 try execution.prepare(monitorPath: monitorPath, childPath: childPath,
                     preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask,
-                    releaseActivity: activity, filesystemChecked: true)
+                    releaseActivity: activity, filesystemProof: proof)
             }
             // The closure stays under this journal's lock and can only verify the same original controller.
             commandStreamChecks[requestID] = {
@@ -1251,8 +1270,8 @@ extension AuthorityJournal {
             commandsAwaitingPreparation.insert(requestID)
             defer { commandsAwaitingPreparation.remove(requestID) }
             do {
-                _ = try awaitCommandFilesystem(probe)
-                try prepare(probe)
+                let proof = try awaitCommandFilesystem(probe)
+                try prepare(probe, proof)
             } catch {
                 execution.cancelBeforeRelease()
                 throw error
@@ -1278,9 +1297,9 @@ extension AuthorityJournal {
                             catch CommandFilesystemProbeError.atCapacity { }
                             continue
                         }
-                        guard try probe.consumeIfReady() != nil else { continue }
+                        guard let proof = try probe.consumeIfReady() else { continue }
                         execution.filesystemProbe = nil
-                        try pending.finish(probe)
+                        try pending.finish(probe, proof)
                     } catch {
                         execution.cancelBeforeRelease()
                     }
@@ -1314,6 +1333,9 @@ extension AuthorityJournal {
                         // No observer can see .executing between the commit and the native release attempt.
                         let now = try execution.clock(), receiptTime = execution.receiptTime()
                         try execution.resources.verifyFilesystemMetadata(proof)
+                        let observedLaunch = try execution.resources.executableLaunch(from: proof)
+                        guard let launch = execution.executableLaunch else { throw CommandExecutionError.unavailable }
+                        try CommandExecution.requireCurrentExecutable(launch, observed: observedLaunch)
                         _ = try requests.recordOutcome(requestID: id, expectedRevision: 0, event: .beginDispatch,
                             now: now, receiptTimeMs: receiptTime)
                         execution.dispatchRevision = 1

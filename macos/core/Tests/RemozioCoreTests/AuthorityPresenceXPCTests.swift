@@ -335,7 +335,7 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
             verify: {}, verifyHandshakePolicy: check, invalidate: {}, onHandshake: check,
             snapshot: { check(); return trust }, validate: { _ in check(); return true },
             requestFrame: { _, _ in check(); return nil }, pendingRequestIDs: { _ in check(); return [] },
-            exchangeRequest: { _, _, _ in check(); return nil }, pairingReceipt: { _, _ in check(); return nil }, wakeHints: {
+            exchangeRequest: { _, _ in check(); return nil }, pairingReceipt: { _, _ in check(); return nil }, wakeHints: {
                 check(); return try .init(binding: .init(ownerID: Data(repeating: 4, count: 16), macID: mac, accountID: account,
                     gatewayID: Data(repeating: 5, count: 16), lifecycleEpoch: Data(repeating: 6, count: 16)), deliveryIDs: [])
             })
@@ -349,7 +349,8 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         endpoint.hello(reply: version); try installer.acquireExclusive().close()
         endpoint.requestDeliveryVersion(reply: version); try installer.acquireExclusive().close()
         endpoint.requestDiscoveryVersion(reply: version); try installer.acquireExclusive().close()
-        endpoint.requestExchangeVersion(reply: version); try installer.acquireExclusive().close()
+        endpoint.requestExchangeVersion { XCTAssertEqual($0, AuthorityRequestExchange.version); check() }
+        try installer.acquireExclusive().close()
         endpoint.pairingReceiptVersion(reply: version); try installer.acquireExclusive().close()
         endpoint.requestWakeVersion(reply: version); try installer.acquireExclusive().close()
         endpoint.pendingRequestIDs(binding, reply: bytes); try installer.acquireExclusive().close()

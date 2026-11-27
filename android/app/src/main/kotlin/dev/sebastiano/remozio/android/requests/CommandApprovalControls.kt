@@ -13,6 +13,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.sebastiano.remozio.android.R
 import dev.sebastiano.remozio.android.biometrics.*
 import dev.sebastiano.remozio.android.decisions.AndroidDecisionIdentities
@@ -37,6 +39,7 @@ import dev.remozio.protocol.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -44,11 +47,17 @@ import kotlinx.coroutines.withContext
 internal class CommandApprovalContext(
     val record: StoredPhoneEnrollment,
     val limits: RequestLimits,
-    val send: suspend (ApprovalMessage) -> Unit,
-)
+    val connectionState: StateFlow<CommandConnectionState>,
+    val reconnect: () -> Unit,
+    val onRepair: (() -> Unit)?,
+    val reportRepair: suspend (BiometricRecoveryReason) -> Unit,
+    val sendWithRefusal: suspend (ApprovalMessage, ((DecisionRefusalFrame.Reason, () -> Boolean) -> Unit)?) -> Unit,
+) {
+    suspend fun send(message: ApprovalMessage) = sendWithRefusal(message, null)
+}
 
 internal data class CommandActionAvailability(val execute: Boolean, val decline: Boolean)
-internal fun commandActionAvailability(session: CommandRequestSession, record: StoredPhoneEnrollment, now: ElapsedInstant): CommandActionAvailability {
+internal fun commandActionAvailability(session: CommandRequestSession, record: StoredPhoneEnrollment, now: () -> ElapsedInstant): CommandActionAvailability {
     val enrollment = record.enrollment
     if (record.phase != EnrollmentPhase.ACTIVE || !session.isBoundToAuthority(enrollment.macID.copyBytes(),
             enrollment.accountID.copyBytes(), enrollment.authorityPublicKey.copyBytes())) return CommandActionAvailability(false, false)
@@ -60,7 +69,12 @@ internal fun commandActionAvailability(session: CommandRequestSession, record: S
         allowed(ActionChoice.DECLINE, enrollment.decisionKey))
 }
 
-internal enum class CommandActionStage { IDLE, PREPARING, BIOMETRIC, SENDING, AWAITING, UNAVAILABLE, UNCERTAIN }
+internal fun biometricRecoveryMessage(reason: BiometricRecoveryReason): Int = when (reason) {
+    BiometricRecoveryReason.LEGACY_POLICY -> R.string.command_biometric_legacy_recovery
+    BiometricRecoveryReason.BIOMETRIC_CHANGED -> R.string.command_biometric_changed_recovery
+}
+
+internal enum class CommandActionStage { IDLE, PREPARING, BIOMETRIC, SENDING, AWAITING, UNAVAILABLE, UNCERTAIN, REFUSED }
 
 /** All state is in memory. Tickets reject work and callbacks from replaced or stopped views. */
 internal class CommandActionAttempt {
@@ -74,26 +88,93 @@ internal class CommandApprovalViewState {
     val attempts = CommandActionAttempt()
     var stage by mutableStateOf(CommandActionStage.IDLE)
     var retained by mutableStateOf<ApprovalMessage?>(null)
-    fun clear() { attempts.invalidate(); retained = null; stage = CommandActionStage.IDLE }
+    var biometricRecovery by mutableStateOf<BiometricRecoveryReason?>(null)
+        private set
+
+    var refusal by mutableStateOf<DecisionRefusalFrame.Reason?>(null)
+        private set
+
+    fun requireBiometricRecovery(ticket: Any, reason: BiometricRecoveryReason) {
+        if (!attempts.owns(ticket)) return
+        biometricRecovery = reason
+        stage = CommandActionStage.IDLE
+    }
+
+    fun clear() {
+        attempts.invalidate()
+        retained = null
+        refusal = null
+        biometricRecovery = null
+        stage = CommandActionStage.IDLE
+    }
+
+    fun refuse(ticket: Any, message: ApprovalMessage, reason: DecisionRefusalFrame.Reason) {
+        if (!attempts.owns(ticket) || retained !== message) return
+        retained = null
+        refusal = reason
+        stage = CommandActionStage.REFUSED
+    }
+
+    fun retry(foreground: Boolean, connected: () -> Boolean, deliver: (Any, ApprovalMessage) -> Unit) {
+        if (!foreground || stage != CommandActionStage.UNCERTAIN || !connected()) return
+        val message = retained ?: return
+        deliver(attempts.begin(), message)
+    }
+
+    suspend fun deliver(ticket: Any, message: ApprovalMessage, send: suspend (ApprovalMessage) -> Unit) {
+        if (!attempts.owns(ticket)) return
+        val previouslyUncertain = retained != null
+        retained = message
+        refusal = null
+        stage = CommandActionStage.SENDING
+        try {
+            send(message)
+            if (attempts.owns(ticket) && retained === message) stage = CommandActionStage.AWAITING
+        } catch (_: CommandDecisionNotSent) {
+            if (!attempts.owns(ticket) || retained !== message) return
+            if (previouslyUncertain) {
+                stage = CommandActionStage.UNCERTAIN
+            } else {
+                retained = null
+                stage = CommandActionStage.UNAVAILABLE
+            }
+        } catch (cancelled: CancellationException) {
+            if (attempts.owns(ticket) && retained === message) stage = CommandActionStage.UNCERTAIN
+            throw cancelled
+        } catch (_: Exception) {
+            if (attempts.owns(ticket) && retained === message) stage = CommandActionStage.UNCERTAIN
+        }
+    }
 }
 
 @Composable
-internal fun CommandApprovalControls(session: CommandRequestSession, context: CommandApprovalContext, status: TrackedRequestStatus?, state: CommandApprovalViewState) {
+internal fun CommandApprovalControls(
+    session: CommandRequestSession,
+    context: CommandApprovalContext,
+    status: TrackedRequestStatus?,
+    state: CommandApprovalViewState,
+    promptContext: CommandPromptContext,
+) {
     if (status?.status?.phase !in setOf(RequestPhase.QUEUED, RequestPhase.PRESENTED)) return
     val activity = LocalActivity.current as? ComponentActivity
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scope = rememberCoroutineScope()
     key(session, context.record, context.limits, lifecycle) {
-        val sender by rememberUpdatedState(context.send)
+        val sender by rememberUpdatedState(context.sendWithRefusal)
+        val repairReporter by rememberUpdatedState(context.reportRepair)
+        val connectionState by context.connectionState.collectAsStateWithLifecycle()
+        val connected = connectionState == CommandConnectionState.CONNECTED
         val attempts = state.attempts
         var prompt by remember { mutableStateOf<CommandBiometricPrompt?>(null) }
         var job by remember { mutableStateOf<Job?>(null) }
+        var repairJob by remember { mutableStateOf<Job?>(null) }
         var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
-        val availability = commandActionAvailability(session, context.record, RequestElapsedClock.now())
+        val availability = commandActionAvailability(session, context.record, RequestElapsedClock::now)
 
         fun stop() {
             attempts.invalidate()
             job?.cancel(); job = null
+            repairJob?.cancel(); repairJob = null
             prompt?.close(); prompt = null
             state.stage = if (state.retained != null) CommandActionStage.UNCERTAIN else CommandActionStage.IDLE
         }
@@ -108,22 +189,32 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
 
         fun deliver(ticket: Any, message: ApprovalMessage) {
             if (!attempts.owns(ticket)) return
-            state.retained = message
-            state.stage = CommandActionStage.SENDING
             job = scope.launch {
-                try {
-                    sender(message)
-                    if (attempts.owns(ticket)) state.stage = CommandActionStage.AWAITING
-                } catch (cancelled: CancellationException) {
-                    if (attempts.owns(ticket)) state.stage = CommandActionStage.UNCERTAIN
-                    throw cancelled
-                } catch (_: Exception) { if (attempts.owns(ticket)) state.stage = CommandActionStage.UNCERTAIN }
+                state.deliver(ticket, message) { decision ->
+                    sender(decision) { reason, isCurrent ->
+                        scope.launch {
+                            if (foreground && isCurrent()) state.refuse(ticket, decision, reason)
+                        }
+                    }
+                }
+            }
+        }
+
+        fun requireRecovery(ticket: Any, reason: BiometricRecoveryReason) {
+            if (!attempts.owns(ticket)) return
+            state.requireBiometricRecovery(ticket, reason)
+            if (foreground) {
+                repairJob?.cancel()
+                repairJob = scope.launch {
+                    if (foreground && attempts.owns(ticket)) repairReporter(reason)
+                }
             }
         }
 
         fun decide(execute: Boolean) {
-            if (!foreground || activity == null || state.retained != null ||
-                state.stage !in setOf(CommandActionStage.IDLE, CommandActionStage.UNAVAILABLE)) return
+            if (!foreground || activity == null || state.retained != null || (execute && state.biometricRecovery != null) ||
+                context.connectionState.value != CommandConnectionState.CONNECTED ||
+                state.stage !in setOf(CommandActionStage.IDLE, CommandActionStage.UNAVAILABLE, CommandActionStage.REFUSED)) return
             val ticket = attempts.begin()
             state.stage = CommandActionStage.PREPARING
             job = scope.launch {
@@ -135,7 +226,11 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                                 loaded = AndroidCommandBiometrics.load(context.record, session, context.limits, RequestElapsedClock::now)
                             }
                             if (!attempts.owns(ticket)) return@launch
-                            val native = CommandBiometricPrompt(activity, checkNotNull(loaded))
+                            if (context.connectionState.value != CommandConnectionState.CONNECTED) {
+                                state.stage = CommandActionStage.UNAVAILABLE
+                                return@launch
+                            }
+                            val native = CommandBiometricPrompt(activity, checkNotNull(loaded), promptContext)
                             loaded = null
                             prompt = native
                             state.stage = CommandActionStage.BIOMETRIC
@@ -147,13 +242,14 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                                     is CommandBiometricResult.Signed -> deliver(ticket, result.message)
                                     CommandBiometricResult.Cancelled -> state.stage = CommandActionStage.IDLE
                                     CommandBiometricResult.Unavailable -> state.stage = CommandActionStage.UNAVAILABLE
+                                    is CommandBiometricResult.RecoveryRequired -> requireRecovery(ticket, result.reason)
                                 }
                             }
                         } finally { loaded?.close() }
                     } else {
                         val message = withContext(Dispatchers.IO) {
                             AndroidDecisionIdentities.load(context.record).use {
-                                it.declineSession(session, RequestElapsedClock.now(), context.limits)
+                                it.declineSession(session, RequestElapsedClock::now, context.limits)
                             }
                         }
                         deliver(ticket, message)
@@ -161,12 +257,14 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                 } catch (cancelled: CancellationException) {
                     if (attempts.owns(ticket)) state.stage = CommandActionStage.UNAVAILABLE
                     throw cancelled
+                } catch (failure: BiometricRecoveryRequired) {
+                    requireRecovery(ticket, failure.reason)
                 } catch (_: Exception) { if (attempts.owns(ticket)) state.stage = CommandActionStage.UNAVAILABLE }
             }
         }
 
         val busy = state.stage in setOf(CommandActionStage.PREPARING, CommandActionStage.BIOMETRIC, CommandActionStage.SENDING)
-        val mayChoose = !busy && state.retained == null && foreground && activity != null
+        val mayChoose = !busy && state.retained == null && foreground && activity != null && connected
         val height = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() / 2 }
         Column(Modifier.fillMaxWidth().heightIn(max = height).verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -178,19 +276,41 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
                 CommandActionStage.AWAITING -> R.string.command_action_awaiting
                 CommandActionStage.UNAVAILABLE -> R.string.command_action_unavailable
                 CommandActionStage.UNCERTAIN -> R.string.command_action_uncertain
+                CommandActionStage.REFUSED -> when (state.refusal) {
+                    DecisionRefusalFrame.Reason.REQUEST_CHANGED -> R.string.command_action_refused_request_changed
+                    DecisionRefusalFrame.Reason.ACTION_UNAVAILABLE -> R.string.command_action_refused_action_unavailable
+                    null -> null
+                }
             }
             if (label != null) Text(stringResource(label), style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-            if (availability.execute) Button(onClick = { decide(true) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {
+            if (connectionState == CommandConnectionState.DISCONNECTED) {
+                Text(stringResource(R.string.commands_disconnected), style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = context.reconnect, enabled = foreground) { Text(stringResource(R.string.commands_reconnect)) }
+            } else if (connectionState == CommandConnectionState.CONNECTING) {
+                Text(stringResource(R.string.commands_connecting), style = MaterialTheme.typography.bodyMedium)
+            }
+            state.biometricRecovery?.let { reason ->
+                Text(stringResource(biometricRecoveryMessage(reason)), style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                context.onRepair?.let { onRepair ->
+                    TextButton(onClick = onRepair, enabled = foreground && !busy) {
+                        Text(stringResource(R.string.commands_pair_again))
+                    }
+                }
+            }
+            if (availability.execute && state.biometricRecovery == null) Button(onClick = { decide(true) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.command_action_approve))
             }
             if (availability.decline) OutlinedButton(onClick = { decide(false) }, enabled = mayChoose, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.command_action_decline))
             }
             if (state.stage == CommandActionStage.UNCERTAIN && state.retained != null && (availability.execute || availability.decline)) {
-                OutlinedButton(onClick = { if (foreground && state.stage == CommandActionStage.UNCERTAIN)
-                    state.retained?.let { deliver(attempts.begin(), it) } },
-                    enabled = foreground, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.command_action_retry)) }
+                OutlinedButton(onClick = {
+                    state.retry(foreground, {
+                        context.connectionState.value == CommandConnectionState.CONNECTED
+                    }, ::deliver)
+                }, enabled = foreground && connected, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.command_action_retry)) }
             }
         }
     }

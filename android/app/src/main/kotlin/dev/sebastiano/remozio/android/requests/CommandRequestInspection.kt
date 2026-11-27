@@ -41,11 +41,11 @@ internal fun CommandRequestInspection(
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 try {
                     launch {
-                        combine(session.revisions, session.closed) { _, _ -> session.snapshot(RequestElapsedClock.now()) }
+                        combine(session.revisions, session.closed) { _, _ -> session.snapshot(RequestElapsedClock::now) }
                             .collect { value = it }
                     }
                     while (isActive) {
-                        value = session.snapshot(RequestElapsedClock.now())
+                        value = session.snapshot(RequestElapsedClock::now)
                         delay(1000)
                     }
                 } finally {
@@ -68,8 +68,17 @@ internal fun CommandRequestInspection(
                 LaunchedEffect(session) { onDismiss() }
                 return@let
             }
-            CommandInspection(it.capture, macName, accountName, onDismiss, status = it.status, requestKey = session,
-                actions = approval?.let { context -> { CommandApprovalControls(session, context, it.status, checkNotNull(approvalState)) } })
+            val capture = it.capture
+            val promptContext = if (approval != null && capture != null) {
+                remember(session, capture, macName, accountName) {
+                    CommandPromptContext.create(session.issuedRequestDigest, macName, accountName, capture.executable.path.copyBytes())
+                }
+            } else null
+            CommandInspection(capture, macName, accountName, onDismiss, status = it.status, requestKey = session,
+                requestReference = promptContext?.reference,
+                actions = if (approval != null && promptContext != null) {
+                    { CommandApprovalControls(session, approval, it.status, checkNotNull(approvalState), promptContext) }
+                } else null)
         }
     }
 }

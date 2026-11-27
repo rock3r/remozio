@@ -29,7 +29,7 @@ object AndroidBiometricKeyCreation {
             val directory = File(context.noBackupFilesDir, "biometrics")
             check(directory.isDirectory || directory.mkdirs())
             ExclusiveFileOwner.acquire(File(directory, "creation.lock")).use {
-                val alias = "remozio.biometric.v1." + id.joinToString("") { "%02x".format(it) }
+                val alias = EnrollmentKeyReference.biometricEnrollmentAlias(id)
                 return createValidatedBiometricKey(PlatformBiometricKeys, alias) { point ->
                     val reference = EnrollmentKeyReference(EnrollmentKeyRole.BIOMETRIC, id, alias, point)
                     loadBiometricKey(reference)
@@ -49,7 +49,7 @@ internal interface BiometricKeyCreationBackend {
 
 /** The caller holds the creation lock through generation and the subsequent custody check. */
 internal fun createBiometricKey(backend: BiometricKeyCreationBackend, alias: String): ByteArray {
-    require(Regex("remozio\\.biometric\\.v1\\.[0-9a-f]{32}").matches(alias))
+    require(Regex("remozio\\.biometric\\.v2\\.[0-9a-f]{32}").matches(alias))
     check(!backend.contains(alias))
     return try { backend.generate(alias, true) }
     catch (_: BiometricStrongBoxUnavailable) {
@@ -82,7 +82,7 @@ private object PlatformBiometricKeys : BiometricKeyCreationBackend {
             .setDigests(KeyProperties.DIGEST_SHA256)
             .setUserAuthenticationRequired(true)
             .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-            .setInvalidatedByBiometricEnrollment(false)
+            .setInvalidatedByBiometricEnrollment(true)
             .setUserConfirmationRequired(false)
             .setUserPresenceRequired(false)
             .setUnlockedDeviceRequired(true)

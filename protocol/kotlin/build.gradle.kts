@@ -31,6 +31,7 @@ val commonTestVectors = mapOf(
     "pairingInvitationV2" to "protocol/vectors/pairing-invitation-v2.json",
     "pairingReceipt" to "protocol/vectors/pairing-receipt-v1.json",
     "pairingSetup" to "protocol/vectors/pairing-setup-v1.json",
+    "pairingDecisionProof" to "protocol/vectors/pairing-decision-proof-v1.json",
     "pairing" to "protocol/vectors/pairing-v1.json",
     "approvalSignatures" to "protocol/vectors/approval-signatures-v1.json",
 )
@@ -59,6 +60,9 @@ tasks.matching { it.name.startsWith("compileTestKotlin") || it.name == "compileT
 // The JVM tests keep their file-based vector wiring.
 tasks.named<Test>("jvmTest") {
     useJUnit()
+    val commandCarrierVectors = rootProject.layout.projectDirectory.file("protocol/vectors/command-carriers-v1.json")
+    inputs.file(commandCarrierVectors)
+    systemProperty("remozio.commandCarrierVectors", commandCarrierVectors.asFile.absolutePath)
     val schedulingV2Vectors = rootProject.layout.projectDirectory.file("protocol/vectors/phone-update-scheduling-v2.json")
     inputs.file(schedulingV2Vectors)
     systemProperty("remozio.phoneUpdateSchedulingV2Vectors", schedulingV2Vectors.asFile.absolutePath)
