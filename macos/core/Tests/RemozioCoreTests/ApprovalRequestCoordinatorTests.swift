@@ -594,19 +594,37 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     private func retirementFixture(_ fixture: Fixture, installReplay: Bool = true) throws
-        -> (JournalDatabase, AuditEpochWriter, ApprovalRequestCoordinator, ContinuityStore) {
-        let (db, writer) = try setup(fixture)
+        -> sending (JournalDatabase, AuditEpochWriter, ApprovalRequestCoordinator, ContinuityStore) {
+        let limits = try limits, capabilities = try capabilities, contract = try contract
+        let anchor = fixture.root.path, clock = clock, mac = id(1), account = id(2)
+        let descriptor = try descriptor(3), enrollment = try fixtureEnrollment(), enrollmentEvent = id(30)
         let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEF1234",
             identifier: "dev.sebastiano.remozio.macos.authority", installedGeneration: 1, minimumGeneration: 1,
             codeDirectoryHash: id(8, 20), active: true)])
-        try db.write {
-            _ = try $0.installCodePolicy(policy, expectedRevision: nil)
-            try $0.installCommandSubmissionReplay()
+        try fixture.createContinuityFiles()
+        let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+            macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+            maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+        let writer = try db.write { transaction in
+            let revision = try transaction.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract])
+            let writer = try transaction.createEpoch(descriptor)
+            _ = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+                eventID: enrollmentEvent, receiptTimeMs: 900, writer: writer, expectedAuditHead: 0)
+            _ = try transaction.installCodePolicy(policy, expectedRevision: nil)
+            try transaction.installCommandSubmissionReplay()
+            return writer
         }
-        let (owner, store) = try checkpointedOwner(fixture, db, writer)
+        let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch,
+            generation: 1, authorityGeneration: 3) }
+        let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: getuid()),
+            macID: mac, accountID: account, initialize: initial)
         if installReplay {
-            XCTAssertEqual(try CheckpointedJournal(journal: db, continuity: store).installPermanentReplay(), .installed)
+            let result = try CheckpointedJournal(journal: db, continuity: store).installPermanentReplay()
+            XCTAssertEqual(result, .installed)
         }
+        let owner = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
         return (db, writer, owner, store)
     }
 
@@ -620,10 +638,10 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testDetailRetirementUsesIdleOwnerAndProtectsRetainedTerminalRequests() throws {
         let fixture = try Fixture(), (_, _, owner, _) = try retirementFixture(fixture)
-        let (issued, receipt) = try declineForRetirement(owner)
-        let request = issued.requestID
         let authority = AuthorityJournal(requests: owner)
         defer { try? authority.close() }
+        let (issued, receipt) = try authority.withRequests { try declineForRetirement($0) }
+        let request = issued.requestID
         let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
         XCTAssertNil(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { false }))
         let protected = try XCTUnwrap(authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
@@ -645,10 +663,12 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     func testDetailRetirementSerializesAdmissionAfterLockedWrite() throws {
         let fixture = try Fixture(), (_, _, owner, _) = try retirementFixture(fixture)
-        let (retired, _) = try declineForRetirement(owner)
-        try owner.forgetTerminal(requestID: retired.requestID)
         let authority = AuthorityJournal(requests: owner)
         defer { try? authority.close() }
+        try authority.withRequests { owner in
+            let (retired, _) = try declineForRetirement(owner)
+            try owner.forgetTerminal(requestID: retired.requestID)
+        }
         let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
         XCTAssertEqual(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true })?.result.observed, 1)
 
