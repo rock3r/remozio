@@ -9,6 +9,7 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
     let channel: NegotiatedNetworkChannel
     let remoteRequests: [ChannelRequestCapability]
     let deliveryResultSchemas: Set<UInt64>
+    let supportsDecisionRefusals: Bool
     let timeoutMilliseconds: UInt64
     let refreshMilliseconds: UInt64
 
@@ -18,8 +19,9 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 do {
-                    while let bytes = try await channel.receive(maximumBytes: min(session.peer.maximumPayloadBytes, AuthorityRequestExchange.maximumFrameBytes)) {
-                        guard await events.push(bytes) else { return }
+                    while let envelope = try await channel.receiveEnvelope(
+                        maximumBytes: min(session.peer.maximumPayloadBytes, AuthorityRequestExchange.maximumFrameBytes)) {
+                        guard await events.push(envelope) else { return }
                     }
                     await events.finish()
                 } catch { await events.finish(error) }
@@ -64,7 +66,8 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
                 let remaining = Set(work.dropFirst(position)).union(ids).union(watching)
                 guard remaining.count <= AuthorityPendingRequests.maximumRequests else { throw ApprovalChannelError.invalidInput }
                 work = remaining.sorted { $0.lexicographicallyPrecedes($1) }; position = 0
-            case .incoming(let bytes):
+            case .incoming(let envelope):
+                let bytes = envelope.payload
                 if !deliveryResultSchemas.isEmpty, let result = try? RequestDeliveryResult.decode(bytes) {
                     let identity = DeliveryIdentity(requestID: result.requestID, requestDigest: result.requestDigest)
                     if delivered[identity] != nil { delivered[identity] = .refused }
@@ -85,7 +88,10 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
                     requestID = claim.requestID; decision = bytes
                 }
                 // These are routing claims. The root verifies every decision and retains the first valid winner.
-                try await sendStatus(for: requestID, decision: decision, watching: &watching)
+                let attempt: DecisionRefusalFrame.Attempt? = if supportsDecisionRefusals, decision != nil {
+                    try .init(sessionID: envelope.sessionID, sequence: envelope.sequence)
+                } else { nil }
+                try await sendStatus(for: requestID, decision: decision, refusalAttempt: attempt, watching: &watching)
             case .work:
                 let id = work[position]; position += 1
                 if let frame = try await service.requestFrame(for: session, requestID: id),
@@ -115,9 +121,15 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
         }
     }
 
-    private func sendStatus(for id: Data, decision: Data? = nil, watching: inout Set<Data>) async throws {
-        guard let frame = try await service.exchangeRequest(for: session, requestID: id, decisionFrame: decision) else {
+    private func sendStatus(for id: Data, decision: Data? = nil, refusalAttempt: DecisionRefusalFrame.Attempt? = nil,
+                            watching: inout Set<Data>) async throws {
+        guard let frame = try await service.exchangeRequest(for: session, requestID: id,
+            decisionFrame: decision, refusalAttempt: refusalAttempt) else {
             watching.remove(id)
+            return
+        }
+        if refusalAttempt != nil, (try? DecisionRefusalFrame.decode(frame)) != nil {
+            try await send(frame)
             return
         }
         let message = try ApprovalMessage.decode(frame, maximumBodyBytes: AuthorityRequestExchange.maximumFrameBytes - ApprovalMessage.overheadBytes)
@@ -143,15 +155,15 @@ struct DirectApprovalRequestExchangeLoop: Sendable {
 
 /// At most eight queued frames and one blocked reader. Timer events occupy one bit.
 private actor RequestExchangeEvents {
-    enum Event: Sendable { case incoming(Data), refresh, work, ended((any Error)?) }
-    private var frames: [Data] = []
+    enum Event: Sendable { case incoming(SessionEnvelope), refresh, work, ended((any Error)?) }
+    private var frames: [SessionEnvelope] = []
     private var refreshing = false
     private var ended = false
     private var failure: (any Error)?
     private var reader: CheckedContinuation<Event, Never>?
-    private var sender: (Data, CheckedContinuation<Bool, Never>)?
+    private var sender: (SessionEnvelope, CheckedContinuation<Bool, Never>)?
 
-    func push(_ frame: Data) async -> Bool {
+    func push(_ frame: SessionEnvelope) async -> Bool {
         guard !ended else { return false }
         if let reader {
             self.reader = nil; reader.resume(returning: .incoming(frame)); return true

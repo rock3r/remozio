@@ -146,11 +146,12 @@ public actor DirectApprovalTransportService {
     }
 
     /// Exchange state for this live session. A lost response does not prove that a submitted decision lost.
-    public func exchangeRequest(for session: DirectApprovalSession, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
+    public func exchangeRequest(for session: DirectApprovalSession, requestID: Data, decisionFrame: Data? = nil,
+                                refusalAttempt: DecisionRefusalFrame.Attempt? = nil) async throws -> Data? {
         guard started, !closed else { throw DirectHostError.stopped }
         try await host.validate(session)
         let status = try await feed.exchangeRequest(session.peer, revision: session.revision,
-            requestID: requestID, decisionFrame: decisionFrame)
+            requestID: requestID, decisionFrame: decisionFrame, refusalAttempt: refusalAttempt)
         try Task.checkCancellation()
         guard !closed else { throw DirectHostError.stopped }
         try await host.validate(session)
@@ -217,8 +218,10 @@ public actor DirectApprovalTransportService {
                     return
                 }
                 let deliveryResultSchemas = try await channel.requestDeliveryResultSchemas()
+                let supportsDecisionRefusals = try await channel.supportsDecisionRefusals()
                 try await DirectApprovalRequestExchangeLoop(service: self, session: session, channel: channel,
                     remoteRequests: metadata.peer.requests, deliveryResultSchemas: deliveryResultSchemas,
+                    supportsDecisionRefusals: supportsDecisionRefusals,
                     timeoutMilliseconds: timeoutMilliseconds,
                     refreshMilliseconds: refreshMilliseconds).run()
             } catch {

@@ -1264,10 +1264,11 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     private func exchangeDecision(_ request: IssuedRequestPayload, phone: UInt8 = 5, keyID: UInt8 = 6,
                                   decline: Bool = false, purpose: SigningPurpose? = nil,
-                                  signer: P256.Signing.PrivateKey? = nil) throws -> Data {
+                                  signer: P256.Signing.PrivateKey? = nil, requestDigest: Data? = nil,
+                                  action: CapturedAction? = nil) throws -> Data {
         let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
-            requestDigest: request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
-            phoneID: id(phone), keyID: id(keyID), action: request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
+            requestDigest: requestDigest ?? request.requestDigest(bodyLimits: limits, signingLimits: limits), challenge: request.challenge,
+            phoneID: id(phone), keyID: id(keyID), action: action ?? request.permittedActions[decline ? 1 : 0]).encode(limits: limits)
         let purpose = purpose ?? (decline ? .cancellation : .biometricAuthorization)
         let signature = try (signer ?? (decline ? decisionKey : key)).signature(for: SigningInput.make(wireVersion: 1,
             messageType: .decision, purpose: purpose, canonicalPayload: body, payloadLimits: limits, inputLimits: limits)).rawRepresentation
@@ -1604,7 +1605,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try access.pendingRequestIDs(binding: stale) { _, _ in
             XCTFail("Stale enrollment reached discovery"); return []
         }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
-        XCTAssertThrowsError(try access.exchangeRequest(binding: stale, requestID: payload.requestID, decisionFrame: nil) { _, _, _, _ in
+        XCTAssertThrowsError(try access.exchangeRequest(binding: stale, query: .init(requestID: payload.requestID, decisionFrame: nil, refusalAttempt: nil)) { _, _, _ in
             XCTFail("Stale enrollment reached exchange"); return nil
         }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
         let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
@@ -1616,7 +1617,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try access.pendingRequestIDs(binding: binding) { _, _ in
             XCTFail("Obsolete transport reached discovery"); return []
         }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
-        XCTAssertThrowsError(try access.exchangeRequest(binding: binding, requestID: payload.requestID, decisionFrame: nil) { _, _, _, _ in
+        XCTAssertThrowsError(try access.exchangeRequest(binding: binding, query: .init(requestID: payload.requestID, decisionFrame: nil, refusalAttempt: nil)) { _, _, _ in
             XCTFail("Obsolete transport reached exchange"); return nil
         }) { XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch) }
 
@@ -1698,12 +1699,12 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertEqual(try providers.pendingRequestIDs(owner, binding, clock), [request.requestID])
         let frame = try XCTUnwrap(providers.requestFrame(owner, binding, request.requestID, clock))
         _ = try verifyProviderFrame(frame, environment, type: .request)
-        let status = try XCTUnwrap(providers.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        let status = try XCTUnwrap(providers.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
         _ = try verifyProviderFrame(status, environment, type: .status)
         let (body, signature) = try decision(request)
         let carrier = try ApprovalMessage(wireVersion: 1, type: .decision, purpose: .biometricAuthorization,
             body: body, signature: signature).encode(maximumBodyBytes: 3968)
-        let accepted = try XCTUnwrap(providers.exchangeRequest(owner, binding, request.requestID, carrier, clock))
+        let accepted = try XCTUnwrap(providers.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: carrier, refusalAttempt: nil), clock))
         let message = try verifyProviderFrame(accepted, environment, type: .status)
         XCTAssertEqual(try RequestStatusPayload.decode(message.body, limits: limits).phase, .authorized)
         XCTAssertEqual(try owner.state(requestID: request.requestID).decisionPhoneID, id(5))
@@ -1750,7 +1751,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertNil(try providers.requestFrame(owner, binding, second.requestID, clock))
         XCTAssertEqual(try owner.state(requestID: second.requestID).phase, .queued)
         XCTAssertEqual(environment.signatures, 2)
-        XCTAssertNotNil(try providers.exchangeRequest(owner, binding, first.requestID, nil, clock))
+        XCTAssertNotNil(try providers.exchangeRequest(owner, binding, .init(requestID: first.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
     }
 
     func testPublicHardwareBundleSignsRealRootRequestAndStatus() throws {
@@ -1775,7 +1776,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
         let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
         let frame = try XCTUnwrap(bundle.requestFrame(owner, binding, request.requestID, clock))
-        let status = try XCTUnwrap(bundle.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        let status = try XCTUnwrap(bundle.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
         for (bytes, type): (Data, ApprovalMessageType) in [(frame, .request), (status, .status)] {
             let message = try ApprovalMessage.decode(bytes, maximumBodyBytes: 3968)
             XCTAssertEqual(message.type, type)
@@ -1796,7 +1797,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertEqual(try providers.pendingRequestIDs(owner, binding, clock), [first.requestID])
         XCTAssertEqual(try providers.requestFrame(owner, binding, first.requestID, clock), frame)
         XCTAssertNil(try providers.requestFrame(owner, binding, second.requestID, clock))
-        XCTAssertNotNil(try providers.exchangeRequest(owner, binding, first.requestID, nil, clock))
+        XCTAssertNotNil(try providers.exchangeRequest(owner, binding, .init(requestID: first.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
         XCTAssertEqual(environment.signatures, 2)
     }
     func testProvidersResampleClockAndPresenceAfterNativeSigningBoundary() throws {
@@ -1822,7 +1823,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         environment.set(time: 200)
         XCTAssertEqual(try providers.expirePending(owner, clock: clock).map(\.requestID), [request.requestID])
         XCTAssertTrue(try providers.expirePending(owner, clock: clock).isEmpty)
-        let status = try XCTUnwrap(providers.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        let status = try XCTUnwrap(providers.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
         let message = try verifyProviderFrame(status, environment, type: .status)
         let payload = try RequestStatusPayload.decode(message.body, limits: limits)
         XCTAssertEqual(payload.phase, .expired); XCTAssertEqual(payload.observedAgeMs, 100)
@@ -1864,11 +1865,11 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             let clock: @Sendable () throws -> AuthorityMoment = { environment.now() }
             environment.set(time: 200)
             if signingFails {
-                XCTAssertThrowsError(try bundle.exchangeRequest(owner, binding, request.requestID, nil, clock)) {
+                XCTAssertThrowsError(try bundle.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: nil, refusalAttempt: nil), clock)) {
                     guard case Failure.fixture = $0 else { return XCTFail("Unexpected signing failure") }
                 }
             } else {
-                let frame = try XCTUnwrap(bundle.exchangeRequest(owner, binding, request.requestID, nil, clock))
+                let frame = try XCTUnwrap(bundle.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
                 let message = try verifyProviderFrame(frame, environment, type: .status)
                 let status = try RequestStatusPayload.decode(message.body, limits: limits)
                 XCTAssertEqual(status.phase, .expired); XCTAssertEqual(status.observedAgeMs, 100)
@@ -1891,7 +1892,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let decision = try ApprovalMessage(wireVersion: 1, type: .decision, purpose: .biometricAuthorization,
             body: body, signature: signature).encode(maximumBodyBytes: 3968)
         environment.set(time: 200)
-        XCTAssertThrowsError(try bundle.exchangeRequest(owner, binding, request.requestID, decision, clock)) {
+        XCTAssertThrowsError(try bundle.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: decision, refusalAttempt: nil), clock)) {
             XCTAssertEqual($0 as? DecisionVerificationError, .invalidSignature)
         }
         XCTAssertEqual(try bundle.expirePending(owner, clock: clock).map(\.requestID), [request.requestID])
@@ -2001,7 +2002,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let clock: @Sendable () throws -> AuthorityMoment = { XCTFail("Wrong-scope clock"); return environment.now() }
         XCTAssertThrowsError(try providers.pendingRequestIDs(owner, binding, clock))
         XCTAssertThrowsError(try providers.requestFrame(owner, binding, request.requestID, clock))
-        XCTAssertThrowsError(try providers.exchangeRequest(owner, binding, request.requestID, nil, clock))
+        XCTAssertThrowsError(try providers.exchangeRequest(owner, binding, .init(requestID: request.requestID, decisionFrame: nil, refusalAttempt: nil), clock))
         XCTAssertEqual(environment.signatures, 0)
     }
     func testProviderBudgetRejectsRequestThatUsesReservedCarrierSpace() throws {
@@ -2043,6 +2044,65 @@ extension ApprovalRequestCoordinatorTests {
         return (access, AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision))
     }
 
+    func testAuthenticatedRefusalSignsTheExactDecisionWithoutConsumptionOrNotice() throws {
+        let fixture = try Fixture(), authorityKey = key
+        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities, keys: [
+                EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
+                EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
+        let journal = try journalOwner(fixture, enrollment: enrollment); defer { try? journal.close() }
+        let (access, binding) = try noticeAccess(journal), draft = try draft(), observed = now(), moment = now(120)
+        let request = try journal.withRequests { try $0.admitFixture(draft, now: observed, receiptTimeMs: nil) }
+        let digest = try request.requestDigest(bodyLimits: limits, signingLimits: limits)
+        let attempt = try DecisionRefusalFrame.Attempt(sessionID: id(33, 32), sequence: 7)
+        let stale = id(34, 32)
+        let invalidAction = CapturedAction(choice: .unlockVault, scope: .currentRequest)
+        let decisions: [(Data, Data, DecisionRefusalFrame.Reason)] = [
+            (try exchangeDecision(request, requestDigest: stale), stale, .requestChanged),
+            (try exchangeDecision(request, action: invalidAction), digest, .actionUnavailable),
+        ]
+        let initial = try journal.withRequests { try $0.state(requestID: request.requestID) }
+        for (decision, submittedDigest, reason) in decisions {
+            let query = AuthorityRequestExchange.Query(requestID: request.requestID, decisionFrame: decision, refusalAttempt: attempt)
+            let bytes = try access.exchangeRequest(binding: binding, query: query, handler: { owner, authenticated, query in
+                try owner.exchangeRequest(binding: authenticated, requestID: query.requestID, decisionFrame: query.decisionFrame,
+                    refusalAttempt: query.refusalAttempt, authorityPublicKey: authorityKey.publicKey.x963Representation,
+                    maximumBodyBytes: 3968, now: { moment }, receiptTimeMs: nil,
+                    signer: { try authorityKey.signature(for: $0).rawRepresentation })
+            }, onCommandAuthorized: { _ in XCTFail("A refusal notified the executor") })
+            let result = try DecisionRefusalFrame.decode(XCTUnwrap(bytes))
+            XCTAssertTrue(try result.verify(authorityPublicKey: authorityKey.publicKey.x963Representation))
+            XCTAssertEqual(result.payload.scope, binding.scope)
+            XCTAssertEqual(result.payload.attempt, attempt)
+            XCTAssertEqual(result.payload.requestID, request.requestID)
+            XCTAssertEqual(result.payload.requestDigest, submittedDigest)
+            XCTAssertEqual(result.payload.decisionFrameDigest, Data(SHA256.hash(data: decision)))
+            XCTAssertEqual(result.payload.reason, reason)
+            XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID) }, initial)
+            XCTAssertNil(try journal.withRequests { try $0.historicalOutcome(requestID: request.requestID) })
+        }
+    }
+
+    func testDecisionRefusalDoesNotConvertBadSignatureOrAmbiguousCommitIntoAResponse() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil), binding = try frameBinding(db)
+        let attempt = try DecisionRefusalFrame.Attempt(sessionID: id(33, 32), sequence: 7)
+        let forged = try exchangeDecision(request, signer: P256.Signing.PrivateKey(), requestDigest: id(34, 32))
+        XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: forged,
+            refusalAttempt: attempt, authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
+            now: { self.now(120) }, receiptTimeMs: nil, signer: { _ in XCTFail("Unauthenticated attempt signed"); throw Failure.fixture })) {
+                XCTAssertEqual($0 as? DecisionVerificationError, .invalidSignature)
+            }
+        XCTAssertNil(try owner.historicalOutcome(requestID: request.requestID))
+        let valid = try exchangeDecision(request)
+        XCTAssertThrowsError(try owner.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: valid,
+            refusalAttempt: attempt, authorityPublicKey: key.publicKey.x963Representation, maximumBodyBytes: 3968,
+            now: { self.now(130) }, receiptTimeMs: nil, signer: { _ in throw Failure.fixture }))
+        XCTAssertEqual(try owner.historicalOutcome(requestID: request.requestID)?.phase, .authorized)
+        XCTAssertEqual(try exchangeStatus(exchange(owner, binding, request.requestID, time: 140)).phase, .authorized)
+    }
+
     func testCommandNoticeFollowsRealExchangeAndStatusSignerFailure() throws {
         for signingFailure in [false, true] {
             let fixture = try Fixture(), authorityKey = key
@@ -2056,9 +2116,9 @@ extension ApprovalRequestCoordinatorTests {
             let request = try journal.withRequests { try $0.admitFixture(draft, now: observed, receiptTimeMs: nil) }
             let decision = try exchangeDecision(request), notices = Mutex<[AuthorityCommandAuthorizationNotice]>([])
             let execute = {
-                try access.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: decision,
-                    handler: { owner, authenticated, id, frame in
-                        try owner.exchangeRequest(binding: authenticated, requestID: id, decisionFrame: frame,
+                try access.exchangeRequest(binding: binding, query: .init(requestID: request.requestID, decisionFrame: decision, refusalAttempt: nil),
+                    handler: { owner, authenticated, query in
+                        try owner.exchangeRequest(binding: authenticated, requestID: query.requestID, decisionFrame: query.decisionFrame,
                             authorityPublicKey: authorityKey.publicKey.x963Representation, maximumBodyBytes: 3968,
                             now: { moment }, receiptTimeMs: nil, signer: {
                                 if signingFailure { throw Failure.fixture }
@@ -2073,9 +2133,9 @@ extension ApprovalRequestCoordinatorTests {
             XCTAssertEqual(notices.withLock { $0.first?.requestID }, request.requestID)
             XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .authorized)
             for frame: Data? in [nil, decision] {
-                let response = try access.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: frame,
-                    handler: { owner, authenticated, id, frame in
-                        try owner.exchangeRequest(binding: authenticated, requestID: id, decisionFrame: frame,
+                let response = try access.exchangeRequest(binding: binding, query: .init(requestID: request.requestID, decisionFrame: frame, refusalAttempt: nil),
+                    handler: { owner, authenticated, query in
+                        try owner.exchangeRequest(binding: authenticated, requestID: query.requestID, decisionFrame: query.decisionFrame,
                             authorityPublicKey: authorityKey.publicKey.x963Representation, maximumBodyBytes: 3968,
                             now: { moment }, receiptTimeMs: nil, signer: { try authorityKey.signature(for: $0).rawRepresentation })
                     }, onCommandAuthorized: { _ in XCTFail("Status or repeated decision scheduled a second execution") })
@@ -2094,8 +2154,8 @@ extension ApprovalRequestCoordinatorTests {
         let journal = try journalOwner(fixture, enrollment: enrollment); defer { try? journal.close() }
         let (access, binding) = try noticeAccess(journal)
         let stale = try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID())
-        XCTAssertThrowsError(try access.exchangeRequest(binding: stale, requestID: id(20), decisionFrame: Data([1]),
-            handler: { _, _, _, _ in XCTFail("Stale enrollment reached exchange"); return nil },
+        XCTAssertThrowsError(try access.exchangeRequest(binding: stale, query: .init(requestID: id(20), decisionFrame: Data([1]), refusalAttempt: nil),
+            handler: { _, _, _ in XCTFail("Stale enrollment reached exchange"); return nil },
             onCommandAuthorized: { _ in XCTFail("Stale enrollment notified executor") })) {
                 XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
             }
@@ -2103,8 +2163,8 @@ extension ApprovalRequestCoordinatorTests {
         let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
         _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: policy.revision) }
-        XCTAssertThrowsError(try access.exchangeRequest(binding: binding, requestID: id(20), decisionFrame: Data([1]),
-            handler: { _, _, _, _ in XCTFail("Retired transport reached exchange"); return nil },
+        XCTAssertThrowsError(try access.exchangeRequest(binding: binding, query: .init(requestID: id(20), decisionFrame: Data([1]), refusalAttempt: nil),
+            handler: { _, _, _ in XCTFail("Retired transport reached exchange"); return nil },
             onCommandAuthorized: { _ in XCTFail("Retired transport notified executor") })) {
                 XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch)
             }
@@ -2152,9 +2212,9 @@ extension ApprovalRequestCoordinatorTests {
             let (access, binding) = try noticeAccess(journal)
             let decision = try exchangeDecision(request, keyID: decisionOnly ? 7 : 6,
                 purpose: decisionOnly ? .oneTimeUI : .biometricAuthorization, signer: decisionOnly ? decisionKey : key)
-            let response = try access.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: decision,
-                handler: { owner, authenticated, id, frame in
-                    try owner.exchangeRequest(binding: authenticated, requestID: id, decisionFrame: frame,
+            let response = try access.exchangeRequest(binding: binding, query: .init(requestID: request.requestID, decisionFrame: decision, refusalAttempt: nil),
+                handler: { owner, authenticated, query in
+                    try owner.exchangeRequest(binding: authenticated, requestID: query.requestID, decisionFrame: query.decisionFrame,
                         authorityPublicKey: authorityKey.publicKey.x963Representation, maximumBodyBytes: 3968,
                         now: { moment }, receiptTimeMs: nil, signer: { try authorityKey.signature(for: $0).rawRepresentation })
                 }, onCommandAuthorized: { _ in XCTFail("UI authorization notified the command executor") })

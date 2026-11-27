@@ -1119,6 +1119,7 @@ public final class ApprovalRequestCoordinator {
     /// Serialize this call with all authority state. Supply a trusted non-exportable signer; callbacks must not reenter.
     /// A lost reply can follow committed consumption. Reconcile status rather than retrying target execution.
     public func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data? = nil,
+                                refusalAttempt: DecisionRefusalFrame.Attempt? = nil,
                                 authorityPublicKey: Data, maximumBodyBytes: Int,
                                 now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                                 signer: (Data) throws -> Data) throws -> Data? {
@@ -1145,12 +1146,26 @@ public final class ApprovalRequestCoordinator {
             let message = try ApprovalMessage.decode(decisionFrame, maximumBodyBytes: maximumBodyBytes)
             let decision = try DecisionPayload.decode(message.body, limits: decisionLimits)
             guard message.type == .decision, decision.macID == mac, decision.accountID == account,
-                  decision.requestID == requestID, decision.requestDigest == current.requestDigest,
-                  decision.challenge == current.challenge, decision.phoneID == binding.scope.phoneID else {
+                  decision.requestID == requestID, decision.phoneID == binding.scope.phoneID else {
                 throw DecisionVerificationError.wrongRequest
             }
-            let requirement = try ActionPolicy.requirement(for: decision.action, requestKind: entry.contract.requestKind,
-                retainedPermittedActions: entry.permittedActions)
+            let pendingAttempt = current.phase == .queued || current.phase == .presented ? refusalAttempt : nil
+            guard decision.requestDigest == current.requestDigest, decision.challenge == current.challenge else {
+                guard let pendingAttempt else { throw DecisionVerificationError.wrongRequest }
+                return try signDecisionRefusal(message, decision: decision, frame: decisionFrame, scope: binding.scope,
+                    enrollment: enrollment, attempt: pendingAttempt, reason: .requestChanged,
+                    authorityPublicKey: authorityPublicKey, signer: signer)
+            }
+            let requirement: ActionRequirement
+            do {
+                requirement = try ActionPolicy.requirement(for: decision.action, requestKind: entry.contract.requestKind,
+                    retainedPermittedActions: entry.permittedActions)
+            } catch let error as ActionPolicyError {
+                guard let pendingAttempt else { throw error }
+                return try signDecisionRefusal(message, decision: decision, frame: decisionFrame, scope: binding.scope,
+                    enrollment: enrollment, attempt: pendingAttempt, reason: .actionUnavailable,
+                    authorityPublicKey: authorityPublicKey, signer: signer)
+            }
             let purpose: SigningPurpose
             switch requirement.purpose {
             case .cancellation: purpose = .cancellation
@@ -1203,6 +1218,31 @@ public final class ApprovalRequestCoordinator {
                 signature: signature).encode(maximumBodyBytes: maximumBodyBytes)
         }
         throw ApprovalCoordinatorError.unavailable
+    }
+
+    /// This authenticates an attempt only for a refusal. It must never supply an authorization key check.
+    private func signDecisionRefusal(_ message: ApprovalMessage, decision: DecisionPayload, frame: Data, scope: ChannelScope,
+                                     enrollment: ApprovalEnrollment, attempt: DecisionRefusalFrame.Attempt,
+                                     reason: DecisionRefusalFrame.Reason, authorityPublicKey: Data,
+                                     signer: (Data) throws -> Data) throws -> Data {
+        let keyClass: ApprovalKeyClass
+        switch message.purpose {
+        case .cancellation, .oneTimeUI: keyClass = .decision
+        case .biometricAuthorization: keyClass = .biometric
+        default: throw DecisionVerificationError.wrongKeyClass
+        }
+        guard enrollment.active, let key = enrollment.keys.first(where: { $0.id == decision.keyID }),
+              key.keyClass == keyClass else { throw DecisionVerificationError.wrongKeyClass }
+        guard try ApprovalSignature.verify(signature: message.signature, publicKey: key.publicKey,
+            wireVersion: message.wireVersion, messageType: .decision, purpose: message.purpose,
+            canonicalPayload: message.body, payloadLimits: decisionLimits, inputLimits: signingLimits) else {
+            throw DecisionVerificationError.invalidSignature
+        }
+        let payload = try DecisionRefusalFrame.Payload(scope: scope, attempt: attempt, requestID: decision.requestID,
+            requestDigest: decision.requestDigest, decisionFrameDigest: Data(SHA256.hash(data: frame)), reason: reason)
+        let result = try DecisionRefusalFrame(payload: payload, signature: signer(payload.signingInput()))
+        guard try result.verify(authorityPublicKey: authorityPublicKey) else { throw DecisionVerificationError.invalidSignature }
+        return try result.encode()
     }
 
     private func deliveryState(requestID: Data, now: AuthorityMoment, receiptTimeMs: UInt64?) throws -> ApprovalRequestState {

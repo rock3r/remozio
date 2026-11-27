@@ -351,19 +351,23 @@ public actor AuthorityXPCChannel {
             guard case .exchangeVersion(let version) = try await perform(.exchangeVersion) else { throw AuthorityXPCError.invalidMessage }
             exchangeVersion = version
         }
-        return exchangeVersion == 1
+        return exchangeVersion == AuthorityRequestExchange.version
     }
 
     /// Returns authority-signed state. A decision can commit before a lost reply; query status to reconcile it.
-    public func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data? = nil) async throws -> Data? {
-        let query = try AuthorityRequestExchange.encode(requestID: requestID, decisionFrame: decisionFrame)
+    public func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data? = nil,
+                                refusalAttempt: DecisionRefusalFrame.Attempt? = nil) async throws -> Data? {
+        let query = try AuthorityRequestExchange.encode(requestID: requestID, decisionFrame: decisionFrame, refusalAttempt: refusalAttempt)
         guard try await supportsRequestExchange() else { throw AuthorityXPCError.unsupportedRequestExchange }
         let encoded = try AuthorityTrustCodec.encodeBinding(binding)
         guard case .exchange(let bytes) = try await perform(.exchange, binding: encoded, query: query) else {
             throw AuthorityXPCError.invalidMessage
         }
         if bytes.isEmpty { return nil }
-        do { try AuthorityRequestExchange.validateResponse(bytes, binding: binding, requestID: requestID) }
+        do {
+            try AuthorityRequestExchange.validateResponse(bytes, binding: binding, requestID: requestID,
+                decisionFrame: decisionFrame, refusalAttempt: refusalAttempt)
+        }
         catch { finish(.invalidMessage); throw error }
         return bytes
     }

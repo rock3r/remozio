@@ -77,10 +77,18 @@ public actor NegotiatedNetworkChannel {
         try active(); guard state == .open, let metadata else { throw ApprovalChannelError.closed }; return metadata
     }
     func requestDeliveryResultSchemas() throws -> Set<UInt64> {
+        try resultSchemas(feature: RequestDeliveryResult.capability)
+    }
+
+    func supportsDecisionRefusals() throws -> Bool {
+        try !resultSchemas(feature: DecisionRefusalFrame.capability).isEmpty
+    }
+
+    private func resultSchemas(feature: UInt64) throws -> Set<UInt64> {
         guard purpose == .approvals else { return [] }
         func supported(_ capabilities: [ChannelRequestCapability]) -> Set<UInt64> {
             Set(capabilities.filter {
-                $0.kind == 0 && $0.wireVersion == 1 && $0.features.contains(RequestDeliveryResult.capability)
+                $0.kind == 0 && $0.wireVersion == 1 && $0.features.contains(feature)
             }.map(\.schemaVersion))
         }
         return try supported(localRequests).intersection(supported(negotiated().peer.requests))
@@ -126,6 +134,10 @@ public actor NegotiatedNetworkChannel {
         } catch { await finish(); throw error }
     }
     public func receive(maximumBytes: Int? = nil) async throws -> Data? {
+        try await receiveEnvelope(maximumBytes: maximumBytes)?.payload
+    }
+
+    func receiveEnvelope(maximumBytes: Int? = nil) async throws -> SessionEnvelope? {
         do {
             try active()
             let maximum = maximumBytes ?? maximumPayloadBytes
@@ -137,7 +149,7 @@ public actor NegotiatedNetworkChannel {
             let envelope = try SessionEnvelope.decode(frame, maximumPayloadBytes: maximum)
             guard envelope.sessionID == metadata.sessionID, envelope.sequence == incoming else { throw ApprovalChannelError.invalidInput }
             incoming = envelope.sequence == .max ? nil : envelope.sequence + 1
-            try active(); return envelope.payload
+            try active(); return envelope
         } catch { await finish(); throw error }
     }
     /// Invalidates the incarnation immediately, then closes pending native I/O.

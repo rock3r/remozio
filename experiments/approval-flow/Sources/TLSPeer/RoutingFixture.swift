@@ -116,7 +116,7 @@ final class RoutingFixture: @unchecked Sendable {
         } else { audit = nil }
         let requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
         let pending: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
-        let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+        let exchange: (@Sendable (AuthorityPeerBinding, AuthorityRequestExchange.Query) throws -> Data?)?
         if commandRequestID != nil {
             requestFrame = { binding, id in
                 try access.requestFrame(binding: binding, requestID: id,
@@ -126,9 +126,9 @@ final class RoutingFixture: @unchecked Sendable {
                 try access.pendingRequestIDs(binding: binding,
                     handler: { try providers.pendingRequestIDs($0, $1, { try clock.now() }) })
             }
-            exchange = { binding, id, frame in
-                try access.exchangeRequest(binding: binding, requestID: id, decisionFrame: frame,
-                    handler: { try providers.exchangeRequest($0, $1, $2, $3, { try clock.now() }) })
+            exchange = { binding, query in
+                try access.exchangeRequest(binding: binding, query: query,
+                    handler: { try providers.exchangeRequest($0, $1, $2, { try clock.now() }) })
             }
         } else {
             requestFrame = nil; pending = nil; exchange = nil

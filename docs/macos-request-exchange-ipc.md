@@ -27,11 +27,13 @@ sequenceDiagram
 
 ## Local IPC contract
 
-After common hello, negotiate `requestExchangeVersion`. Version one enables `exchangeRequest(binding, query)`. Zero or unknown versions send no binding or decision and leave common operations available. An older server without the selector can retire the connection before query dispatch.
+After common hello, negotiate `requestExchangeVersion`. Version two enables `exchangeRequest(binding, query)`. An unsupported version sends no binding or decision. Common operations remain available.
 
-The canonical query has three fields: key zero is schema one, key one is the 16-byte request ID, and key two is a signed decision carrier or null. The complete decision carrier is at most 4096 bytes. The query is at most 4352 bytes. Empty decision bytes are invalid.
+The supported installed Authority and Transport come from the same signed app bundle. The update path exchanges the bundle under quiescence and requires both candidate roles before reopening admission. Source inspection supports this compatibility decision. It does not prove an installed update or rollback.
 
-A nonempty reply is a status carrier of at most 4096 bytes. Both IPC ends check its type, status structure, Mac/account scope, and request ID. The phone must verify its authority signature and retained digest/challenge. Empty Data means no retained live state. Nil, malformed bytes, or wrong scope retires the connection. Absence never proves expiry or a terminal result.
+The canonical query has four fields. Key zero is schema two. Key one is the 16-byte request ID. Key two is a signed decision carrier or null. Key three is null or a two-item array with the 32-byte live session ID and the decision envelope sequence. Only a negotiated decision can carry an attempt. The complete decision carrier is at most 4096 bytes. The query is at most 4352 bytes. Empty decision bytes are invalid.
+
+A nonempty reply is a status carrier of at most 4096 bytes or an authority-signed refusal of at most 384 bytes. Refusals require a matching negotiated attempt, enrolled scope, and exact decision digest. An older phone still uses the original signed status frame and failure behavior. Both IPC ends check its type, status structure, Mac/account scope, and request ID. The phone must verify its authority signature and retained digest/challenge. Empty Data means no retained live state. Nil, malformed bytes, or wrong scope retires the connection. Absence never proves expiry or a terminal result.
 
 The endpoint uses the existing OS identity guard and shared work budget. The standard listener rechecks current transport code policy and enrollment inside the shared authority lock. The feed keeps its bounded ordered queue and refresh priority. The service rejects replies after channel replacement, closure, or cancellation. It never retries a decision automatically.
 

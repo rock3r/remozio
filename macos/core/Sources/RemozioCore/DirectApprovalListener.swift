@@ -211,12 +211,16 @@ public final class DirectApprovalListener: @unchecked Sendable {
     }
 
     static func requestCapabilities(_ requests: [ChannelRequestCapability], purpose: EnrolledChannelPurpose,
-                                    enableDeliveryResults: Bool) throws -> [ChannelRequestCapability] {
+                                    enableDeliveryResults: Bool, enableDecisionRefusals: Bool = false)
+        throws -> [ChannelRequestCapability] {
         try requests.map { capability in
             guard capability.kind == 0, capability.wireVersion == 1 else { return capability }
-            let feature = RequestDeliveryResult.capability
-            var features = capability.features.subtracting([feature])
-            if purpose == .approvals, enableDeliveryResults, features.count < 64 { features.insert(feature) }
+            let delivery = RequestDeliveryResult.capability, refusal = DecisionRefusalFrame.capability
+            var features = capability.features.subtracting([delivery, refusal])
+            if purpose == .approvals {
+                if enableDeliveryResults, features.count < 64 { features.insert(delivery) }
+                if enableDecisionRefusals, features.count < 64 { features.insert(refusal) }
+            }
             return try .init(kind: capability.kind, wireVersion: capability.wireVersion,
                 schemaVersion: capability.schemaVersion, features: features)
         }
@@ -294,7 +298,8 @@ public final class DirectApprovalListener: @unchecked Sendable {
                 }
                 if purpose == .audit, !peer.auditVersions.contains(1) { throw DirectListenerError.invalidConfiguration }
                 let requests = try Self.requestCapabilities(peer.requests, purpose: purpose,
-                    enableDeliveryResults: enableRequestDeliveryResults)
+                    enableDeliveryResults: enableRequestDeliveryResults,
+                    enableDecisionRefusals: enableRequestDeliveryResults && peer.maximumPayloadBytes >= DecisionRefusalFrame.maximumBytes)
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
                     requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .audit || purpose == .updateScheduling) ? [] : requests,
                     auditVersions: purpose == .audit ? [1] : ((purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .updateScheduling) ? [] : peer.auditVersions),
