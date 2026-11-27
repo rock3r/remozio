@@ -75,7 +75,7 @@ Decision 2 already accepts that for the execution identity, and `CAP_SYS_PTRACE`
 adds no new risk. The protection stays the authority's one-use permit. The
 AppArmor profile still limits ptrace to the frontend label. For decision 3 it must
 also let O execute commands unconfined (`ux`), so a command does not inherit the
-ptrace profile. That rule is not measured yet.
+ptrace profile. PR2 measures that rule (`unit-apparmor`); no Root run is recorded yet.
 
 ### Identity of the command
 
@@ -296,6 +296,21 @@ installer does not install or enable `remozio-exec.service` until the measuremen
 below passes and the Linux host owner turns it on. That change names the setting
 in the installer and in this document.
 
+The gate must also state the known limit of the `sudo` password prompt: a command
+has no controlling terminal (see [Inherited state of the command](#inherited-state-of-the-command)),
+so a `sudo` that asks for a password cannot ask. The PR2 measurement records this
+row and does not let it gate its `strictAdmission`. Production execution must not
+turn on with this limit unstated: either a terminal decision fixes it, or the gate
+text names it.
+
+The gate must also require a distinct outcome for a dispatch that ends without a
+command. O reports `notStarted` at S4 (see [Sequence](#sequence)) when no command
+ran. The PR2 authority records that request as `failed`, because the lifecycle has
+no transition from `executing` to a proved no-dispatch, and it keeps the reason
+`notStarted` in its record and in the report. Production execution must not turn on
+until the authority records `notStarted` as its own outcome, apart from a command
+that failed.
+
 ## Measurement
 
 A new opt-in experiment, built from the composed fixture, with O written in C next
@@ -362,11 +377,61 @@ PR2 runs the other rows: the descriptor table with two dispatches at the same
 time, the unit stop, restart and out-of-memory kill, AppArmor, the composed
 fixture's `dispatch-race-limitation` case and the `sudo` child.
 
+### Cases in PR2
+
+`scripts/run-linux-single-owner-pr2-experiment.py` runs these rows with the Swift
+authority and O as the main process of a transient unit (`systemd-run`). It
+changes no file under `/etc`: O and the authority run as disposable numeric
+identities with no `/etc` entry. systemd resolves `User=` through NSS and refuses
+a number with no record, so O's identity gets an nss-systemd drop-in record in
+`/run/userdb` (tmpfs) for the run. The authority runs by number only. The
+[experiment document](experiments/linux-single-owner.md) lists each case.
+
+- The unit options from inside a command (`NoNewPrivs:` 0 and the host's mount
+  namespace), with two negative controls (`NoNewPrivileges=yes`, `PrivateTmp=yes`)
+  that must change the result, and the unit's settings and O's limits read back.
+- The command's capability sets under the unit.
+- `passwd -S` of the caller's own account inside the command, and `NoNewPrivs:` 0
+  from the command's `/proc/self/status`. shadow-utils exits 0 for the caller's
+  own account with or without effective UID 0, so the exit code proves nothing.
+  It prints the seven `/etc/shadow` fields only when it can read `/etc/shadow`,
+  which needs the set-user-ID start with effective UID 0 (so without
+  `no_new_privs`). The seven fields are the decisive set-user-ID check. Expected:
+  seven fields. The `NoNewPrivileges=yes` control expects the two `/etc/passwd`
+  fields or a failure. `passwd -S root` is no check: shadow-utils refuses another
+  account by the real UID, with or without effective UID 0.
+- `sudo -n true` inside the command, with a 5 s limit: "a password is required" or
+  "allowed" shows that `sudo` reached its policy. On a host where `sudo` waits for
+  a FIDO touch through PAM, `-n` does not stop the wait, so a `sudo` that does not
+  end in 5 s is recorded as `inconclusive` and does not fail the case. The `sudo`
+  child's full Root sets stay not verified.
+- `sudo true` with a password prompt: recorded as a known limit, not gating.
+- AppArmor: O under its profile, the command `unconfined` through `ux`, and
+  `passwd -S` and `sudo -n` inside it. The profile also gives `r` on the command
+  images: `ux` grants no `getattr`, and O's `stat` of `/proc/<K>/exe` resolves to
+  the command image once K has executed it.
+- A second dispatch while the first command runs after S6, with the descriptor
+  checks of [Pipes](#pipes). Two preparations at the same time stay not verified.
+- `systemctl stop` and `systemctl restart` with `KillMode=process`, and a real
+  out-of-memory kill under a case-only `MemoryMax=` with `OOMPolicy=continue`.
+- O killed at S1, after the fork and before the go byte, with the Swift authority.
+- The authority alone, where each refusal must name the reason that its control
+  tests: a replayed `SUBMIT`, refused by the store's ledger, and a new decision
+  with the same submission nonce, refused by the store's replay table (O's nonce
+  is bound into the capture; the check uses the first request's store); a `HELLO` from a live process with its own PID and
+  an earlier start time (`stale-generation`); a permit of an earlier generation
+  presented by a later process (`earlier-generation`); a peer that has exited but
+  is not yet reaped (`generation-lost`); and a wrong peer. Its first outcome is
+  `notStarted`: the authority records `failed` with the reason `notStarted`.
+
+The report sets `strictAdmission` to true only when every case except the `sudo`
+password prompt passes. `productionAdmission` stays false.
+
 O's restart log is the evidence that C never left its stop between S0 and the go
-byte: the check requires no restart call for C in that interval. A `/proc` sample
-cannot prove "never". The tracer PID, when the experiment reads it as a second
-check, comes from `TracerPid:` in `/proc/<pid>/status`. The report sets
-`strictAdmission` to true only when every case passes.
+byte: the check requires no restart call for C in that interval, and a log that
+is missing a dispatch is not clean. A `/proc` sample cannot prove "never". The
+tracer PID, when the experiment reads it as a second check, comes from
+`TracerPid:` in `/proc/<pid>/status`.
 
 ## Not verified
 
@@ -374,17 +439,46 @@ The measurement is split in two pull requests. PR1 uses a stub authority (a
 one-use permit bound to O's generation and the nonce, and `beginDispatch` and the
 outcome in a file), so its report keeps `strictAdmission` and `productionAdmission`
 false. PR2 composes O with the Swift authority of the composed fixture and adds the
-systemd unit. Only PR2 can set `strictAdmission` to true. Until PR2:
+systemd unit. Only PR2 can set `strictAdmission` to true. Until the PR2 Root run is
+recorded:
 
 - the signed decision, the SQLite transaction and the real authority;
 - the unit options, `NoNewPrivs:` and the mount namespace inside a command;
-- `sudo` with a password prompt, and the controlling terminal;
 - the AppArmor `ux` rule, `KillMode=process` and `OOMPolicy=continue`.
+
+Not verified by PR2 either:
+
+- `sudo` with a password prompt, and the controlling terminal: a known limit (see
+  [Gate](#gate)).
+- `sudo -n true` on a host where PAM waits for a FIDO touch: the result is
+  `inconclusive`. The `/etc/shadow` fields of `passwd -S` give the set-user-ID
+  result instead.
+- The side files of `sudo` inside the command: it can create
+  `~/.sudo_as_admin_successful` and `/var/lib/sudo/lectured/<user>`, and it writes
+  to the authentication log. The runner does not record or remove them.
+- The full Root capability sets of a `sudo` child of the command.
+- Two dispatches prepared at the same time: O is single-threaded, and PR2 measures
+  a second dispatch while the first command runs after S6.
+- The authority's record for a dispatch that ends without a command. The durable
+  `beginDispatch` comes before the fork, and the lifecycle has no transition from
+  `executing` to a proved no-dispatch, so the PR2 authority records `failed` with
+  the reason `notStarted`. Production needs a distinct outcome for it (see S4 in
+  [Sequence](#sequence) and [Gate](#gate)).
+- Durable replay protection. `replayBinding` checks only that the capture binds
+  O's nonce: the authority sends the second decision to the store of the first
+  request, which already holds that nonce. A real replayed `SUBMIT` is refused by
+  the authority's in-memory `submissions` table, which an authority restart loses:
+  after a restart, a replayed nonce would get a new store and a `PERMIT`. The
+  production authority needs durable replay state.
+- A decision signed by a phone, and a capture of a real requester: PR2 uses
+  fixture keys and a synthetic requester.
 
 Also not verified, in either pull request:
 
 - Every result comes from one host and one kernel until a second host repeats it.
-- The `ux` rule in the AppArmor profile and the stacked label under systemd.
+- An AppArmor profile installed under `/etc/apparmor.d` and loaded at boot: PR2
+  loads its profile into the kernel only, for one run, and attaches it with
+  `AppArmorProfile=` on a transient unit.
 - An installed systemd unit, the installer setting and upgrade from an older unit.
 - `KillMode=process` and `OOMPolicy=continue` with real commands that run for a
   long time, and the left-over process warnings on restart.

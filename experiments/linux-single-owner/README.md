@@ -11,6 +11,22 @@ do not install a service, approve a real decision or turn on production executio
 - `probe.c` is the command. It writes one marker line and reports the state that
   it inherited.
 
+PR2 adds:
+
+- `authority/`, the Swift authority (one `FixtureStore` per request, the durable
+  `beginDispatch` before the permit).
+- `fdshim.c`, the transient unit's `ExecStart`, which receives O's descriptors and
+  replaces itself with O.
+- `command2.c`, the PR2 command (`cmd-report`, `cmd-sudo`, `cmd-prompt`, `cmd-hog`).
+- `apparmor.in`, O's profile with the `ux` rule for the command.
+
+```sh
+python3 scripts/run-linux-single-owner-pr2-experiment.py --build-authority --work-dir "$PWD/.build/linux-swift/single-owner"
+sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --authority <the printed path>
+sudo python3 scripts/run-linux-single-owner-pr2-experiment.py --sweep   # after a run killed before its cleanup
+python3 -m unittest tests.test_linux_single_owner_pr2_experiment
+```
+
 The supervised run needs Root through `sudo` from an ordinary account:
 
 ```sh

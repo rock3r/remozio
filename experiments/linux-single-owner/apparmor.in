@@ -1,0 +1,43 @@
+# Remozio single-owner experiment (issue #988, PR2): the AppArmor profile of the owner O.
+#
+# The runner renders this file once per run. @@TAG@@ becomes a random 8-hex tag and @@BASE@@ the
+# run's root-owned directory. It loads the profile into the kernel only (apparmor_parser -a -K: no
+# cache, nothing under /etc/apparmor.d) and removes it by name at the end. The transient unit
+# attaches it with AppArmorProfile=, which sets no no_new_privs and no mount namespace. No rule
+# includes an abstraction; every image is static, so no loader rule is needed.
+#
+# The measurement is the ux rule: the command leaves O's profile at execve and runs unconfined,
+# so sudo inside the command is not limited by O's profile.
+abi <abi/4.0>,
+
+profile rmzso-owner-@@TAG@@ flags=(enforce) {
+  capability sys_ptrace,
+  capability setuid,
+  capability setgid,
+  # C is unconfined in this experiment; K runs under this profile until its execve.
+  ptrace (read, trace) peer=unconfined,
+  ptrace (read, trace, readby, tracedby) peer=rmzso-owner-@@TAG@@,
+  signal (send) peer=unconfined,
+  signal (receive) set=(kill, term, int, hup) peer=unconfined,
+  signal (send, receive) peer=rmzso-owner-@@TAG@@,
+  unix (create, connect, accept, send, receive, getattr, getopt, shutdown),
+  # The shim, then the owner image in the same profile, then the command unconfined.
+  # AppArmorProfile= makes systemd call aa_change_onexec before it executes the shim, so the
+  # kernel checks that exec against systemd's own label, not this profile: the shim needs only
+  # mr here (the kernel maps the image under the new label). The owner image stays in the
+  # profile (ix); the command leaves it (ux).
+  @@BASE@@/run/fdshim mr,
+  @@BASE@@/run/owner mrix,
+  @@BASE@@/run/cmd-* ux,
+  # ux alone grants no getattr: O's stat of /proc/<K>/exe, which resolves to the command image
+  # once K has executed it (same_image() in owner.c), needs r. AppArmor checks the final path of
+  # each access, not the directories on the way, so run/ and cases/ need no rule of their own.
+  # r is broader than stat needs (it also lets O open the images for reading), which is harmless:
+  # the images are world-readable, and the profile has no getattr-only file permission.
+  @@BASE@@/run/cmd-* r,
+  # The rendezvous, frontend and authority sockets and the restart log of each case.
+  @@BASE@@/cases/** rw,
+  # O's own and C's procfs entries: status, stat, limits, cwd, exe, fdinfo of its pidfds.
+  /proc/ r,
+  /proc/** r,
+}
