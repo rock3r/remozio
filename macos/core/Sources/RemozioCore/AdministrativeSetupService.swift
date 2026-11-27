@@ -37,7 +37,7 @@ public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertibl
         self.maximumConnections = maximumConnections; self.handshakeTimeoutMilliseconds = handshakeTimeoutMilliseconds
         self.pairingPolicy = pairingPolicy
         var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .text(machineDirectory), 2: .bytes(macID),
-            3: .bytes(installationID), 4: .bytes(releaseDigest), 5: .bytes(codePolicy.bytes),
+            3: .bytes(installationID), 4: .bytes(releaseDigest), 5: .bytes(try codePolicy.bytes),
             6: .unsigned(UInt64(maximumConnections)), 7: .unsigned(handshakeTimeoutMilliseconds)]
         if let scope = pairingPolicy.enabledScope {
             fields[0] = .unsigned(2); fields[8] = scope
