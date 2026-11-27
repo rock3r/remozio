@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import OSLog
 import Security
 import SQLite3
 import RemozioProtocol
@@ -39,6 +40,8 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var storage: AuthorityStorage?
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
+    private var auditRetentionSuspended = false
+    private static let auditRetentionLogger = Logger(subsystem: "dev.sebastiano.remozio.macos.authority", category: "audit-retention")
     private var observePairingContention: (@Sendable () -> Void)?
     private var requestStartupAttempted = false
     private(set) var updateHealthOnly = false
@@ -437,16 +440,26 @@ public final class AuthorityJournal: @unchecked Sendable {
                                 executionIsIdle: () -> Bool = { true }) throws -> AuditRetention.Result? {
         guard lock.try() else { return nil }
         defer { lock.unlock() }
-        guard lock.depth == 1, !requestOperationActive, !updatePolicyOperationActive, let requests,
-              !updateHealthOnly, !updateCompletionOnly, !retainedSetupPolicyOnly else { return nil }
+        guard lock.depth == 1, !auditRetentionSuspended, !requestOperationActive, !updatePolicyOperationActive,
+              !updateHealthOnly, !updateCompletionOnly, !retainedSetupPolicyOnly, let requests else { return nil }
         let work = try requests.maintenanceRequestWork(), exchanges = commandExchanges.maintenanceWork
+        // The worker reads its counters here. It releases its mutex before invoking any journal callback.
         guard work.liveRequests == 0, work.commandCaptures == 0, work.activityOwners == 0,
               !exchanges.stopped, exchanges.active == 0, commandExecutions.isEmpty, commandActivity.isEmpty,
               commandsAwaitingPreparation.isEmpty, deferredCommandPreparations.isEmpty, executionIsIdle() else { return nil }
         requestOperationActive = true
         defer { requestOperationActive = false }
-        do { return try requests.pruneAuditHistoryIfNeeded(policy: policy) }
-        catch {
+        do {
+            let result = try requests.pruneAuditHistoryIfNeeded(policy: policy)
+            if let result, result.protectedExcess > 0 {
+                Self.auditRetentionLogger.notice("Audit retention kept \(result.protectedExcess, privacy: .public) rows above the target")
+            }
+            return result
+        } catch let failure as AuditRetention.PlanningFailure where !requests.retired {
+            auditRetentionSuspended = true
+            Self.auditRetentionLogger.error("Audit retention suspended until restart: \(failure.rawValue, privacy: .public)")
+            return nil
+        } catch {
             if requests.retired || !isStorageContention(error) { throw error }
             return nil
         }

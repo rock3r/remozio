@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 import RemozioProtocol
 
 /// Trusted root provider. Use the supplied clock for request checks, including a fresh sample after signing.
@@ -25,7 +24,6 @@ public final class AuthorityService: @unchecked Sendable {
     private let listener: AuthorityXPCListener
     private var maintenance: AuthorityMaintenanceLoop?
     private var auditMaintenance: AuthorityMaintenanceLoop?
-    private static let auditRetentionLogger = Logger(subsystem: "dev.sebastiano.remozio.macos.authority", category: "audit-retention")
     private let requestClock: @Sendable () throws -> AuthorityMoment
     private let onMaintenanceFailure: @Sendable () -> Void
     private var started = false
@@ -209,9 +207,7 @@ public final class AuthorityService: @unchecked Sendable {
                 }, failed: { [weak self] in self?.maintenanceDidFail() })
                 let policy = try AuditRetention.Policy(maximumRowsPerBatch: 10_000)
                 auditMaintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: 60_000, runImmediately: false, work: {
-                    guard let result = try journal.pruneAuditHistoryIfIdle(policy: policy, executionIsIdle: auditExecutionIsIdle),
-                          result.protectedExcess > 0 else { return }
-                    Self.auditRetentionLogger.notice("Audit retention kept \(result.protectedExcess, privacy: .public) rows above the target")
+                    _ = try journal.pruneAuditHistoryIfIdle(policy: policy, executionIsIdle: auditExecutionIsIdle)
                 }, failed: { [weak self] in self?.maintenanceDidFail() })
             } else if let maintain {
                 maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: maintenanceIntervalMilliseconds,
