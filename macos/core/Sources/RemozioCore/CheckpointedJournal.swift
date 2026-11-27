@@ -20,6 +20,11 @@ final class CheckpointedJournal {
     /// The callback may mutate the journal only. It must not publish results or cause external effects.
     /// `epoch` identifies the resulting audit epoch, including when the callback creates a fresh epoch.
     func write<Value>(epoch: Data, recoverRejectedBody: Bool = false, _ body: (JournalTransaction) throws -> Value) throws -> Value {
+        try write(epoch: epoch, recoverRejectedBody: recoverRejectedBody, expectedCheckpoint: nil, body)
+    }
+
+    private func write<Value>(epoch: Data, recoverRejectedBody: Bool = false, expectedCheckpoint: ContinuityCheckpoint?,
+                              _ body: (JournalTransaction) throws -> Value) throws -> Value {
         guard !retired else { throw Failure.retired }
         guard !active else { throw Failure.reentrant }
         active = true
@@ -31,6 +36,7 @@ final class CheckpointedJournal {
             original = before
             guard !before.recoveryRequired else { throw ContinuityStoreError.recoveryRequired }
             guard before.pending == nil else { throw Failure.unresolvedPreparation }
+            if let expectedCheckpoint, before.committed != expectedCheckpoint { throw Failure.boundaryMismatch }
             guard before.committed.generation < UInt64.max else { throw Failure.generationExhausted }
             let (value, candidate) = try journal.write { transaction in
                 guard try Self.matches(before.committed, transaction: transaction) else { throw Failure.boundaryMismatch }
@@ -69,6 +75,10 @@ final class CheckpointedJournal {
 
     /// Validates the independent checkpoint in the same journal transaction as the caller's read.
     func read<Value>(_ body: (JournalTransaction) throws -> Value) throws -> Value {
+        try verifiedRead { _, transaction in try body(transaction) }
+    }
+
+    private func verifiedRead<Value>(_ body: (ContinuityCheckpoint, JournalTransaction) throws -> Value) throws -> Value {
         guard !retired else { throw Failure.retired }
         guard !active else { throw Failure.reentrant }
         active = true
@@ -83,7 +93,23 @@ final class CheckpointedJournal {
             do {
                 guard try Self.matches(checkpoint.committed, transaction: transaction) else { throw Failure.boundaryMismatch }
             } catch { retired = true; throw error }
-            return try body(transaction)
+            return try body(checkpoint.committed, transaction)
+        }
+    }
+
+    /// Run one bounded maintenance batch under the caller's exclusive journal ownership.
+    /// The caller schedules idle work and continues eligible batches until the target is reached.
+    func pruneAuditHistory(policy: AuditRetention.Policy, continuing: Bool = false) throws -> AuditRetention.Result {
+        let (checkpoint, plan) = try verifiedRead { checkpoint, transaction in
+            (checkpoint, try AuditRetention.plan(transaction: transaction, activeEpoch: checkpoint.journalEpoch,
+                                                 policy: policy, continuing: continuing))
+        }
+        guard !plan.prefixes.isEmpty else { return plan.result }
+        return try write(epoch: checkpoint.journalEpoch, expectedCheckpoint: checkpoint) { transaction in
+            for prefix in plan.prefixes {
+                try transaction.prune(epoch: prefix.epoch, through: prefix.through, expectedHead: prefix.head)
+            }
+            return plan.result
         }
     }
 

@@ -89,6 +89,29 @@ final class ConsumptionJournalTests: XCTestCase {
         XCTAssertEqual(batch.head, 2)
     }
 
+    func testAuditRetentionReportsSignedGapAndPreservesConsumptionAndOutcome() throws {
+        let fixture = try CheckpointedJournalTests.Fixture()
+        let commits = CheckpointedJournal(journal: fixture.journal, continuity: fixture.store)
+        let receipt = try commits.write(epoch: fixture.epoch) { try consume($0, fixture.writer, request: request()) }
+        let outcome = try commits.write(epoch: fixture.epoch) { try transition($0, fixture.writer, event: .loseOutcome) }
+        let policy = try AuditRetention.Policy(targetRows: 1, triggerRows: 2, maximumRowsPerBatch: 10)
+        XCTAssertEqual(try commits.pruneAuditHistory(policy: policy).prunedRows, 1)
+        XCTAssertEqual(try commits.read { try $0.consumption(requestID: id(4)) }, receipt)
+        XCTAssertEqual(try commits.read { try $0.consumptionOutcome(requestID: id(4)) }, outcome)
+
+        let replies = try AuditReplyBuilder(macID: id(1), accountID: id(2), authorityPublicKey: key.publicKey.x963Representation,
+            limits: AuditReplyLimits(batch: bounds, record: bounds, history: bounds, descriptor: bounds,
+                signing: bounds, maximumRecords: 10)) { try self.key.signature(for: $0).rawRepresentation }
+        let query = try AuditPageRequest(nonce: id(9, count: 32), epoch: fixture.epoch, generation: 7, after: 0)
+        let reply = try replies.page(query, journal: fixture.journal)
+        XCTAssertTrue(try AuditBatchSignature.verify(signature: reply.signature, publicKey: key.publicKey.x963Representation,
+            wireVersion: 1, canonicalPayload: reply.canonicalBody, payloadLimits: bounds, inputLimits: bounds))
+        let batch = try AuditBatch.decode(reply.canonicalBody, batchLimits: bounds, recordLimits: bounds, maximumRecords: 10)
+        XCTAssertTrue(batch.retentionGap)
+        XCTAssertEqual(batch.records, [outcome.event])
+        XCTAssertEqual(batch.head, 2)
+    }
+
     func testFirstVerifiedPhoneWinsAndReopenCannotChangeItsDecision() throws {
         for firstDeclines in [false, true] {
             let fixture = try Fixture(), database = try open(fixture, initialize: true), request = try request()

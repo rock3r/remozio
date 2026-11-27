@@ -100,13 +100,34 @@ public final class AuditJournalTables {
             let rc = sqlite3_step($0)
             if rc == SQLITE_DONE { return nil }
             try row(rc)
-            let descriptor = try AuditEpochDescriptor.decode(blob($0, 0, maximum: descriptorLimits.maxBytes), limits: descriptorLimits)
-            guard descriptor.macID == macID, descriptor.accountID == accountID, descriptor.epoch == id else {
-                throw AuditJournalError.corruptData
-            }
-            return try AuditEpochRead(descriptor: descriptor, retainedAfter: number(blob($0, 2, maximum: 8)),
-                                      head: number(blob($0, 1, maximum: 8)))
+            return try epochRow($0, id: id, descriptorColumn: 0)
         }
+    }
+
+    /// Read account epoch boundaries without visiting the event rows.
+    public func epochs() throws -> [AuditEpochRead] {
+        try transaction()
+        return try statement("SELECT epoch,descriptor,head,retained FROM main.audit_epochs_v1 WHERE mac=? AND account=?",
+                             [macID, accountID]) { statement in
+            var epochs = [AuditEpochRead]()
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { return epochs }
+                try row(result)
+                let id = try blob(statement, 0, maximum: 16)
+                epochs.append(try epochRow(statement, id: id, descriptorColumn: 1))
+            }
+        }
+    }
+
+    private func epochRow(_ row: OpaquePointer, id: Data, descriptorColumn: Int32) throws -> AuditEpochRead {
+        let descriptor = try AuditEpochDescriptor.decode(blob(row, descriptorColumn, maximum: descriptorLimits.maxBytes),
+                                                        limits: descriptorLimits)
+        guard descriptor.macID == macID, descriptor.accountID == accountID, descriptor.epoch == id else {
+            throw AuditJournalError.corruptData
+        }
+        return try AuditEpochRead(descriptor: descriptor, retainedAfter: number(blob(row, descriptorColumn + 2, maximum: 8)),
+                                  head: number(blob(row, descriptorColumn + 1, maximum: 8)))
     }
 
     /// The outer read transaction keeps the descriptor, boundaries and page in one snapshot.
