@@ -446,27 +446,38 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     func testStartupReconciliationFailureKeepsAdmissionClosedUntilReopen() throws {
-        enum Cut: CaseIterable { case prepare, journalCommit, finalize }
+        enum Cut: Error, CaseIterable { case beforePrepare, afterPrepare, afterCommit }
         for cut in Cut.allCases {
-            let finalize = cut == .finalize
+            let finalize = cut == .afterCommit
             let fixture = try Fixture(), (db, _, owner, store) = try retirementFixture(fixture, installReplay: false)
             defer { try? db.close(); store.close() }
             let requests = try seedStartupPages(owner, interrupted: true)
             let startup = try JournalStartupRecovery(journal: db, continuity: store, maximumRecords: 1, maximumBytes: 16384)
             let next = try descriptor(4, generation: store.read().committed.currentAuthorityGeneration)
-            guard case .recovering = try startup.start(descriptor: next) else { return XCTFail("startup did not begin") }
-            let before = try store.read().committed
-            if cut == .journalCommit {
-                var reader: OpaquePointer?
-                guard sqlite3_open_v2(fixture.path, &reader, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
-                      let reader else { throw Failure.fixture }
-                defer { sqlite3_close(reader) }
-                guard sqlite3_exec(reader, "BEGIN; SELECT count(*) FROM sqlite_schema", nil, nil, nil) == SQLITE_OK else {
-                    throw Failure.fixture
+            let before: ContinuityCheckpoint
+            if cut == .afterPrepare {
+                let commits = CheckpointedJournal(journal: db, continuity: store)
+                let writer = try commits.write(epoch: next.epoch) { try $0.createEpoch(next) }
+                before = try store.read().committed
+                XCTAssertThrowsError(try db.write { transaction in
+                    let page = try transaction.consumptionOutcomes(afterRequestID: requests[0],
+                        maximumRecords: 1, maximumBytes: 16384)
+                    let batch = try transaction.reconcileInterruptedConsumptions(afterRequestID: requests[0],
+                        maximumRecords: 1, maximumBytes: 16384, writer: writer, expectedHead: 0, expectedPage: page)
+                    XCTAssertEqual(batch.changedCount, 1)
+                    let digests = try transaction.continuityDigests()
+                    let candidate = try before.successor(authorityDigest: digests.authority,
+                        ledgerDigest: digests.ledger, journalEpoch: writer.epoch, journalHead: batch.journalHead)
+                    // Interrupt after the independent preparation and before SQLite commits the journal.
+                    try store.prepare(expected: before, candidate: candidate)
+                    throw Cut.afterPrepare
+                }) {
+                    XCTAssertEqual($0 as? Cut, .afterPrepare)
                 }
-                XCTAssertThrowsError(try startup.advance())
-                XCTAssertEqual(sqlite3_exec(reader, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+                XCTAssertEqual(try db.read { try $0.consumptionOutcome(requestID: requests[1])?.phase }, .authorized)
             } else {
+                guard case .recovering = try startup.start(descriptor: next) else { return XCTFail("startup did not begin") }
+                before = try store.read().committed
                 let condition = finalize ? "NEW.pending IS NULL" : "NEW.pending IS NOT NULL"
                 try fixture.sql("""
                     CREATE TRIGGER fail_outcome_recovery BEFORE UPDATE ON continuity_v1 WHEN \(condition)
@@ -474,17 +485,41 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                     """, continuity: true)
                 XCTAssertThrowsError(try startup.advance())
                 try fixture.sql("DROP TRIGGER fail_outcome_recovery", continuity: true)
+                XCTAssertThrowsError(try startup.advance())
             }
             XCTAssertThrowsError(try startup.completedWriter())
-            XCTAssertThrowsError(try startup.advance())
             let interrupted = try store.read()
             XCTAssertEqual(interrupted.committed, before)
-            XCTAssertEqual(interrupted.pending?.journalHead, cut == .prepare ? nil : 1)
+            let expectedRecovery: JournalCheckpointRecovery.Result
+            let journalBoundary: ContinuityCheckpoint
+            switch cut {
+            case .beforePrepare:
+                XCTAssertNil(interrupted.pending)
+                expectedRecovery = .unchanged(before)
+                journalBoundary = before
+            case .afterPrepare:
+                let pending = try XCTUnwrap(interrupted.pending)
+                XCTAssertEqual(pending.journalHead, 1)
+                XCTAssertNotEqual(pending.ledgerDigest, before.ledgerDigest)
+                expectedRecovery = .discarded(before)
+                journalBoundary = before
+            case .afterCommit:
+                let pending = try XCTUnwrap(interrupted.pending)
+                XCTAssertEqual(pending.journalHead, 1)
+                expectedRecovery = .finalized(pending)
+                journalBoundary = pending
+            }
+            XCTAssertEqual(try db.read { transaction in
+                try CheckpointedJournal.checkpoint(transaction: transaction, epoch: next.epoch,
+                    generation: journalBoundary.generation, authorityGeneration: journalBoundary.authorityGeneration)
+            }, journalBoundary)
             try db.close(); store.close()
             let reopened = try open(fixture, initialize: false)
             let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
                 relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
             defer { try? reopened.close(); continuity.close() }
+            XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: reopened, continuity: continuity), expectedRecovery)
+            XCTAssertNil(try continuity.read().pending)
             let restart = try JournalStartupRecovery(journal: reopened, continuity: continuity,
                 maximumRecords: 1, maximumBytes: 16384)
             let retryEpoch = try descriptor(5, generation: before.currentAuthorityGeneration)
