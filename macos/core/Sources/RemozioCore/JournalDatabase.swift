@@ -510,9 +510,9 @@ public final class JournalDatabase {
             throw JournalDatabaseError.incompatibleStore
         }
         let version = try expectedVersion ?? AuthorityJournalSchema.featureTier(on: db)
-        if format >= AuthorityJournalSchema.pairingRecoveryFormat {
+        if format >= AuthorityJournalSchema.recoveryFormat {
             _ = try JournalContinuityDigest.requireCatalog(db, recoveryFormat: true, tier: version,
-                permanentReplay: format == AuthorityJournalSchema.recoveryFormat)
+                permanentReplay: format == AuthorityJournalSchema.permanentReplayFormat)
             try PairingRecoveryStageJournal.validateStorage(on: db)
         } else {
             try statement("""
