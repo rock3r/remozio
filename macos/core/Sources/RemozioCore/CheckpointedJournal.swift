@@ -179,11 +179,9 @@ final class CheckpointedJournal {
         guard let planned else {
             return ConsumptionRecoveryBatch(nextRequestID: nil, changedCount: 0, journalHead: expectedHead)
         }
-        return try write(epoch: writer.epoch, expectedCheckpoint: checkpoint) { transaction in
-            let page = try transaction.consumptionOutcomes(afterRequestID: after,
-                maximumRecords: maximumRecords, maximumBytes: maximumBytes)
-            guard page == planned else { throw Failure.boundaryMismatch }
-            return try transaction.reconcileInterruptedConsumptions(in: page, writer: writer, expectedHead: expectedHead)
+        return try write(epoch: writer.epoch, expectedCheckpoint: checkpoint) {
+            try $0.reconcileInterruptedConsumptions(afterRequestID: after, maximumRecords: maximumRecords,
+                maximumBytes: maximumBytes, writer: writer, expectedHead: expectedHead, expectedPage: planned)
         }
     }
 
