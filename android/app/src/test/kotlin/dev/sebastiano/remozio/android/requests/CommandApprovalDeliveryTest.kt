@@ -14,8 +14,11 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
+import kotlin.test.fail
 
 class CommandApprovalDeliveryTest {
     private val approval = ApprovalMessage(1u, ApprovalMessageType.DECISION,
@@ -40,6 +43,66 @@ class CommandApprovalDeliveryTest {
         assertSame(approval, state.retained)
         state.deliver(state.attempts.begin(), approval) { throw CommandDecisionNotSent() }
         assertEquals(CommandActionStage.UNCERTAIN, state.stage)
+        assertSame(approval, state.retained)
+    }
+
+    @Test fun retryUsesAFreshTicketAndTheSameRetainedMessage() {
+        val state = CommandApprovalViewState()
+        state.stage = CommandActionStage.UNCERTAIN
+        state.retained = approval
+        val previous = state.attempts.begin()
+        var deliveries = 0
+
+        state.retry(foreground = true, connected = { true }) { ticket, message ->
+            assertTrue(state.attempts.owns(ticket), "Retry must use a current ticket")
+            assertFalse(state.attempts.owns(previous), "Retry must invalidate the previous ticket")
+            assertSame(approval, message, "Retry must use the retained message")
+            deliveries++
+        }
+        assertEquals(1, deliveries)
+    }
+
+    @Test fun ineligibleRetryLeavesTheCurrentTicketAndMessageInPlace() {
+        fun assertBlocked(foreground: Boolean = true, connected: Boolean = true,
+                          stage: CommandActionStage = CommandActionStage.UNCERTAIN, message: ApprovalMessage? = approval) {
+            val state = CommandApprovalViewState()
+            state.stage = stage
+            state.retained = message
+            val ticket = state.attempts.begin()
+
+            state.retry(foreground, { connected }) { _, _ -> fail("An ineligible retry reached delivery") }
+            assertTrue(state.attempts.owns(ticket), "An ineligible retry replaced the ticket")
+            assertSame(message, state.retained)
+            assertEquals(stage, state.stage)
+        }
+
+        assertBlocked(foreground = false)
+        assertBlocked(connected = false)
+        assertBlocked(stage = CommandActionStage.AWAITING)
+        assertBlocked(message = null)
+    }
+
+    @Test fun staleTicketCannotEnterDeliveryOrReplaceTheCurrentChoice() = runBlocking<Unit> {
+        val state = CommandApprovalViewState()
+        val stale = state.attempts.begin()
+        val current = state.attempts.begin()
+        state.stage = CommandActionStage.UNCERTAIN
+        state.retained = decline
+
+        state.deliver(stale, approval) { fail("A stale ticket reached the sender") }
+        assertTrue(state.attempts.owns(current))
+        assertSame(decline, state.retained)
+        assertEquals(CommandActionStage.UNCERTAIN, state.stage)
+    }
+
+    @Test fun lateWriteCompletionCannotReplaceTheStageOfANewerTicket() = runBlocking<Unit> {
+        val state = CommandApprovalViewState()
+        val first = state.attempts.begin()
+        state.deliver(first, approval) {
+            state.attempts.begin()
+            state.stage = CommandActionStage.PREPARING
+        }
+        assertEquals(CommandActionStage.PREPARING, state.stage, "A stale write replaced the current stage")
         assertSame(approval, state.retained)
     }
 

@@ -115,6 +115,12 @@ internal class CommandApprovalViewState {
         stage = CommandActionStage.REFUSED
     }
 
+    fun retry(foreground: Boolean, connected: () -> Boolean, deliver: (Any, ApprovalMessage) -> Unit) {
+        if (!foreground || stage != CommandActionStage.UNCERTAIN || !connected()) return
+        val message = retained ?: return
+        deliver(attempts.begin(), message)
+    }
+
     suspend fun deliver(ticket: Any, message: ApprovalMessage, send: suspend (ApprovalMessage) -> Unit) {
         if (!attempts.owns(ticket)) return
         val previouslyUncertain = retained != null
@@ -295,10 +301,9 @@ internal fun CommandApprovalControls(session: CommandRequestSession, context: Co
             }
             if (state.stage == CommandActionStage.UNCERTAIN && state.retained != null && (availability.execute || availability.decline)) {
                 OutlinedButton(onClick = {
-                    if (foreground && state.stage == CommandActionStage.UNCERTAIN &&
-                        context.connectionState.value == CommandConnectionState.CONNECTED) {
-                        state.retained?.let { deliver(attempts.begin(), it) }
-                    }
+                    state.retry(foreground, {
+                        context.connectionState.value == CommandConnectionState.CONNECTED
+                    }, ::deliver)
                 }, enabled = foreground && connected, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.command_action_retry)) }
             }
         }
