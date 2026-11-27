@@ -659,6 +659,7 @@ class _Fake:
         self.__dict__.update(values)
 
 
+@unittest.skipUnless(LINUX, "needs Linux socket flags (SOCK_CLOEXEC)")
 class CleanupTests(unittest.TestCase):
     def make_run(self):
         operator = SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="operator")
@@ -1384,6 +1385,7 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("unit_properties(self.owner_uid, self.owner_gid,", SCRIPT.read_text())
 
 
+@unittest.skipUnless(LINUX, "needs Linux system library directories")
 class LoaderTests(unittest.TestCase):
     """The authority must start as its own identity (Toni's item 3)."""
 
@@ -1443,7 +1445,10 @@ class LoaderTests(unittest.TestCase):
                     patch.object(EXPERIMENT.PL, "root_owned_ancestry", return_value=ancestry), \
                     patch.object(EXPERIMENT.os, "lstat", return_value=info), self.assertRaises(RuntimeError):
                 EXPERIMENT.resolved_system_library(path)
-        self.assertEqual(EXPERIMENT.resolved_system_library(path), Path(path))
+        with patch.object(EXPERIMENT.os.path, "realpath", return_value=path), \
+                patch.object(EXPERIMENT.PL, "root_owned_ancestry", return_value=True), \
+                patch.object(EXPERIMENT.os, "lstat", return_value=cases[0][1]):
+            self.assertEqual(EXPERIMENT.resolved_system_library(path), Path(path))
 
     def test_the_build_links_the_swift_runtime_statically(self):
         self.assertIn('"--static-swift-stdlib"', SCRIPT.read_text())
