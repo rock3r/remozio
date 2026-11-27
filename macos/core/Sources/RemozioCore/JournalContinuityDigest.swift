@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import RemozioHostCore
 import SQLite3
 
 /// Evidence from one journal transaction. These hashes do not grant admission or dispatch authority.
@@ -46,13 +47,13 @@ enum JournalContinuityDigest {
         if permanentReplay { try PermanentReplayJournal.validateSchema(on: db) }
         let authorityTables = Self.authorityTables + (tier >= 13 ? ["authority_code_policy_v1"] : [])
             + (tier >= 15 && !permanentReplay ? ["command_submissions_v1"] : [])
-            + (permanentReplay ? PermanentReplayJournal.tables : [])
+            + (permanentReplay ? PermanentReplayJournal.tables + [PermanentReplayCounters.authorityTable] : [])
             + (tier >= 16 ? ["gateway_submission_outbox_v1"] : [])
             + (tier >= 17 ? ["update_scheduling_state_v1", "update_scheduling_operations_v1"] : [])
             + (tier >= 18 ? [GatewayAuthorityJournal.abandonmentTable] : [])
             + (recoveryFormat ? [AuthorityJournalSchema.tierTable, PairingRecoveryStageJournal.table] : [])
         let ledgerTables = Self.ledgerTables + (tier >= 14 ? ["history_recoveries_v1"] : [])
-            + (permanentReplay ? ["command_submissions_v1", ReplayDetailJournal.table] : [])
+            + (permanentReplay ? ["command_submissions_v1", ReplayDetailJournal.table, PermanentReplayCounters.ledgerTable] : [])
         guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
         return (authorityTables, ledgerTables)
     }

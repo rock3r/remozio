@@ -153,17 +153,19 @@ public actor AuthorityWakeService {
     }
     static func openInstalledPresence(configuration: AuthorityPresenceStartupConfiguration,
         updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory?,
+        preparePermanentReplay: (@Sendable (AuthorityJournal) throws -> Void)?,
         reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
         commandReceiverFactory: AuthorityCommandReceiveFactory?, commandExecutionFactory: AuthorityCommandExecutionFactory?,
         onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> AuthorityWakeService {
         try openPresence(configuration: configuration.wake, accountPresence: configuration.presence, appEndpoint: configuration.endpoint,
             pairingConfiguration: configuration.pairing, updateSchedulingFactory: updateSchedulingFactory,
-            reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory,
+            preparePermanentReplay: preparePermanentReplay, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory,
             commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     private static func openPresence(configuration: AuthorityWakeStartupConfiguration, accountPresence: AuthorityAccountPresenceConfiguration,
         appEndpoint: AuthorityPresenceEndpointConfiguration, pairingConfiguration: AuthorityPairingSetupConfiguration?,
         updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory?,
+        preparePermanentReplay: (@Sendable (AuthorityJournal) throws -> Void)? = nil,
         reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
         commandReceiverFactory: AuthorityCommandReceiveFactory?, commandExecutionFactory: AuthorityCommandExecutionFactory?,
         onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> AuthorityWakeService {
@@ -181,6 +183,12 @@ public actor AuthorityWakeService {
             payloadLimits: limits, signingLimits: CBORLimits(maxBytes: 131_072, maxDepth: 16, maxItems: 4096))
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy,
             gatewayPolicy: configuration.phonePush?.journalPolicy(clockEpoch: clock.epoch))
+        do {
+            try journal.prepareLegacyReplayInstallation(preparePermanentReplay)
+        } catch {
+            try? journal.close()
+            throw error
+        }
         let presence = AuthorityPresenceRuntime(configuration: accountPresence, clockEpoch: clock.epoch)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint, pairingConfiguration: pairingConfiguration,
             routing: { throw AuthorityPresenceError.unavailable }, updateSchedulingFactory: updateSchedulingFactory,

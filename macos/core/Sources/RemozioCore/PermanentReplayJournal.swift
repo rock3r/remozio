@@ -3,14 +3,14 @@ import SQLite3
 
 /// Defines the replay tables owned by the checkpointed macOS journal format.
 enum PermanentReplayJournal {
-    enum Failure: Error { case inconsistentCommandKeys }
+    enum Failure: Error { case inconsistentCommandKeys, inconsistentCounters }
 
     private static let consumed = ConsumptionJournalTables.permanentReplayTable
     private static let submissions = CommandSubmissionReplayTables.permanentReplayTable
     private static let nonces = CommandSubmissionReplayTables.permanentNonceTable
     static let tables = [consumed, submissions, nonces]
 
-    private static let definitions = [
+    private static let keyDefinitions = [
         """
         CREATE TABLE \(consumed) (
             mac BLOB NOT NULL CHECK(length(mac)=16), account BLOB NOT NULL CHECK(length(account)=16),
@@ -46,11 +46,21 @@ enum PermanentReplayJournal {
     static func seed(on db: OpaquePointer) throws {
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         guard try !hasRecordedHistoryGap(on: db) else { throw JournalDatabaseError.incompatibleStore }
-        let sql = definitions.joined(separator: ";\n") + """
+        let counterDefinitions = [PermanentReplayCounters.authorityDefinition, PermanentReplayCounters.ledgerDefinition]
+        let sql = (keyDefinitions + counterDefinitions).joined(separator: ";\n") + """
         ;
         INSERT INTO main.\(consumed) SELECT mac,account,request FROM main.consumptions_v1;
         INSERT INTO main.\(submissions) SELECT mac,account,submission,nonce FROM main.command_submissions_v1;
         INSERT INTO main.\(nonces) SELECT mac,account,nonce,submission FROM main.\(submissions);
+        INSERT INTO main.\(PermanentReplayCounters.authorityTable)
+          SELECT j.mac,j.account,
+            (SELECT count(*) FROM main.\(consumed) k WHERE k.mac=j.mac AND k.account=j.account),
+            (SELECT count(*) FROM main.\(submissions) k WHERE k.mac=j.mac AND k.account=j.account)
+          FROM main.journal_identity_v1 j;
+        INSERT INTO main.\(PermanentReplayCounters.ledgerTable)
+          SELECT j.mac,j.account,
+            (SELECT count(*) FROM main.consumptions_v1 c WHERE c.mac=j.mac AND c.account=j.account)
+          FROM main.journal_identity_v1 j;
         """
         let result = sqlite3_exec(db, sql, nil, nil, nil)
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
@@ -86,11 +96,35 @@ enum PermanentReplayJournal {
             guard step == SQLITE_ROW else { throw JournalDatabaseError.storage(step) }
             guard sqlite3_column_int(row, 0) == 1 else { throw Failure.inconsistentCommandKeys }
         }
+        try validateCounts(on: db)
+    }
+
+    private static func validateCounts(on db: OpaquePointer) throws {
+        let authorityCounts = PermanentReplayCounters.authorityTable
+        let liveCounts = PermanentReplayCounters.ledgerTable
+        try query(db, """
+            SELECT (SELECT count(*) FROM main.\(authorityCounts))=1
+              AND (SELECT count(*) FROM main.\(liveCounts))=1
+              AND EXISTS (
+                SELECT 1 FROM main.journal_identity_v1 j
+                  JOIN main.\(authorityCounts) c ON c.mac=j.mac AND c.account=j.account
+                  JOIN main.\(liveCounts) l ON l.mac=j.mac AND l.account=j.account
+                WHERE c.consumed_requests=(SELECT count(*) FROM main.\(consumed) k WHERE k.mac=j.mac AND k.account=j.account)
+                  AND c.command_submissions=(SELECT count(*) FROM main.\(submissions) k WHERE k.mac=j.mac AND k.account=j.account)
+                  AND l.live_receipts=(SELECT count(*) FROM main.consumptions_v1 r WHERE r.mac=j.mac AND r.account=j.account)
+              )
+            """) { row in
+            let step = sqlite3_step(row)
+            guard step == SQLITE_ROW else { throw JournalDatabaseError.storage(step) }
+            guard sqlite3_column_int(row, 0) == 1 else { throw Failure.inconsistentCounters }
+        }
     }
 
     static func validateSchema(on db: OpaquePointer) throws {
         // A WITHOUT ROWID primary key is the table B-tree. There must be no secondary index to select.
-        let schemaTables = tables + [ReplayDetailJournal.table]
+        let schemaTables = tables + [ReplayDetailJournal.table, PermanentReplayCounters.authorityTable, PermanentReplayCounters.ledgerTable]
+        let schemaDefinitions = keyDefinitions + [ReplayDetailJournal.definition,
+            PermanentReplayCounters.authorityDefinition, PermanentReplayCounters.ledgerDefinition]
         let names = schemaTables.map { "'\($0)'" }.joined(separator: ",")
         try query(db, """
             SELECT 1 FROM main.sqlite_schema WHERE type='trigger'
@@ -102,7 +136,7 @@ enum PermanentReplayJournal {
             case let code: throw JournalDatabaseError.storage(code)
             }
         }
-        for (table, definition) in zip(schemaTables, definitions + [ReplayDetailJournal.definition]) {
+        for (table, definition) in zip(schemaTables, schemaDefinitions) {
             try query(db, """
                 SELECT type,sql FROM main.sqlite_schema
                 WHERE name='\(table)'

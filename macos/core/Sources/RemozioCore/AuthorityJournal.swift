@@ -169,6 +169,12 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Only a legacy journal needs the installed migration authorization. Request startup verifies existing storage.
+    func prepareLegacyReplayInstallation(_ install: (@Sendable (AuthorityJournal) throws -> Void)?) throws {
+        guard let install, try read({ try !$0.hasPermanentReplayStorage() }) else { return }
+        try install(self)
+    }
+
     /// The installer validates the reader floor before calling this startup-only migration.
     func installPermanentReplay() throws -> CheckpointedJournal.PermanentReplayMigration {
         try lock.withLock {

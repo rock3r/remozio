@@ -98,6 +98,7 @@ enum JournalHistoryRecovery {
             ]), limits: limits), limits: limits)
             let writer = try transaction.createEpoch(descriptor)
             try transaction.recordHistoryRecovery(intent)
+            try transaction.recountLiveReceiptsAfterHistoryLoss()
             // Deterministic metadata permits the exact transaction to be reconstructed after rollback.
             let gap = try AuditEventMetadata(eventID: intent.recoveryEpoch, macID: macID, accountID: accountID,
                 journalEpoch: intent.recoveryEpoch, sequence: 1, requestID: nil, eventTimeMs: nil,

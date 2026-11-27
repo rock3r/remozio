@@ -170,8 +170,9 @@ final class CommandSubmissionReplayTablesTests: XCTestCase {
         _ = try db.write { try table.reserve(value()) }
     }
 
-    func testFailedPermanentReservationRollsBackBothKeys() throws {
-        let db = try DB(), table = try tables(db), reservation = try value()
+    func testFailedPermanentReservationRollsBackBothKeysAndCount() throws {
+        let db = try DB(), table = try tables(db, maximum: 1), reservation = try value()
+        let counters = PermanentReplayCounters(connection: db.handle, macID: reservation.macID, accountID: reservation.accountID)
         try db.exec("""
             CREATE TABLE command_submission_replay_v1 (
                 mac BLOB, account BLOB, submission BLOB, nonce BLOB, PRIMARY KEY(mac,account,submission)
@@ -179,18 +180,30 @@ final class CommandSubmissionReplayTablesTests: XCTestCase {
             CREATE TABLE command_nonce_replay_v1 (
                 mac BLOB, account BLOB, nonce BLOB, submission BLOB, PRIMARY KEY(mac,account,nonce)
             ) STRICT, WITHOUT ROWID;
+            \(PermanentReplayCounters.authorityDefinition);
+            INSERT INTO permanent_replay_counts_v1 VALUES(
+                x'01010101010101010101010101010101',x'02020202020202020202020202020202',0,0);
             ALTER TABLE command_submissions_v1 RENAME TO unavailable_details;
             """)
         try db.write {
             expect(.storage(SQLITE_ERROR)) { _ = try table.reserve(reservation, permanentReplay: true) }
             XCTAssertEqual(try db.integer("SELECT count(*) FROM command_submission_replay_v1"), 0)
             XCTAssertEqual(try db.integer("SELECT count(*) FROM command_nonce_replay_v1"), 0)
+            XCTAssertEqual(try counters.count(.commandSubmissions), 0)
         }
         try db.exec("ALTER TABLE unavailable_details RENAME TO command_submissions_v1")
         try db.write {
             XCTAssertEqual(try table.reserve(reservation, permanentReplay: true), reservation)
             expect(.alreadyReserved) { _ = try table.reserve(value(10, nonce: 7), permanentReplay: true) }
             expect(.alreadyReserved) { _ = try table.reserve(value(7, nonce: 10), permanentReplay: true) }
+            expect(.capacityExceeded) { _ = try table.reserve(value(11, nonce: 12), permanentReplay: true) }
+            XCTAssertEqual(try counters.count(.commandSubmissions), 1)
+        }
+        try db.exec("DELETE FROM permanent_replay_counts_v1")
+        let higherCap = try tables(db, maximum: 10, initialize: false)
+        try db.write {
+            expect(.corruptData) { _ = try higherCap.reserve(value(11, nonce: 12), permanentReplay: true) }
+            XCTAssertFalse(try higherCap.contains(value(11, nonce: 12).submission, permanentReplay: true))
         }
     }
 

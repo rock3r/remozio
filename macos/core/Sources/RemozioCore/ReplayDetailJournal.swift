@@ -1,4 +1,5 @@
 import Foundation
+import RemozioHostCore
 import SQLite3
 
 /// Scoped ledger metadata for observing settlement and linking new command reservations to requests.
@@ -36,10 +37,12 @@ struct ReplayDetailJournal {
 
     private let db: OpaquePointer
     private let scope: [Data]
+    private let counts: PermanentReplayCounters
 
     init(connection: OpaquePointer, macID: Data, accountID: Data) {
         db = connection
         scope = [macID, accountID]
+        counts = PermanentReplayCounters(connection: db, macID: macID, accountID: accountID)
     }
 
     static func create(on db: OpaquePointer) throws {
@@ -48,11 +51,7 @@ struct ReplayDetailJournal {
     }
 
     func liveCount() throws -> Int {
-        try statement("SELECT count(*) FROM main.consumptions_v1 WHERE mac=? AND account=?", scope) {
-            let code = sqlite3_step($0)
-            guard code == SQLITE_ROW else { throw JournalDatabaseError.storage(code) }
-            return Int(sqlite3_column_int64($0, 0))
-        }
+        try withCounts { try Int(counts.count(.liveReceipts)) }
     }
 
     func bindSubmission(_ submission: Data, to request: Data) throws {
@@ -93,8 +92,20 @@ struct ReplayDetailJournal {
         try change("DELETE FROM main.consumption_outcomes_v1 WHERE mac=? AND account=? AND request=?", scope + [request])
         try change("DELETE FROM main.consumptions_v1 WHERE mac=? AND account=? AND request=?", scope + [request])
         guard sqlite3_changes(db) == 1 else { throw JournalDatabaseError.incompatibleStore }
+        try withCounts { try counts.retireReceipt() }
         try change("DELETE FROM main.\(Self.table) WHERE mac=? AND account=? AND request=?", scope + [request])
         return submissions
+    }
+
+    func recountLiveReceipts() throws {
+        try withCounts { try counts.recountLiveReceipts() }
+    }
+
+    private func withCounts<Value>(_ body: () throws -> Value) throws -> Value {
+        do { return try body() }
+        catch PermanentReplayCounters.Failure.invalidState { throw JournalDatabaseError.incompatibleStore }
+        catch PermanentReplayCounters.Failure.writeTransactionRequired { throw JournalDatabaseError.readOnly }
+        catch PermanentReplayCounters.Failure.storage(let code) { throw JournalDatabaseError.storage(code) }
     }
 
     private func change(_ sql: String, _ values: [Data]) throws {

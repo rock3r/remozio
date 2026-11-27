@@ -5,10 +5,11 @@ import XCTest
 final class ReleaseGenerationPreflightTests: XCTestCase {
     private let team = "ABCDEFGHIJ"
     private func component(_ role: AuthorityCodeRole, generation: UInt64 = 4,
-                           identifier: String? = nil, team: String? = "ABCDEFGHIJ", hash: UInt8 = 1) throws -> ReleaseComponent {
+                           identifier: String? = nil, team: String? = "ABCDEFGHIJ", hash: UInt8 = 1,
+                           formats: [ReleaseFormat] = []) throws -> ReleaseComponent {
         try ReleaseComponent(role: role, identifier: identifier ?? "dev.remozio.role-\(role.rawValue)", generation: generation,
             relativePath: "Contents/Helpers/role-\(role.rawValue)",
-            codeDirectoryHash: role == .app ? nil : Data(repeating: hash, count: 20), build: "4", teamID: team, formats: [])
+            codeDirectoryHash: role == .app ? nil : Data(repeating: hash, count: 20), build: "4", teamID: team, formats: formats)
     }
     private func evidence(_ components: [ReleaseComponent]) throws -> SignedReleaseEvidence {
         let manifest = try ReleaseManifest(release: "0.1.0", build: "4", components: components)
@@ -19,6 +20,29 @@ final class ReleaseGenerationPreflightTests: XCTestCase {
         try AuthorityCodeEntry(role: role, teamID: team, identifier: "dev.remozio.role-\(role.rawValue)",
             installedGeneration: installed, minimumGeneration: minimum, codeDirectoryHash: Data(repeating: 1, count: 20), active: active)
     }
+    func testPermanentReplayRequiresBothCommittedCatalogFloors() throws {
+        let journal = try ReleaseFormat(name: "authority.journal", readers: [19, 20], writers: [19, 20], migrations: [:])
+        let marker = try ReleaseFormat(name: AuthorityPermanentReplayStartup.formatName, readers: [1], writers: [1], migrations: [:])
+        let authority = try component(.authority, formats: [journal, marker])
+        let setup = try component(.setupController, formats: [journal, marker])
+        let app = try component(.app)
+        let current = try evidence([app, authority, setup])
+        let both = try AuthorityCodePolicy(entries: [retained(.authority, minimum: 4), retained(.setupController, minimum: 4)])
+        XCTAssertTrue(AuthorityPermanentReplayStartup.hasReaderFloor(release: current, policy: both))
+
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            let pending = try AuthorityCodePolicy(entries: [
+                retained(.authority, minimum: role == .authority ? 3 : 4),
+                retained(.setupController, minimum: role == .setupController ? 3 : 4),
+            ])
+            XCTAssertFalse(AuthorityPermanentReplayStartup.hasReaderFloor(release: current, policy: pending), "Pending floor for \(role)")
+            let previous = try component(role, formats: [journal])
+            let mixed = try evidence([app, role == .authority ? previous : authority,
+                                      role == .setupController ? previous : setup])
+            XCTAssertFalse(AuthorityPermanentReplayStartup.hasReaderFloor(release: mixed, policy: both), "Dormant catalog for \(role)")
+        }
+    }
+
     func testCurrentAndHigherGenerationsPassWithoutChangingRetainedPolicy() throws {
         let policy = try AuthorityCodePolicy(entries: [retained(.app), retained(.authority)])
         let original = try policy.bytes

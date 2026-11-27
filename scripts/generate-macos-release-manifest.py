@@ -76,6 +76,7 @@ def declarations(role):
         journal_migrations = {v: 12 for v in range(1, 12)} | {v: 19 for v in range(12, 19)}
         values.append(format_declaration('authority.journal', list(range(12, 21)), journal_migrations))
     if role in (2, 8):
+        values.append(format_declaration('authority.journal-replay-counters', [1]))
         preparation = next(value for value in values if value[0] == 'authority.installation-preparation')
         preparation[1].extend((25, 26, 27, 28, 29))
         preparation[2].append(25)

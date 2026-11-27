@@ -76,14 +76,22 @@ public final class CommandSubmissionReplayTables {
         guard try !contains(value.submission, permanentReplay: permanentReplay) else {
             throw CommandSubmissionReplayError.alreadyReserved
         }
-        let replayTable = permanentReplay ? Self.permanentReplayTable : "command_submissions_v1"
-        try statement("SELECT count(*) FROM main.\(replayTable) WHERE mac=? AND account=?", values: [macID, accountID]) {
-            guard try step($0) == SQLITE_ROW, sqlite3_column_type($0, 0) == SQLITE_INTEGER else {
-                throw CommandSubmissionReplayError.corruptData
+        let counters = PermanentReplayCounters(connection: db, macID: macID, accountID: accountID)
+        if permanentReplay {
+            try withReplayCounters {
+                guard try counters.count(.commandSubmissions) < Int64(maximumRows) else {
+                    throw CommandSubmissionReplayError.capacityExceeded
+                }
             }
-            let count = sqlite3_column_int64($0, 0)
-            guard count >= 0 else { throw CommandSubmissionReplayError.corruptData }
-            guard count < Int64(maximumRows) else { throw CommandSubmissionReplayError.capacityExceeded }
+        } else {
+            try statement("SELECT count(*) FROM main.command_submissions_v1 WHERE mac=? AND account=?", values: [macID, accountID]) {
+                guard try step($0) == SQLITE_ROW, sqlite3_column_type($0, 0) == SQLITE_INTEGER else {
+                    throw CommandSubmissionReplayError.corruptData
+                }
+                let count = sqlite3_column_int64($0, 0)
+                guard count >= 0 else { throw CommandSubmissionReplayError.corruptData }
+                guard count < Int64(maximumRows) else { throw CommandSubmissionReplayError.capacityExceeded }
+            }
         }
         func insertDetails() throws {
             try statement("INSERT INTO main.command_submissions_v1 VALUES(?,?,?,?,?,?)",
@@ -93,6 +101,7 @@ public final class CommandSubmissionReplayTables {
         }
         if permanentReplay {
             try atomicReplayReservation {
+                try withReplayCounters { try counters.increment(.commandSubmissions) }
                 try statement("INSERT INTO main.\(Self.permanentReplayTable) VALUES(?,?,?,?)",
                     values: [macID, accountID, value.submission.id, value.submission.nonce]) {
                     guard try step($0) == SQLITE_DONE else { throw CommandSubmissionReplayError.corruptData }
@@ -158,6 +167,13 @@ public final class CommandSubmissionReplayTables {
         try transaction()
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw CommandSubmissionReplayError.writeTransactionRequired }
     }
+    private func withReplayCounters(_ body: () throws -> Void) throws {
+        do { try body() }
+        catch PermanentReplayCounters.Failure.invalidState { throw CommandSubmissionReplayError.corruptData }
+        catch PermanentReplayCounters.Failure.writeTransactionRequired { throw CommandSubmissionReplayError.writeTransactionRequired }
+        catch PermanentReplayCounters.Failure.storage(let code) { throw CommandSubmissionReplayError.storage(code) }
+    }
+
     private func atomicReplayReservation(_ body: () throws -> Void) throws {
         try exec("SAVEPOINT remozio_command_replay")
         do {

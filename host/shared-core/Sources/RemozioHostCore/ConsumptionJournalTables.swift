@@ -68,10 +68,19 @@ public final class ConsumptionJournalTables {
         guard try !hasConsumed(requestID: decision.requestID, permanentReplay: permanentReplay) else {
             throw ConsumptionJournalError.alreadyConsumed
         }
-        let replayTable = permanentReplay ? Self.permanentReplayTable : "consumptions_v1"
-        try statement("SELECT count(*) FROM main.\(replayTable) WHERE mac=? AND account=?", [macID, accountID]) {
-            guard sqlite3_step($0) == SQLITE_ROW else { throw ConsumptionJournalError.storage(sqlite3_errcode(db)) }
-            guard sqlite3_column_int64($0, 0) < Int64(maximumRows) else { throw ConsumptionJournalError.capacityExceeded }
+        let counters = PermanentReplayCounters(connection: db, macID: macID, accountID: accountID)
+        if permanentReplay {
+            try withReplayCounters {
+                guard try counters.count(.consumedRequests) < Int64(maximumRows),
+                      try counters.count(.liveReceipts) < 1_000_000 else {
+                    throw ConsumptionJournalError.capacityExceeded
+                }
+            }
+        } else {
+            try statement("SELECT count(*) FROM main.consumptions_v1 WHERE mac=? AND account=?", [macID, accountID]) {
+                guard sqlite3_step($0) == SQLITE_ROW else { throw ConsumptionJournalError.storage(sqlite3_errcode(db)) }
+                guard sqlite3_column_int64($0, 0) < Int64(maximumRows) else { throw ConsumptionJournalError.capacityExceeded }
+            }
         }
         guard expectedHead < UInt64.max else { throw AuditJournalError.headMismatch }
         let category: AuditCategory
@@ -92,6 +101,10 @@ public final class ConsumptionJournalTables {
         let body = try event.encode(limits: recordLimits)
         return try atomic {
             if permanentReplay {
+                try withReplayCounters {
+                    try counters.increment(.consumedRequests)
+                    try counters.increment(.liveReceipts)
+                }
                 try statement("INSERT INTO main.\(Self.permanentReplayTable) VALUES(?,?,?)", [macID, accountID, decision.requestID]) {
                     let rc = sqlite3_step($0)
                     guard rc == SQLITE_DONE else { throw ConsumptionJournalError.storage(rc) }
@@ -104,6 +117,13 @@ public final class ConsumptionJournalTables {
             try audit.append(body, writer: writer, expectedHead: expectedHead)
             return ConsumptionReceipt(decision: decision, event: event)
         }
+    }
+
+    private func withReplayCounters(_ body: () throws -> Void) throws {
+        do { try body() }
+        catch PermanentReplayCounters.Failure.invalidState { throw ConsumptionJournalError.corruptData }
+        catch PermanentReplayCounters.Failure.writeTransactionRequired { throw ConsumptionJournalError.writeTransactionRequired }
+        catch PermanentReplayCounters.Failure.storage(let code) { throw ConsumptionJournalError.storage(code) }
     }
 
     public func hasConsumed(requestID: Data, permanentReplay: Bool) throws -> Bool {
