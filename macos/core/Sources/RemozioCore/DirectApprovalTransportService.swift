@@ -79,6 +79,8 @@ public actor DirectApprovalTransportService {
             }
             try await feed.start(host: host)
             if useDefaultDelivery {
+                let deliveryResultsSupported = try await feed.supportsRequestExchange()
+                try await host.configureRequestDeliveryResultSupport(deliveryResultsSupported)
                 let pairingLookupQuota: Int
                 do { pairingLookupQuota = try await feed.withPairingLookup { try await $0.requirePairingLookupSupport() } }
                 catch is CancellationError { throw CancellationError() }
@@ -214,8 +216,10 @@ public actor DirectApprovalTransportService {
                     try await deliverPendingRequests(for: session, over: channel, timeoutMilliseconds: timeoutMilliseconds)
                     return
                 }
+                let deliveryResultSchemas = try await channel.requestDeliveryResultSchemas()
                 try await DirectApprovalRequestExchangeLoop(service: self, session: session, channel: channel,
-                    remoteRequests: metadata.peer.requests, timeoutMilliseconds: timeoutMilliseconds,
+                    remoteRequests: metadata.peer.requests, deliveryResultSchemas: deliveryResultSchemas,
+                    timeoutMilliseconds: timeoutMilliseconds,
                     refreshMilliseconds: refreshMilliseconds).run()
             } catch {
                 await channel.closeAndWait()
@@ -322,7 +326,13 @@ public actor DirectApprovalTransportService {
     }
 
     static func supports(_ frame: Data, maximumBytes: Int,
-                                 local: [ChannelRequestCapability], remote: [ChannelRequestCapability]) throws -> Bool {
+                         local: [ChannelRequestCapability], remote: [ChannelRequestCapability]) throws -> Bool {
+        try supportedRequest(frame, maximumBytes: maximumBytes, local: local, remote: remote) != nil
+    }
+
+    static func supportedRequest(_ frame: Data, maximumBytes: Int, local: [ChannelRequestCapability],
+                                 remote: [ChannelRequestCapability]) throws
+        -> (message: ApprovalMessage, fields: [UInt64: CBORValue], limits: CBORLimits)? {
         guard frame.count <= maximumBytes, maximumBytes > ApprovalMessage.overheadBytes else {
             throw ApprovalChannelError.invalidInput
         }
@@ -343,7 +353,8 @@ public actor DirectApprovalTransportService {
             capabilities.contains { $0.kind == kind && $0.wireVersion == message.wireVersion &&
                 $0.schemaVersion == schema && features.isSubset(of: $0.features) }
         }
-        return accepts(local) && accepts(remote)
+        guard accepts(local), accepts(remote) else { return nil }
+        return (message, body, limits)
     }
 
     static func send(_ frame: Data, over channel: NegotiatedNetworkChannel,

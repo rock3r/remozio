@@ -126,6 +126,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
     private let recoveryBudget: AuthorityXPCWorkBudget?
     private let recovery: RecoveryHandler?
     private let timeoutMilliseconds: UInt64
+    private let enableRequestDeliveryResults: Bool
     private let handler: @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void
     private let event: @Sendable (DirectListenerEvent) -> Void
     private var slots: [UUID: Slot] = [:]
@@ -151,6 +152,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
     }
     init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
          maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000, enablePhoneRouting: Bool = false, enablePhoneAudit: Bool = false, enablePhoneUpdateScheduling: Bool = false,
+         enableRequestDeliveryResults: Bool = false,
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void,
          sharedWorkBudget: AuthorityXPCWorkBudget, recoveryMacID: Data? = nil,
@@ -169,6 +171,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
         let snapshot = try DirectPeerSnapshot(peers, recoveryMacID: recoveryMacID)
         self.peers = snapshot; self.maximumConnections = maximumConnections
         self.timeoutMilliseconds = timeoutMilliseconds; self.handler = handler; self.event = event
+        self.enableRequestDeliveryResults = enableRequestDeliveryResults
         let tls = NWProtocolTLS.Options(), options = tls.securityProtocolOptions
         guard let local = sec_identity_create(identity) else { throw DirectListenerError.invalidIdentity }
         sec_protocol_options_set_local_identity(options, local)
@@ -204,6 +207,18 @@ public final class DirectApprovalListener: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
             self.accept(connection)
+        }
+    }
+
+    static func requestCapabilities(_ requests: [ChannelRequestCapability], purpose: EnrolledChannelPurpose,
+                                    enableDeliveryResults: Bool) throws -> [ChannelRequestCapability] {
+        try requests.map { capability in
+            guard capability.kind == 0, capability.wireVersion == 1 else { return capability }
+            let feature = RequestDeliveryResult.capability
+            var features = capability.features.subtracting([feature])
+            if purpose == .approvals, enableDeliveryResults, features.count < 64 { features.insert(feature) }
+            return try .init(kind: capability.kind, wireVersion: capability.wireVersion,
+                schemaVersion: capability.schemaVersion, features: features)
         }
     }
 
@@ -278,8 +293,10 @@ public final class DirectApprovalListener: @unchecked Sendable {
                     throw DirectListenerError.invalidIdentity
                 }
                 if purpose == .audit, !peer.auditVersions.contains(1) { throw DirectListenerError.invalidConfiguration }
+                let requests = try Self.requestCapabilities(peer.requests, purpose: purpose,
+                    enableDeliveryResults: enableRequestDeliveryResults)
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
-                    requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .audit || purpose == .updateScheduling) ? [] : peer.requests,
+                    requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .audit || purpose == .updateScheduling) ? [] : requests,
                     auditVersions: purpose == .audit ? [1] : ((purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .updateScheduling) ? [] : peer.auditVersions),
                     maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose),
                     trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout, purpose: purpose)
