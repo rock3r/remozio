@@ -102,7 +102,7 @@ class CommandConnectionTest {
                 if (supported) {
                     val notice = wire.notices.single()
                     assertEquals(PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED, notice.reason)
-                    assertEquals(ChannelScope(id(1), id(2), id(3), id(4)), notice.scope)
+                    assertEquals(ChannelScope(id(2), id(3), id(4), id(5)), notice.scope)
                     assertTrue(notice.verify(point(decision)))
                 }
             } finally { owner.close(); running.cancelAndJoin() }
