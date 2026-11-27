@@ -834,7 +834,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
 
     func testDetailRetirementReconcilesInterruptedCheckpoint() throws {
-        enum Cut: CaseIterable { case prepare, journalCommit, finalize }
+        enum Cut: Error, CaseIterable { case beforePrepare, afterPrepare, afterCommit }
         for cut in Cut.allCases {
             let fixture = try Fixture(), (db, writer, owner, store) = try retirementFixture(fixture)
             let (request, receipt) = try declineForRetirement(owner)
@@ -844,18 +844,27 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 10)
             XCTAssertEqual(try commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: false)?.observed, 1)
             let before = try store.read().committed
-            if cut == .journalCommit {
-                var reader: OpaquePointer?
-                guard sqlite3_open_v2(fixture.path, &reader, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
-                      let reader else { throw Failure.fixture }
-                defer { sqlite3_close(reader) }
-                guard sqlite3_exec(reader, "BEGIN; SELECT count(*) FROM sqlite_schema", nil, nil, nil) == SQLITE_OK else {
-                    throw Failure.fixture
+            if cut == .afterPrepare {
+                let plan = try commits.read {
+                    try $0.planDetailRetirement(checkpoint: before, policy: policy, protecting: [],
+                        after: nil, continuing: true).plan
                 }
-                XCTAssertThrowsError(try commits.retireDetails(policy: policy, protecting: [], after: nil, continuing: true))
-                XCTAssertEqual(sqlite3_exec(reader, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+                XCTAssertEqual(plan.deletions, [request.requestID])
+                XCTAssertThrowsError(try db.write { transaction in
+                    _ = try transaction.applyDetailRetirement(plan)
+                    let boundary = try XCTUnwrap(transaction.epoch(writer.epoch))
+                    let digests = try transaction.continuityDigests()
+                    let candidate = try before.successor(authorityDigest: digests.authority, ledgerDigest: digests.ledger,
+                        journalEpoch: writer.epoch, journalHead: boundary.head)
+                    // Commit the independent checkpoint, then interrupt the journal before its COMMIT.
+                    try store.prepare(expected: before, candidate: candidate)
+                    XCTAssertEqual(try store.read().pending, candidate)
+                    throw Cut.afterPrepare
+                }) {
+                    XCTAssertEqual($0 as? Cut, .afterPrepare)
+                }
             } else {
-                let condition = cut == .prepare ? "NEW.pending IS NOT NULL" : "NEW.pending IS NULL"
+                let condition = cut == .beforePrepare ? "NEW.pending IS NOT NULL" : "NEW.pending IS NULL"
                 try fixture.sql("""
                     CREATE TRIGGER fail_retirement BEFORE UPDATE ON continuity_v1 WHEN \(condition)
                     BEGIN SELECT RAISE(ABORT,'injected'); END
@@ -872,14 +881,22 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
             defer { try? journal.close(); continuity.close() }
             let recovered = try JournalCheckpointRecovery.reconcile(journal: journal, continuity: continuity)
             switch cut {
-            case .prepare: XCTAssertEqual(recovered, .unchanged(before))
-            case .journalCommit: XCTAssertEqual(recovered, .discarded(before))
-            case .finalize: XCTAssertEqual(recovered, .finalized(try XCTUnwrap(pending)))
+            case .beforePrepare:
+                XCTAssertNil(pending)
+                XCTAssertEqual(recovered, .unchanged(before))
+            case .afterPrepare:
+                XCTAssertNotEqual(try XCTUnwrap(pending).ledgerDigest, before.ledgerDigest)
+                XCTAssertEqual(recovered, .discarded(before))
+            case .afterCommit:
+                let candidate = try XCTUnwrap(pending)
+                XCTAssertNotEqual(candidate.ledgerDigest, before.ledgerDigest)
+                XCTAssertEqual(recovered, .finalized(candidate))
             }
+            XCTAssertNil(try continuity.read().pending)
             let restarted = CheckpointedJournal(journal: journal, continuity: continuity)
             XCTAssertTrue(try restarted.read { try $0.hasConsumed(requestID: request.requestID) })
             XCTAssertEqual(try restarted.read { try $0.consumptionReceiptHistory(requestID: request.requestID) },
-                cut == .finalize ? .retired : .present(receipt))
+                cut == .afterCommit ? .retired : .present(receipt))
         }
     }
 
