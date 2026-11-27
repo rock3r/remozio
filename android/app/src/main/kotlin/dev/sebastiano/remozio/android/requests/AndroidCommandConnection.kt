@@ -3,6 +3,7 @@ package dev.sebastiano.remozio.android.requests
 import android.content.Context
 import androidx.annotation.WorkerThread
 import dev.remozio.phone.enrollment.EnrollmentPhase
+import dev.sebastiano.remozio.android.decisions.AndroidDecisionIdentities
 import dev.sebastiano.remozio.android.transport.AndroidTransportIdentities
 import dev.sebastiano.remozio.android.transport.LocalNetworkSettings
 import dev.sebastiano.remozio.android.transport.androidDirectRoutes
@@ -19,6 +20,7 @@ import dev.remozio.protocol.ChannelRequestCapability
 import dev.remozio.protocol.ChannelScope
 import dev.remozio.protocol.DecisionRefusalFrame
 import dev.remozio.protocol.PendingRequestSnapshotFrame
+import dev.remozio.protocol.PhoneRepairNoticeFrame
 import dev.remozio.protocol.RequestDeliveryResult
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
@@ -37,7 +39,7 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
             try {
                 identity = AndroidTransportIdentities.load(context, e.transportKey)
                 val maximumPayloadBytes = if (snapshot) CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)
-                else maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES
+                    else maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES
                 val capabilities = if (snapshot) commandInspectionCapabilities() else liveCommandCapabilities(maximumPayloadBytes)
                 val connector = ApprovalChannelConnector(arrayOf(identity.keyManager), e.transportPublicKey.copyBytes(),
                     ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
@@ -60,7 +62,8 @@ internal fun androidCommandConnection(context: Context, record: StoredPhoneEnrol
         }
         return CommandConnection(record, limits, open = { scope, enrollment -> openWire(scope, enrollment, false) },
             clock = RequestElapsedClock::now, retired = retired, memoryBudget = memoryBudget,
-            openSnapshot = { scope, enrollment -> openWire(scope, enrollment, true) })
+            openSnapshot = { scope, enrollment -> openWire(scope, enrollment, true) },
+            signRepairNotice = { reason -> AndroidDecisionIdentities.load(record).use { it.phoneRepairNotice(reason) } })
     } catch (failure: Throwable) { retired.close(); throw failure }
 }
 
@@ -68,6 +71,7 @@ internal fun liveCommandCapabilities(maximumPayloadBytes: Int): List<ChannelRequ
     val features = buildSet {
         if (maximumPayloadBytes >= RequestDeliveryResult.MAXIMUM_BYTES) add(RequestDeliveryResult.CAPABILITY)
         if (maximumPayloadBytes >= DecisionRefusalFrame.MAXIMUM_BYTES) add(DecisionRefusalFrame.CAPABILITY)
+        if (maximumPayloadBytes >= PhoneRepairNoticeFrame.MAXIMUM_BYTES) add(PhoneRepairNoticeFrame.CAPABILITY)
     }
     return commandInspectionCapabilities().map {
         ChannelRequestCapability(it.kind, it.wireVersion, it.schemaVersion, it.features + features)
@@ -83,6 +87,8 @@ private class NativeCommandWire(
     override suspend fun send(bytes: ByteArray) = receiver.sendDecision(bytes)
     override suspend fun sendWithRefusal(bytes: ByteArray, onRefusal: (DecisionRefusalFrame.Reason) -> Unit) =
         receiver.sendDecision(bytes, onRefusal)
+    override val supportsPhoneRepairNotices get() = receiver.supportsPhoneRepairNotices
+    override suspend fun sendPhoneRepairNotice(notice: PhoneRepairNoticeFrame) = receiver.sendPhoneRepairNotice(notice)
     override fun close() {
         if (closed.compareAndSet(false, true)) {
             try { receiver.close() } finally { identity.close() }

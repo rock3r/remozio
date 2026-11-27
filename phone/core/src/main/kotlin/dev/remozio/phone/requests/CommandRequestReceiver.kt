@@ -23,6 +23,7 @@ internal interface RequestMessageChannel : AutoCloseable {
     suspend fun sendTracked(bytes: ByteArray, beforeWrite: (ULong) -> Unit) {
         throw IOException("Tracked sending is unsupported")
     }
+    val supportsPhoneRepairNotices: Boolean get() = false
     suspend fun receive(): ByteArray?
     suspend fun send(bytes: ByteArray) { throw IOException("Sending is unsupported") }
 }
@@ -35,6 +36,9 @@ private class NegotiatedRequestChannel(private val channel: NegotiatedTLSChannel
     override val deliveryResultSchemas = sharedControlSchemas(RequestDeliveryResult.CAPABILITY, RequestDeliveryResult.MAXIMUM_BYTES)
     override val refusalSessionID = if (sharedControlSchemas(DecisionRefusalFrame.CAPABILITY,
             DecisionRefusalFrame.MAXIMUM_BYTES).isNotEmpty()) channel.negotiated.sessionID else null
+
+    override val supportsPhoneRepairNotices =
+        sharedControlSchemas(PhoneRepairNoticeFrame.CAPABILITY, PhoneRepairNoticeFrame.MAXIMUM_BYTES).isNotEmpty()
 
     private fun sharedControlSchemas(feature: ULong, minimumBytes: Int): Set<ULong> {
         if (!live || maximumPayloadBytes < minimumBytes) return emptySet()
@@ -56,8 +60,9 @@ internal fun commandChannelSchemas(local: List<ChannelRequestCapability>, localA
                                   allowLiveControlFeatures: Boolean = false): Set<ULong> {
     fun ChannelRequestCapability.known() = kind == 0uL && wireVersion == 1uL &&
         schemaVersion in CommandCapturePayload.supportedSchemaVersions
-    val features = if (allowLiveControlFeatures) setOf(RequestDeliveryResult.CAPABILITY, DecisionRefusalFrame.CAPABILITY)
-        else emptySet()
+    val features = if (allowLiveControlFeatures) setOf(
+        RequestDeliveryResult.CAPABILITY, DecisionRefusalFrame.CAPABILITY, PhoneRepairNoticeFrame.CAPABILITY,
+    ) else emptySet()
     require(peerRole == ChannelRole.MAC && localAuditVersions.isEmpty() && local.all { it.known() && features.containsAll(it.features) })
     val shared = local.map { it.schemaVersion }.toSet().intersect(peer.filter { it.known() }.map { it.schemaVersion }.toSet())
     require(shared.isNotEmpty())
@@ -162,6 +167,14 @@ class CommandRequestReceiver private constructor(
             refusalAttempts.remove(payload.requestID)
         }
         if (!closed.get()) attempt?.receive?.invoke(payload.reason)
+    }
+
+    val supportsPhoneRepairNotices: Boolean get() = channel.supportsPhoneRepairNotices
+
+    /** A live advisory shares the writer with decisions and queries. A completed write supplies no receipt. */
+    suspend fun sendPhoneRepairNotice(notice: PhoneRepairNoticeFrame) {
+        require(supportsPhoneRepairNotices && notice.scope == channel.scope)
+        send(notice.encode())
     }
 
     private suspend fun send(bytes: ByteArray, beforeWrite: ((ULong) -> Unit)? = null) = writing.withLock {

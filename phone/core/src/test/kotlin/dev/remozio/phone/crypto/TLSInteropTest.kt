@@ -30,6 +30,7 @@ import dev.remozio.phone.transport.EncryptedRecordTransport
 import dev.remozio.phone.transport.TLSRecordSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -648,6 +649,66 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun phoneRepairNoticeIsAcceptedBySwiftAndVisibleInSetupV4() =
+        Fixture(negotiate = true, commandExchange = true, repairNotices = true).use { fixture ->
+            fun id(byte: Byte) = ByteArray(16) { byte }
+            val scope = ChannelScope(id(1), id(2), id(3), id(4))
+            val bounds = CborLimits(16_000, 12, 1024)
+            val limits = RequestLimits(bounds, bounds, bounds, bounds)
+            val requests = listOf(ChannelRequestCapability(0u, 1u, 1u, setOf(PhoneRepairNoticeFrame.CAPABILITY)))
+            val connector = ApprovalChannelConnector(fixture.phone.keyManagers, fixture.mac.certificate.publicKey.encoded,
+                scope, requests, emptySet(), 16_384)
+            val started = System.nanoTime()
+            fun clock() = ElapsedInstant(0, ((System.nanoTime() - started) / 1_000_000).toULong())
+            CommandRequestInbox(1, 2).use { inbox ->
+                val enrollment = inbox.add(id(1), id(2), requireNotNull(fixture.routingAuthorityPublicKey), limits)
+                runBlocking {
+                    withTimeout(15_000) {
+                        val channel = connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", fixture.port))
+                        }), null)
+                        val receiver = CommandRequestReceiver.bind(enrollment, channel, id(3), id(4),
+                            queryRetainedOnStart = false, clock = ::clock)
+                        val reading = async { receiver.run() }
+                        try {
+                            assertTrue(receiver.supportsPhoneRepairNotices)
+                            val empty = fixture.routingControl("phone-repair-snapshot")
+                            assertEquals(4, empty.getValue("version").jsonPrimitive.int)
+                            assertEquals(1, empty.getValue("active").jsonPrimitive.int)
+                            assertEquals(0, empty.getValue("reason").jsonPrimitive.int)
+                            val session = enrollment.requestSessions.first { it.isNotEmpty() }.single()
+                            val initial = session.revisions.first { it > 0uL }
+                            val decision = requireNotNull(fixture.routingDecision).private
+                            fun notice(reason: PhoneRepairNoticeFrame.Reason): PhoneRepairNoticeFrame {
+                                val signature = Signature.getInstance("SHA256withECDSA").run {
+                                    initSign(decision)
+                                    update(PhoneRepairNoticeFrame.signingInput(scope, reason))
+                                    P256SignatureEncoding.fromDer(sign())
+                                }
+                                return PhoneRepairNoticeFrame(scope, reason, signature)
+                            }
+                            receiver.sendPhoneRepairNotice(notice(PhoneRepairNoticeFrame.Reason.BIOMETRIC_CHANGED))
+                            receiver.sendPhoneRepairNotice(notice(PhoneRepairNoticeFrame.Reason.LEGACY_POLICY))
+                            // A following query proves that Swift has consumed both earlier frames.
+                            channel.send(RequestStatusQuery(session.identity.requestID.copyBytes()).encode())
+                            session.revisions.first { it > initial }
+                            val listed = fixture.routingControl("phone-repair-snapshot")
+                            assertEquals(4, listed.getValue("version").jsonPrimitive.int)
+                            assertEquals(1, listed.getValue("active").jsonPrimitive.int)
+                            assertEquals(2, listed.getValue("reason").jsonPrimitive.int)
+                            val command = fixture.routingControl("command-snapshot")
+                            assertEquals(0, command.getValue("consumed").jsonPrimitive.int)
+                            assertEquals(0, command.getValue("dispatched").jsonPrimitive.int)
+                        } finally {
+                            receiver.close()
+                            reading.cancelAndJoin()
+                            channel.closeAndJoin()
+                        }
+                    }
+                }
+            }
+        }
+
     @Test fun phoneBuiltDeclineReachesTheNativeRequestExchange() =
         nativeCommandDecision(ActionChoice.DECLINE, RequestPhase.DECLINED)
 
@@ -1166,7 +1227,7 @@ class TLSInteropTest {
         }
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true, private val commandExchange: Boolean = false) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true, private val commandExchange: Boolean = false, private val repairNotices: Boolean = false) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -1201,7 +1262,7 @@ class TLSInteropTest {
                         val capture = File(checkNotNull(System.getProperty("remozio.test.commandCapture"))).readBytes()
                         ",\"commandCapture\":\"" + Base64.getEncoder().encodeToString(capture) + "\""
                     } else ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + commandField + "}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + commandField + ",\"repairNotices\":" + repairNotices + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

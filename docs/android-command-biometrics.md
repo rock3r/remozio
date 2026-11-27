@@ -17,6 +17,8 @@ JVM tests use software keys to verify exact bindings, signature domains, substit
 
 ## Inspector controls
 
+If the approval key uses the legacy policy or Android invalidates it, the inspector offers [Pair again](android-biometric-keys.md#pair-again-after-a-change). The enrolled decision key can sign a repair notice for the current live connection. The connection sends it only when both peers advertise support. The notice carries no command decision, and a send provides no confirmation that Setup displays it.
+
 `CommandRequestInspection` accepts an optional enrollment-bound `CommandApprovalContext`. The same session supplies the displayed capture and both decisions. Samples remain read-only. Controls appear only for permitted pending actions and active enrollment. The integration supplies the authenticated sender; no production connection is opened by this view.
 
 JVM tests exercise the prompt's success callback checks and the inspector's attempt tickets. They use software signatures. The native prompt and per-use Android Keystore enforcement still need device validation.
