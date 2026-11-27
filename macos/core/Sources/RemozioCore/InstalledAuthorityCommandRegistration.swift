@@ -162,12 +162,16 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
 
     /// Only the protected installed startup can move the journal to the final replay catalog.
     func preparePermanentReplay(_ journal: AuthorityJournal) throws {
-        try lock.withLock {
-            guard !taken, let startupActivity, let admissionStartup,
-                  admissionStartup.boundary.accountID == configuration.command.accountID else { return }
+        let deferral: AuthorityPermanentReplayStartup.Deferral? = try lock.withLock {
+            guard !taken, let startupActivity else { return .startupActivityUnavailable }
+            guard let admissionStartup, admissionStartup.boundary.accountID == configuration.command.accountID else {
+                return .accountNotRegistered
+            }
             let release = try validate()
-            guard AuthorityPermanentReplayStartup.hasReaderFloor(release: release, policy: configuration.codePolicy) else { return }
-            try admissionStartup.withReplayInstallationDrain(machine: machine, placement: placement) {
+            guard AuthorityPermanentReplayStartup.hasReaderFloor(release: release, policy: configuration.codePolicy) else {
+                return .readerFloor
+            }
+            return try admissionStartup.withReplayInstallationDrain(machine: machine, placement: placement) {
                 try startupActivity.validate()
                 try AuthoritySelfValidation.validate(journal: journal)
                 guard let policy = try journal.read({ try $0.codePolicy()?.policy }),
@@ -175,6 +179,10 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
                 _ = try journal.installPermanentReplay()
                 try startupActivity.validate()
             }
+        }
+        if let deferral {
+            Logger(subsystem: "dev.sebastiano.remozio.macos.authority", category: "permanent-replay")
+                .notice("Format 20 migration deferred because \(deferral.rawValue, privacy: .public)")
         }
     }
 

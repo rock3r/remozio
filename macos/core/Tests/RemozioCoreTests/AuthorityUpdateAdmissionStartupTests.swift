@@ -72,6 +72,37 @@ final class AuthorityUpdateAdmissionStartupTests: XCTestCase {
         XCTAssertThrowsError(try a.boundary.acquireAdmission()); XCTAssertThrowsError(try b.boundary.acquireAdmission())
         global.close(); let resumed = try a.boundary.acquireAdmission(); resumed.close()
     }
+    func testReplayInstallationReportsBusyDrainAndThenRunsWithOwnership() throws {
+        let f = try BoundAdmissionRegistrationFixture(), record = try f.prepare(), selected = try XCTUnwrap(capture(f))
+        let placement = try f.directory()
+        defer { placement.close() }
+        let other = try barrier(f, record, .account(f.machine.account))
+        let drain = try other.beginDrain()
+        defer { drain.close() }
+        XCTAssertEqual(try selected.withReplayInstallationDrain(machine: f.machine.store, placement: placement) {
+            XCTFail("Busy drain reached migration")
+        }, .drainBusy)
+        drain.close()
+
+        var installed = false
+        XCTAssertNil(try selected.withReplayInstallationDrain(machine: f.machine.store, placement: placement) {
+            XCTAssertThrowsError(try other.beginDrain()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
+            installed = true
+        })
+        XCTAssertTrue(installed)
+        let released = try other.beginDrain()
+        released.close()
+    }
+    func testReplayInstallationReportsUnregisteredAccount() throws {
+        let f = try BoundAdmissionRegistrationFixture(), other = Data(repeating: 96, count: 16)
+        _ = try f.prepare()
+        try f.addAccount(other)
+        let selected = try XCTUnwrap(capture(f, account: other)), placement = try f.directory()
+        defer { placement.close() }
+        XCTAssertEqual(try selected.withReplayInstallationDrain(machine: f.machine.store, placement: placement) {
+            XCTFail("Unregistered account reached migration")
+        }, .accountNotRegistered)
+    }
     func testFailedAccountAdmissionReleasesItsTemporaryMachineToken() throws {
         let f = try BoundAdmissionRegistrationFixture(), record = try f.prepare(), selected = try XCTUnwrap(capture(f))
         let accountDrain = try barrier(f, record, .account(f.machine.account)).beginDrain()
