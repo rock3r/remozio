@@ -152,7 +152,7 @@ func startTime(_ pid: Int32) -> UInt64? {
 /// generation's PID, and that PID still has the generation's start time.
 func live(_ generation: Generation, _ pidfd: Int32) -> Bool {
     generation.boot == bootID() && csa_pidfd_alive(pidfd) == 1 && csa_pidfd_pid(pidfd) == generation.pid
-        && startTime(generation.pid) == generation.start && csa_pidfd_pid(pidfd) == generation.pid
+        && startTime(generation.pid) == generation.start
 }
 
 func identity(_ descriptor: Int32) throws -> CapturedFileIdentity {

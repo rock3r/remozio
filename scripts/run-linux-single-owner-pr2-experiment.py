@@ -1710,7 +1710,6 @@ def sweep(systemctl, cgroup_system=None, apparmor=None, base_parent=None, userdb
         systemctl("reset-failed", unit)
     for number in sorted(numbers):
         clean = _step(kill, number) and clean
-    profiles = []
     profiles = sweep_profiles(apparmor)
     for name in profiles:
         try:
