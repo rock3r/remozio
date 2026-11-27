@@ -40,7 +40,7 @@ final class RuntimeSetupTests: XCTestCase {
         deinit { directory.close(); try? machine.close() }
         var state: RuntimePreparationState { get throws { try machine.runtimePreparation(accountID: account.accountID) } }
         func prepare(_ expected: RuntimePreparationState, verify: @escaping () throws -> Void = {},
-                     publishCommand: (AuthorityCommandStartupConfiguration, () throws -> Void) throws -> Void = { _, _ in },
+                     writeCommandFile: Bool = false,
                      stage: (RuntimePublicationController.Stage) throws -> Void = { _ in }) throws -> RuntimePreparationState {
             try RuntimePublicationController.prepare(machine: machine, account: account, expected: expected,
                 verifyCurrent: verify, verifyServices: { services in XCTAssertEqual(services, self.plan) },
@@ -57,7 +57,10 @@ final class RuntimeSetupTests: XCTestCase {
                     XCTAssertEqual(bundle.transport.transport.identityPublicKeyInfo, material.transportPublicKeyInfo)
                     XCTAssertEqual(bundle.command.presence.pairing?.transportPublicKey, try material.reference.transportPublicKeyX963)
                     XCTAssertEqual(bundle.frontendClient.serviceName, bundle.command.serviceName)
-                    try publishCommand(bundle.command, check)
+                    if writeCommandFile {
+                        _ = try AdministrativeSetupPublication.publish(bundle.command.canonicalBytes, file: .commandConfiguration,
+                            directory: self.directory, owner: getuid(), verify: check)
+                    }
                 }, didStage: stage)
         }
         func owner() throws -> SetupAccountOwner {
@@ -84,11 +87,7 @@ final class RuntimeSetupTests: XCTestCase {
             XCTAssertEqual(retained.pairingPolicy, selection)
             let replay = try f.f.begin(f.machine, pairingPolicy: .disabled)
             XCTAssertEqual(replay, retained)
-            func publish(_ command: AuthorityCommandStartupConfiguration, _ verify: () throws -> Void) throws {
-                _ = try AdministrativeSetupPublication.publish(command.canonicalBytes, file: .commandConfiguration,
-                    directory: f.directory, owner: getuid(), verify: verify)
-            }
-            XCTAssertThrowsError(try f.prepare(f.state, publishCommand: publish, stage: {
+            XCTAssertThrowsError(try f.prepare(f.state, writeCommandFile: true, stage: {
                 if $0 == .filesPublished { throw Interrupted.injected }
             })) { XCTAssertTrue($0 is Interrupted) }
             func published() throws -> Data {
@@ -110,7 +109,7 @@ final class RuntimeSetupTests: XCTestCase {
                 XCTAssertTrue(pairing.decisionProofRequired)
                 XCTAssertEqual(pairing.lanScope, scope)
             }
-            XCTAssertTrue(try f.prepare(f.state, publishCommand: publish).configurationPublished)
+            XCTAssertTrue(try f.prepare(f.state, writeCommandFile: true).configurationPublished)
             XCTAssertEqual(try published(), before)
             XCTAssertEqual(f.creations, 1)
         }
