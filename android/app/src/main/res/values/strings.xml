@@ -457,6 +457,7 @@
     <string name="pairing_repair_connect">Re-pair</string>
     <string name="pairing_repair_pending">Check the pending setup in Your Macs. To use a new phone ID, start a new pairing on the Mac. The pending setup stays available for recovery.</string>
     <string name="pairing_repair_unavailable">This invitation does not match an eligible pairing on this phone.</string>
+    <string name="pairing_repair_new_pairing_guidance">If Setup on your Mac says this phone needs a new pairing, open Your Macs on your phone and choose Remove from this phone for this Mac. Then use Pair a Mac.</string>
     <string name="macs_remove_local">Remove from this phone</string>
     <string name="macs_remove_local_description">Remove %1$s from this phone? To revoke the pairing, open Paired phones on the Mac.</string>
     <string name="macs_discard_setup">Discard saved setup</string>
