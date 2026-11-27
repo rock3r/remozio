@@ -197,6 +197,7 @@ public final class AuthorityJournal: @unchecked Sendable {
             try requireNoRequestOperation()
             guard !updateHealthOnly, !updateCompletionOnly else { throw JournalDatabaseError.readOnly }
             guard let storage else { return }
+            try withStorageFailureCleanup { try database.read { _ in () } }
             guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
             requestStartupAttempted = true
             do {
