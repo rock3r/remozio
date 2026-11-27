@@ -3,6 +3,7 @@ package dev.sebastiano.remozio.android.enrollment
 import android.Manifest
 import android.os.SystemClock
 import android.content.pm.PackageManager
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,6 +15,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -24,6 +26,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -35,7 +39,9 @@ import dev.remozio.protocol.PairingInvitation
 import dev.remozio.protocol.PairingInvitationV2
 import dev.remozio.protocol.RePairInvitation
 import dev.sebastiano.remozio.android.R
+import dev.sebastiano.remozio.android.biometrics.AndroidPairingBiometrics
 import dev.sebastiano.remozio.android.biometrics.PairingBiometricPrompt
+import dev.sebastiano.remozio.android.biometrics.PairingBiometricResult
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,19 +59,18 @@ internal fun PairingSetupSheet(model: PairingViewModel, activity: ComponentActiv
         model.foreground(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
         onDispose { lifecycle.removeObserver(observer); model.foreground(false) }
     }
-    state.signer?.let { signer ->
-        DisposableEffect(signer, activity) {
-            val prompt = PairingBiometricPrompt(activity, signer)
-            prompt.authenticate { model.biometricResult(signer, it) }
-            onDispose { prompt.close() }
-        }
-    }
     PairingSetupSurface(state, model::connect, model::confirmComparison, model::expire, model::close,
         inspectRePair = model::inspectRePair, onConnectV2 = { model.connectV2(it, offerDecisionProof = !testV2) },
-        inspectRePairV2 = model::inspectRePairV2, legacyInputEnabled = !testV2)
+        inspectRePairV2 = model::inspectRePairV2, legacyInputEnabled = !testV2,
+        biometrics = PairingBiometricHost(activity, model::biometricResult))
 }
 
-/** Display-only surface. Callback ownership remains with the retained setup host. */
+internal class PairingBiometricHost(
+    val activity: ComponentActivity,
+    val onResult: (AndroidPairingBiometrics, PairingBiometricResult) -> Unit,
+)
+
+/** The retained setup host owns the attempt. The active comparison window owns its prompt. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PairingSetupSurface(state: PairingScreenState, onConnect: (String) -> Boolean, onCompare: () -> Unit,
@@ -74,26 +79,114 @@ internal fun PairingSetupSurface(state: PairingScreenState, onConnect: (String) 
     onConnectV2: ((PairingInvitationV2) -> Boolean)? = null,
     inspectRePairV2: (suspend (PairingInvitationV2) -> RePairAvailability)? = null,
     legacyInputEnabled: Boolean = true,
+    biometrics: PairingBiometricHost? = null,
 ) {
-    BoxWithConstraints {
-        if (maxWidth >= 600.dp) {
-            Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-                Surface(Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(24.dp), shape = MaterialTheme.shapes.extraLarge) {
-                    PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(24.dp), inspectRePair, onConnectV2, inspectRePairV2, legacyInputEnabled)
+    var seconds by remember(state.transcript) { mutableLongStateOf(0) }
+    val expire by rememberUpdatedState(onExpire)
+    LaunchedEffect(state.expiresElapsedMillis, state.phase) {
+        val deadline = state.expiresElapsedMillis ?: return@LaunchedEffect
+        while (true) {
+            val remaining = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)
+            seconds = (remaining + 999) / 1000
+            if (seconds == 0L) { expire(); break }
+            delay(1000)
+        }
+    }
+    val needsProtection = requiresPairingWindowProtection(state.phase, preview)
+    val capturePolicy = if (needsProtection) SecureFlagPolicy.SecureOn else SecureFlagPolicy.Inherit
+    val timedContent: @Composable (Modifier) -> Unit = { modifier ->
+        PairingComparisonWindow(needsProtection) { protection ->
+            val hasCode = !state.comparisonCode.isNullOrEmpty()
+            when (protection?.state) {
+                PairingWindowProtection.State.CHECKING -> Unit
+                PairingWindowProtection.State.UNAVAILABLE -> {
+                    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text(stringResource(R.string.pairing_setup_protection_unavailable))
+                        TextButton(onClick = onClose) { Text(stringResource(R.string.pairing_biometric_cancel)) }
+                    }
+                    val signer = state.signer
+                    if (state.phase == PairingPhase.BIOMETRIC && signer != null && biometrics != null) {
+                        LaunchedEffect(protection, signer) { biometrics.onResult(signer, PairingBiometricResult.Unavailable) }
+                    }
+                }
+                PairingWindowProtection.State.READY, null -> {
+                    val canMatch = hasCode && (preview || protection?.canMatch(state.phase, hasCode) == true)
+                    PairingSetupContent(state, onConnect, onCompare = {
+                        if (preview || protection?.canMatch(state.phase, hasCode) == true) onCompare()
+                    }, canMatch = canMatch, seconds = seconds, onClose = onClose, preview = preview, modifier = modifier,
+                        inspectRePair = inspectRePair, onConnectV2 = onConnectV2, inspectRePairV2 = inspectRePairV2,
+                        legacyInputEnabled = legacyInputEnabled)
+                    if (protection != null && biometrics != null && state.phase == PairingPhase.BIOMETRIC) {
+                        PairingBiometricEffect(state, protection, biometrics)
+                    }
                 }
             }
-        } else {
-            ModalBottomSheet(onDismissRequest = onClose,
-                sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))) {
-                PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp), inspectRePair, onConnectV2, inspectRePairV2, legacyInputEnabled)
+        }
+    }
+    BoxWithConstraints {
+        // Keep capture protection on the old window until Compose removes it and its content.
+        key(needsProtection) {
+            if (maxWidth >= 600.dp) {
+                Dialog(onDismissRequest = onClose,
+                    properties = DialogProperties(securePolicy = capturePolicy, usePlatformDefaultWidth = false)) {
+                    Surface(Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(24.dp), shape = MaterialTheme.shapes.extraLarge) {
+                        timedContent(Modifier.padding(24.dp))
+                    }
+                }
+            } else {
+                ModalBottomSheet(onDismissRequest = onClose,
+                    sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden,
+                        enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
+                    properties = ModalBottomSheetProperties(securePolicy = capturePolicy)) {
+                    timedContent(Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp))
+                }
             }
         }
     }
 }
 
 @Composable
+private fun PairingComparisonWindow(required: Boolean, content: @Composable (PairingWindowProtection?) -> Unit) {
+    if (!required) {
+        content(null)
+        return
+    }
+    val window = generateSequence(LocalView.current.parent) { it.parent }
+        .filterIsInstance<DialogWindowProvider>().firstOrNull()?.window
+    key(window) {
+        val protection = remember { PairingWindowProtection() }
+        DisposableEffect(protection) {
+            val secure = window != null && (window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE) != 0
+            protection.protect(secure) { checkNotNull(window).setHideOverlayWindows(true) }
+            onDispose { protection.revoke() }
+        }
+        content(protection)
+    }
+}
+
+@Composable
+private fun PairingBiometricEffect(state: PairingScreenState, protection: PairingWindowProtection, host: PairingBiometricHost) {
+    val signer = state.signer ?: return
+    val onResult by rememberUpdatedState(host.onResult)
+    val hasCode = !state.comparisonCode.isNullOrEmpty()
+    DisposableEffect(protection, host.activity, signer, hasCode) {
+        val prompt = protection.startBiometrics(state.phase, hasCode, signer) { current ->
+            PairingBiometricPrompt(host.activity, current).apply {
+                authenticate { result ->
+                    val checked = if (result is PairingBiometricResult.Signed && protection.state != PairingWindowProtection.State.READY) {
+                        PairingBiometricResult.Unavailable
+                    } else result
+                    onResult(current, checked)
+                }
+            }
+        }
+        onDispose { prompt?.close() }
+    }
+}
+
+@Composable
 private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -> Boolean, onCompare: () -> Unit,
-    onExpire: () -> Unit, onClose: () -> Unit, preview: Boolean, modifier: Modifier,
+    canMatch: Boolean, seconds: Long, onClose: () -> Unit, preview: Boolean, modifier: Modifier,
     inspectRePair: (suspend (String) -> RePairAvailability)?,
     onConnectV2: ((PairingInvitationV2) -> Boolean)?,
     inspectRePairV2: (suspend (PairingInvitationV2) -> RePairAvailability)?,
@@ -150,16 +243,6 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         denied = !granted
         if (granted && canConnect) connect()
-    }
-    var seconds by remember(state.transcript) { mutableLongStateOf(0) }
-    LaunchedEffect(state.expiresElapsedMillis, state.phase) {
-        val deadline = state.expiresElapsedMillis ?: return@LaunchedEffect
-        while (true) {
-            val remaining = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)
-            seconds = (remaining + 999) / 1000
-            if (seconds == 0L) { onExpire(); break }
-            delay(1000)
-        }
     }
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (preview) Text(stringResource(R.string.pairing_setup_preview), color = MaterialTheme.colorScheme.error)
@@ -250,7 +333,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                 SelectionContainer { Text(stringResource(R.string.pairing_setup_phone, state.phoneSuffix), style = MaterialTheme.typography.titleMedium) }
             }
             state.comparisonCode?.let { code ->
-                if (state.phase in setOf(PairingPhase.COMPARING, PairingPhase.PREPARING, PairingPhase.BIOMETRIC)) {
+                if (state.phase.displaysComparison) {
                     if (state.clockSkewAdvisory) Text(stringResource(R.string.pairing_setup_clock_advisory))
                     SelectionContainer {
                         Text(code.replace(" ", "\n"),
@@ -260,7 +343,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                 }
             }
             if (state.phase == PairingPhase.COMPARING) {
-                Button(onClick = onCompare, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.pairing_setup_match)) }
+                Button(onClick = onCompare, enabled = canMatch, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.pairing_setup_match)) }
                 OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.pairing_setup_mismatch)) }
             }
         }
