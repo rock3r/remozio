@@ -2629,6 +2629,49 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         }
     }
 
+    func testDetailRetirementIdleDrainAndNonceOnlyCommandReplay() throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true, ready: false)
+        let authority = try XCTUnwrap(fixture.authority)
+        XCTAssertEqual(try authority.installPermanentReplay(), .installed)
+        try authority.prepareRequests(clockEpoch: fixture.clock, maximumPayloadBytes: 16384)
+        let gate = try UpdateAdmissionProvisioningFixture(), account = Data(repeating: 2, count: 16)
+        let files = try gate.prepare(account: account)
+        let updater = try gate.open(files, scope: .account(account))
+        try authority.attachReleaseActivityBarrier(gate.activity.open())
+        try authority.attachUpdateAdmissionBoundary(.init(machine: gate.open(files, scope: .machine),
+            account: gate.open(files, scope: .account(account))))
+
+        let admission = try Endpoint(), terminal = try Endpoint()
+        let (_, capture, submission, profile) = try ownerIOCommand(admission: admission, terminal: terminal)
+        let admitted = try admitOwnedCommand(capture, fixture: fixture)
+        _ = try ownerAdmission(admission, submission: submission, profile: profile)
+        let policy = try DetailRetirement.Policy(target: 0, trigger: 1, maximumRecords: 100)
+        XCTAssertNil(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
+        _ = try ownerDecision(admitted, fixture: fixture, decline: true)
+        let requestID = admitted.requestID
+        try authority.withRequests { try $0.forgetTerminal(requestID: requestID) }
+
+        let drain = try updater.beginDrain()
+        XCTAssertNil(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
+        drain.close()
+        XCTAssertEqual(try authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true })?.result.observed, 1)
+        let retired = try XCTUnwrap(authority.retireDetailsIfIdle(policy: policy, executionIsIdle: { true }))
+        XCTAssertEqual(retired.result.retiredReceipts, 1)
+        XCTAssertEqual(retired.result.retiredSubmissions, 1)
+        let oldID = submission.binding.id
+        XCTAssertEqual(try authority.read { try $0.commandSubmissionHistory(submissionID: oldID) }, .retired)
+
+        let retryAdmission = try Endpoint(), retryTerminal = try Endpoint()
+        let freshID = Data(repeating: 0xb3, count: 16)
+        let duplicate = CapturedSubmission(id: freshID, nonce: submission.binding.nonce, callerBinding: assemblyBinding)
+        let (received, retry, _, _) = try ownerIOCommand(admission: retryAdmission, terminal: retryTerminal, binding: duplicate)
+        XCTAssertThrowsError(try admitOwnedCommand(retry, fixture: fixture, now: { fixture.now(125) })) {
+            XCTAssertEqual($0 as? CommandSubmissionReplayError, .alreadyReserved)
+        }
+        try expectAssemblyResourcesRetired(received)
+        XCTAssertEqual(try authority.read { try $0.commandSubmissionHistory(submissionID: freshID) }, .absent)
+    }
+
     func testCommandReplayAdmissionPendingRetirementNeverFreesIDOrNonce() throws {
         for checkpointed in [false, true] {
             for decline in [false, true] {

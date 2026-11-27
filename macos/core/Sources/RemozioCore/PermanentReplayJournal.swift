@@ -68,6 +68,7 @@ enum PermanentReplayJournal {
             }
         }
         try validateStorage(on: db)
+        try ReplayDetailJournal.create(on: db)
     }
 
     static func validateStorage(on db: OpaquePointer) throws {

@@ -93,6 +93,8 @@ public final class ApprovalRequestCoordinator {
     var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
     private var auditRetentionContinuing = false
+    private var detailRetirementContinuing = false
+    private var detailRetirementCursor: Data?
     private var retainedBytes = 0
     private var deliveryBytes = 0
     private let wakePublication: RetainedWakePublication
@@ -174,6 +176,30 @@ public final class ApprovalRequestCoordinator {
             auditRetentionContinuing = result.remainingEligibleExcess > 0
             return result
         } catch { retireAfterStorageFailure(); throw error }
+    }
+
+    /// Called by the idle journal owner. Scheduling remains disabled until installation and capacity qualify.
+    func retireDetailsIfNeeded(policy: DetailRetirement.Policy) throws -> DetailRetirement.Result? {
+        try running()
+        guard let checkpointed, accountUpdateDrain == nil else { return nil }
+        do {
+            let admission = try acquireUpdateAdmission()
+            defer { admission?.close() }
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
+            guard let result = try checkpointed.retireDetails(policy: policy, protecting: Set(entries.keys),
+                    after: detailRetirementCursor, continuing: detailRetirementContinuing) else { return nil }
+            detailRetirementContinuing = result.continuing
+            detailRetirementCursor = result.continuing ? result.nextRequest : nil
+            return result
+        } catch ReleaseActivityError.busy {
+            return nil
+        } catch UpdateAdmissionBarrierError.busy {
+            return nil
+        } catch {
+            retireAfterStorageFailure()
+            throw error
+        }
     }
 
     /// The host retains both store leases and completes startup recovery before supplying the writer.
@@ -686,6 +712,7 @@ public final class ApprovalRequestCoordinator {
                 let reservation = try CommandSubmissionReservation(macID: mac, accountID: account, submission: command.capture.submission,
                     captureDigest: Data(SHA256.hash(data: command.capture.canonicalBytes)))
                 _ = try tx.reserveCommandSubmission(reservation)
+                try tx.bindCommandRetirement(submissionID: reservation.submission.id, requestID: payload.requestID)
             }
             try append(tx, requestID: payload.requestID, category: category, kind: .requestCreated, outcome: .pending,
                 reason: .none, receiptTimeMs: receiptTimeMs)
@@ -1317,6 +1344,11 @@ public final class ApprovalRequestCoordinator {
     public func historicalOutcome(requestID: Data) throws -> ConsumptionOutcome? {
         try running()
         return try read { try $0.consumptionOutcome(requestID: requestID) }
+    }
+
+    public func historicalOutcomeLookup(requestID: Data) throws -> HistoricalJournalLookup<ConsumptionOutcome> {
+        try running()
+        return try read { try $0.consumptionOutcomeHistory(requestID: requestID) }
     }
 
     /// Only controller-verified outcomes belong here. This records an observation and grants no permission to execute.
