@@ -28,7 +28,6 @@ enum JournalContinuityDigest {
         let permanentReplay = format == AuthorityJournalSchema.permanentReplayFormat
         let tier = try AuthorityJournalSchema.featureTier(on: db)
         let catalog = try requireCatalog(db, recoveryFormat: recoveryFormat, tier: tier, permanentReplay: permanentReplay)
-        if permanentReplay { try PermanentReplayJournal.validateStorage(on: db) }
         let authoritySchema = recoveryFormat ? format : (tier >= 15 ? tier : min(tier, 13))
         return try withUnsafeTemporaryAllocation(byteCount: DigestEncoder.capacity, alignment: 1) { buffer in
             try JournalContinuityDigests(

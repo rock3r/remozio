@@ -278,6 +278,27 @@ final class CheckpointedJournalTests: XCTestCase {
                 .repairRequired, mutation)
             XCTAssertThrowsError(try recoverHistory(fixture), mutation)
             XCTAssertEqual(try fixture.store.read(), checkpoint, mutation)
+
+            // Model an already committed inconsistent pair in this fixture to isolate the startup check.
+            // The ordinary checkpoint comparison rejected the same bytes above.
+            let observed = try fixture.journal.read { try $0.continuityDigests() }
+            let old = checkpoint.committed
+            let candidate = try old.successor(authorityDigest: observed.authority, ledgerDigest: observed.ledger,
+                journalEpoch: old.journalEpoch, journalHead: old.journalHead)
+            try fixture.store.prepare(expected: old, candidate: candidate)
+            try fixture.store.finalize(expected: ContinuityState(committed: old, pending: candidate, recoveryRequired: false))
+            XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: fixture.journal, continuity: fixture.store),
+                .unchanged(candidate), mutation)
+            let startup = try JournalStartupRecovery(journal: fixture.journal, continuity: fixture.store,
+                maximumRecords: 10, maximumBytes: fixture.limits.maxBytes)
+            let next = Data(repeating: 6, count: 16)
+            let descriptor = try fixture.descriptor(next, generation: candidate.currentAuthorityGeneration)
+            guard case .repairRequired = try startup.start(descriptor: descriptor) else {
+                return XCTFail("Startup accepted inconsistent command replay keys: " + mutation)
+            }
+            XCTAssertThrowsError(try startup.completedWriter(), mutation)
+            XCTAssertNil(try fixture.journal.read { try $0.epoch(next) }, mutation)
+            XCTAssertEqual(try fixture.store.read().committed, candidate, mutation)
         }
     }
 

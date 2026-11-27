@@ -348,6 +348,13 @@ public final class JournalDatabase {
         return try PermanentReplayJournal.hasRecordedHistoryGap(on: db)
     }
 
+    fileprivate func validatePermanentReplayStorage(_ token: UUID) throws {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        guard try AuthorityJournalSchema.permanentReplayInstalled(on: db) else { return }
+        try PermanentReplayJournal.validateStorage(on: db)
+    }
+
     fileprivate func installPermanentReplay(_ token: UUID) throws {
         _ = try access(token)
         guard let db else { throw JournalDatabaseError.expiredTransaction }
@@ -708,6 +715,12 @@ public final class JournalTransaction {
     func hasRecordedHistoryGap() throws -> Bool {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.hasRecordedHistoryGap(token)
+    }
+
+    /// Check the committed replay mapping before starting request recovery.
+    func validatePermanentReplayStorage() throws {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        try owner.validatePermanentReplayStorage(token)
     }
 
     func installPermanentReplay() throws {
