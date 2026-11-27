@@ -157,6 +157,34 @@ final class CheckpointedJournal {
             nextRequest: plan.nextRequest, liveCountTime: liveCountTime, planning: planning, mutation: mutation)
     }
 
+    /// Scan settled pages under one verified read. Recheck the selected page before writing any recovery event.
+    func recoverInterruptedConsumptions(afterRequestID: Data?, maximumRecords: Int, maximumBytes: Int,
+                                        writer: AuditEpochWriter, expectedHead: UInt64) throws -> ConsumptionRecoveryBatch {
+        let (checkpoint, after, planned) = try verifiedRead { checkpoint, transaction
+            -> (ContinuityCheckpoint, Data?, ConsumptionOutcomePage?) in
+            guard checkpoint.journalEpoch == writer.epoch, checkpoint.journalHead == expectedHead else {
+                throw Failure.boundaryMismatch
+            }
+            var after = afterRequestID
+            while true {
+                let page = try transaction.consumptionOutcomes(afterRequestID: after,
+                    maximumRecords: maximumRecords, maximumBytes: maximumBytes)
+                if page.outcomes.contains(where: { $0.phase == .authorized || $0.phase == .executing }) {
+                    return (checkpoint, after, page)
+                }
+                guard let next = page.nextRequestID else { return (checkpoint, nil, nil) }
+                after = next
+            }
+        }
+        guard let planned else {
+            return ConsumptionRecoveryBatch(nextRequestID: nil, changedCount: 0, journalHead: expectedHead)
+        }
+        return try write(epoch: writer.epoch, expectedCheckpoint: checkpoint) {
+            try $0.reconcileInterruptedConsumptions(afterRequestID: after, maximumRecords: maximumRecords,
+                maximumBytes: maximumBytes, writer: writer, expectedHead: expectedHead, expectedPage: planned)
+        }
+    }
+
     static func checkpoint(transaction: JournalTransaction, epoch: Data, generation: UInt64,
                            authorityGeneration: UInt64? = nil) throws -> ContinuityCheckpoint {
         guard let boundary = try transaction.epoch(epoch) else { throw Failure.missingEpoch }
