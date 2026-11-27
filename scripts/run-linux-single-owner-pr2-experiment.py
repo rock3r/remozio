@@ -347,11 +347,20 @@ def runtime_system_only(paths):
 def resolved_system_library(path):
     """The file a loader path names. Distributions install sonames as symlinks (libsqlite3.so.0 ->
     libsqlite3.so.0.8.6), and the bounded read refuses symlinks, so the read takes the resolved file.
-    The resolved file must still pass runtime_system_only."""
-    resolved = os.path.realpath(path)
-    if not runtime_system_only([resolved]):
+
+    No race between the resolution and the read: the resolved file must pass runtime_system_only, every
+    directory from / to it must be root-owned and not group- or other-writable (so only Root can swap a
+    component), and the file itself must be a regular root-owned file that only Root can write. The
+    read then opens it with O_NOFOLLOW, so a symlink put in its place is refused, not followed."""
+    resolved = Path(os.path.realpath(path))
+    if not runtime_system_only([str(resolved)]):
         raise RuntimeError("authority library resolves outside the system directories")
-    return Path(resolved)
+    if not PL.root_owned_ancestry(resolved.parent):
+        raise RuntimeError("authority library directory is not root-owned and write-protected")
+    info = os.lstat(resolved)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise RuntimeError("authority library is not a root-owned, write-protected file")
+    return resolved
 
 
 REASON = frozenset({"malformed", "boot-mismatch", "pid-mismatch", "stale-generation", "earlier-generation",

@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import stat
 import tempfile
 import threading
 import time
@@ -1418,11 +1419,27 @@ class LoaderTests(unittest.TestCase):
     def test_a_soname_symlink_is_hashed_through_its_resolved_system_file(self):
         resolved = {"/lib/x86_64-linux-gnu/libsqlite3.so.0": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6",
                     "/lib/x86_64-linux-gnu/libbad.so.1": "/opt/lib/libbad.so.1"}
-        with patch.object(EXPERIMENT.os.path, "realpath", side_effect=lambda path: resolved.get(path, path)):
+        root_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
+        with patch.object(EXPERIMENT.os.path, "realpath", side_effect=lambda path: resolved.get(path, path)), \
+                patch.object(EXPERIMENT.PL, "root_owned_ancestry", return_value=True), \
+                patch.object(EXPERIMENT.os, "lstat", return_value=root_file):
             self.assertEqual(EXPERIMENT.resolved_system_library("/lib/x86_64-linux-gnu/libsqlite3.so.0"),
                              Path("/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6"))
             with self.assertRaises(RuntimeError):
                 EXPERIMENT.resolved_system_library("/lib/x86_64-linux-gnu/libbad.so.1")
+
+    def test_a_resolved_library_must_be_root_owned_and_write_protected(self):
+        path = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+        cases = [(False, SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)),
+                 (True, SimpleNamespace(st_mode=stat.S_IFREG | 0o664, st_uid=0)),
+                 (True, SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=1000)),
+                 (True, SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0))]
+        for ancestry, info in cases:
+            with patch.object(EXPERIMENT.os.path, "realpath", return_value=path), \
+                    patch.object(EXPERIMENT.PL, "root_owned_ancestry", return_value=ancestry), \
+                    patch.object(EXPERIMENT.os, "lstat", return_value=info), self.assertRaises(RuntimeError):
+                EXPERIMENT.resolved_system_library(path)
+        self.assertEqual(EXPERIMENT.resolved_system_library(path), Path(path))
 
     def test_the_build_links_the_swift_runtime_statically(self):
         self.assertIn('"--static-swift-stdlib"', SCRIPT.read_text())
