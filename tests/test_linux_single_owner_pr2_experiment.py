@@ -1402,6 +1402,15 @@ class LoaderTests(unittest.TestCase):
         self.assertFalse(EXPERIMENT.runtime_system_only(["/opt/lib/libsqlite3.so.0"]))
         self.assertFalse(EXPERIMENT.runtime_system_only([]))
 
+    def test_a_soname_symlink_is_hashed_through_its_resolved_system_file(self):
+        resolved = {"/lib/x86_64-linux-gnu/libsqlite3.so.0": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6",
+                    "/lib/x86_64-linux-gnu/libbad.so.1": "/opt/lib/libbad.so.1"}
+        with patch.object(EXPERIMENT.os.path, "realpath", side_effect=lambda path: resolved.get(path, path)):
+            self.assertEqual(EXPERIMENT.resolved_system_library("/lib/x86_64-linux-gnu/libsqlite3.so.0"),
+                             Path("/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6"))
+            with self.assertRaises(RuntimeError):
+                EXPERIMENT.resolved_system_library("/lib/x86_64-linux-gnu/libbad.so.1")
+
     def test_the_build_links_the_swift_runtime_statically(self):
         self.assertIn('"--static-swift-stdlib"', SCRIPT.read_text())
 

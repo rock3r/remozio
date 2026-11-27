@@ -341,6 +341,16 @@ def runtime_system_only(paths):
                                and "Foundation" not in path for path in paths)
 
 
+def resolved_system_library(path):
+    """The file a loader path names. Distributions install sonames as symlinks (libsqlite3.so.0 ->
+    libsqlite3.so.0.8.6), and the bounded read refuses symlinks, so the read takes the resolved file.
+    The resolved file must still pass runtime_system_only."""
+    resolved = os.path.realpath(path)
+    if not runtime_system_only([resolved]):
+        raise RuntimeError("authority library resolves outside the system directories")
+    return Path(resolved)
+
+
 REASON = frozenset({"malformed", "boot-mismatch", "pid-mismatch", "stale-generation", "earlier-generation",
                     "other-hello", "generation-lost", "missing"})
 CONTROL_KEYS = {
@@ -1318,7 +1328,8 @@ class Run:
         if not runtime_system_only(paths):
             raise RuntimeError("authority loads a library outside the system directories")
         self.build_hashes["authorityLibraries"] = {
-            path: hashlib.sha256(SO.read_bounded(Path(path), 256 * 1024 * 1024)).hexdigest() for path in paths}
+            path: hashlib.sha256(SO.read_bounded(resolved_system_library(path), 256 * 1024 * 1024)).hexdigest()
+            for path in paths}
         start = subprocess.run([str(binary)], env={}, **identity)
         if start.returncode != 2 or start.stdout != b'{"event":"error"}\n':
             raise RuntimeError("authority did not start as its own identity")
