@@ -87,6 +87,8 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("KillMode=process", properties)
         self.assertIn("OOMPolicy=continue", properties)
         self.assertIn("TasksMax=infinity", properties)
+        self.assertIn("LimitNICE=40", properties)
+        self.assertIn("LimitNOFILE=infinity", properties)
         self.assertIn("AmbientCapabilities=CAP_SYS_PTRACE CAP_SETUID CAP_SETGID", properties)
         # Options that set no_new_privs or a mount namespace for a service user that is not Root.
         forbidden = ("NoNewPrivileges", "SystemCallFilter", "SystemCallArchitectures", "RestrictSUIDSGID",
@@ -146,9 +148,11 @@ class ReadbackTests(unittest.TestCase):
                 EXPERIMENT.parse_show(text)
 
     def test_owner_limits_at_max(self):
-        top = ",".join(["inf/inf"] * 7 + ["1048576/1048576"] + ["inf/inf"] * 8)
+        top = ",".join(["inf/inf"] * 7 + ["1048576/1048576"] + ["inf/inf"] * 5 + ["40/40"] + ["inf/inf"] * 2)
         self.assertTrue(EXPERIMENT.limits_at_max(top, 1048576))
-        self.assertTrue(EXPERIMENT.limits_at_max(",".join(["inf/inf"] * 16), 1048576))
+        self.assertTrue(EXPERIMENT.limits_at_max(top.replace("1048576/1048576", "inf/inf"), 1048576))
+        self.assertFalse(EXPERIMENT.limits_at_max(top.replace("40/40", "0/0"), 1048576))
+        self.assertFalse(EXPERIMENT.limits_at_max(",".join(["inf/inf"] * 16), 1048576))
         self.assertFalse(EXPERIMENT.limits_at_max(top.replace("1048576/1048576", "1024/1048576"), 1048576))
         self.assertFalse(EXPERIMENT.limits_at_max(",".join(["inf/inf"] * 15), 1048576))
         self.assertFalse(EXPERIMENT.limits_at_max(top.replace("inf/inf", "8388608/inf", 1), 1048576))
@@ -961,7 +965,7 @@ class DriveCaseTests(unittest.TestCase):
 
     def drive(self, report=None, case="unit-report"):
         nr_open = int(Path("/proc/sys/fs/nr_open").read_text())
-        limits = ",".join(["inf/inf"] * 7 + [f"{nr_open}/{nr_open}"] + ["inf/inf"] * 8)
+        limits = ",".join(["inf/inf"] * 7 + [f"{nr_open}/{nr_open}"] + ["inf/inf"] * 5 + ["40/40"] + ["inf/inf"] * 2)
         report = report if report is not None else command_report()
         barriers = [("start", 1, 0, 0), ("k-ready", 1, 999991, 999992), ("after-s6", 1, 999991, 999992),
                     ("end", 1, 0, 0)]

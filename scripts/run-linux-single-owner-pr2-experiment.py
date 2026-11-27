@@ -129,8 +129,11 @@ COMMANDS = ("cmd-report", "cmd-sudo", "cmd-prompt", "cmd-hog")
 # no no_new_privs and no mount namespace.
 LIMITS = ("CPU", "FSIZE", "DATA", "STACK", "CORE", "RSS", "NOFILE", "AS", "NPROC", "MEMLOCK", "LOCKS",
           "SIGPENDING", "MSGQUEUE", "NICE", "RTPRIO", "RTTIME")
+# systemd refuses LimitNICE=infinity ("Failed to parse resource limit"); 40 is the highest value it accepts
+# and the highest that changes anything (nice -20). Every other limit is set to infinity.
+LIMIT_MAX = {name: "40" if name == "NICE" else "infinity" for name in LIMITS}
 UNIT_OPTIONS = ("AmbientCapabilities=CAP_SYS_PTRACE CAP_SETUID CAP_SETGID", "KillMode=process",
-                "OOMPolicy=continue", "TasksMax=infinity", *(f"Limit{name}=infinity" for name in LIMITS),
+                "OOMPolicy=continue", "TasksMax=infinity", *(f"Limit{name}={LIMIT_MAX[name]}" for name in LIMITS),
                 "RemainAfterExit=yes")
 # Case-only additions: the two negative controls, the AppArmor profile, and the memory bound that
 # causes a real out-of-memory kill in the unit's cgroup. None of them is a production option.
@@ -140,7 +143,7 @@ SHOW_PROPERTIES = ("KillMode", "OOMPolicy", "TasksMax", "NoNewPrivileges", "Priv
                    *(f"Limit{name}" for name in LIMITS))
 SHOW_EXPECTED = {"KillMode": "process", "OOMPolicy": "continue", "TasksMax": "infinity", "NoNewPrivileges": "no",
                  "PrivateTmp": "no", "AmbientCapabilities": "cap_setgid cap_setuid cap_sys_ptrace",
-                 **{f"Limit{name}": "infinity" for name in LIMITS}}
+                 **{f"Limit{name}": LIMIT_MAX[name] for name in LIMITS}}
 
 SUDO = frozenset({"password-required", "allowed", "terminal-required", "no-new-privs", "not-setuid",
                   "not-permitted", "not-found", "inconclusive", "other", "not-run", "not-reported"})
@@ -572,12 +575,13 @@ def readback_matches(values):
 
 
 def limits_at_max(limits, nr_open):
-    """O's /proc limits in the PR1 "soft/hard" form: every limit unlimited, RLIMIT_NOFILE at nr_open."""
+    """O's /proc limits in the PR1 "soft/hard" form: every limit unlimited, RLIMIT_NOFILE at nr_open,
+    RLIMIT_NICE at 40 (LIMIT_MAX)."""
     pairs = limits.split(",")
     if len(pairs) != 16:
         return False
     for index, pair in enumerate(pairs):
-        wanted = f"{nr_open}/{nr_open}" if index == 7 else "inf/inf"
+        wanted = f"{nr_open}/{nr_open}" if index == 7 else "40/40" if index == 13 else "inf/inf"
         if pair != wanted and not (index == 7 and pair == "inf/inf"):
             return False
     return True
