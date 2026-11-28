@@ -38,11 +38,12 @@ final class GatewayDatabaseTests: XCTestCase {
             nowUnixMillis: wall, now: AuthorityMoment(epoch: clock ?? epoch, milliseconds: monotonic))
     }
     private func open(_ fixture: Fixture, initialize: Bool = false, owner: UInt8 = 1, maximum: Int = 10, pending: Int = 2,
-                      lifetime: UInt64 = 1000, busy: UInt32 = 100, registration: GatewayRegistrationIdentity? = nil, migrate: Bool = false, probePolicy: GatewayProbePolicy? = nil, health: Bool = false) throws -> GatewayDatabase {
+                      lifetime: UInt64 = 1000, busy: UInt32 = 100, registration: GatewayRegistrationIdentity? = nil, migrate: Bool = false, probePolicy: GatewayProbePolicy? = nil, health: Bool = false,
+                      reportTombstoneCapacityRefusal: ((String) -> Void)? = nil) throws -> GatewayDatabase {
         try GatewayDatabase(lease: fixture.lease(), identity: registration ?? identity(owner: owner), payloadLimits: limits, signingLimits: limits,
             maximumOperations: maximum, maximumPendingPerEnrollment: pending, maximumLifetimeMillis: lifetime,
             clockEpoch: epoch, busyMilliseconds: busy, initialize: initialize, migrateLegacyStore: migrate, probePolicy: probePolicy,
-            readOnlyForUpdateHealth: health)
+            readOnlyForUpdateHealth: health, reportTombstoneCapacityRefusal: reportTombstoneCapacityRefusal)
     }
     private func fails(_ expected: GatewayDatabaseError, _ action: () throws -> Any, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try action(), file: file, line: line) { XCTAssertEqual($0 as? GatewayDatabaseError, expected, file: file, line: line) }
@@ -504,6 +505,28 @@ final class GatewayDatabaseTests: XCTestCase {
         fails(.capacityExceeded) { try abandon(db, third, after: 2) }
         XCTAssertFalse(try abandon(db, first, after: 0).inserted)
         XCTAssertEqual(try db.headEvidence().receipt?.signature, second.1)
+    }
+
+    func testTombstoneCapacityRefusalReportsOnlyRedactedCountsOnce() throws {
+        let fixture = try Fixture()
+        var reports: [String] = []
+        let db = try open(fixture, initialize: true, maximum: 2, reportTombstoneCapacityRefusal: { reports.append($0) })
+        _ = try admit(db)
+        XCTAssertTrue(try revoke(db, revision: 2, head: 1).inserted)
+        for revision: UInt8 in 3...5 {
+            let control = try signedTombstone(.candidate, revision: UInt64(revision), operation: revision)
+            XCTAssertTrue(try abandon(db, control, after: UInt64(revision - 1)).inserted)
+        }
+        let retained = try db.headEvidence()
+        let refused = try signedTombstone(.candidate, revision: 6, operation: 6)
+        fails(.headMismatch) { try abandon(db, refused, after: 4) }
+        XCTAssertTrue(reports.isEmpty)
+
+        fails(.capacityExceeded) { try abandon(db, refused, after: 5) }
+        fails(.capacityExceeded) { try abandon(db, refused, after: 5) }
+        XCTAssertEqual(reports, ["gateway_tombstone_refused reason=control_capacity_exceeded tombstones=3 ordinary_controls=1 limit=2"])
+        XCTAssertEqual(try db.head(), 5)
+        XCTAssertEqual(try db.headEvidence().receipt?.signature, retained.receipt?.signature)
     }
 
     func testDelayedRecoveryKeepsOriginalReceiptAfterAnotherPhoneAdvancesHead() throws {
