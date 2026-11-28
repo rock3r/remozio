@@ -18,7 +18,7 @@ SPEC.loader.exec_module(CHECKS)
 
 class CheckStageTimingTests(unittest.TestCase):
     def run_checks(self, system="Linux", github=False, fail_argument="", fail_command="", mac_part=None,
-                   app_configurations=None):
+                   app_configurations=None, performance_cores="8", logical_cores="10"):
         with tempfile.TemporaryDirectory(prefix="timed checks ") as temporary:
             directory = Path(temporary)
             (directory / "repo/scripts").mkdir(parents=True)
@@ -40,9 +40,21 @@ if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 
             uname = binary / "uname"
             uname.write_text('#!/bin/sh\nprintf "%s\\n" "$CHECK_SYSTEM"\n')
             uname.chmod(0o755)
+            sysctl = binary / "sysctl"
+            sysctl.write_text("""#!/bin/sh
+case "$2" in
+    hw.perflevel0.physicalcpu) value=$CHECK_PERFORMANCE_CORES ;;
+    hw.ncpu) value=$CHECK_LOGICAL_CORES ;;
+    *) exit 2 ;;
+esac
+[ "$value" != missing ] || exit 1
+printf '%s\\n' "$value"
+""")
+            sysctl.chmod(0o755)
             log = directory / "calls"
             env = os.environ | {"PATH": str(binary) + os.pathsep + os.environ["PATH"],
                                 "CHECK_SYSTEM": system, "CHECK_TIMING_LOG": str(log),
+                                "CHECK_PERFORMANCE_CORES": performance_cores, "CHECK_LOGICAL_CORES": logical_cores,
                                 "GITHUB_ACTIONS": "true" if github else "false", "FAIL_ARGUMENT": fail_argument, "FAIL_COMMAND": fail_command}
             env.pop("REMOZIO_CHECK_MAC_PART", None)
             if mac_part is not None:
@@ -131,13 +143,29 @@ if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 
                 self.assertEqual(calls, [])
                 self.assertIn(f"Unknown REMOZIO_MAC_APP_CONFIGURATIONS: {value}", result.stderr)
 
-    def test_local_mac_run_keeps_the_serial_core_suite_in_the_app_part(self):
-        _, every = self.run_checks("Darwin")
-        result, app = self.run_checks("Darwin", mac_part="app")
+    def test_local_mac_run_shards_the_full_core_suite_in_the_app_part(self):
+        _, every = self.run_checks("Darwin", performance_cores="4")
+        result, app = self.run_checks("Darwin", mac_part="app", performance_cores="4")
         self.assertEqual(result.returncode, 0, result.stderr)
-        core = "swift test --package-path macos/core --triple arm64-apple-macosx26.0"
-        self.assertIn(core, every)
-        self.assertIn(core, app)
+        core = self.local_core_command(4)
+        self.assertEqual(every.count(core), 1)
+        self.assertEqual(app.count(core), 1)
+
+    def test_local_core_uses_cpu_fallback_and_caps_shards(self):
+        cases = (("missing", "6", 6), ("missing", "12", 8), ("12", "16", 8), ("missing", "missing", 1),
+                 ("", "10", 1), ("unknown", "10", 1), ("0", "10", 1))
+        for performance, logical, shards in cases:
+            with self.subTest(performance=performance, logical=logical):
+                result, app = self.run_checks("Darwin", mac_part="app", performance_cores=performance,
+                                              logical_cores=logical)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(self.local_core_command(shards), app)
+
+    @staticmethod
+    def local_core_command(shards):
+        return ("python3 scripts/run-xctest-shards.py --package-path macos/core "
+                f"--weights .github/macos-core-test-weights.json --shards {shards} --concurrent "
+                "-- --triple arm64-apple-macosx26.0 -Xswiftc -O")
 
     def test_other_hosts_ignore_the_mac_part(self):
         _, every = self.run_checks()

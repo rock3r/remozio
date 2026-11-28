@@ -85,7 +85,7 @@ if [ "$(uname -s)" = Darwin ]; then
     mac_stage experiments run-installation-inventory-experiment python3 scripts/run-installation-inventory-experiment.py
     mac_stage experiments 'Swift test: protocol/swift' swift test --package-path protocol/swift --triple arm64-apple-macosx26.0 --force-resolved-versions
     mac_stage experiments 'Swift test: host/shared-core' swift test --package-path host/shared-core --triple arm64-apple-macosx26.0 --force-resolved-versions --jobs 4
-    # CI spends most of this stage in CPU-bound validation. Optimizing halves it; local runs keep faster rebuilds.
+    # Optimize the Core tests because validation spends most of its time on the CPU.
     # In CI the Mac core tests job runs the other classes in shards. This job built the app these classes inspect,
     # so none of them may skip here.
     if [ "${GITHUB_ACTIONS:-}" = true ]; then
@@ -93,7 +93,19 @@ if [ "$(uname -s)" = Darwin ]; then
             --package-path macos/core --shards 1 --index 0 --app-dependent only --forbid-skips \
             -- --triple arm64-apple-macosx26.0 -Xswiftc -O
     else
-        mac_stage app 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0
+        core_shards=$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '1\n')
+        case "$core_shards" in
+            ''|*[!0-9]*) core_shards=1 ;;
+        esac
+        if [ "$core_shards" -gt 8 ]; then
+            core_shards=8
+        elif [ "$core_shards" -lt 1 ]; then
+            core_shards=1
+        fi
+        mac_stage app 'Swift test: macos/core' python3 scripts/run-xctest-shards.py \
+            --package-path macos/core --weights .github/macos-core-test-weights.json \
+            --shards "$core_shards" --concurrent \
+            -- --triple arm64-apple-macosx26.0 -Xswiftc -O
     fi
     mac_stage experiments 'Swift test: macos/ui-adapters' swift test --package-path macos/ui-adapters --triple arm64-apple-macosx26.0 --disable-keychain --disable-netrc
     mac_stage experiments run-macos-job-control-experiment python3 scripts/run-macos-job-control-experiment.py
