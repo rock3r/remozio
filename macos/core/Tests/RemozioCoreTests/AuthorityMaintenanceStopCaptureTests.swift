@@ -42,6 +42,39 @@ final class AuthorityMaintenanceStopCaptureTests: XCTestCase, @unchecked Sendabl
         XCTAssertEqual(requests.last?.binding?.incarnation, maintenanceCloseBytes(61))
         XCTAssertNotEqual(requests.last?.binding?.incarnation, f.driver.state.withLock { $0.incarnation })
     }
+    func testRetainedCaptureFailureAfterArmReopensTheExactSavedWindow() async throws {
+        let f = try MaintenanceStopTestFixture(purpose: .retainedRuntime), client = try f.client()
+        do {
+            _ = try await f.capture(client, requireProcess: { _ in
+                if f.driver.requests.contains(where: { $0.action == .arm }) {
+                    throw MaintenanceStopTestFault.expected
+                }
+            })
+            XCTFail("A failed process check returned a stop capture")
+        } catch { XCTAssertEqual(error as? MaintenanceStopTestFault, .expected) }
+        let requests = f.driver.requests, rows = f.cleanupRows.withLock { $0 }
+        XCTAssertEqual(requests.map(\.action), [.open, .observe, .arm, .cancel])
+        XCTAssertEqual(rows.map(\.phase), [.reopenPending, .restored])
+        XCTAssertEqual(f.recoveryDriver.requests.count, 1)
+        let reopen = try XCTUnwrap(f.recoveryDriver.requests.first)
+        XCTAssertEqual(reopen.action, .reopen)
+        XCTAssertEqual(reopen.binding, requests.last?.binding)
+        XCTAssertEqual(reopen.revision, rows.first?.revision)
+        XCTAssertEqual(rows.last?.gate?.admission, .available)
+        XCTAssertThrowsError(try f.drain.validate())
+    }
+    func testRetainedCaptureArmTimeoutReopensWithoutRetryingArm() async throws {
+        let f = try MaintenanceStopTestFixture(purpose: .retainedRuntime), client = try f.client()
+        f.driver.state.withLock { $0.holdArmReply = true }
+        do {
+            _ = try await f.capture(client)
+            XCTFail("A timed out arm returned a stop capture")
+        } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .cancelled) }
+        XCTAssertEqual(f.driver.requests.map(\.action), [.open, .observe, .arm])
+        XCTAssertEqual(f.recoveryDriver.requests.map(\.action), [.reopen])
+        XCTAssertEqual(f.cleanupRows.withLock { $0.map(\.phase) }, [.reopenPending, .restored])
+        XCTAssertThrowsError(try f.drain.validate())
+    }
     func testChangedWindowRevisionCannotReachObservationOrArm() async throws {
         let f = try MaintenanceStopTestFixture(), client = try f.client(revision: maintenanceCloseBytes(82))
         do { _ = try await f.capture(client); XCTFail() }
@@ -66,7 +99,8 @@ final class AuthorityMaintenanceStopCaptureTests: XCTestCase, @unchecked Sendabl
         do {
             _ = try await client.captureNativeStop(window: f.window, cohort: f.cohort, admission: f.ordinary,
                 drain: f.drain, directory: f.directory, until: .now.advanced(by: .seconds(2)),
-                persistBinding: { _ in throw MaintenanceStopTestFault.expected }, verifyOwner: {})
+                persistBinding: { _ in throw MaintenanceStopTestFault.expected },
+                persistCleanup: { _, _ in throw MaintenanceStopTestFault.expected }, verifyOwner: {})
             XCTFail()
         } catch { XCTAssertEqual(error as? JournalLeaseError, .rootRequired) }
         XCTAssertEqual(f.driver.requests.map(\.action), [.open]); await client.close()
