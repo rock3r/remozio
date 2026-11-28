@@ -74,7 +74,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     /// Owned-only test observer for the moment a hold decides to release. Root cannot set it.
     private var ownedHoldEndObserver: (@Sendable () -> Void)?
     private var recoverySignal: (@Sendable () -> Void)?
-    private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
+    private let auditUpgradeCleanup: SetupAuditUpgradeCleanupOwner
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
     private let gatewayActivationOperation: GatewaySetupActivationOperations?
@@ -111,9 +111,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
          gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
          importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil,
-         verifyAccountStartup: @escaping (Data, Data) throws -> Void = { _, _ in }) throws {
+         verifyAccountStartup: @escaping (Data, Data) throws -> Void = { _, _ in },
+         auditUpgradeCleanup: SetupAuditUpgradeCleanupOwner = .init()) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, pairingPolicy: pairingPolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
+            accountCodePolicy: accountCodePolicy, pairingPolicy: pairingPolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup,
+            auditUpgradeCleanup: auditUpgradeCleanup)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -144,8 +146,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
          activationOperations: RuntimeActivationOperations, releaseActivity: ReleaseActivityBarrier?,
          gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?,
-         importedGatewayOperation: GatewaySetupImportedRuntimeOperations?, verifyAccountStartup: @escaping (Data, Data) throws -> Void) throws {
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations?, verifyAccountStartup: @escaping (Data, Data) throws -> Void,
+         auditUpgradeCleanup: SetupAuditUpgradeCleanupOwner = .init()) throws {
         self.verifyAccountStartup = verifyAccountStartup
+        self.auditUpgradeCleanup = auditUpgradeCleanup
         self.releaseActivity = releaseActivity; self.gatewayJournalOperation = gatewayJournalOperation
         self.gatewayActivationOperation = gatewayActivationOperation; self.gatewaySettingsOperation = gatewaySettingsOperation
         self.importedGatewayOperation = importedGatewayOperation
@@ -174,7 +178,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         beginClosing()
         // A retained maintenance invocation keeps both admissions. Its cleanup needs no rights and no new connection,
         // so shutdown retries it here until it settles. No other path releases that admission.
-        while !(auditUpgradeCleanup.retry() && asynchronousWork.isIdle && setupReplyWork.isIdle) {
+        while !(retryAuditUpgradeCleanup(reportShutdownWait: true) && asynchronousWork.isIdle && setupReplyWork.isIdle) {
             await Self.pauseBeforeCleanupRetry()
         }
         await setupReplyWork.waitUntilIdle()
@@ -560,9 +564,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
         guard getpid() == processID else { return false }
         return auditUpgradeCleanup.settle(invocation)
     }
-    func retryAuditUpgradeCleanup() -> Bool {
+    func retryAuditUpgradeCleanup(reportShutdownWait: Bool = false) -> Bool {
         guard getpid() == processID else { return false }
-        return auditUpgradeCleanup.retry()
+        return auditUpgradeCleanup.retry(reportShutdownWait: reportShutdownWait)
     }
 
     /// Recovery observations bypass only the account startup fence. Ordinary setup keeps its existing admission checks.

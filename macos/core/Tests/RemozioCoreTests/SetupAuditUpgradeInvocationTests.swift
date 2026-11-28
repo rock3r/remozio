@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -122,17 +123,28 @@ final class SetupAuditUpgradeInvocationTests: XCTestCase {
         try owner.verifyCurrent(); try h.machine { _ in () }
     }
     func testShutdownFinishesRetainedCleanupWithoutNewRightsOrConnections() throws {
-        let h = try Harness(), owner = try h.owner()
+        let reported = expectation(description: "Shutdown reported the pending cleanup")
+        let reports = Mutex([String]())
+        let cleanup = SetupAuditUpgradeCleanupOwner(report: { report in
+            let first = reports.withLock { values in values.append(report.message); return values.count == 1 }
+            if first { reported.fulfill() }
+        })
+        let h = try Harness(), owner = try h.owner(auditUpgradeCleanup: cleanup)
         func acquireProcess() throws -> SetupProcessLease {
             try .openOwned(directory: ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
         }
         let processLease = try acquireProcess()
         let placement = try ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid())
         let shutdown = AdministrativeSetupShutdown(owner: owner, placement: placement, processLease: processLease)
-        h.quiescenceValidationFails = true; h.quiescenceCloseFails = true
+        h.quiescenceValidationFails = true
+        let allowClose = Mutex(false)
+        defer { allowClose.withLock { $0 = true } }
         var valid = true
         var invocation: SetupAuditUpgradeInvocation? = try begin(h, owner, rights: { if !valid { throw Refused() } })
         XCTAssertThrowsError(try XCTUnwrap(invocation).run { _ in XCTFail("Unverified result") })
+        try XCTUnwrap(h.q).beforeClose = {
+            if !allowClose.withLock({ $0 }) { throw JournalLeaseError.busy }
+        }
         XCTAssertFalse(owner.settleAuditUpgradeInvocation(try XCTUnwrap(invocation)))
         invocation = nil; valid = false
         // A failed close leaves the owner closing. It refuses new work but keeps the retained cleanup.
@@ -144,17 +156,96 @@ final class SetupAuditUpgradeInvocationTests: XCTestCase {
             do { try await shutdown.close() } catch { XCTFail("Shutdown: \(error)") }
             closed.fulfill()
         }
-        // Shutdown keeps retrying while cleanup fails. The exclusive Root activity token stays with the retained operation.
-        Thread.sleep(forTimeInterval: 0.5)
+        wait(for: [reported], timeout: 10)
+        XCTAssertEqual(reports.withLock { $0 }, ["setup_shutdown_wait cleanup=audit_upgrade cause=lease_busy count=1"])
         XCTAssertThrowsError(try h.installer.acquireShared())
         XCTAssertThrowsError(try acquireProcess()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
-        try XCTUnwrap(h.q).closeFails = false
+        XCTAssertNoThrow(try placement.validate())
+        allowClose.withLock { $0 = true }
         wait(for: [closed], timeout: 10)
+        XCTAssertThrowsError(try placement.validate())
         let replacement = try acquireProcess(); replacement.close()
         XCTAssertTrue(owner.retryAuditUpgradeCleanup()); XCTAssertThrowsError(try owner.verifyCurrent())
         let update = try h.installer.acquireExclusive(); update.close()
         try h.machine { _ in () }
     }
+    func testShutdownCleanupKeepsTheLatestRedactedReasonAndRateLimitsReports() throws {
+        let clock = Mutex(ContinuousClock.now)
+        let reports = Mutex([String]())
+        let cleanup = SetupAuditUpgradeCleanupOwner(now: { clock.withLock { $0 } },
+            report: { report in reports.withLock { $0.append(report.message) } })
+        let h = try Harness(), owner = try h.owner(auditUpgradeCleanup: cleanup)
+        defer { try? owner.close() }
+        h.quiescenceValidationFails = true
+        let invocation = try begin(h, owner)
+        XCTAssertThrowsError(try invocation.run { _ in XCTFail("Unverified result") })
+        let drain = try XCTUnwrap(h.q)
+        var attempts = 0
+        drain.beforeClose = { [weak owner] in
+            attempts += 1
+            // A contender can observe the pending cleanup but cannot reenter its close.
+            XCTAssertFalse(try XCTUnwrap(owner).retryAuditUpgradeCleanup())
+            throw PreparationStoreError.transactionActive
+        }
+        XCTAssertFalse(owner.settleAuditUpgradeInvocation(invocation))
+        XCTAssertEqual(attempts, 1)
+        XCTAssertTrue(reports.withLock { $0 }.isEmpty)
+        XCTAssertFalse(owner.retryAuditUpgradeCleanup(reportShutdownWait: true))
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(reports.withLock { $0 }, ["setup_shutdown_wait cleanup=audit_upgrade cause=transaction_active count=1"])
+
+        drain.beforeClose = {
+            throw NSError(domain: "/private/fixture/secret-token", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "fixture secret"])
+        }
+        clock.withLock { $0 = $0.advanced(by: .seconds(29)) }
+        XCTAssertFalse(owner.retryAuditUpgradeCleanup(reportShutdownWait: true))
+        XCTAssertEqual(reports.withLock { $0 }.count, 1)
+        clock.withLock { $0 = $0.advanced(by: .seconds(1)) }
+        XCTAssertFalse(owner.retryAuditUpgradeCleanup(reportShutdownWait: true))
+        XCTAssertEqual(reports.withLock { $0 }, [
+            "setup_shutdown_wait cleanup=audit_upgrade cause=transaction_active count=1",
+            "setup_shutdown_wait cleanup=audit_upgrade cause=other count=1",
+        ])
+
+        drain.beforeClose = nil
+        XCTAssertTrue(owner.retryAuditUpgradeCleanup(reportShutdownWait: true))
+        clock.withLock { $0 = $0.advanced(by: .seconds(30)) }
+        XCTAssertTrue(owner.retryAuditUpgradeCleanup(reportShutdownWait: true))
+        XCTAssertEqual(reports.withLock { $0 }.count, 2)
+    }
+
+    func testRecoveryJoinedShutdownReportsPendingCleanupAndRetainsBothLeases() throws {
+        let reports = Mutex([String]())
+        let cleanup = SetupAuditUpgradeCleanupOwner(report: { report in reports.withLock { $0.append(report.message) } })
+        let h = try Harness(), owner = try h.owner(auditUpgradeCleanup: cleanup)
+        let placement = try ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid())
+        let lockDirectory = try ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid())
+        let lease = try SetupProcessLease.openOwned(directory: lockDirectory)
+        let shutdown = AdministrativeSetupShutdown(owner: owner, placement: placement, processLease: lease)
+        try shutdown.reserveRecoverySupervisor(expectsPublication: false)
+        h.quiescenceValidationFails = true
+        let invocation = try begin(h, owner)
+        XCTAssertThrowsError(try invocation.run { _ in XCTFail("Unverified result") })
+        let drain = try XCTUnwrap(h.q)
+        drain.beforeClose = { throw AdministrativeSetupError.unavailable }
+        defer { drain.beforeClose = nil; _ = try? shutdown.closeAfterRecoveryJoinedOwned() }
+        XCTAssertFalse(owner.settleAuditUpgradeInvocation(invocation))
+        XCTAssertEqual(try shutdown.closeAfterRecoveryJoinedOwned(), .pending)
+        XCTAssertEqual(reports.withLock { $0 }, ["setup_shutdown_wait cleanup=audit_upgrade cause=cleanup_unavailable count=1"])
+        XCTAssertThrowsError(try owner.acquireAuditUpgradeScope(authorization: .openOwned(verifyRights: {})))
+        XCTAssertNoThrow(try placement.validate())
+        XCTAssertNoThrow(try lease.validate())
+        XCTAssertThrowsError(try h.installer.acquireShared())
+
+        drain.beforeClose = nil
+        XCTAssertEqual(try shutdown.closeAfterRecoveryJoinedOwned(), .closed)
+        XCTAssertThrowsError(try placement.validate())
+        XCTAssertThrowsError(try lease.validate())
+        let activity = try h.installer.acquireExclusive(); activity.close()
+        XCTAssertEqual(reports.withLock { $0 }.count, 1)
+    }
+
     func testRightsExpiryAfterRegistrationPreventsReplyAndLeavesRecoveryAvailable() throws {
         let h = try Harness(), owner = try h.owner(); defer { try? owner.close() }
         var valid = true; h.afterRestart = { valid = false }
