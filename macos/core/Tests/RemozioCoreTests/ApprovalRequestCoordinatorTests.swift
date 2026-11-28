@@ -847,7 +847,14 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
             relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
         defer { try? reopened.close(); continuity.close() }
-        let restarted = try ApprovalRequestCoordinator(database: reopened, continuity: continuity, writer: writer, clockEpoch: clock,
+        let startup = try JournalStartupRecovery(journal: reopened, continuity: continuity,
+            maximumRecords: 10, maximumBytes: 16384)
+        let nextEpoch = try descriptor(4, generation: continuity.read().committed.currentAuthorityGeneration)
+        var progress = try startup.start(descriptor: nextEpoch)
+        while case .recovering = progress { progress = try startup.advance() }
+        guard case .complete = progress else { return XCTFail("Restart did not recover the journal") }
+        let restarted = try ApprovalRequestCoordinator(database: reopened, continuity: continuity,
+            writer: startup.completedWriter(), clockEpoch: clock,
             maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
             decisionLimits: limits, signingLimits: limits, auditLimits: limits, replayCapacityDiagnostics: report)
         XCTAssertEqual(messages.withLock { $0 }, [consumptionFull, submissionFull])
