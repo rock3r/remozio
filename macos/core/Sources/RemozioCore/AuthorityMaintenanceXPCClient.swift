@@ -450,6 +450,9 @@ actor AuthorityMaintenanceXPCClient {
             throw RuntimePreparationError.changedScope
         }
         let witness = try capture()
+        func requireCurrent() throws {
+            try check(); try verifyConfiguration(); try requireProcess(witness)
+        }
         let saved: RuntimeMaintenanceWindowRecord
         let bindingTransition: PreparationIntentStore.RuntimeMaintenanceTransition?
         do {
@@ -465,17 +468,20 @@ actor AuthorityMaintenanceXPCClient {
             guard saved.shutdownBinding == binding, saved == (try window.retainingShutdownBinding(binding, revision: saved.revision)) else {
                 throw RuntimePreparationError.changedScope
             }
+            if saved.purpose != .retainedRuntime { try requireCurrent() }
         } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        do {
-            try check(); try verifyConfiguration(); try requireProcess(witness)
+
+        func observeAndArm() async throws -> Response {
             while true {
                 try check(); let response = try await observe(until: deadline); try check()
                 if response.work?.allowsMaintenanceStop == true { break }
                 guard ContinuousClock.now < deadline else { throw AuthorityMaintenanceClientError.cancelled }
                 try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
             }
-            let response = try await arm(until: deadline)
-            try check(); try verifyConfiguration(); try requireProcess(witness)
+            return try await arm(until: deadline)
+        }
+        func makeCapture(_ response: Response) throws -> RuntimeMaintenanceStopCapture {
+            try requireCurrent()
             guard response.outcome == .applied, response.work?.allowsMaintenanceStop == true else {
                 throw AuthorityMaintenanceClientError.cancelled
             }
@@ -486,19 +492,31 @@ actor AuthorityMaintenanceXPCClient {
             return .init(window: saved, cohort: cohort, marker: marker, witness: witness, configuration: configuration,
                 bindingTransition: bindingTransition,
                 verifyOwner: verifyOwner, verifyConfiguration: verifyConfiguration)
+        }
+
+        if saved.purpose != .retainedRuntime {
+            let response = try await observeAndArm()
+            do { return try makeCapture(response) }
+            catch {
+                do { try await release(until: .now.advanced(by: timeout)) }
+                catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+                throw error
+            }
+        }
+
+        do {
+            try requireCurrent()
+            let response = try await observeAndArm()
+            return try makeCapture(response)
         } catch {
             do {
-                if saved.purpose == .retainedRuntime {
-                    try check()
-                    try await recover(saved)
-                } else {
-                    try await release(until: .now.advanced(by: timeout))
-                }
+                try check()
+                try await recover(saved)
             } catch {
                 finish()
                 throw AuthorityMaintenanceClientError.needsOwnerRecovery
             }
-            if saved.purpose == .retainedRuntime, error as? AuthorityMaintenanceClientError == .needsOwnerRecovery {
+            if error as? AuthorityMaintenanceClientError == .needsOwnerRecovery {
                 throw AuthorityMaintenanceClientError.cancelled
             }
             throw error

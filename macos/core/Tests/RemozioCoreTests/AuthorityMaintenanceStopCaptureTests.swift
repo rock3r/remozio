@@ -42,6 +42,31 @@ final class AuthorityMaintenanceStopCaptureTests: XCTestCase, @unchecked Sendabl
         XCTAssertEqual(requests.last?.binding?.incarnation, maintenanceCloseBytes(61))
         XCTAssertNotEqual(requests.last?.binding?.incarnation, f.driver.state.withLock { $0.incarnation })
     }
+    func testNonRetainedProcessCheckAfterBindingRequiresOwnerRecoveryWithoutCancel() async throws {
+        let f = try MaintenanceStopTestFixture(), client = try f.client()
+        do {
+            _ = try await f.capture(client, requireProcess: { _ in throw MaintenanceStopTestFault.changedProcess })
+            XCTFail("A failed process check returned a stop capture")
+        } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
+        XCTAssertEqual(f.driver.requests.map(\.action), [.open])
+        XCTAssertTrue(f.recoveryDriver.requests.isEmpty)
+        XCTAssertTrue(f.cleanupRows.withLock { $0.isEmpty })
+        try f.drain.validate()
+    }
+    func testNonRetainedObserveAndArmTimeoutsLeaveTheSavedWindowForOwnerRecovery() async throws {
+        for action in [AuthorityMaintenanceChannelRequest.Action.observe, .arm] {
+            let f = try MaintenanceStopTestFixture(), client = try f.client()
+            f.driver.state.withLock { $0.unansweredAction = action }
+            do {
+                _ = try await f.capture(client)
+                XCTFail("A timed out operation returned a stop capture")
+            } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
+            XCTAssertEqual(f.driver.requests.map(\.action), action == .observe ? [.open, .observe] : [.open, .observe, .arm])
+            XCTAssertTrue(f.recoveryDriver.requests.isEmpty)
+            XCTAssertTrue(f.cleanupRows.withLock { $0.isEmpty })
+            try f.drain.validate()
+        }
+    }
     func testRetainedCaptureFailureAfterArmReopensTheExactSavedWindow() async throws {
         let f = try MaintenanceStopTestFixture(purpose: .retainedRuntime), client = try f.client()
         do {
@@ -65,7 +90,7 @@ final class AuthorityMaintenanceStopCaptureTests: XCTestCase, @unchecked Sendabl
     }
     func testRetainedCaptureArmTimeoutReopensWithoutRetryingArm() async throws {
         let f = try MaintenanceStopTestFixture(purpose: .retainedRuntime), client = try f.client()
-        f.driver.state.withLock { $0.holdArmReply = true }
+        f.driver.state.withLock { $0.unansweredAction = .arm }
         do {
             _ = try await f.capture(client)
             XCTFail("A timed out arm returned a stop capture")

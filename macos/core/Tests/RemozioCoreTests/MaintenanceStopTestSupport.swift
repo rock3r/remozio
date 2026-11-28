@@ -18,7 +18,8 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
         var invalidated: (@Sendable () -> Void)?
         var requests: [AuthorityMaintenanceChannelRequest] = []
         var incarnation = maintenanceCloseBytes(61), busyObservations = 0, pendingArms = 0
-        var ready = true, holdArmReply = false
+        var ready = true
+        var unansweredAction: AuthorityMaintenanceChannelRequest.Action?
     }
     let state = Mutex(State())
     var requests: [AuthorityMaintenanceChannelRequest] { state.withLock { $0.requests } }
@@ -39,7 +40,7 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
                 if busy { s.busyObservations -= 1 }
                 let pending = q.action == .arm && s.pendingArms > 0
                 if pending { s.pendingArms -= 1 }
-                return (s.incarnation, busy, pending, s.ready, q.action == .arm && s.holdArmReply)
+                return (s.incarnation, busy, pending, s.ready, q.action == s.unansweredAction)
             }
             if observed.4 { return }
             let binding = try q.binding ?? .init(accountID: q.accountID, attemptID: q.attemptID, revision: q.revision,
