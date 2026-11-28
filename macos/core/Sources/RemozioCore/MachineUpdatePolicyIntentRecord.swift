@@ -100,8 +100,14 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
 
     /// Checks the archived scope only. Live owners must separately validate their current stores and native boundary.
     func requireSnapshot(_ snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence) throws {
+        var verification = MachineUpdateRestartHealthPlan.Verification(snapshot: snapshot, candidate: candidate)
+        try requireSnapshot(&verification)
+    }
+
+    func requireSnapshot(_ verification: inout MachineUpdateRestartHealthPlan.Verification) throws {
         try validate()
-        _ = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)
+        try verification.require()
+        let snapshot = verification.snapshot, candidate = verification.candidate
         guard snapshot.source.replacement.activation.phase == .restartChecking,
               try EpochScope(configuration: snapshot.configuration.record, backend: snapshot.backend.record) == epochs,
               try snapshot.configuration.policy(accountID: binding.accountID) == sourcePolicy.snapshot(),

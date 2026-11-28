@@ -20,6 +20,30 @@ struct MachineUpdateRestartHealthPlan: CustomStringConvertible, CustomDebugStrin
         let requirements: [Requirement]
         var accountID: Data { configuration.binding.accountID }
     }
+    struct Verification {
+        let snapshot: MachineUpdateRestartSnapshot
+        let candidate: SignedReleaseEvidence
+        private var verified = false
+
+        #if DEBUG
+        @TaskLocal static var observePlanBuild: (@Sendable () -> Void)?
+        #endif
+
+        init(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence) {
+            self.snapshot = snapshot
+            self.candidate = candidate
+        }
+
+        mutating func require() throws {
+            guard !verified else { return }
+            #if DEBUG
+            Self.observePlanBuild?()
+            #endif
+            _ = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)
+            verified = true
+        }
+    }
+
     let accounts: [Account]
     let preservedAccounts: [Data]
     var requirements: [Requirement] { accounts.flatMap(\.requirements) }

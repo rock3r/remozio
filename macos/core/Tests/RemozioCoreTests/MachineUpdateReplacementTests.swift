@@ -7532,8 +7532,24 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let row = try MachineUpdatePolicyIntentRecord.decode(XCTUnwrap(archive.policies.first).encoded)
             XCTAssertEqual(try MachineUpdateCompletionIntentArchive(record: record, policies: [row]), archive)
             XCTAssertEqual(row.phase, .prepared)
-            try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
-                currentSourceDigest: fixture.snapshot.backend.record.currentSourceDigest)
+            let digest = fixture.snapshot.backend.record.currentSourceDigest
+            #if DEBUG
+            let builds = Mutex(0)
+            try MachineUpdateRestartHealthPlan.Verification.$observePlanBuild.withValue({ builds.withLock { $0 += 1 } }) {
+                try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate, currentSourceDigest: digest)
+                XCTAssertEqual(builds.withLock { $0 }, 1)
+                try record.requireSnapshot(fixture.snapshot, candidate: fixture.candidate, currentSourceDigest: digest)
+                try row.requireSnapshot(fixture.snapshot, candidate: fixture.candidate)
+                XCTAssertEqual(builds.withLock { $0 }, 3)
+                let foreign = SignedReleaseEvidence(manifest: fixture.candidate.manifest, codeDirectoryHashes: [:])
+                var invalid = MachineUpdateRestartHealthPlan.Verification(snapshot: fixture.snapshot, candidate: foreign)
+                XCTAssertThrowsError(try invalid.require())
+                XCTAssertThrowsError(try invalid.require())
+                XCTAssertEqual(builds.withLock { $0 }, 5)
+            }
+            #else
+            try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate, currentSourceDigest: digest)
+            #endif
             XCTAssertThrowsError(try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
                 currentSourceDigest: Data(repeating: 249, count: 32))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
