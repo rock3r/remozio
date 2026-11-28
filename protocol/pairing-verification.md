@@ -15,8 +15,11 @@ Display the 20 symbols as four groups of five, separated by spaces.
 The alphabet excludes zero, one, I and O. Both implementations use the same shared vectors.
 The format changes no transcript bytes, signing purpose, wire frame, invitation or receipt.
 
-The displayed code carries 100 bits of comparison data. It is not the full 256-bit digest or an enrollment credential.
-Root confirmation still sends and checks the complete digest. Phone signatures and commit receipts bind the complete canonical transcript.
+The full comparison code carries 100 bits. The Mac checks only the last group, which carries 25 bits.
+With at most three blind guesses at an unpredictable group, the probability of guessing it is at most 3 × 2⁻²⁵ per session.
+The first three groups carry 75 bits for the visual comparison. The Mac cannot verify that the user compared them.
+
+Root checks the full 256-bit digest at commit. Phone signatures and commit receipts bind the complete canonical transcript.
 The invitation's diagnostic fingerprint remains separate and unchanged.
 
 The code binds both devices' keys, identities, protocol choice, fresh challenge, setup ID, trust revision and expiry.
