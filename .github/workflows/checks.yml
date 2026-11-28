@@ -358,6 +358,9 @@ jobs:
       matrix:
         part: ${{ fromJSON(needs.changes.outputs.mac_core_parts || '[1, 2]') }}
     steps:
+      # Crash reports written after this time belong to this job; see the crash summary steps below.
+      - name: Record the job start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Depth 2 also fetches the base a pull request was merged onto, for the duration check's changed paths.
@@ -423,6 +426,22 @@ jobs:
         with:
           name: mac-core-shards-${{ matrix.part }}-${{ github.run_attempt }}
           path: .build/xctest-shards/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+      # A crashed xctest process leaves only its "started" line in the shard log, and the runner is gone after the
+      # job. On failure, keep the crashed thread of each xctest crash report from this job. The script copies no
+      # report as is: it drops other threads, registers, paths and every unnamed field, since the logs are public.
+      - name: Summarize xctest crash reports
+        if: failure()
+        continue-on-error: true
+        run: python3 scripts/collect-xctest-crashes.py --since "$JOB_STARTED_AT" --output .build/xctest-crashes
+      - name: Retain xctest crash summaries
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac-core-crashes-${{ matrix.part }}-${{ github.run_attempt }}
+          path: .build/xctest-crashes/*.txt
           if-no-files-found: ignore
           retention-days: 7
   mac-interop:
