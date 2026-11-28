@@ -1,0 +1,48 @@
+# Measure and reduce completion publication cost
+
+[Issue #1069](https://github.com/rock3r/remozio/issues/1069) tracks product work. This plan is based on main at `e0b10957`. A seven-entry test completed in 46.671 seconds. Time Profiler attributed 45.892 seconds of weighted CPU samples to its stack. `completionPublicationSnapshot`, `loadCompletionRecoverySnapshot`, `requireInLeases` and `requireEntry` overlapped. Their inclusive times were 44.136, 39.153, 39.360 and 37.021 seconds. The test runs writes, rollback, recovery and replay scenarios. It does not establish the cost of one installed update.
+
+The seven entries are six configuration files and one authority job for one account. The fixture has no Gateway backend capture. It calls the retain helper six times and the file coordinator five times. The sample export contains neither dynamic call counts nor real payload sizes.
+
+## Measure each operation
+
+Add a temporary measurement patch to the existing publication test. Use its production path and existing fixture. Add observer calls for private functions only in the throwaway measurement patch. Remove the patch after the run. Keep the production and review branches free of the measurement code.
+
+- Record entry, exit and outcome for each retain, prepare, complete, file exchange and finalization attempt. Use integer attempt, stage, transaction and scope IDs. Keep the existing write, fault, retry and replay sequence.
+- Count actual calls to `completionPublicationSnapshot`, `loadCompletionRecoverySnapshot`, `CompletionPublicationScope.read`, `requireInLeases`, `requireEntry`, and each immutable cache hit or miss. Count entries visited and successful scans separately. An early failure can make a scan shorter than the plan.
+- Record monotonic elapsed time and XCTest process CPU for each call. Run one selected test per process. Report counts, totals, per-call mean and median, and per-step totals. Use parent IDs to subtract child intervals from exclusive cost. Keep inclusive times visible and avoid summing overlapping calls.
+- At the existing materialization points, count `startup` and `completion` bytes per plan entry. Count the already produced record JSON before SQLite bind, with schema, stage and outcome. Count immutable validation key input bytes and actual file bytes read. Read `Data.count` from existing values and avoid a second encode. Record only lengths and classifications. Keep payloads and file paths out of the report.
+- Capture three serial passes of the existing test with the same optimized flags, binary and host configuration. Use an uninstrumented run to estimate probe overhead. Confirm the same rollback results, marker order, idempotent replay, original inode after acknowledgment replay and terminal state. The deadline cap is 900 seconds for the build and 600 seconds per pass.
+- Separate entry-count scaling from byte scaling. Use a second admitted account from the existing completion fixture only after both recorded policy boundaries validate. Compare matched plans with the same operation/fault script. Then vary valid canonical operand sizes at a fixed entry count. If a second fixture cannot vary one dimension independently, report the measured sizes and leave scaling unproven.
+
+## Reduce repeated work in separate changes
+
+Start with the operations whose inputs are immutable. Use before and after profiles to choose the next change.
+
+| Candidate | Required check |
+| --- | --- |
+| Compute plan fingerprints and per-entry startup/completion hashes once on a verified immutable plan. Reuse the derived values in `requirePlan`. | Compare every account, owner, file, source/target inventory digest and entry digest with the current record. Keep the same canonical encoding and digest domains. Still verify actual file bytes and metadata. |
+| Reuse the SQLite-only part of the publication frame within one read transaction. Follow the existing stable frame cache rules. Skip an immediate second full frame load before the first borrower callback only after showing no intervening effects. | Require the active connection, read transaction state, transaction serial, unchanged `total_changes64`, the exact candidate and publication ID/revision, and the bound plan. Recheck the restart lease, destination identity and machine boundary on every read. Recapture every external compatibility input, including shared-import state. Expire the loan on any error or change. |
+| Avoid reopening the same bound directory during redundant validation when the operation can retain its directory lease. Reuse only the directory handle and immutable plan data. | Validate the directory again against current path and identity. Require current owner, mode, type, link count and exact startup/completion bytes. Keep stage, process and thread ownership checks. An open file descriptor alone does not prove the current path still names that file. |
+| Merge two full-file scans only within a proven effect-free interval on the same publication revision. A candidate is the pair around the built-in no-op store notification. An injected notification keeps two scans. | Keep full validation across callbacks that can change a sibling, every write/commit boundary, and each return to a caller. Keep the selected entry verification before exchange, the exact-byte/path/metadata checks at exchange, and readback after exchange. If a live check or callback can change state between the candidate scans, retain both. |
+
+Reuse of database-derived state is limited to one read transaction. Clear it on begin, commit, rollback, shutdown, write upgrade or a changed key. Misses use the full path. Keep full loads in the before-transaction, in-transaction, after-mutation and after-commit scopes when they belong to different transactions or a write transaction. A drain blocks cooperating admission. It does not establish that disk, another journal, or the caller's callback stayed unchanged.
+
+Do not replace `CompletionPublicationScope.read()` with a cached return. Keep process/thread checks, the active transaction and scope checks, and revocation on failed verification. Leave the nested verification around borrowed file and store callbacks in place. Keep the durable writing marker before file exchange, the acknowledgment after readback and replay of a completed exchange after a lost acknowledgment.
+
+## Use fixed-size validation cache keys
+
+For configuration and backend pure validation, derive a 32-byte SHA-256 index from the existing domain-separated, length-framed input. Stream the parts, so creating the key avoids building a large concatenated `Data`. Include the canonical record and each artifact's kind, account and actual bytes in order. Include the exact configuration key in the backend key. Keep a versioned domain for each computation. Never use a declared digest or revision as a substitute for hashing the actual inputs.
+
+Keep the current byte-equality guarantee on a digest hit. Store a bounded reference to the validated immutable inputs behind the fixed-size index and compare the exact framed inputs. A digest collision is a miss. A repeated lookup may reuse an already computed digest only for the same immutable archive inputs. A new read validates its exact inputs again. If the digest and equality check cost more than the current path, retain the current path and report the comparison.
+
+Keep insertion after successful pure validation, store ownership, the PID guard before locking, synchronization, eviction and both entry and retained-byte limits. Do not share a cache across stores, processes or mutable records. The initial change covers the two archive validation caches. The exact-byte value/decode caches and installed-release key path stay outside the first change.
+
+## Verification sequence
+
+1. Instrumentation-only selection. Run `MachineUpdateReplacementTests/testCompletionPublicationStorageRetainsOnlyTheExactRecordedPlan` on the existing optimized macOS Core entry point under ATC. Pin the diff, exact selector, output folder, host and caps before running.
+2. Run the affected Core tests for the selected change. Include `PreparationImmutableValidationCacheTests`, `PreparationStoreFrameCacheTests` and the completion publication cases in `MachineUpdateReplacementTests`. Pin the exact methods after the diff is ready. Use the current ATC toolkit and repository toolchain. Propose a 900-second build cap and a 600-second focused-test cap, subject to that selection's measured forecast.
+3. Add targeted cases where existing tests lack coverage. Check digest collisions with an injected hash in test code, changed/reordered input, error/eviction/fork behavior, another connection before or between transactions, external import drift within a read transaction, and a sibling or selected entry changing at the removed boundary. Use existing protected-directory and replay fixtures. Keep stale scope, unsafe mode, rollback, post-commit failure and lost acknowledgment outcomes. Recover the same durable state after reopening.
+4. Repeat the measured publication case and Time Profiler under matching conditions. Compare counts, byte totals, CPU and elapsed medians before and after each change. Then run the full optimized Core gate with eight local shards, the same weights and exactly-once guard, and a proposed 2,400-second cap. Compare selectors, outcomes and expected skips. Preserve the repository PR and CI checks.
+
+Publish each production change separately after review of its evidence. A reduction in call count alone does not qualify a change if the fault or replay outcomes differ.
