@@ -20,6 +20,25 @@ struct MachineUpdateRestartHealthPlan: CustomStringConvertible, CustomDebugStrin
         let requirements: [Requirement]
         var accountID: Data { configuration.binding.accountID }
     }
+    struct Verification {
+        let snapshot: MachineUpdateRestartSnapshot
+        let candidate: SignedReleaseEvidence
+        private var verified = false
+        private(set) var buildAttempts = 0
+
+        init(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence) {
+            self.snapshot = snapshot
+            self.candidate = candidate
+        }
+
+        mutating func require() throws {
+            guard !verified else { return }
+            buildAttempts += 1
+            _ = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)
+            verified = true
+        }
+    }
+
     let accounts: [Account]
     let preservedAccounts: [Data]
     var requirements: [Requirement] { accounts.flatMap(\.requirements) }

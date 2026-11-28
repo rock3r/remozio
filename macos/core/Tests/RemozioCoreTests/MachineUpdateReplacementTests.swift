@@ -7532,8 +7532,27 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let row = try MachineUpdatePolicyIntentRecord.decode(XCTUnwrap(archive.policies.first).encoded)
             XCTAssertEqual(try MachineUpdateCompletionIntentArchive(record: record, policies: [row]), archive)
             XCTAssertEqual(row.phase, .prepared)
-            try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
-                currentSourceDigest: fixture.snapshot.backend.record.currentSourceDigest)
+            let digest = fixture.snapshot.backend.record.currentSourceDigest
+            var verification = MachineUpdateRestartHealthPlan.Verification(
+                snapshot: fixture.snapshot, candidate: fixture.candidate)
+            try archive.requireSnapshot(&verification, currentSourceDigest: digest)
+            XCTAssertEqual(verification.buildAttempts, 1)
+
+            verification = .init(
+                snapshot: fixture.snapshot, candidate: fixture.candidate)
+            try record.requireSnapshot(&verification, currentSourceDigest: digest)
+            XCTAssertEqual(verification.buildAttempts, 1)
+
+            verification = .init(
+                snapshot: fixture.snapshot, candidate: fixture.candidate)
+            try row.requireSnapshot(&verification)
+            XCTAssertEqual(verification.buildAttempts, 1)
+
+            let foreign = SignedReleaseEvidence(manifest: fixture.candidate.manifest, codeDirectoryHashes: [:])
+            verification = .init(snapshot: fixture.snapshot, candidate: foreign)
+            XCTAssertThrowsError(try verification.require())
+            XCTAssertThrowsError(try verification.require())
+            XCTAssertEqual(verification.buildAttempts, 2)
             XCTAssertThrowsError(try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
                 currentSourceDigest: Data(repeating: 249, count: 32))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)

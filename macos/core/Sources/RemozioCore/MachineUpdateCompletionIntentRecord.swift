@@ -88,8 +88,15 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
     /// Checks historical operands under the caller's separately verified machine source digest.
     func requireSnapshot(_ snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
                          currentSourceDigest: Data) throws {
+        var verification = MachineUpdateRestartHealthPlan.Verification(snapshot: snapshot, candidate: candidate)
+        try requireSnapshot(&verification, currentSourceDigest: currentSourceDigest)
+    }
+
+    func requireSnapshot(_ verification: inout MachineUpdateRestartHealthPlan.Verification,
+                         currentSourceDigest: Data) throws {
         try validate()
-        _ = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)
+        try verification.require()
+        let snapshot = verification.snapshot, candidate = verification.candidate
         let source = snapshot.source, context = source.replacement
         let version = context.runtime.schemaVersion
         guard currentSourceDigest == sourceMachineDigest,
@@ -215,9 +222,15 @@ struct MachineUpdateCompletionIntentArchive: Equatable, Sendable {
 
     func requireSnapshot(_ snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
                          currentSourceDigest: Data) throws {
+        var verification = MachineUpdateRestartHealthPlan.Verification(snapshot: snapshot, candidate: candidate)
+        try requireSnapshot(&verification, currentSourceDigest: currentSourceDigest)
+    }
+
+    func requireSnapshot(_ verification: inout MachineUpdateRestartHealthPlan.Verification,
+                         currentSourceDigest: Data) throws {
         try validate()
-        try record.requireSnapshot(snapshot, candidate: candidate, currentSourceDigest: currentSourceDigest)
-        for policy in policies { try policy.requireSnapshot(snapshot, candidate: candidate) }
+        try record.requireSnapshot(&verification, currentSourceDigest: currentSourceDigest)
+        for policy in policies { try policy.requireSnapshot(&verification) }
     }
 
     func preparingWrite(accountID: Data, expected: AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Self {
