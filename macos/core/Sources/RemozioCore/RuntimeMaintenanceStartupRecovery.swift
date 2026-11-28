@@ -1282,6 +1282,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             return try afterProbePolicy(row, proof.incarnation == target.incarnation)
         }
     }
+    // Only the live PID wait uses this timing.
     struct RestoringProcessTiming: Sendable {
         let now: @Sendable () -> ContinuousClock.Instant
         let sleep: @Sendable (ContinuousClock.Instant) async throws -> Void
