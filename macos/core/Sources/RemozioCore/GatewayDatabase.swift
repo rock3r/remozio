@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import OSLog
 import RemozioProtocol
 import SQLite3
 
@@ -30,6 +31,7 @@ public struct GatewayCandidateAdmission: Sendable {
 /// Candidate admission and recipient changes share one durable revision. No method grants provider dispatch authority.
 public final class GatewayDatabase {
     private static let applicationID: Int64 = 0x524D5A47
+    private static let controlLogger = Logger(subsystem: "dev.sebastiano.remozio.macos.gateway", category: "control")
     private let lease: ProtectedGatewayLease
     private let readOnlyForUpdateHealth: Bool
     private let identity: GatewayRegistrationIdentity
@@ -42,6 +44,8 @@ public final class GatewayDatabase {
     private let clockEpoch: UUID
     private let runID = UUID()
     private var lastMoment: UInt64?
+    private var reportedTombstoneCapacityRefusal = false
+    private let reportTombstoneCapacityRefusal: (String) -> Void
     private var db: OpaquePointer?
     private var active = false
     private var unavailable = false
@@ -75,8 +79,11 @@ public final class GatewayDatabase {
     init(lease: ProtectedGatewayLease, identity: GatewayRegistrationIdentity, payloadLimits: CBORLimits,
          signingLimits: CBORLimits, maximumOperations: Int, maximumPendingPerEnrollment: Int,
          maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool, migrateLegacyStore: Bool = false, probePolicy: GatewayProbePolicy? = nil,
-         readOnlyForUpdateHealth: Bool = false) throws {
+         readOnlyForUpdateHealth: Bool = false, reportTombstoneCapacityRefusal: ((String) -> Void)? = nil) throws {
         self.readOnlyForUpdateHealth = readOnlyForUpdateHealth
+        self.reportTombstoneCapacityRefusal = reportTombstoneCapacityRefusal ?? { message in
+            GatewayDatabase.controlLogger.error("\(message, privacy: .public)")
+        }
         self.lease = lease; self.identity = identity; self.payloadLimits = payloadLimits; self.signingLimits = signingLimits
         self.maximumOperations = maximumOperations; self.maximumPendingPerEnrollment = maximumPendingPerEnrollment
         self.maximumLifetimeMillis = maximumLifetimeMillis; self.clockEpoch = clockEpoch; self.probePolicy = probePolicy
@@ -693,9 +700,12 @@ public final class GatewayDatabase {
     private enum ControlCapacity { case ordinary, firstPhoneRevocation, tombstone }
 
     private struct ControlUsage {
-        let ordinary: Int64
+        let ordinaryControls: Int64
+        let overflowTombstones: Int64
         let firstRevocations: Int64
         let tombstones: Int64
+
+        var ordinary: Int64 { ordinaryControls + overflowTombstones }
     }
 
     private func controlUsage(includeSubmission: Bool, includeTombstones: Bool) throws -> ControlUsage {
@@ -715,7 +725,7 @@ public final class GatewayDatabase {
             let firstRevocations = sqlite3_column_int64(row, 1)
             let tombstones = sqlite3_column_int64(row, 2)
             let ordinaryTombstones = max(0, tombstones - Int64(maximumOperations))
-            return ControlUsage(ordinary: total - firstRevocations + ordinaryTombstones,
+            return ControlUsage(ordinaryControls: total - firstRevocations, overflowTombstones: ordinaryTombstones,
                 firstRevocations: firstRevocations, tombstones: tombstones)
         }
     }
@@ -728,7 +738,15 @@ public final class GatewayDatabase {
         case .tombstone where usage.tombstones < maximumOperations:
             return
         default:
-            guard usage.ordinary < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
+            guard usage.ordinary < maximumOperations else {
+                if case .tombstone = capacity, !reportedTombstoneCapacityRefusal {
+                    // A full store retains the counted rows. Retries need only one report per open.
+                    reportedTombstoneCapacityRefusal = true
+                    reportTombstoneCapacityRefusal(
+                        "gateway_tombstone_refused reason=control_capacity_exceeded tombstones=\(usage.tombstones) ordinary_controls=\(usage.ordinaryControls) limit=\(maximumOperations)")
+                }
+                throw GatewayDatabaseError.capacityExceeded
+            }
         }
     }
     private func advanceHead(_ revision: UInt64, from previous: UInt64) throws {
