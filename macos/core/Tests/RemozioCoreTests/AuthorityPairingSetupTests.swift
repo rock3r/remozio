@@ -1969,7 +1969,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let f = try Fixture(v2ActivationEnabled: false), requirement = try testRequirement(), trace = PhoneManagementTrace()
         let server = NativeServer(f, requirement: requirement, installedPairing: true)
         defer { server.close() }
-        let root = client(f, driver: NativeDriver(endpoint: server.listener.endpoint, policy: f.policy, requirement: requirement, trace: trace))
+        let root = AuthorityPairingChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: f.policy,
+            requirement: requirement, trace: trace), macID: f.mac, accountID: f.account)
         defer { root.abort() }
         _ = try await root.start()
         let negotiation = try await root.negotiateInstalledPairing()
