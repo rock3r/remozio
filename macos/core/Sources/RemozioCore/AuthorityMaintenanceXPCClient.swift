@@ -380,7 +380,8 @@ actor AuthorityMaintenanceXPCClient {
     func captureNativeStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
         admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
         until deadline: ContinuousClock.Instant, persistBinding: (@Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord)? = nil,
-        persistBindingTransition: (@Sendable (AuthorityMaintenanceBinding) throws -> PreparationIntentStore.RuntimeMaintenanceTransition)? = nil, verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
+        persistBindingTransition: (@Sendable (AuthorityMaintenanceBinding) throws -> PreparationIntentStore.RuntimeMaintenanceTransition)? = nil,
+        persistCleanup: @escaping CleanupCommit, verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
         guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
         let configuration = try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath)
         guard let code = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else { throw RuntimePreparationError.changedScope }
@@ -393,7 +394,11 @@ actor AuthorityMaintenanceXPCClient {
                 guard try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath).canonicalBytes == configuration.canonicalBytes else {
                     throw InstalledAuthorityCommandError.changedConfiguration
                 }
-            }, persistBinding: persistBinding, persistBindingTransition: persistBindingTransition, verifyOwner: verifyOwner)
+            }, persistBinding: persistBinding, persistBindingTransition: persistBindingTransition,
+            recover: { saved in
+                _ = try await self.cancelAndReopenNative(window: saved, drain: drain, directory: directory,
+                    until: .now.advanced(by: self.timeout), persist: persistCleanup)
+            }, verifyOwner: verifyOwner)
     }
     /// Same capture sequence with ordinary-owner controls. Root cannot select its callbacks.
     func captureOwnedStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
@@ -401,11 +406,18 @@ actor AuthorityMaintenanceXPCClient {
         configuration: InstalledAuthorityCommandConfiguration, until deadline: ContinuousClock.Instant,
         capture: @Sendable () throws -> any RuntimeJobExitWitness, requireProcess: @Sendable (any RuntimeJobExitWitness) throws -> Void,
         persistBinding: (@Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord)? = nil,
-        persistBindingTransition: (@Sendable (AuthorityMaintenanceBinding) throws -> PreparationIntentStore.RuntimeMaintenanceTransition)? = nil, verifyOwner: @escaping @Sendable () throws -> Void = {}) async throws -> RuntimeMaintenanceStopCapture {
+        persistBindingTransition: (@Sendable (AuthorityMaintenanceBinding) throws -> PreparationIntentStore.RuntimeMaintenanceTransition)? = nil,
+        makeRecoveryDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        persistCleanup: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord,
+        verifyOwner: @escaping @Sendable () throws -> Void = {}) async throws -> RuntimeMaintenanceStopCapture {
         try RuntimeMaintenanceOwnedControl.require()
         return try await captureStop(window: window, cohort: cohort, admission: admission, drain: drain, directory: directory,
             configuration: configuration, until: deadline, capture: capture, requireProcess: requireProcess,
-            verifyConfiguration: {}, persistBinding: persistBinding, persistBindingTransition: persistBindingTransition, verifyOwner: verifyOwner)
+            verifyConfiguration: {}, persistBinding: persistBinding, persistBindingTransition: persistBindingTransition,
+            recover: { saved in
+                _ = try await self.cancelAndReopenOwned(window: saved, drain: drain, directory: directory,
+                    until: .now.advanced(by: self.timeout), makeDriver: makeRecoveryDriver, persist: persistCleanup)
+            }, verifyOwner: verifyOwner)
     }
     /// The native driver captures the original process. Copied replies cannot construct this permit.
     private func captureStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
@@ -415,6 +427,7 @@ actor AuthorityMaintenanceXPCClient {
         verifyConfiguration: @escaping @Sendable () throws -> Void,
         persistBinding: (@Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord)? = nil,
         persistBindingTransition: (@Sendable (AuthorityMaintenanceBinding) throws -> PreparationIntentStore.RuntimeMaintenanceTransition)? = nil,
+        recover: (CleanupRecord) async throws -> Void,
         verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
         guard (persistBinding == nil) != (persistBindingTransition == nil), state == .open,
               window.phase == .draining, window.operation == .notStarted, window.service == .notStopped,
@@ -437,6 +450,9 @@ actor AuthorityMaintenanceXPCClient {
             throw RuntimePreparationError.changedScope
         }
         let witness = try capture()
+        func requireCurrent() throws {
+            try check(); try verifyConfiguration(); try requireProcess(witness)
+        }
         let saved: RuntimeMaintenanceWindowRecord
         let bindingTransition: PreparationIntentStore.RuntimeMaintenanceTransition?
         do {
@@ -452,17 +468,20 @@ actor AuthorityMaintenanceXPCClient {
             guard saved.shutdownBinding == binding, saved == (try window.retainingShutdownBinding(binding, revision: saved.revision)) else {
                 throw RuntimePreparationError.changedScope
             }
-            try check(); try verifyConfiguration(); try requireProcess(witness)
+            if saved.purpose != .retainedRuntime { try requireCurrent() }
         } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        while true {
-            try check(); let response = try await observe(until: deadline); try check()
-            if response.work?.allowsMaintenanceStop == true { break }
-            guard ContinuousClock.now < deadline else { throw AuthorityMaintenanceClientError.cancelled }
-            try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
+
+        func observeAndArm() async throws -> Response {
+            while true {
+                try check(); let response = try await observe(until: deadline); try check()
+                if response.work?.allowsMaintenanceStop == true { break }
+                guard ContinuousClock.now < deadline else { throw AuthorityMaintenanceClientError.cancelled }
+                try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
+            }
+            return try await arm(until: deadline)
         }
-        let response = try await arm(until: deadline)
-        do {
-            try check(); try verifyConfiguration(); try requireProcess(witness)
+        func makeCapture(_ response: Response) throws -> RuntimeMaintenanceStopCapture {
+            try requireCurrent()
             guard response.outcome == .applied, response.work?.allowsMaintenanceStop == true else {
                 throw AuthorityMaintenanceClientError.cancelled
             }
@@ -473,9 +492,33 @@ actor AuthorityMaintenanceXPCClient {
             return .init(window: saved, cohort: cohort, marker: marker, witness: witness, configuration: configuration,
                 bindingTransition: bindingTransition,
                 verifyOwner: verifyOwner, verifyConfiguration: verifyConfiguration)
+        }
+
+        if saved.purpose != .retainedRuntime {
+            let response = try await observeAndArm()
+            do { return try makeCapture(response) }
+            catch {
+                do { try await release(until: .now.advanced(by: timeout)) }
+                catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+                throw error
+            }
+        }
+
+        do {
+            try requireCurrent()
+            let response = try await observeAndArm()
+            return try makeCapture(response)
         } catch {
-            do { try await release(until: .now.advanced(by: timeout)) }
-            catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            do {
+                try check()
+                try await recover(saved)
+            } catch {
+                finish()
+                throw AuthorityMaintenanceClientError.needsOwnerRecovery
+            }
+            if error as? AuthorityMaintenanceClientError == .needsOwnerRecovery {
+                throw AuthorityMaintenanceClientError.cancelled
+            }
             throw error
         }
     }

@@ -19,6 +19,7 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
         var requests: [AuthorityMaintenanceChannelRequest] = []
         var incarnation = maintenanceCloseBytes(61), busyObservations = 0, pendingArms = 0
         var ready = true
+        var unansweredAction: AuthorityMaintenanceChannelRequest.Action?
     }
     let state = Mutex(State())
     var requests: [AuthorityMaintenanceChannelRequest] { state.withLock { $0.requests } }
@@ -39,8 +40,9 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
                 if busy { s.busyObservations -= 1 }
                 let pending = q.action == .arm && s.pendingArms > 0
                 if pending { s.pendingArms -= 1 }
-                return (s.incarnation, busy, pending, s.ready)
+                return (s.incarnation, busy, pending, s.ready, q.action == s.unansweredAction)
             }
+            if observed.4 { return }
             let binding = try q.binding ?? .init(accountID: q.accountID, attemptID: q.attemptID, revision: q.revision,
                 incarnation: observed.0, connectionID: maintenanceCloseBytes(62))
             let refused = q.binding != nil && q.binding?.incarnation != observed.0
@@ -48,6 +50,13 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
             let value = try AuthorityMaintenanceChannelResponse(request: q, binding: binding,
                 work: observes && !refused ? Self.work(busy: observed.1, ready: observed.3) : nil, outcome: refused ? .refused : observed.2 ? .stagesPending : .applied)
             reply(.bytes(try value.encoded))
+        } catch { reply(.bytes(nil)) }
+    }
+    func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+        do {
+            let request = try AuthorityMaintenanceGateRequest.decode(bytes)
+            reply(.bytes(try AuthorityMaintenanceGateResponse(request: request,
+                authorityIncarnation: state.withLock { $0.incarnation }, hold: .released, admission: .available).encoded))
         } catch { reply(.bytes(nil)) }
     }
     func close() { let f = state.withLock { $0.invalidated }; f?() }
@@ -59,8 +68,9 @@ final class MaintenanceStopTestFixture: @unchecked Sendable {
     let directory: ReleaseDestinationLease, ordinary: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken
     let cohort: RuntimeMaintenanceAuthorityCohort, window: RuntimeMaintenanceWindowRecord
     let initialization: AuthorityInitializationIntent
-    let driver = MaintenanceStopTestDriver(), witness = MaintenanceStopTestWitness()
-    let ownerValid = Mutex(true)
+    let driver = MaintenanceStopTestDriver(), recoveryDriver = MaintenanceStopTestDriver()
+    let witness = MaintenanceStopTestWitness()
+    let ownerValid = Mutex(true), cleanupRows = Mutex<[RuntimeMaintenanceWindowRecord]>([])
     init(purpose: RuntimeMaintenanceWindowRecord.Purpose = .retainedPolicy) throws {
         runtime = try .init(); files = try .init()
         initialization = try XCTUnwrap(runtime.machine.initialization(accountID: runtime.account.accountID))
@@ -99,14 +109,24 @@ final class MaintenanceStopTestFixture: @unchecked Sendable {
         persistBinding: (@Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord)? = nil) async throws -> RuntimeMaintenanceStopCapture {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         _ = try await client.start(until: deadline)
+        let current = Mutex(window)
         return try await client.captureOwnedStop(window: window, cohort: cohort, admission: ordinary, drain: drain,
             directory: directory, configuration: runtime.plan.host, until: deadline, capture: { self.witness },
             requireProcess: { value in
                 if let requireProcess { try requireProcess(value) }
                 else { guard try !value.hasExited() else { throw MaintenanceStopTestFault.changedProcess } }
             }, persistBinding: { value in
-                if let persistBinding { return try persistBinding(value) }
-                return try self.window.retainingShutdownBinding(value)
+                let saved = try persistBinding?(value) ?? self.window.retainingShutdownBinding(value)
+                current.withLock { $0 = saved }
+                return saved
+            }, makeRecoveryDriver: { self.recoveryDriver }, persistCleanup: { next, previous in
+                try next.requireReplacing(previous)
+                try current.withLock { row in
+                    guard row == previous else { throw PreparationStoreError.staleRevision }
+                    row = next
+                }
+                self.cleanupRows.withLock { $0.append(next) }
+                return next
             }, verifyOwner: {
                 guard self.ownerValid.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
             })
