@@ -6,12 +6,13 @@ writes a crash report (`.ips`) for the process, and this script keeps the part a
 
 The repository is public, so a report is never copied as it is. The summary keeps only:
 
-- the process name, the OS version, the exception and the termination reason;
+- the process name, the OS version, the exception type and signal, and the termination namespace;
 - the frames of the thread that crashed, each as image name, symbol and offset.
 
-It drops the other threads, the register state, the image paths (they hold the runner's user name), the process
-paths and every field this script does not name. Only reports whose process name starts with `xctest` and that were
-modified at or after `--since` are read. ReportCrash can write a report a few seconds after the process died, so
+It drops the other threads, the free-text thread, queue and termination labels, the exception subtype, the register
+state, the image paths (they hold the runner's user name), the process
+paths and every field this script does not name. Only reports whose file name and JSON process name (`procName`, else
+`app_name`) both start with `xctest`, and that were modified at or after `--since` are read. ReportCrash can write a report a few seconds after the process died, so
 the script waits up to `--wait` seconds (15 by default) for the first one. A run without such reports writes nothing and exits 0; so does a report
 that cannot be parsed, which only produces a warning.
 """
@@ -37,17 +38,21 @@ def text(value, limit=200):
     return str(value)[:limit] if value is not None else '?'
 
 
+def process_name(header, body):
+    return str(body.get('procName') or header.get('app_name') or '')
+
+
 def summarize(header, body):
-    process = body.get('procName') or header.get('app_name') or '?'
+    process = process_name(header, body) or '?'
     lines = [f'process: {text(process)}', f'os: {text(header.get("os_version"))}',
              f'time: {text(body.get("captureTime") or header.get("timestamp"))}']
     exception = body.get('exception') or {}
     if exception:
-        lines.append('exception: ' + ' '.join(text(exception.get(key)) for key in ('type', 'signal', 'subtype')
+        lines.append('exception: ' + ' '.join(text(exception.get(key)) for key in ('type', 'signal')
                                                if exception.get(key) is not None))
     termination = body.get('termination') or {}
     if termination:
-        lines.append(f'termination: {text(termination.get("namespace"))} {text(termination.get("indicator"))}')
+        lines.append(f'termination: {text(termination.get("namespace"))}')
     images = body.get('usedImages') or []
     threads = body.get('threads') or []
     index = body.get('faultingThread')
@@ -55,7 +60,7 @@ def summarize(header, body):
         lines.append('crashed thread: not in the report')
         return '\n'.join(lines) + '\n'
     thread = threads[index]
-    lines.append(f'crashed thread {index}: {text(thread.get("queue") or thread.get("name") or "")}')
+    lines.append(f'crashed thread {index}')
     frames = thread.get('frames') or []
     for number, frame in enumerate(frames[:MAXIMUM_FRAMES]):
         image = '?'
@@ -98,7 +103,10 @@ def main(argv=None):
     written = 0
     for path in found:
         try:
-            summary = summarize(*parse(path.read_text(errors='replace')))
+            header, body = parse(path.read_text(errors='replace'))
+            if not process_name(header, body).startswith('xctest'):
+                continue
+            summary = summarize(header, body)
         except (OSError, ValueError, AttributeError, TypeError) as error:
             print(f'::warning::Could not read crash report {path.name}: {type(error).__name__}')
             continue

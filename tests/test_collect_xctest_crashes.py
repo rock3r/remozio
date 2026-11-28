@@ -65,19 +65,21 @@ class CollectXCTestCrashesTests(unittest.TestCase):
         status, written, _ = self.collect({"xctest-2026-11-28-051952.ips": report()})
         self.assertEqual(status, 0)
         summary = written["xctest-2026-11-28-051952.txt"]
-        self.assertIn("exception: EXC_BAD_ACCESS SIGSEGV KERN_PROTECTION_FAILURE", summary)
-        self.assertIn("termination: SIGNAL Segmentation fault: 11", summary)
-        self.assertIn("crashed thread 1: com.apple.main-thread", summary)
+        self.assertIn("exception: EXC_BAD_ACCESS SIGSEGV\n", summary)
+        self.assertIn("termination: SIGNAL\n", summary)
+        self.assertIn("crashed thread 1\n", summary)
         self.assertIn("RemozioCorePackageTests", summary)
         self.assertIn("Verification.require() + 12", summary)
         self.assertIn("libswiftCore.dylib", summary)
         self.assertIn("??? + 4096", summary)
         self.assertIn("unknownImage", summary)
-        for dropped in (SECRET, "GITHUB_TOKEN", "/Users/runner", "otherThreadSymbol", "threadState", "procPath"):
+        for dropped in (SECRET, "GITHUB_TOKEN", "/Users/runner", "otherThreadSymbol", "threadState", "procPath",
+                        "com.apple.main-thread", "Segmentation fault", "KERN_PROTECTION_FAILURE"):
             self.assertNotIn(dropped, summary)
 
     def test_other_processes_old_reports_and_missing_reports_write_nothing(self):
         self.assertEqual(self.collect({"Finder-2026.ips": report("Finder")})[:2], (0, {}))
+        self.assertEqual(self.collect({"xctest-renamed.ips": report("Finder")})[:2], (0, {}))
         self.assertEqual(self.collect({"xctest-old.ips": report()}, since=2_000, mtime=1_000)[:2], (0, {}))
         self.assertEqual(self.collect({})[:2], (0, {}))
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
