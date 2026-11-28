@@ -238,6 +238,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
     }
     private static func complete(_ h: StartupHarness, _ driver: StartupDriver, timeoutSeconds: Int? = nil,
         startup: RuntimeMaintenanceStartupRecovery? = nil, until deadline: ContinuousClock.Instant? = nil,
+        restoringProcessTiming: RuntimeMaintenanceStartupRecovery.RestoringProcessTiming = .continuous,
         beforeOpen: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in }) async throws -> RuntimeMaintenanceWindowRecord {
         let startup = try startup ?? h.open(), attempts = Mutex(0)
         return try await startup.runOwned(makeDriver: {
@@ -245,7 +246,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             return first ? driver : driver.fresh()
         }, capturePeer: { h.witness }, requirePeerLive: { peer in
             guard try !peer.hasExited() else { throw StartupTestError.expected }
-        }, beforeHealthyOpen: beforeOpen,
+        }, beforeHealthyOpen: beforeOpen, restoringProcessTiming: restoringProcessTiming,
             until: deadline ?? .now.advanced(by: timeoutSeconds.map { Duration.seconds($0) } ?? restorationTestForwardDeadline))
     }
     private static func failed(_ h: StartupHarness, _ driver: StartupDriver,
@@ -596,10 +597,28 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
     }
     func testAJobWithoutALivePidDoesNotRegisterAReplacement() throws {
         try withAsyncStartup(.restoring) { h, driver in
-            // The wait for a live pid ends only at the deadline. Preparation alone takes about 3.4 seconds
-            // locally, so a 5-second deadline could expire before the wait starts on a slower runner.
-            h.inspected = .matching(nil); _ = await Self.failed(h, driver, timeoutSeconds: 15)
-            XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.writes, [.needsOwnerRecovery])
+            let deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
+            let start = deadline.advanced(by: .milliseconds(-375))
+            let clock = Mutex((now: start, wakes: [ContinuousClock.Instant]()))
+            let timing = RuntimeMaintenanceStartupRecovery.RestoringProcessTiming(
+                now: { clock.withLock { $0.now } },
+                sleep: { wake in
+                    try Task.checkCancellation()
+                    clock.withLock { state in
+                        state.wakes.append(wake)
+                        state.now = wake
+                    }
+                })
+            h.inspected = .matching(nil)
+            do {
+                _ = try await Self.complete(h, driver, until: deadline, restoringProcessTiming: timing)
+                XCTFail("The job without a live PID must time out")
+            } catch {
+                XCTAssertEqual(error as? RuntimeActivationError, .unavailable)
+            }
+            XCTAssertEqual(clock.withLock { $0.wakes }, [start.advanced(by: .milliseconds(250)), deadline])
+            XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.observations, 0)
+            XCTAssertEqual(h.writes, [.needsOwnerRecovery])
             XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable); XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
         }
     }

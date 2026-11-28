@@ -1282,6 +1282,12 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             return try afterProbePolicy(row, proof.incarnation == target.incarnation)
         }
     }
+    // Only the live PID wait uses this timing.
+    struct RestoringProcessTiming: Sendable {
+        let now: @Sendable () -> ContinuousClock.Instant
+        let sleep: @Sendable (ContinuousClock.Instant) async throws -> Void
+        static let continuous = Self(now: { .now }, sleep: { try await ContinuousClock().sleep(until: $0) })
+    }
     private struct OwnedClients: Sendable {
         let makeDriver: @Sendable () throws -> any AuthorityMaintenanceClientDriver
         let capturePeer: @Sendable () throws -> any RuntimeJobExitWitness
@@ -1303,12 +1309,14 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         afterProbe: @escaping @Sendable () -> Void = {},
         beforeCancel: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
         ownedPhaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
+        restoringProcessTiming: RestoringProcessTiming = .continuous,
         until deadline: ContinuousClock.Instant) async throws -> Record {
         try RuntimeMaintenanceOwnedControl.require()
         guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
         return try await run(mode: .owned(.init(makeDriver: makeDriver, capturePeer: capturePeer,
             requirePeerLive: requirePeerLive, beforeHealthyOpen: beforeHealthyOpen,
-            afterProbe: afterProbe, beforeCancel: beforeCancel, phaseControl: ownedPhaseControl)), until: deadline)
+            afterProbe: afterProbe, beforeCancel: beforeCancel, phaseControl: ownedPhaseControl)),
+            restoringProcessTiming: restoringProcessTiming, until: deadline)
     }
     private func makeClient(_ mode: ClientMode, context: AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceXPCClient {
         try explicitAuthority?.willUseForwardEffects()
@@ -1333,7 +1341,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         case .owned: return try await client.observeIncarnationOwned(until: deadline)
         }
     }
-    private func run(mode: ClientMode, until deadline: ContinuousClock.Instant) async throws -> Record {
+    private func run(mode: ClientMode, restoringProcessTiming: RestoringProcessTiming = .continuous,
+        until deadline: ContinuousClock.Instant) async throws -> Record {
         // A repeated call cannot reach the fallback writer of the first call.
         try lock.withLock {
             guard !runUsed else { throw JournalLeaseError.invalidated }
@@ -1408,7 +1417,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 }
             case .cancelAndReopen: throw PreparationStoreError.invalidTransition
             }
-            return try await restoreHealthy(owner, mode: mode, until: deadline)
+            return try await restoreHealthy(owner, mode: mode, restoringProcessTiming: restoringProcessTiming,
+                until: deadline)
         } catch {
             let cancelled = Task.isCancelled || error is CancellationError
             let row = window
@@ -1451,7 +1461,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         throw RuntimeMaintenanceStartupFailure(.serviceUnavailable, AuthorityMaintenanceClientError.needsOwnerRecovery)
     }
     private func restoreHealthy(_ owner: RuntimeMaintenanceRestoration, mode: ClientMode,
-        until deadline: ContinuousClock.Instant) async throws -> Record {
+        restoringProcessTiming: RestoringProcessTiming, until deadline: ContinuousClock.Instant) async throws -> Record {
         var refreshWitness = false
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
@@ -1460,7 +1470,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 try self.custody.requireBeforePendingRetry()
                 if discardWitness { try owner.discardStartupCandidate() }
             }
-            try await requireRestoringProcess(until: deadline)
+            try await requireRestoringProcess(timing: restoringProcessTiming, until: deadline)
             // Check protected metadata and job liveness before creating the new connection.
             let context = try await blockingPhase {
                 try owner.validateBeforePending()
@@ -1526,8 +1536,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         try custody.requireRestoring(restoring)
         return .init(custody: custody, window: restoring, previous: previous, receipt: receipt)
     }
-    private func requireRestoringProcess(until deadline: ContinuousClock.Instant) async throws {
-        while ContinuousClock.now < deadline {
+    private func requireRestoringProcess(timing: RestoringProcessTiming, until deadline: ContinuousClock.Instant) async throws {
+        while timing.now() < deadline {
             try Task.checkCancellation()
             try await blockingPhase { try self.custody.requireRestoring(self.window) }
             let live: Bool
@@ -1548,7 +1558,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 }
             } catch { throw RuntimeMaintenanceStartupFailure(Self.failure(error, fallback: .serviceUnavailable), error) }
             if live { return }
-            try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))
+            try await timing.sleep(min(deadline, timing.now().advanced(by: .milliseconds(250))))
         }
         throw RuntimeMaintenanceStartupFailure(.serviceUnavailable, RuntimeActivationError.unavailable)
     }
