@@ -124,6 +124,8 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
             root = Path(temporary); app = root / RUNNER.APP
             helper = app / 'Contents/Helpers/RemozioCommandChild'
             helper.parent.mkdir(parents=True); helper.write_bytes(b'owned helper')
+            connector = app / 'Contents/Helpers/RemozioCloudflared'
+            connector.write_bytes(b'ad-hoc connector')
             (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
                 'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '1'}))
             before = RUNNER.fingerprint(app)
@@ -138,6 +140,9 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
                 return subprocess.CompletedProcess([], 0, '', 'Signature=adhoc\nTeamIdentifier=not set\n')
             manifest = SimpleNamespace(COMPONENTS=[(11, 'command-child',
                 'Contents/Helpers/RemozioCommandChild', 'RemozioCommandChild', 'CommandChild')],
+                CLOUDFLARED_PATH='Contents/Helpers/RemozioCloudflared',
+                CLOUDFLARED_PRODUCT='RemozioCloudflared',
+                CLOUDFLARED_IDENTIFIER='dev.sebastiano.remozio.macos.cloudflared',
                 generate=lambda _: {})
             def inspect(_probe, _bundle, _team, expected, *_):
                 return {'result': 'accepted' if expected else 'rejected'}
@@ -154,6 +159,49 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
             self.assertEqual(result['cases']['foreignApplicationIdentifierEntitlement'], {'result': 'rejected'})
             self.assertFalse(result['appLaunched'])
             self.assertEqual(RUNNER.fingerprint(app), before)
+
+    def test_developer_id_signs_cloudflared_before_generating_the_manifest(self):
+        manifest = RUNNER.load_manifest()
+        identity = 'A' * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / RUNNER.APP
+            for _, _, relative, product, _ in manifest.COMPONENTS:
+                if product:
+                    helper = app / relative
+                    helper.parent.mkdir(parents=True, exist_ok=True)
+                    helper.write_bytes(b'ad-hoc helper')
+            connector = app / 'Contents/Helpers/RemozioCloudflared'
+            connector.write_bytes(b'ad-hoc connector')
+            (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+                'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '1'}))
+            connector_signs = []
+
+            def command(arguments):
+                executable = Path(arguments[-1])
+                if '--sign' in arguments and executable.name == 'RemozioCloudflared':
+                    self.assertNotEqual(executable, connector)
+                    self.assertEqual(arguments[:-1], [
+                        '/usr/bin/codesign', '--force', '--sign', identity, '--timestamp',
+                        '--options', 'runtime', '--identifier', 'dev.sebastiano.remozio.macos.cloudflared'])
+                    self.assertEqual(executable.read_bytes(), b'ad-hoc connector')
+                    executable.write_bytes(b'developer-id connector')
+                    connector_signs.append(executable)
+                return subprocess.CompletedProcess([], 0, '', 'Signature=adhoc\nTeamIdentifier=not set\n')
+
+            def generate(environment):
+                self.assertEqual(len(connector_signs), 1)
+                product = Path(environment['BUILT_PRODUCTS_DIR']) / 'RemozioCloudflared'
+                self.assertEqual(product.read_bytes(), b'developer-id connector')
+                return {}
+
+            with patch.object(RUNNER, 'ROOT', root), patch.object(RUNNER, 'run', side_effect=command), \
+                 patch.object(RUNNER, 'load_manifest', return_value=manifest), \
+                 patch.object(manifest, 'generate', side_effect=generate) as generate_manifest, \
+                 patch.object(RUNNER, 'inspect'):
+                RUNNER.measure(Path('/unused'), identity=identity, team='ABCDEFGHIJ', secure_timestamp=True)
+            generate_manifest.assert_called_once()
+            self.assertEqual(connector.read_bytes(), b'ad-hoc connector')
 
     def test_rejected_probe_mutation_does_not_claim_the_original_was_preserved(self):
         with tempfile.TemporaryDirectory() as temporary:

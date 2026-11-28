@@ -161,6 +161,10 @@ def measure(probe, *, identity=None, team=None, export_app=None, secure_timestam
                     run(['/usr/bin/codesign', '--force', '--sign', identity, timestamp,
                          '--options', 'runtime', '--identifier', 'dev.sebastiano.remozio.macos.' + name, executable])
                     shutil.copy2(executable, products / product)
+                connector = app / manifest.CLOUDFLARED_PATH
+                run(['/usr/bin/codesign', '--force', '--sign', identity, timestamp,
+                     '--options', 'runtime', '--identifier', manifest.CLOUDFLARED_IDENTIFIER, connector])
+                shutil.copy2(connector, products / manifest.CLOUDFLARED_PRODUCT)
                 info_path = app / 'Contents/Info.plist'
                 info = plistlib.loads(info_path.read_bytes())
                 info.update(manifest.generate({'SRCROOT': str(ROOT / 'macos/app'),
