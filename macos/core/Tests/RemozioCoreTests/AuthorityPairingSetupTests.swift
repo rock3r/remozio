@@ -28,6 +28,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
     fileprivate final class Environment: @unchecked Sendable {
         let epoch = UUID()
         let time = Box<UInt64>(100)
+        let timeAtAuthorization = Box<UInt64?>(nil)
+        let commitEntries = Box(0), signingFails = Box(false)
         let denied = Box(false), selfDenied = Box(false), peerDenied = Box(false)
         let authorized = Box(0), invalidated = Box(0), signed = Box(0)
         func now() -> AuthorityMoment { .init(epoch: epoch, milliseconds: time.value) }
@@ -112,9 +114,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                     if environment.selfDenied.value { throw Failure.denied }
                 }, gatewayRevocations: gatewayRevocations, readColdDisableIntent: readColdDisableIntent,
                 commit: { attempt, proof, event, authorize, validate in
-                    try journal.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: authority.publicKey.x963Representation,
+                    environment.commitEntries.value += 1
+                    return try journal.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: authority.publicKey.x963Representation,
                         addEventID: event, recheckAdministrator: authorize, now: { environment.now() }, validate: validate, sign: {
                             environment.signed.value += 1
+                            if environment.signingFails.value { throw Failure.denied }
                             return try authority.signature(for: $0).rawRepresentation
                         })
                 })
@@ -135,6 +139,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 if environment.peerDenied.value { throw Failure.denied }
             }, authorize: { _ in
                 environment.authorized.value += 1
+                if let time = environment.timeAtAuthorization.value { environment.time.value = time }
                 if environment.denied.value { throw Failure.denied }
             }, invalidate: { environment.invalidated.value += 1 })
         }
@@ -203,6 +208,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let endpoint: AuthorityPairingXPCEndpoint
         let sends = Box(0), stageSends = Box(0), commitSends = Box(0), revocationSends = Box(0)
         let discardSends = Box(0)
+        let resultSends = Box(0)
+        let managementVersionLimit = Box(UInt64.max)
         let rejectCommitBeforeSend = Box(false)
         let hold = Box(Hold.none)
         let late = Box<(@Sendable () -> Void)?>(nil)
@@ -223,7 +230,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 do { result = try transform(call, value) } catch { reply(.failed); return }
                 let held: Bool
                 switch (hold.value, call) {
-                case (.stage, .stage), (.commit, .commit), (.revoke, .managePhone(.revoke, _, _)): held = true
+                case (.stage, .stage), (.commit, .commit), (.commit, .commitWithResult),
+                     (.revoke, .managePhone(.revoke, _, _)): held = true
                 default: held = false
                 }
                 if held { late.value = { reply(result) } } else { reply(result) }
@@ -241,6 +249,11 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 commitSends.value += 1
                 endpoint.commitPairingWithDecisionProof(setup, confirmedDigest: digest, biometricProof: proof.biometric,
                     decisionProof: decision, authorization: authorization) { complete(.bytes($0)) }
+            case .commitWithResult(let setup, let digest, let proof, let authorization):
+                commitSends.value += 1
+                resultSends.value += 1
+                endpoint.commitPairingWithResult(setup, confirmedDigest: digest, biometricProof: proof.biometric,
+                    decisionProof: proof.decision, authorization: authorization) { complete(.bytes($0)) }
             case .setupHello:
                 endpoint.pairingSetupHello(maximumVersion: 5) { complete(.setupVersion($0, $1)) }
             case let .openV2(label, predecessor, rendezvousID):
@@ -257,7 +270,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             case .cancel: endpoint.cancelPairing { complete(.cancelled($0)) }
             case .phoneManagementHello: endpoint.pairedPhoneHello { complete(.version($0)) }
             case .versionedPhoneManagementHello(let maximumVersion):
-                endpoint.pairedPhoneHello(maximumVersion: maximumVersion) { complete(.version($0)) }
+                endpoint.pairedPhoneHello(maximumVersion: min(maximumVersion, managementVersionLimit.value)) { complete(.version($0)) }
             case .managePhone(let operation, let selection, let authorization):
                 if operation == .revoke { revocationSends.value += 1 }
                 if operation == .discardExpiredRePair { discardSends.value += 1 }
@@ -382,6 +395,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 guard let decision = proof.decision else { complete(.failed); return }
                 proxy.commitPairingWithDecisionProof(setup, confirmedDigest: digest, biometricProof: proof.biometric,
                     decisionProof: decision, authorization: authorization) { complete(.bytes($0)) }
+            case .commitWithResult(let setup, let digest, let proof, let authorization):
+                proxy.commitPairingWithResult(setup, confirmedDigest: digest, biometricProof: proof.biometric,
+                    decisionProof: proof.decision, authorization: authorization) { complete(.bytes($0)) }
             case .setupHello:
                 proxy.pairingSetupHello(maximumVersion: 5) { [trace] version, id in
                     trace?.setupReply.value = version
@@ -1840,7 +1856,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         try owners.retain(installed, id: UUID())
         defer { installed.close(); withExtendedLifetime(owners) {} }
         try hello(installed)
-        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (5, 5), (UInt64.max, 5)]
+        let installedVersions: [(UInt64, UInt64)] = [(3, 3), (4, 4), (5, 5), (6, 6), (UInt64.max, 6)]
         for (maximum, expected) in installedVersions {
             installed.pairedPhoneHello(maximumVersion: maximum) { negotiated.value = $0 }
             XCTAssertEqual(negotiated.value, expected)
@@ -1932,6 +1948,263 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         } catch {}
         XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1)
     }
+    private func requestCommitResult(_ endpoint: AuthorityPairingXPCEndpoint, transcript: PairingTranscript,
+                                     fixture: Fixture) throws -> Data? {
+        let reply = Box<Data?>(nil)
+        endpoint.commitPairingWithResult(transcript.setupID, confirmedDigest: try transcript.digest(),
+            biometricProof: try proof(transcript, fixture), decisionProof: nil, authorization: authorization) { reply.value = $0 }
+        return reply.value
+    }
+
+    private func negotiateCommitResult(_ endpoint: AuthorityPairingXPCEndpoint) throws {
+        try hello(endpoint)
+        let management = Box<UInt64>(0), setup = Box<UInt64>(0)
+        endpoint.pairedPhoneHello(maximumVersion: 6) { management.value = $0 }
+        endpoint.pairingSetupHello(maximumVersion: 5) { version, _ in setup.value = version }
+        XCTAssertEqual(management.value, 6)
+        XCTAssertEqual(setup.value, 1)
+    }
+
+    func testNativeV6CommitResultDeliversTheVerifiedReceipt() async throws {
+        let f = try Fixture(v2ActivationEnabled: false), requirement = try testRequirement(), trace = PhoneManagementTrace()
+        let server = NativeServer(f, requirement: requirement, installedPairing: true)
+        defer { server.close() }
+        let root = AuthorityPairingChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: f.policy,
+            requirement: requirement, trace: trace), macID: f.mac, accountID: f.account)
+        defer { root.abort() }
+        _ = try await root.start()
+        let negotiation = try await root.negotiateInstalledPairing()
+        XCTAssertNil(negotiation)
+        XCTAssertEqual(trace.versionedReply.value, 6)
+        XCTAssertEqual(trace.setupReply.value, 1)
+        let transcript = try await root.stage(f.proposal(), authorization: authorization)
+        let receipt = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                            authorization: authorization)
+        XCTAssertTrue(try transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(try f.records(), 1)
+        try f.assertCheckpoint()
+    }
+
+    func testV6CommitResultPreservesTheDualProofSetup() async throws {
+        let f = try Fixture(v2ActivationEnabled: true, decisionProofRequired: true), driver = try ClientDriver(f)
+        let root = client(f, driver: driver)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        defer { root.abort(); withExtendedLifetime(owners) {} }
+        _ = try await root.start()
+        let offered = try await root.negotiateInstalledPairing()
+        let setup = try XCTUnwrap(offered)
+        XCTAssertTrue(setup.requiresDecisionProof)
+        let rendezvous = try XCTUnwrap(owners.lookupRendezvous(setup.rendezvousID))
+        let link = AuthorityPairingProofLink(verifyPolicy: {}, validatePolicy: { _ in })
+        let offer = UUID()
+        XCTAssertTrue(rendezvous.claim(offer: offer))
+        XCTAssertTrue(rendezvous.acceptHello(offer: offer, link: link, offerDeadline: .now.advanced(by: .seconds(5))))
+        let invitation = try await root.openV2(label: "Fixture", predecessor: nil, rendezvousID: setup.rendezvousID)
+        let decision = P256.Signing.PrivateKey(), draft = try f.proposal(decision: decision)
+        let proposal = try PairingPhoneProposal(phone: draft.phone, transportKey: draft.transportKey,
+            decisionKey: draft.decisionKey, biometricKey: draft.biometricKey)
+        let binding = try bindingV2(invitation, proposal: proposal)
+        try driver.endpoint.reservePairingV2(binding)
+        let transcript = try await root.stageV2(proposal, connection: binding.connection, authorization: authorization)
+        let phoneProof = try PairingPhoneProof(biometric: proof(transcript, f),
+            decision: decision.signature(for: transcript.signingInput(purpose: .phoneDecision)).rawRepresentation)
+        let receipt = try await root.commit(confirmedDigest: transcript.digest(), phoneProof: phoneProof,
+                                            authorization: authorization, onSend: {})
+        XCTAssertTrue(try transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(driver.resultSends.value, 1)
+        XCTAssertEqual(try f.records(), 1)
+        try f.assertCheckpoint()
+    }
+
+    func testClientAcceptsOnlyTheBoundPreWriteExpiry() async throws {
+        let f = try Fixture(v2ActivationEnabled: false), driver = try ClientDriver(f), root = client(f, driver: driver)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        defer { root.abort(); withExtendedLifetime(owners) {} }
+        _ = try await root.start()
+        _ = try await root.negotiateInstalledPairing()
+        let transcript = try await root.stage(f.proposal(), authorization: authorization)
+        f.environment.time.value += f.pairingConfiguration.lifetimeMilliseconds
+        let dispatched = Box(false)
+        do {
+            _ = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                      authorization: authorization, onSend: { dispatched.value = true })
+            XCTFail("Expected the proven expiry")
+        } catch AuthorityPairingCommitRejection.expired {}
+        XCTAssertTrue(dispatched.value)
+        XCTAssertEqual(driver.resultSends.value, 1)
+        XCTAssertEqual(try f.records(), 0)
+        try f.assertCheckpoint()
+    }
+
+    func testV5AndUnnegotiatedClientsKeepTheLegacyCommitReply() async throws {
+        for negotiate in [true, false] {
+            let f = try Fixture(v2ActivationEnabled: false), driver = try ClientDriver(f), root = client(f, driver: driver)
+            let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+            driver.endpoint.attachInstalledPairing(to: owners)
+            defer { root.abort(); withExtendedLifetime(owners) {} }
+            driver.managementVersionLimit.value = 5
+            _ = try await root.start()
+            if negotiate { _ = try await root.negotiateInstalledPairing() }
+            let transcript = try await root.stage(f.proposal(), authorization: authorization)
+            let receipt = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                                authorization: authorization)
+            XCTAssertTrue(try transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+            XCTAssertEqual(driver.resultSends.value, 0)
+            XCTAssertEqual(driver.commitSends.value, 1)
+            XCTAssertEqual(try f.records(), 1)
+            try f.assertCheckpoint()
+        }
+    }
+
+    func testCommitExpiryConsumesTheAttemptBeforeTheBoundReply() throws {
+        let f = try Fixture(v2ActivationEnabled: false), original = try f.endpoint(), other = try f.endpoint()
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        original.attachInstalledPairing(to: owners)
+        other.attachInstalledPairing(to: owners)
+        defer { original.close(); other.close(); withExtendedLifetime(owners) {} }
+        try negotiateCommitResult(original)
+        try negotiateCommitResult(other)
+        let transcript = try staged(original, proposal: f.proposal())
+        f.environment.time.value += f.pairingConfiguration.lifetimeMilliseconds
+        guard case .expired(let setupID, let digest) = try AuthorityPairingCommitReply.decode(
+            XCTUnwrap(requestCommitResult(original, transcript: transcript, fixture: f))) else {
+            return XCTFail("Expected the bound expiry")
+        }
+        XCTAssertEqual(setupID, transcript.setupID)
+        XCTAssertEqual(digest, try transcript.digest())
+        XCTAssertEqual(try original.maintenancePairingWork().stagedAttempts, 0)
+        let authorized = f.environment.authorized.value
+        XCTAssertNil(try requestCommitResult(original, transcript: transcript, fixture: f))
+        XCTAssertNil(try requestCommitResult(other, transcript: transcript, fixture: f))
+        XCTAssertEqual(f.environment.authorized.value, authorized)
+        XCTAssertEqual(f.environment.commitEntries.value, 0)
+        XCTAssertEqual(f.environment.signed.value, 0)
+        XCTAssertEqual(try f.records(), 0)
+        XCTAssertTrue(try f.access.pairedPhones().phones.isEmpty)
+        try f.assertCheckpoint()
+    }
+
+    func testCommitResultRequiresSetupNegotiationOnTheSameEndpoint() throws {
+        let f = try Fixture(v2ActivationEnabled: false), endpoint = try f.endpoint()
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        endpoint.attachInstalledPairing(to: owners)
+        defer { endpoint.close(); withExtendedLifetime(owners) {} }
+        try hello(endpoint)
+        let management = Box<UInt64>(0)
+        endpoint.pairedPhoneHello(maximumVersion: 6) { management.value = $0 }
+        XCTAssertEqual(management.value, 6)
+        let transcript = try staged(endpoint, proposal: f.proposal())
+        let authorized = f.environment.authorized.value
+        XCTAssertNil(try requestCommitResult(endpoint, transcript: transcript, fixture: f))
+        XCTAssertEqual(f.environment.authorized.value, authorized)
+        XCTAssertEqual(try f.records(), 0)
+    }
+
+    func testCommitExpiryInsideTheWriteHasNoProvenResult() async throws {
+        let f = try Fixture(v2ActivationEnabled: false), driver = try ClientDriver(f), root = client(f, driver: driver)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        defer { root.abort(); withExtendedLifetime(owners) {} }
+        _ = try await root.start()
+        _ = try await root.negotiateInstalledPairing()
+        let transcript = try await root.stage(f.proposal(), authorization: authorization)
+        let authorized = f.environment.authorized.value
+        f.environment.timeAtAuthorization.value = f.environment.time.value + f.pairingConfiguration.lifetimeMilliseconds
+        do {
+            _ = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                      authorization: authorization)
+            XCTFail("Accepted a commit that expired in the write")
+        } catch AuthorityPairingChannelError.invalidMessage {}
+        XCTAssertEqual(driver.resultSends.value, 1)
+        XCTAssertEqual(f.environment.authorized.value, authorized + 1)
+        XCTAssertEqual(f.environment.commitEntries.value, 1)
+        XCTAssertEqual(try f.records(), 0)
+        XCTAssertEqual(f.environment.signed.value, 0)
+        try f.assertCheckpoint()
+    }
+
+    func testV6SigningFailureKeepsTheDurableCommitAmbiguous() async throws {
+        let f = try Fixture(v2ActivationEnabled: false), driver = try ClientDriver(f), root = client(f, driver: driver)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        defer { root.abort(); withExtendedLifetime(owners) {} }
+        _ = try await root.start()
+        _ = try await root.negotiateInstalledPairing()
+        let transcript = try await root.stage(f.proposal(), authorization: authorization)
+        f.environment.signingFails.value = true
+        do {
+            _ = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                      authorization: authorization)
+            XCTFail("Accepted a missing signed receipt")
+        } catch AuthorityPairingChannelError.invalidMessage {}
+        XCTAssertEqual(driver.resultSends.value, 1)
+        XCTAssertEqual(f.environment.commitEntries.value, 1)
+        XCTAssertEqual(f.environment.signed.value, 1)
+        XCTAssertEqual(try f.records(), 1)
+        let scope = transcript.phone.scope
+        let retained = try f.journal.read { try $0.committedPairing(setupID: transcript.setupID,
+            authenticatedPhoneID: scope.phoneID, authenticatedEnrollmentEpoch: scope.enrollmentEpoch) }
+        XCTAssertEqual(try retained?.digest(), try transcript.digest())
+        try f.assertCheckpoint()
+    }
+
+    func testCommitResultRejectsUnknownAndMismatchedExpiryEnvelopes() async throws {
+        for invalidByte in [0, 1, 17, 49] {
+            let f = try Fixture(v2ActivationEnabled: false)
+            let driver = try ClientDriver(f) { call, reply in
+                guard case .commitWithResult = call, case .bytes(let result?) = reply, result.count == 49 else { return reply }
+                var corrupted = result
+                if invalidByte < corrupted.count { corrupted[invalidByte] ^= 1 }
+                else { corrupted.append(0) }
+                return .bytes(corrupted)
+            }
+            let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+            driver.endpoint.attachInstalledPairing(to: owners)
+            defer { driver.close(); withExtendedLifetime(owners) {} }
+            let root = client(f, driver: driver)
+            _ = try await root.start()
+            _ = try await root.negotiateInstalledPairing()
+            let transcript = try await root.stage(f.proposal(), authorization: authorization)
+            f.environment.time.value += f.pairingConfiguration.lifetimeMilliseconds
+            do {
+                _ = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                          authorization: authorization)
+                XCTFail("Accepted invalid expiry data")
+            } catch AuthorityPairingChannelError.invalidMessage {}
+            XCTAssertEqual(driver.resultSends.value, 1)
+            XCTAssertEqual(try f.records(), 0)
+        }
+    }
+
+    func testClientLosesTheExpiryReplyWithoutRetryingCommit() async throws {
+        let f = try Fixture(v2ActivationEnabled: false), driver = try ClientDriver(f), root = client(f, driver: driver, timeout: 250)
+        let owners = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        driver.endpoint.attachInstalledPairing(to: owners)
+        defer { root.abort(); withExtendedLifetime(owners) {} }
+        _ = try await root.start()
+        _ = try await root.negotiateInstalledPairing()
+        let transcript = try await root.stage(f.proposal(), authorization: authorization)
+        f.environment.time.value += f.pairingConfiguration.lifetimeMilliseconds
+        driver.hold.value = .commit
+        do {
+            _ = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                      authorization: authorization)
+            XCTFail("Accepted a lost refusal")
+        } catch AuthorityPairingChannelError.timedOut {}
+        XCTAssertNotNil(driver.late.value)
+        driver.late.value?()
+        do {
+            _ = try await root.commit(confirmedDigest: transcript.digest(), biometricProof: proof(transcript, f),
+                                      authorization: authorization)
+            XCTFail("Retried a commit after the missing reply")
+        } catch AuthorityPairingChannelError.closed {}
+        XCTAssertEqual(driver.commitSends.value, 1)
+        XCTAssertEqual(try f.records(), 0)
+        try f.assertCheckpoint()
+    }
+
     func testClientCommitDoesNotMarkDispatchWhenDriverRejectsBeforeSend() async throws {
         let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver)
         _ = try await channel.start()

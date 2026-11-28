@@ -371,6 +371,11 @@ public actor MacPairingSession {
             } catch { /* Root returned a verified durable receipt; phone delivery remains uncertain. */ }
             await releaseChannels()
             return snapshot()
+        } catch AuthorityPairingCommitRejection.expired where submitted.withLock({ $0 }) {
+            await releaseChannels()
+            commitAttempted = false
+            endComparison(as: .expired)
+            throw MacPairingSessionError.expired
         } catch {
             // Keep the attempted flag during the call so re-pair waits for it to drain.
             if !submitted.withLock({ $0 }) { commitAttempted = false }
@@ -418,9 +423,7 @@ public actor MacPairingSession {
             else if !cancellation.ifActive({}) { phase = .closed }
             else if error as? MacPairingSessionError == .comparisonAttemptsExhausted ||
                         error as? MacPairingSessionError == .expired || (try? remainingTime()) == 0 {
-                phase = error as? MacPairingSessionError == .comparisonAttemptsExhausted ? .comparisonFailed : .expired
-                invitation = nil; rePairInvitation = nil
-                candidates = []; selected = nil; transcript = nil; proof = nil; humanConfirmed = false
+                endComparison(as: error as? MacPairingSessionError == .comparisonAttemptsExhausted ? .comparisonFailed : .expired)
             }
             else if error as? TransportPairingControlError == .unavailableInterface { phase = .unavailableInterface }
             else { phase = .unavailable }
@@ -437,6 +440,12 @@ public actor MacPairingSession {
             proof = nil
             humanConfirmed = false
         }
+    }
+
+    private func endComparison(as phase: MacPairingSessionPhase) {
+        self.phase = phase
+        invitation = nil; rePairInvitation = nil
+        candidates = []; selected = nil; transcript = nil; proof = nil; humanConfirmed = false
     }
 
     private func refreshRePairRestriction(_ selection: PairedPhoneSelection) async -> Bool {

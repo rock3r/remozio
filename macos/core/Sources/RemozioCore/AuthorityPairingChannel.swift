@@ -40,6 +40,36 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
     }
 }
 
+enum AuthorityPairingCommitRejection: Error {
+    case expired
+}
+
+/// The negotiated selector gives these lengths and tags their meaning.
+enum AuthorityPairingCommitReply {
+    static let capabilityVersion: UInt64 = 6
+
+    case receipt(Data)
+    case expired(setupID: Data, digest: Data)
+
+    func encode() -> Data {
+        switch self {
+        case .receipt(let signature): Data([1]) + signature
+        case .expired(let setupID, let digest): Data([2]) + setupID + digest
+        }
+    }
+
+    static func decode(_ bytes: Data) throws -> Self {
+        switch (bytes.first, bytes.count) {
+        case (1, 65):
+            return .receipt(Data(bytes.dropFirst()))
+        case (2, 49):
+            return .expired(setupID: Data(bytes.dropFirst().prefix(16)), digest: Data(bytes.suffix(32)))
+        default:
+            throw AuthorityPairingChannelError.invalidMessage
+        }
+    }
+}
+
 struct InstalledPairingNegotiation: Sendable {
     let rendezvousID: Data
     let requiresLAN: Bool
@@ -49,6 +79,7 @@ struct InstalledPairingNegotiation: Sendable {
 enum PairingClientCall: Sendable {
     case hello, context, stage(Data, Data), commit(Data, Data, Data, Data), cancel
     case commitDual(Data, Data, PairingPhoneProof, Data)
+    case commitWithResult(Data, Data, PairingPhoneProof, Data)
     case setupHello, openV2(String, PairedPhoneSelection?, rendezvousID: Data?), stageV2(Data, UUID, Data)
     case phoneManagementHello, versionedPhoneManagementHello(UInt64)
     case managePhone(PairedPhoneOperation, Data, Data)
@@ -95,6 +126,9 @@ private final class NativePairingClientDriver: PairingClientDriver, @unchecked S
             guard let decision = proof.decision else { reply(.failed); return }
             proxy.commitPairingWithDecisionProof(setup, confirmedDigest: digest, biometricProof: proof.biometric,
                 decisionProof: decision, authorization: authorization) { [self] in checked(.bytes($0), reply: reply) }
+        case .commitWithResult(let setup, let digest, let proof, let authorization):
+            proxy.commitPairingWithResult(setup, confirmedDigest: digest, biometricProof: proof.biometric,
+                decisionProof: proof.decision, authorization: authorization) { [self] in checked(.bytes($0), reply: reply) }
         case .setupHello:
             proxy.pairingSetupHello(maximumVersion: 5) { [self] in checked(.setupVersion($0, $1), reply: reply) }
         case let .openV2(label, selection, rendezvousID):
@@ -144,6 +178,7 @@ public actor AuthorityPairingChannel {
     private var state = State.new
     private var context: AuthorityPairingContext?
     private var staged: PairingTranscript?
+    private var usesCommitResult = false
     private var managesPhones = false
     private var canListExpiredRePairs = false
     private var authorizingPhoneMutation = false
@@ -363,19 +398,24 @@ public actor AuthorityPairingChannel {
 
     func negotiateInstalledPairing() async throws -> InstalledPairingNegotiation? {
         let compatibility: PairingClientReply
-        do { compatibility = try await perform(.versionedPhoneManagementHello(3)) }
+        let commitResultVersion = AuthorityPairingCommitReply.capabilityVersion
+        usesCommitResult = false
+        do { compatibility = try await perform(.versionedPhoneManagementHello(commitResultVersion)) }
         catch AuthorityPairingChannelError.closed { throw AuthorityPairingChannelError.setupDiscoveryUnavailable }
-        // The previous Authority answers 2. A legacy Authority can terminate the connection on this probe.
+        // Version 2 has no setup hello. Older Authorities can close the connection on this probe.
         switch compatibility {
         case .version(2): return nil
-        case .version(3):
+        case .version(let maximum) where (3...commitResultVersion).contains(maximum):
+            let negotiation: InstalledPairingNegotiation?
             switch try await perform(.setupHello) {
-            case .setupVersion(1, nil): return nil
+            case .setupVersion(1, nil): negotiation = nil
             case .setupVersion(let version, let id?) where (2...5).contains(version) && id.count == 16:
-                return InstalledPairingNegotiation(rendezvousID: id, requiresLAN: version == 3 || version == 5,
+                negotiation = InstalledPairingNegotiation(rendezvousID: id, requiresLAN: version == 3 || version == 5,
                     requiresDecisionProof: version >= 4)
             default: throw AuthorityPairingChannelError.invalidMessage
             }
+            usesCommitResult = maximum == commitResultVersion
+            return negotiation
         default: throw AuthorityPairingChannelError.unsupportedVersion
         }
     }
@@ -428,12 +468,26 @@ public actor AuthorityPairingChannel {
         guard pending == nil else { throw AuthorityPairingChannelError.busy }
         self.staged = nil
         do {
-            let call: PairingClientCall = if phoneProof.decision != nil {
+            let useResult = usesCommitResult
+            let call: PairingClientCall = if useResult {
+                .commitWithResult(staged.setupID, confirmedDigest, phoneProof, authorization)
+            } else if phoneProof.decision != nil {
                 .commitDual(staged.setupID, confirmedDigest, phoneProof, authorization)
             } else {
                 .commit(staged.setupID, confirmedDigest, phoneProof.biometric, authorization)
             }
-            let receipt = try bytes(await perform(call, onSend: onSend))
+            let response = try bytes(await perform(call, onSend: onSend))
+            let receipt: Data
+            if useResult {
+                switch try AuthorityPairingCommitReply.decode(response) {
+                case .receipt(let signature): receipt = signature
+                case .expired(let setupID, let digest):
+                    guard staged.replacement == nil, setupID == staged.setupID, digest == confirmedDigest else {
+                        throw AuthorityPairingChannelError.invalidMessage
+                    }
+                    throw AuthorityPairingCommitRejection.expired
+                }
+            } else { receipt = response }
             guard receipt.count == 64, try staged.verify(signature: receipt, publicKey: context.authorityPublicKey, purpose: .macCommit) else {
                 throw AuthorityPairingChannelError.invalidMessage
             }
@@ -457,7 +511,7 @@ public actor AuthorityPairingChannel {
         switch call {
         case .hello: guard state == .opening else { throw AuthorityPairingChannelError.closed }
         case .context: guard state == .opening else { throw AuthorityPairingChannelError.closed }
-        case .setupHello, .openV2, .stageV2, .stage, .commit, .commitDual, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
+        case .setupHello, .openV2, .stageV2, .stage, .commit, .commitDual, .commitWithResult, .cancel, .phoneManagementHello, .versionedPhoneManagementHello, .managePhone:
             guard state == .open else { throw AuthorityPairingChannelError.closed }
         }
         guard pending == nil else { throw AuthorityPairingChannelError.busy }
@@ -493,7 +547,8 @@ public actor AuthorityPairingChannel {
     private func expire(_ id: UUID) { if pending?.id == id { finish(.timedOut) } }
     private func finish(_ error: AuthorityPairingChannelError) {
         guard state != .closed else { return }
-        state = .closed; context = nil; staged = nil; lifetime.close(); timer?.cancel(); timer = nil
+        state = .closed; context = nil; staged = nil; usesCommitResult = false
+        lifetime.close(); timer?.cancel(); timer = nil
         let previous = pending; pending = nil; driver.close(); onClose(); previous?.continuation.resume(throwing: error)
     }
 }

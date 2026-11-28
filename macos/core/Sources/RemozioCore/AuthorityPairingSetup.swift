@@ -401,14 +401,30 @@ final class AuthorityPairingSetupAccess: Sendable {
         return try journal.read { try prepare($0, started, nil) }
     }
 
-    func commit(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data, proof: Data,
-                decisionProof: Data? = nil, window: AuthorityPairingV2Window? = nil,
-                authorize: @escaping () throws -> Void) throws -> Data {
-        guard setupID.count == 16, confirmedDigest.count == 32, proof.count == 64,
+    private func confirmedProof(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data,
+                                biometricProof: Data, decisionProof: Data?) throws -> PairingPhoneProof {
+        guard setupID.count == 16, confirmedDigest.count == 32, biometricProof.count == 64,
               setupID == attempt.transcript.setupID, try confirmedDigest == attempt.transcript.digest() else {
             throw AuthorityPairingSetupError.invalidConfirmation
         }
-        let phoneProof = try PairingPhoneProof(biometric: proof, decision: decisionProof)
+        return try PairingPhoneProof(biometric: biometricProof, decision: decisionProof)
+    }
+
+    func isFirstCommitExpiredBeforeWrite(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data,
+                                         biometricProof: Data, decisionProof: Data?, window: AuthorityPairingV2Window?) throws -> Bool {
+        guard attempt.transcript.replacement == nil, try attempt.remainingMilliseconds(at: now()) == 0 else { return false }
+        let proof = try confirmedProof(attempt, setupID: setupID, confirmedDigest: confirmedDigest,
+                                       biometricProof: biometricProof, decisionProof: decisionProof)
+        guard !requiresDecisionProof || window != nil else { throw PairingEnrollmentError.invalidProof }
+        try proof.verify(in: attempt.transcript, requiresDecisionProof: requiresDecisionProof)
+        return true
+    }
+
+    func commit(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data, proof: Data,
+                decisionProof: Data? = nil, window: AuthorityPairingV2Window? = nil,
+                authorize: @escaping () throws -> Void) throws -> Data {
+        let phoneProof = try confirmedProof(attempt, setupID: setupID, confirmedDigest: confirmedDigest,
+                                            biometricProof: proof, decisionProof: decisionProof)
         return try commitPairing(attempt, proof, random(16), {
             try authorize()
             try window?.requireStaging(self.now())
