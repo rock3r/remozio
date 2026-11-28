@@ -1839,6 +1839,33 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
         XCTAssertThrowsError(try plan.select(accountID: account, role: .notificationGateway))
         XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.oldRelease))
+        let retained = try XCTUnwrap(snapshot.configuration.configuration(accountID: account))
+        let policy = try XCTUnwrap(snapshot.configuration.policy(accountID: account))
+        var verification = RuntimeReleaseConfigurationPlan.SourceVerification()
+        try retained.requireSource(snapshot.source, policy: policy, candidate: f.newRelease, verification: &verification)
+        XCTAssertEqual(verification.buildAttempts, 1)
+        try retained.requireSource(snapshot.source, policy: policy, candidate: f.newRelease, verification: &verification)
+        XCTAssertEqual(verification.buildAttempts, 2)
+
+        verification = .init()
+        try retained.startup.requireSourceForPublication(snapshot.source, currentPolicy: policy, candidate: f.newRelease,
+            host: retained.source.host, transport: retained.source.transport, gateway: retained.source.gateway,
+            clients: retained.source.clients, verification: &verification)
+        XCTAssertEqual(verification.buildAttempts, 1)
+
+        verification = .init()
+        let invalid = MachineUpdateConfigurationEpoch.Configuration(source: retained.source,
+            startup: retained.startup, completion: retained.startup)
+        XCTAssertThrowsError(try invalid.requireSource(snapshot.source, policy: policy, candidate: f.oldRelease,
+            verification: &verification)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        XCTAssertEqual(verification.buildAttempts, 0)
+        XCTAssertThrowsError(try retained.requireSource(snapshot.source, policy: policy, candidate: f.oldRelease,
+            verification: &verification))
+        XCTAssertThrowsError(try retained.requireSource(snapshot.source, policy: policy, candidate: f.oldRelease,
+            verification: &verification))
+        XCTAssertEqual(verification.buildAttempts, 2)
         let selected = try MachineUpdateAuthorityHealthOwner.RestartSelection(snapshot: snapshot, candidate: f.newRelease,
             accountID: account)
         XCTAssertEqual(selected.requirement, authority)

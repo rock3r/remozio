@@ -11,13 +11,18 @@ enum MachineUpdateConfigurationEpoch {
         let completion: RuntimeReleaseConfigurationPlan
         func requireSource(_ machine: MachineUpdateRestartSource, policy: AuthorityCodePolicySnapshot,
                            candidate: SignedReleaseEvidence) throws {
+            var verification = RuntimeReleaseConfigurationPlan.SourceVerification()
+            try requireSource(machine, policy: policy, candidate: candidate, verification: &verification)
+        }
+
+        func requireSource(_ machine: MachineUpdateRestartSource, policy: AuthorityCodePolicySnapshot,
+                           candidate: SignedReleaseEvidence,
+                           verification: inout RuntimeReleaseConfigurationPlan.SourceVerification) throws {
             guard startup.policyStage == .startup, completion.policyStage == .completion,
                   startup.binding == completion.binding, try startup.sourceDigest == source.digest,
                   completion.sourceDigest == startup.sourceDigest else { throw RuntimePreparationError.changedScope }
-            for plan in [startup, completion] {
-                try plan.requireSourceForPublication(machine, currentPolicy: policy, candidate: candidate,
-                    host: source.host, transport: source.transport, gateway: source.gateway, clients: source.clients)
-            }
+            try RuntimeReleaseConfigurationPlan.requireSourceForPublication(startup: startup, completion: completion,
+                source: machine, currentPolicy: policy, candidate: candidate, original: source, verification: &verification)
         }
     }
     struct Artifact: Equatable {

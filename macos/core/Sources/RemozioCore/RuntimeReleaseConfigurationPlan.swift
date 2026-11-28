@@ -25,6 +25,20 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
             self.clients = clients
         }
     }
+    private struct CommonSource {
+        let policy: MachineUpdatePolicyPlan
+        let binding: RuntimeReleaseBinding
+        let digest: Data
+    }
+
+    struct SourceVerification {
+        private(set) var buildAttempts = 0
+
+        fileprivate mutating func recordBuildAttempt() {
+            buildAttempts += 1
+        }
+    }
+
     private let storage: Storage
     var binding: RuntimeReleaseBinding { storage.binding }
     var policyStage: RuntimeReleasePolicyStage { storage.policyStage }
@@ -41,8 +55,29 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
          transport sourceTransport: TransportPairingStartupConfiguration,
          gateway sourceGateway: GatewaySettingsConsumerHostConfiguration, clients sourceClients: RuntimeActivationClients,
          stage: RuntimeReleasePolicyStage) throws {
-        let policy = try MachineUpdatePolicyPlan(source: currentPolicy, candidate: candidate)
-        let binding = try RuntimeReleaseBinding(accountID: accountID, source: source, candidate: candidate, policy: policy)
+        var commonSource: CommonSource?
+        var verification = SourceVerification()
+        try self.init(accountID: accountID, source: source, currentPolicy: currentPolicy, candidate: candidate,
+            host: sourceHost, transport: sourceTransport, gateway: sourceGateway, clients: sourceClients, stage: stage,
+            commonSource: &commonSource, verification: &verification)
+    }
+
+    private init(accountID: Data, source: MachineUpdateRestartSource, currentPolicy: AuthorityCodePolicySnapshot,
+                 candidate: SignedReleaseEvidence, host sourceHost: InstalledAuthorityCommandConfiguration,
+                 transport sourceTransport: TransportPairingStartupConfiguration,
+                 gateway sourceGateway: GatewaySettingsConsumerHostConfiguration, clients sourceClients: RuntimeActivationClients,
+                 stage: RuntimeReleasePolicyStage, commonSource: inout CommonSource?,
+                 verification: inout SourceVerification) throws {
+        let policy: MachineUpdatePolicyPlan
+        let binding: RuntimeReleaseBinding
+        if let commonSource {
+            policy = commonSource.policy
+            binding = commonSource.binding
+        } else {
+            verification.recordBuildAttempt()
+            policy = try MachineUpdatePolicyPlan(source: currentPolicy, candidate: candidate)
+            binding = try RuntimeReleaseBinding(accountID: accountID, source: source, candidate: candidate, policy: policy)
+        }
         let reference = sourceGateway.runtime
         try binding.requireHistoricalRuntime(reference)
         guard sourceGateway.releaseBinding == nil, sourceGateway.bundlePath == source.replacement.inventory.bundlePath,
@@ -65,11 +100,13 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
             bundlePath: sourceGateway.bundlePath, codePolicy: targetPolicy, releaseBinding: binding, policyStage: stage)
         let transport = try Self.transport(sourceTransport, host: transportHost, policy: targetPolicy)
         let clients = try Self.clients(sourceClients, policy: targetPolicy)
-        try self.init(binding: binding, stage: stage,
-            sourceDigest: Self.digest(host: sourceHost, transport: sourceTransport, gateway: sourceGateway, clients: sourceClients),
+        let sourceDigest = try commonSource?.digest ??
+            Self.digest(host: sourceHost, transport: sourceTransport, gateway: sourceGateway, clients: sourceClients)
+        try self.init(binding: binding, stage: stage, sourceDigest: sourceDigest,
             host: host, transport: transport, gateway: gateway, clients: clients)
         try host.validateRelease(candidate, bundlePath: gateway.bundlePath)
         try gateway.validateRelease(candidate); try transportHost.validateRelease(candidate)
+        commonSource = CommonSource(policy: policy, binding: binding, digest: sourceDigest)
     }
     private init(binding: RuntimeReleaseBinding, stage: RuntimeReleasePolicyStage, sourceDigest: Data,
                  host: InstalledAuthorityCommandConfiguration, transport: TransportPairingStartupConfiguration,
@@ -89,8 +126,48 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
                                     candidate: SignedReleaseEvidence, host: InstalledAuthorityCommandConfiguration,
                                     transport: TransportPairingStartupConfiguration,
                                     gateway: GatewaySettingsConsumerHostConfiguration, clients: RuntimeActivationClients) throws {
+        var verification = SourceVerification()
+        try requireSourceForPublication(source, currentPolicy: currentPolicy, candidate: candidate, host: host,
+            transport: transport, gateway: gateway, clients: clients, verification: &verification)
+    }
+
+    func requireSourceForPublication(_ source: MachineUpdateRestartSource, currentPolicy: AuthorityCodePolicySnapshot,
+                                     candidate: SignedReleaseEvidence, host: InstalledAuthorityCommandConfiguration,
+                                     transport: TransportPairingStartupConfiguration,
+                                     gateway: GatewaySettingsConsumerHostConfiguration, clients: RuntimeActivationClients,
+                                     verification: inout SourceVerification) throws {
+        var commonSource: CommonSource?
         let proposed = try Self(accountID: binding.accountID, source: source, currentPolicy: currentPolicy,
-            candidate: candidate, host: host, transport: transport, gateway: gateway, clients: clients, stage: policyStage)
+            candidate: candidate, host: host, transport: transport, gateway: gateway, clients: clients, stage: policyStage,
+            commonSource: &commonSource, verification: &verification)
+        try requireProposedSource(proposed, candidate: candidate)
+    }
+
+    /// Checks both stages against the same original values within the caller's current scope.
+    static func requireSourceForPublication(startup: Self, completion: Self, source: MachineUpdateRestartSource,
+                                            currentPolicy: AuthorityCodePolicySnapshot, candidate: SignedReleaseEvidence,
+                                            original: RuntimeReleaseConfigurationSource,
+                                            verification: inout SourceVerification) throws {
+        // Only this call can reuse source inputs after the startup stage has passed.
+        var commonSource: CommonSource?
+        try startup.requireSourceForPublication(source, currentPolicy: currentPolicy, candidate: candidate, original: original,
+            commonSource: &commonSource, verification: &verification)
+        try completion.requireSourceForPublication(source, currentPolicy: currentPolicy, candidate: candidate, original: original,
+            commonSource: &commonSource, verification: &verification)
+    }
+
+    private func requireSourceForPublication(_ source: MachineUpdateRestartSource, currentPolicy: AuthorityCodePolicySnapshot,
+                                             candidate: SignedReleaseEvidence, original: RuntimeReleaseConfigurationSource,
+                                             commonSource: inout CommonSource?, verification: inout SourceVerification) throws {
+        var checked = commonSource
+        let proposed = try Self(accountID: binding.accountID, source: source, currentPolicy: currentPolicy, candidate: candidate,
+            host: original.host, transport: original.transport, gateway: original.gateway, clients: original.clients,
+            stage: policyStage, commonSource: &checked, verification: &verification)
+        try requireProposedSource(proposed, candidate: candidate)
+        commonSource = checked
+    }
+
+    private func requireProposedSource(_ proposed: Self, candidate: SignedReleaseEvidence) throws {
         let retained = self.host.installedReadinessEnabled && !proposed.host.installedReadinessEnabled
             ? try proposed.selectingInstalledRootReadiness(candidate: candidate) : proposed
         guard try retained.encoded == encoded else { throw RuntimeActivationError.changedScope }
