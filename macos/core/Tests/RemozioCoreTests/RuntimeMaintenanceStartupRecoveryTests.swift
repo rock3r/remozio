@@ -595,6 +595,46 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             XCTAssertEqual(h.observations, 2); XCTAssertEqual(h.writes, [.reopenPending, .restored])
         }
     }
+    private static func retainMatchingStartupRegistration(_ h: StartupHarness) throws -> RuntimeMaintenanceWindowRecord {
+        let opened = try XCTUnwrap(h.frame().window)
+        let scope = RuntimeJobRegistration.StartupScope(openedWindow: opened, automatic: true)
+        try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: opened, verifyCurrent: {
+            guard try h.frame().window == opened else { throw PreparationStoreError.staleRevision }
+        }, inspect: {
+            h.inspected = .matching(h.witness.processID)
+            return .matching
+        }, bootstrap: { XCTFail("The first startup has no new registration") })
+        return opened
+    }
+
+    func testRestartAfterRetainingTheMatchStillRequiresLiveProcessAndHealth() throws {
+        try withAsyncStartup(.restoring) { h, driver in
+            let opened = try Self.retainMatchingStartupRegistration(h)
+            XCTAssertEqual(try h.frame().window, opened)
+            XCTAssertTrue(h.writes.isEmpty)
+            let restored = try await Self.complete(h, driver)
+            XCTAssertEqual(restored.phase, .restored)
+            XCTAssertEqual(h.registrations, 0)
+            XCTAssertEqual(h.observations, 2)
+            XCTAssertEqual(h.writes, [.reopenPending, .restored])
+        }
+    }
+
+    func testMatchingStartupRegistrationCannotReopenAfterTheLiveCodeCheckFails() throws {
+        try withAsyncStartup(.restoring) { h, driver in
+            let opened = try Self.retainMatchingStartupRegistration(h)
+            XCTAssertEqual(try h.frame().window, opened)
+            h.rejectCode = true
+            let error = await Self.failed(h, driver)
+            XCTAssertNotNil(error)
+            XCTAssertGreaterThan(h.observations, 0)
+            XCTAssertEqual(h.registrations, 0)
+            XCTAssertEqual(h.writes, [.needsOwnerRecovery])
+            XCTAssertEqual(try h.frame().window?.phase, .needsOwnerRecovery)
+            XCTAssertTrue(driver.metrics.actions.withLock { $0 }.isEmpty)
+        }
+    }
+
     func testAJobWithoutALivePidDoesNotRegisterAReplacement() throws {
         try withAsyncStartup(.restoring) { h, driver in
             let deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)

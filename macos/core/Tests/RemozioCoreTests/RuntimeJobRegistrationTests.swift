@@ -104,6 +104,116 @@ final class RuntimeJobRegistrationTests: XCTestCase {
         })
         XCTAssertEqual(reads, 2); XCTAssertEqual(starts, 1)
     }
+    func testResumedStartupKeepsTheExactJobThatAppearsBetweenInspections() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
+            let harness = try StartupHarness(fixture)
+            try harness.seed(.restoring)
+            let window = try XCTUnwrap(harness.frame().window)
+            let scope = RuntimeJobRegistration.StartupScope(openedWindow: window, automatic: true)
+            XCTAssertEqual(harness.inspected, .absent)
+            var checks = 0
+            try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: window, verifyCurrent: { checks += 1 },
+                inspect: { .matching }, bootstrap: { XCTFail("The exact loaded job needs no bootstrap") })
+            XCTAssertEqual(checks, 2)
+            XCTAssertEqual(try harness.frame().window, window)
+        }
+    }
+
+    func testResumedStartupRefusesAConflictingJobAtTheSecondInspection() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
+            let harness = try StartupHarness(fixture)
+            try harness.seed(.restoring)
+            let window = try XCTUnwrap(harness.frame().window)
+            let scope = RuntimeJobRegistration.StartupScope(openedWindow: window, automatic: true)
+            XCTAssertEqual(harness.inspected, .absent)
+            XCTAssertThrowsError(try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: window,
+                verifyCurrent: {}, inspect: { .conflicting }, bootstrap: { XCTFail("Never replace a different job") })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .conflictingPlan)
+            }
+            XCTAssertEqual(try harness.frame().window, window)
+        }
+    }
+
+    func testFreshRestoringRowDoesNotAuthorizeRetainingAMatchingJob() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
+            let harness = try StartupHarness(fixture)
+            try harness.seed(.workSettled)
+            let opened = try XCTUnwrap(harness.frame().window)
+            let scope = RuntimeJobRegistration.StartupScope(openedWindow: opened, automatic: true)
+            let fresh = try RuntimeMaintenanceStartupPolicy.row(opened, phase: .restoring, service: .restartPending)
+            let drain = try harness.barrier.beginDrain()
+            defer { drain.close() }
+            _ = try harness.write(fresh, previous: opened, drain: drain)
+            XCTAssertEqual(try harness.frame().window, fresh)
+            XCTAssertThrowsError(try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: fresh,
+                verifyCurrent: {}, inspect: { .matching }, bootstrap: { XCTFail("Do not bootstrap a live job") })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .conflictingPlan)
+            }
+        }
+    }
+
+    func testExplicitOrDifferentRestoringWindowCannotRetainAMatchingJob() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
+            let harness = try StartupHarness(fixture)
+            try harness.seed(.restoring)
+            let window = try XCTUnwrap(harness.frame().window)
+            let differentRevision = try RuntimeMaintenanceWindowRecord(id: window.id,
+                revision: Data(repeating: 99, count: 16), purpose: window.purpose, scope: window.scope, phase: window.phase,
+                operation: window.operation, service: window.service, failure: window.failure,
+                shutdownBinding: window.shutdownBinding, unboundRelease: window.unboundRelease)
+            XCTAssertNotEqual(differentRevision, window)
+            for (scope, expected) in [
+                (RuntimeJobRegistration.StartupScope(openedWindow: window, automatic: false), window),
+                (RuntimeJobRegistration.StartupScope(openedWindow: window, automatic: true), differentRevision)
+            ] {
+                XCTAssertThrowsError(try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: expected,
+                    verifyCurrent: {}, inspect: { .matching }, bootstrap: { XCTFail("No bootstrap outside the opened row") })) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .conflictingPlan)
+                }
+            }
+        }
+    }
+
+    func testResumedStartupRejectsAMatchWhenTheRestoringScopeChanges() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
+            let harness = try StartupHarness(fixture)
+            try harness.seed(.restoring)
+            let window = try XCTUnwrap(harness.frame().window)
+            let scope = RuntimeJobRegistration.StartupScope(openedWindow: window, automatic: true)
+            var observed = false
+            XCTAssertThrowsError(try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: window,
+                verifyCurrent: {
+                    if observed { throw PreparationStoreError.staleRevision }
+                }, inspect: {
+                    observed = true
+                    return .matching
+                }, bootstrap: { XCTFail("A stale row never authorizes bootstrap") })) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertTrue(observed)
+            XCTAssertEqual(try harness.frame().window, window)
+        }
+    }
+
+    func testResumedStartupReconcilesALostBootstrapAcknowledgment() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { fixture in
+            let harness = try StartupHarness(fixture)
+            try harness.seed(.restoring)
+            let window = try XCTUnwrap(harness.frame().window)
+            let scope = RuntimeJobRegistration.StartupScope(openedWindow: window, automatic: true)
+            var reads = 0, bootstraps = 0
+            try RuntimeJobRegistration.reconcileStartupRestoration(scope, window: window, verifyCurrent: {}, inspect: {
+                reads += 1
+                return reads == 3 ? .matching : .absent
+            }, bootstrap: {
+                bootstraps += 1
+                throw LostReply()
+            })
+            XCTAssertEqual(reads, 3)
+            XCTAssertEqual(bootstraps, 1)
+        }
+    }
+
     func testFailedAndConflictingBootstrapOutcomesRemainRecoverableWithoutDeletion() throws {
         for conflict in [false, true] {
             var reads = 0, starts = 0

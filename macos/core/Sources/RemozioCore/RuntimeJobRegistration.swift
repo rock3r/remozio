@@ -87,6 +87,20 @@ struct LaunchdJobObservation {
 /// No stop, remove, replacement or blanket launchctl command is exposed here.
 enum RuntimeJobRegistration {
     enum Observation: Equatable { case absent, matching, conflicting }
+
+    /// Only the exact restoring row opened by automatic startup can retain a late match.
+    struct StartupScope {
+        private let resumedWindow: RuntimeMaintenanceWindowRecord?
+
+        init(openedWindow: RuntimeMaintenanceWindowRecord, automatic: Bool) {
+            resumedWindow = automatic && openedWindow.phase == .restoring ? openedWindow : nil
+        }
+
+        fileprivate func acceptsMatch(for window: RuntimeMaintenanceWindowRecord) -> Bool {
+            resumedWindow == window
+        }
+    }
+
     static func ensure(_ job: InstalledAccountJobManifest, verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try RuntimeMaintenanceBootstrapGuard.withNativeRegistration(job) { verifyAdmission in
@@ -128,14 +142,36 @@ enum RuntimeJobRegistration {
             _ = try MachineUpdateRetainedSetupPromotionSourceValidation.retainedJobBytes(job, directory: directory, owner: 0)
             try custody.requireRestoring(window)
         }
+        func inspectCurrentJob() throws -> Observation {
+            switch try custody.inspect(job) {
+            case .absent: return .absent
+            case .matching: return .matching
+            case .conflicting: return .conflicting
+            }
+        }
         try custody.withRegistration(window) {
-            try verify()
-            guard try inspect(job) == .absent else { throw RuntimeActivationError.conflictingPlan }
-            try reconcile(verifyCurrent: verify, inspect: { try inspect(job) }, bootstrap: {
-                _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
-            })
+            try reconcileStartupRestoration(custody.startupRegistration, window: window,
+                verifyCurrent: verify, inspect: inspectCurrentJob, bootstrap: {
+                    _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
+                })
         }
     }
+
+    // The caller holds registration custody and verifies the protected job and exact restoring row.
+    static func reconcileStartupRestoration(_ scope: StartupScope, window: RuntimeMaintenanceWindowRecord,
+        verifyCurrent: () throws -> Void, inspect: () throws -> Observation, bootstrap: () throws -> Void) throws {
+        try verifyCurrent()
+        switch try inspect() {
+        case .matching:
+            guard scope.acceptsMatch(for: window) else { throw RuntimeActivationError.conflictingPlan }
+            try verifyCurrent()
+        case .conflicting:
+            throw RuntimeActivationError.conflictingPlan
+        case .absent:
+            try reconcile(verifyCurrent: verifyCurrent, inspect: inspect, bootstrap: bootstrap)
+        }
+    }
+
     /// Same restoration order with ordinary-owner callbacks. Root cannot select them.
     static func reconcileOwnedRestoration(_ permit: RuntimeMaintenanceRestorationPermit,
         requireWindow: (RuntimeMaintenanceWindowRecord) throws -> Void, inspect: () throws -> Observation,

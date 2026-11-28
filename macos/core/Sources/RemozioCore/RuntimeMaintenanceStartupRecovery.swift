@@ -219,6 +219,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         let floor: RuntimeMaintenanceStartupFloor
         let admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease
         let native: Bool
+        let startupRegistration: RuntimeJobRegistration.StartupScope
         let verifyConfiguration: @Sendable () throws -> Void
         private let verifyCaller: @Sendable () throws -> Void
         private let restartAttempt: RestartAttempt?
@@ -250,7 +251,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             observe: @escaping @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness,
             verifySetupIdentity: @escaping @Sendable () throws -> Void = {}, restartAttempt: RestartAttempt? = nil,
             cancellation: SetupAuditUpgradeCancellation? = nil, nativeUnboundFiles: NativeFiles? = nil,
-            ownedUnboundWriters: OwnedUnboundWriters? = nil, unboundJoined: SetupRetainedOrphanClaim.Joined? = nil) {
+            ownedUnboundWriters: OwnedUnboundWriters? = nil, unboundJoined: SetupRetainedOrphanClaim.Joined? = nil,
+            automaticStartup: Bool = false) {
             self.verifySetupIdentity = verifySetupIdentity; self.restartAttempt = restartAttempt
             self.cancellation = cancellation; restartAttempt?.confirmedRow(row)
             self.nativeUnboundFiles = nativeUnboundFiles; self.ownedUnboundWriters = ownedUnboundWriters
@@ -258,6 +260,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             self.floor = floor; self.row = row; self.admission = admission; self.drain = drain; self.directory = directory
             self.release = release; self.read = read; self.writeNative = writeNative; self.writeOwned = writeOwned
             native = writeNative != nil; self.verifyCaller = verifyCaller; self.verifyConfiguration = verifyConfiguration
+            startupRegistration = .init(openedWindow: row, automatic: writeNative != nil && automaticStartup)
             self.inspect = inspect; self.observe = observe
             restartAttempt?.didOpenCustody()
         }
@@ -830,7 +833,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                                 arguments: ["print", "system/" + job.declaration.label]), job: job)
                         }, observe: { try RuntimeJobProcessObservation.open(job: $0, code: $1, processID: $2) },
                         verifySetupIdentity: verifyHost, restartAttempt: explicit?.restartAttempt, cancellation: cancellation,
-                        nativeUnboundFiles: explicit?.unboundJoined == nil ? nil : files, unboundJoined: explicit?.unboundJoined)
+                        nativeUnboundFiles: explicit?.unboundJoined == nil ? nil : files, unboundJoined: explicit?.unboundJoined,
+                        automaticStartup: explicit == nil)
                     _ = try custody.requireCurrent(row)
                     return .init(custody: custody, explicitAuthority: explicit, nativePhases: nativePhases, observeOperation: { window in
                         // The synchronous M08 loan opens B only and ends before any async transfer.
