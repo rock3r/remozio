@@ -11,13 +11,15 @@ The repository is public, so a report is never copied as it is. The summary keep
 
 It drops the other threads, the register state, the image paths (they hold the runner's user name), the process
 paths and every field this script does not name. Only reports whose process name starts with `xctest` and that were
-modified at or after `--since` are read. A run without such reports writes nothing and exits 0; so does a report
+modified at or after `--since` are read. ReportCrash can write a report a few seconds after the process died, so
+the script waits up to `--wait` seconds (15 by default) for the first one. A run without such reports writes nothing and exits 0; so does a report
 that cannot be parsed, which only produces a warning.
 """
 import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 REPORT_DIRECTORIES = (Path.home() / 'Library/Logs/DiagnosticReports', Path('/Library/Logs/DiagnosticReports'))
 MAXIMUM_FRAMES = 128
@@ -85,9 +87,16 @@ def main(argv=None):
     parser.add_argument('--since', type=float, required=True, help='job start, in seconds since the epoch')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--directory', type=Path, action='append', help='report directory (tests only)')
+    parser.add_argument('--wait', type=float, default=15, help='seconds to wait for a late report')
     arguments = parser.parse_args(argv)
+    directories = arguments.directory or REPORT_DIRECTORIES
+    deadline = time.monotonic() + max(0, arguments.wait)
+    found = list(reports(directories, arguments.since))
+    while not found and time.monotonic() < deadline:
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+        found = list(reports(directories, arguments.since))
     written = 0
-    for path in reports(arguments.directory or REPORT_DIRECTORIES, arguments.since):
+    for path in found:
         try:
             summary = summarize(*parse(path.read_text(errors='replace')))
         except (OSError, ValueError, AttributeError, TypeError) as error:

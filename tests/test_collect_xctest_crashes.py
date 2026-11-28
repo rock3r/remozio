@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("collect_xctest_crashes", ROOT / "scripts/collect-xctest-crashes.py")
@@ -55,7 +56,8 @@ class CollectXCTestCrashesTests(unittest.TestCase):
                     os.utime(path, (mtime, mtime))
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
-                status = CRASHES.main(["--since", str(since), "--output", str(output), "--directory", str(directory)])
+                status = CRASHES.main(["--since", str(since), "--output", str(output), "--directory", str(directory),
+                                        "--wait", "0"])
             written = {path.name: path.read_text() for path in output.glob("*")} if output.exists() else {}
             return status, written, stdout.getvalue()
 
@@ -81,7 +83,7 @@ class CollectXCTestCrashesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             missing = Path(temporary) / "missing"
             self.assertEqual(CRASHES.main(["--since", "0", "--output", str(Path(temporary) / "out"),
-                                           "--directory", str(missing)]), 0)
+                                           "--directory", str(missing), "--wait", "0"]), 0)
             self.assertFalse((Path(temporary) / "out").exists())
 
     def test_an_unreadable_report_is_a_warning_and_not_copied(self):
@@ -98,6 +100,34 @@ class CollectXCTestCrashesTests(unittest.TestCase):
         self.assertIn("SIGSEGV", summary)
         self.assertIn("crashed thread: not in the report", summary)
         self.assertNotIn("otherThreadSymbol", summary)
+
+    def test_a_late_report_is_found_within_the_wait(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory, output = Path(temporary) / "reports", Path(temporary) / "out"
+            directory.mkdir()
+            sleeps = []
+
+            def late_sleep(seconds):
+                sleeps.append(seconds)
+                (directory / "xctest-late.ips").write_text(report())
+
+            with patch.object(CRASHES.time, "sleep", late_sleep), contextlib.redirect_stdout(io.StringIO()):
+                status = CRASHES.main(["--since", "0", "--output", str(output), "--directory", str(directory),
+                                       "--wait", "15"])
+            self.assertEqual(status, 0)
+            self.assertEqual(len(sleeps), 1)
+            self.assertTrue((output / "xctest-late.txt").exists())
+
+    def test_the_wait_is_bounded_without_a_report(self):
+        clock = iter([0, 0, 5, 10, 15, 16])
+        sleeps = []
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(CRASHES.time, "monotonic", lambda: next(clock)), \
+                patch.object(CRASHES.time, "sleep", sleeps.append):
+            self.assertEqual(CRASHES.main(["--since", "0", "--output", str(Path(temporary) / "out"),
+                                           "--directory", temporary, "--wait", "15"]), 0)
+        self.assertLessEqual(len(sleeps), 15)
+        self.assertTrue(all(0 <= seconds <= 1 for seconds in sleeps))
 
 
 if __name__ == "__main__":
