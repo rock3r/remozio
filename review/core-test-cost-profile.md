@@ -23,6 +23,38 @@ Case times overlap across shards. They include fixture setup, test code and tear
 | `SetupMaintenanceRecoveryScopeTests` | 24 | 60.843 | 1.41% | 61.732 | 1.42% |
 | **Top ten** | **997** | **1687.541** | **39.15%** | **1700.659** | **39.24%** |
 
+## Compare six and eight shards first
+
+The gate Mac has 10 cores (8 performance and 2 efficiency) and 64 GiB of RAM. Use gates 7999 and 8022 as the historical three-shard baseline. Their source revisions differ from `8930647a`. Gate 8022 has eight fewer Core cases than the source inventory for `8930647a`.
+
+Run the full Core suite at `8930647a` with six shards and then with eight. Run one configuration at a time under the native validation lock. Use the same optimized binary, weights and intentional skips. The standard runner must verify every expected test exactly once. Record the test bundle digest and compare complete case outcomes between configurations.
+
+| Concurrent shards | Longest shard from reassigned 8022 case times | Proposed runner elapsed | Cap |
+| --- | ---: | ---: | ---: |
+| 6 | 754 s | 750–1,250 s | 2,400 s |
+| 8 | 559 s | 560–1,100 s | 2,400 s |
+
+The reassignment uses the repository splitter and the measured durations from gate 8022. It does not model contention, changes in CPU frequency or the eight new cases. Record build and per-shard wall time, overall elapsed time, failures and timeouts. Sample the concurrent sum of XCTest RSS every two seconds and retain the peak sample. The sum can count shared pages more than once and can miss a peak between samples.
+
+If the higher count materially reduces wall time and retains the expected outcomes, propose a local gate change for that count. One run per configuration can uncover failures and timeouts. It cannot establish a flake rate. GitHub CI concurrency is a separate decision.
+
+### Measured result
+
+Both runs used the same binary at `8930647a`. Each run recorded 8,113 passes and three expected skips. The exactly-once guard passed. No test timed out, and no outcome differed. These were sequential runs on the same host.
+
+| Shards | Runner elapsed | Fastest shard | Slowest shard | Peak sampled XCTest RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 6 | 821.750 s | 2/6 at 762.216 s | 4/6 at 808.237 s | 1,417.9 MiB |
+| 8 | 650.173 s | 5/8 at 587.432 s | 3/8 at 638.377 s | 1,575.7 MiB |
+
+Eight shards reduced elapsed time by 20.88% compared with six. The historical three-shard maxima were 1472.027 s and 1498.462 s. Those values are shard elapsed times from earlier source revisions.
+
+The comparison below includes the slowest cases that passed in both configurations and had a historical result.
+
+| Test | 7999 | 8022 | 6 shards | 8 shards |
+| --- | ---: | ---: | ---: | ---: |
+| `MachineUpdateReplacementTests/testCompletionPublicationStorageRetainsOnlyTheExactRecordedPlan` | 47.479 s | 48.557 s | 49.505 s | 51.663 s |
+
 ## Separate fixture and test costs
 
 Measure the median-duration case from each class and three slow cases with distinct behavior. Each selector below uses the `RemozioCoreTests.` prefix. These timings are from gate 8022 and forecast the sample size only.
@@ -45,7 +77,7 @@ Measure the median-duration case from each class and three slow cases with disti
 
 The 13 selectors sum to 94.410 seconds in 8022. Three serial repeats are about 283 seconds of case time at those rates, before process startup and host variation. Budget 3–6 minutes for tests with a 10-minute test cap. Allow up to 15 minutes for the separate optimized build. These are proposed bounds for the profiling run.
 
-Add test-only monotonic phase timing to the actual fixture paths and run each selector three times on the same host. Record the first pass separately from warmed passes. Measure construction, teardown and the work between those boundaries. Record fixture counts and inclusive and exclusive time. Merge overlapping fixture intervals within each case so nested setup and teardown count once. Attribute process setup in the caller receiver case separately from Mach dispatch. Keep assertions and real deadlines in place. Flag and investigate any testcase wall time missing from the phase records. Report the split for each sample and avoid extrapolation to unmeasured paths.
+Add test-only monotonic phase timing to the actual fixture paths and run each selector three times on the same host. Record the first pass separately from warmed passes. Measure construction, teardown and the work between those boundaries. Record fixture counts and inclusive and exclusive time. Merge overlapping fixture intervals within each case so nested setup and teardown count once. Attribute process setup in the caller receiver case separately from Mach dispatch. Keep assertions and real deadlines in place. Flag and investigate any testcase wall time missing from the phase records. Report the split for each sample and avoid extrapolation to unmeasured paths. For the startup deadline and slow completion publication tests, also record XCTest process CPU by phase in isolation. CPU time excludes child processes and does not explain every gap in elapsed time. Check the explicit startup deadline separately before proposing a clock substitution.
 
 ## Choose the first change from the result
 
