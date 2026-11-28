@@ -47,6 +47,13 @@ final class CommandFrontendReadinessPresentationTests: XCTestCase {
         }
     }
 
+    func testAdmissionCapacityPrintsTheGenericMessageAndKeepsItsExitStatus() {
+        var messages: [String] = []
+        let outcome = CommandAdmissionOutcome.notAdmitted(.capacityExceeded, .never)
+        XCTAssertEqual(status(CommandFrontendMain.admissionExit(outcome) { messages.append($0) }), EX_TEMPFAIL)
+        XCTAssertEqual(messages, ["Approval capacity reached. See Remozio diagnostics."])
+    }
+
     func testConfigurationAndClockErrorsKeepTheirExistingResults() {
         for (error, expected, text): (CommandCallerReadinessError, Int32, String) in [
             (.invalidConfiguration, EX_CONFIG, "Invalid command readiness settings."),

@@ -113,7 +113,7 @@ public enum CommandFrontendMain {
             }, onStatus: { log(readinessStatusMessage($0)) },
             refreshAuthorityPolicy: { try configuration.reloadAuthorityPolicy(path: configurationPath) }, currentJobQueries: true)
         switch response {
-        case .result(let result): return admissionExit(result)
+        case .result(let result): return admissionExit(result.outcome, report: log)
         case .admitted(let session):
             defer { session.close() }
             let relay = try terminal.map { try CommandFrontendRelay(session: session, terminal: $0) }
@@ -276,14 +276,17 @@ public enum CommandFrontendMain {
         case .unknown: return .status(EX_SOFTWARE)
         }
     }
-    private static func admissionExit(_ result: VerifiedCommandAdmissionResult) -> CommandFrontendExit {
-        switch result.outcome {
-        case .uncertain: log("Admission is uncertain. The command was not retried."); return .status(EX_PROTOCOL)
+    static func admissionExit(_ outcome: CommandAdmissionOutcome, report: (String) -> Void) -> CommandFrontendExit {
+        switch outcome {
+        case .uncertain: report("Admission is uncertain. The command was not retried."); return .status(EX_PROTOCOL)
         case .notAdmitted(let reason, _):
             switch reason {
             case .policyRejected: return .status(EX_NOPERM)
             case .invalidRequest: return .status(EX_DATAERR)
             case .unsupported: return .status(EX_PROTOCOL)
+            case .capacityExceeded:
+                report("Approval capacity reached. See Remozio diagnostics.")
+                return .status(EX_TEMPFAIL)
             default: return .status(EX_TEMPFAIL)
             }
         case .admitted: return .status(EX_SOFTWARE)

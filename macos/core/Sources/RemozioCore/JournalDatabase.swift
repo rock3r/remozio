@@ -1,4 +1,5 @@
 import Foundation
+import RemozioHostCore
 import RemozioProtocol
 import SQLite3
 
@@ -54,6 +55,8 @@ public final class JournalDatabase {
     let readOnlyForCutover: Bool
     private let lease: ProtectedJournalLease
     private let journalStep: (OpaquePointer) -> Int32
+    private let maximumConsumptions: Int
+    private let maximumCommandSubmissions: Int
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?
     private var consumption: ConsumptionJournal?
@@ -100,6 +103,8 @@ public final class JournalDatabase {
          journalStep: @escaping (OpaquePointer) -> Int32 = sqlite3_step) throws {
         self.lease = lease; self.readOnlyForCutover = readOnlyForCutover
         self.journalStep = journalStep
+        self.maximumConsumptions = maximumConsumptions
+        self.maximumCommandSubmissions = maximumCommandSubmissions
         self.recordLimits = recordLimits
         self.descriptorLimits = descriptorLimits
         self.macID = macID
@@ -356,6 +361,18 @@ public final class JournalDatabase {
         _ = try access(token)
         guard let db else { throw JournalDatabaseError.expiredTransaction }
         return try AuthorityJournalSchema.permanentReplayInstalled(on: db)
+    }
+
+    fileprivate func permanentReplayUsage(_ counter: ReplayCapacityDiagnostics.Counter, token: UUID) throws -> ReplayCapacityDiagnostics.Usage? {
+        _ = try access(token)
+        guard let db, try AuthorityJournalSchema.permanentReplayInstalled(on: db) else { return nil }
+        let counters = PermanentReplayCounters(connection: db, macID: macID, accountID: accountID)
+        switch counter {
+        case .consumedRequests:
+            return try .init(counter: counter, count: counters.count(.consumedRequests), limit: Int64(maximumConsumptions))
+        case .commandSubmissions:
+            return try .init(counter: counter, count: counters.count(.commandSubmissions), limit: Int64(maximumCommandSubmissions))
+        }
     }
 
     fileprivate func validatePermanentReplayStorage(_ token: UUID) throws {
@@ -736,6 +753,11 @@ public final class JournalTransaction {
     func hasPermanentReplayStorage() throws -> Bool {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
         return try owner.hasPermanentReplayStorage(token)
+    }
+
+    func permanentReplayUsage(_ counter: ReplayCapacityDiagnostics.Counter) throws -> ReplayCapacityDiagnostics.Usage? {
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        return try owner.permanentReplayUsage(counter, token: token)
     }
 
     /// Check the committed replay mapping before starting request recovery.

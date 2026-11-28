@@ -92,6 +92,7 @@ public final class ApprovalRequestCoordinator {
     private var accountUpdateDrain: UpdateDrainToken?
     var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
+    private var replayCapacityDiagnostics = ReplayCapacityDiagnostics()
     private var auditRetentionContinuing = false
     private var detailRetirementContinuing = false
     private var detailRetirementCursor: Data?
@@ -205,13 +206,18 @@ public final class ApprovalRequestCoordinator {
     /// The host retains both store leases and completes startup recovery before supplying the writer.
     convenience init(database: JournalDatabase, continuity: ContinuityStore, writer: AuditEpochWriter, clockEpoch: UUID,
                      maximumRequests: Int, maximumRetainedBytes: Int, requestLimits: CBORLimits, captureLimits: CBORLimits,
-                     decisionLimits: CBORLimits, signingLimits: CBORLimits, auditLimits: CBORLimits) throws {
+                     decisionLimits: CBORLimits, signingLimits: CBORLimits, auditLimits: CBORLimits,
+                     replayCapacityDiagnostics: ReplayCapacityDiagnostics = .init()) throws {
         try self.init(database: database, writer: writer, clockEpoch: clockEpoch, maximumRequests: maximumRequests,
             maximumRetainedBytes: maximumRetainedBytes, requestLimits: requestLimits, captureLimits: captureLimits,
             decisionLimits: decisionLimits, signingLimits: signingLimits, auditLimits: auditLimits)
         let commits = CheckpointedJournal(journal: database, continuity: continuity)
-        try commits.read { _ in () }
+        let usage = try commits.read { transaction in
+            ReplayCapacityDiagnostics.Counter.allCases.compactMap { try? transaction.permanentReplayUsage($0) }
+        }
         checkpointed = commits
+        self.replayCapacityDiagnostics = replayCapacityDiagnostics
+        for counter in usage { self.replayCapacityDiagnostics.observe(counter) }
     }
 
     func attachReleaseActivityBarrier(_ barrier: ReleaseActivityBarrier) throws {
@@ -703,7 +709,7 @@ public final class ApprovalRequestCoordinator {
         let activity = try releaseActivity?.acquireShared()
         var transferred = false
         defer { if !transferred { activity?.close() } }
-        try write { tx in
+        try writeObservingReplayCapacity(command == nil ? nil : .commandSubmissions) { tx in
             let trust = try tx.approvalTrustSnapshot()
             guard trust.allowedContracts.contains(payload.contract), let features = trust.authorityCapabilities.contracts[payload.contract],
                   payload.requiredFeatures.isSubset(of: features) else { throw DecisionVerificationError.unsupportedContract }
@@ -800,7 +806,7 @@ public final class ApprovalRequestCoordinator {
         let decision = try DecisionPayload.decode(canonicalDecision, limits: decisionLimits)
         guard decision.phoneID == authenticatedPhoneID else { throw ApprovalCoordinatorError.wrongPhone }
         let retained = try pending(decision.requestID, now: now, receiptTimeMs: receiptTimeMs)
-        let (receipt, enrollment) = try write { tx in
+        let (receipt, enrollment) = try writeObservingReplayCapacity(.consumedRequests) { tx in
             let trust = try tx.requestDeliveryTrust()
             guard let enrollment = trust.enrollments.first(where: {
                 $0.approval.phoneID == authenticatedPhoneID && $0.epoch == authenticatedEnrollmentEpoch && $0.approval.active
@@ -1670,6 +1676,32 @@ public final class ApprovalRequestCoordinator {
             if let checkpointed { return try checkpointed.write(epoch: writer.epoch, recoverRejectedBody: true, body) }
             return try database.write(body)
         } catch { retireAfterStorageFailure(); throw error }
+    }
+
+    private func writeObservingReplayCapacity<Value>(_ counter: ReplayCapacityDiagnostics.Counter?,
+                                                      _ body: (JournalTransaction) throws -> Value) throws -> Value {
+        guard let counter, let checkpointed else { return try write(body) }
+        var observed: ReplayCapacityDiagnostics.WriteObservation?
+        do {
+            let value = try write { transaction in
+                do {
+                    let value = try body(transaction)
+                    if let usage = try? transaction.permanentReplayUsage(counter) { observed = .completedBody(usage) }
+                    return value
+                } catch {
+                    if counter.isCapacityRefusal(error), let usage = try? transaction.permanentReplayUsage(counter) {
+                        observed = .capacityRefusal(usage)
+                    }
+                    throw error
+                }
+            }
+            if case .completedBody(let usage)? = observed { replayCapacityDiagnostics.observe(usage) }
+            return value
+        } catch {
+            // The checkpointed writer stays usable after a body rejection only if it proved the rollback.
+            replayCapacityDiagnostics.observeRejectedWrite(observed, writerRetired: checkpointed.retired)
+            throw error
+        }
     }
 
     private func retireAfterStorageFailure() {

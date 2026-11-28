@@ -2332,7 +2332,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
         var continuity: ContinuityStore?
         init(maximumRequests: Int = 8, checkpointed: Bool = false, owned: Bool = false, ready: Bool = true, commandSchema: UInt64 = 1,
              installReplay: Bool = true, maximumSubmissions: Int = 30, retiredEnrollmentEpoch: UInt8? = nil,
-             commandFilesystem: CommandFilesystemProbePool = .init()) throws {
+             commandFilesystem: CommandFilesystemProbePool = .init(), permanentReplay: Bool = false,
+             replayCapacityDiagnostics: ReplayCapacityDiagnostics = .init()) throws {
             limits = try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024)
             contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: commandSchema)
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw MachCommandCallerError.unavailable }
@@ -2406,6 +2407,9 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                 let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
                     macID: mac, accountID: account, initialize: initial)
                 continuity = store
+                if permanentReplay {
+                    _ = try CheckpointedJournal(journal: db, continuity: store).installPermanentReplay()
+                }
                 if owned {
                     try db.close(); store.close()
                     let anchor = root.path, limits = self.limits
@@ -2425,7 +2429,8 @@ final class MachCommandCallerReceiverTests: XCTestCase {
                     authority = nil
                     standaloneRequests = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
                         maximumRequests: maximumRequests, maximumRetainedBytes: 65536, requestLimits: limits, captureLimits: limits,
-                        decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+                        decisionLimits: limits, signingLimits: limits, auditLimits: limits,
+                        replayCapacityDiagnostics: replayCapacityDiagnostics)
                 }
             } else {
                 if owned {
@@ -2614,6 +2619,31 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
             try first.withBorrowedInputDescriptor { XCTAssertGreaterThanOrEqual($0, 0) }
         }
+    }
+
+    func testPermanentCommandCapacityReportsCommittedReservationAndSuppressesRepeatedRefusals() throws {
+        let messages = Mutex<[String]>([])
+        let report = ReplayCapacityDiagnostics { _, message in messages.withLock { $0.append(message) } }
+        let fixture = try CommandRequestFixture(checkpointed: true, maximumSubmissions: 1, permanentReplay: true,
+            replayCapacityDiagnostics: report)
+        let (_, first) = try requestCommand()
+        let request = try admitCommand(first, fixture: fixture)
+        let boundary = try fixture.continuity?.read()
+        let binding = CapturedSubmission(id: Data(repeating: 0xc2, count: 16), nonce: Data(repeating: 0xc3, count: 32),
+            callerBinding: first.capture.submission.callerBinding)
+        for _ in 0..<2 {
+            let (incoming, second) = try requestCommand(binding: binding)
+            XCTAssertThrowsError(try admitCommand(second, fixture: fixture)) {
+                XCTAssertEqual($0 as? CommandSubmissionReplayError, .capacityExceeded)
+            }
+            try expectAssemblyResourcesRetired(incoming)
+        }
+        XCTAssertEqual(messages.withLock { $0 }, [
+            "permanent_replay_capacity counter=command_submissions count=1 limit=1 band=100",
+        ])
+        XCTAssertEqual(try fixture.continuity?.read(), boundary)
+        XCTAssertNil(try fixture.reservation(binding.id))
+        XCTAssertEqual(try fixture.requests.state(requestID: request.requestID).phase, .queued)
     }
 
     func testCommandReplayAdmissionRequiresExplicitInstalledStoreBeforePublication() throws {
