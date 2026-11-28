@@ -35,6 +35,11 @@ struct ReplayCapacityDiagnostics: Sendable {
         }
     }
 
+    enum WriteObservation {
+        case completedBody(Usage)
+        case capacityRefusal(Usage)
+    }
+
     private static let logger = Logger(subsystem: "dev.sebastiano.remozio.macos.authority", category: "replay-capacity")
     private var reported: [Counter: Band] = [:]
     private let report: @Sendable (Band, String) -> Void
@@ -44,6 +49,11 @@ struct ReplayCapacityDiagnostics: Sendable {
         else { ReplayCapacityDiagnostics.logger.notice("\(message, privacy: .public)") }
     }) {
         self.report = report
+    }
+
+    mutating func observeRejectedWrite(_ observation: WriteObservation?, writerRetired: Bool) {
+        guard !writerRetired, case .capacityRefusal(let usage)? = observation, usage.full else { return }
+        observe(usage)
     }
 
     mutating func observe(_ usage: Usage) {

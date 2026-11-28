@@ -1681,27 +1681,25 @@ public final class ApprovalRequestCoordinator {
     private func writeObservingReplayCapacity<Value>(_ counter: ReplayCapacityDiagnostics.Counter?,
                                                       _ body: (JournalTransaction) throws -> Value) throws -> Value {
         guard let counter, let checkpointed else { return try write(body) }
-        var observed: ReplayCapacityDiagnostics.Usage?
+        var observed: ReplayCapacityDiagnostics.WriteObservation?
         do {
             let value = try write { transaction in
                 do {
                     let value = try body(transaction)
-                    observed = try? transaction.permanentReplayUsage(counter)
+                    if let usage = try? transaction.permanentReplayUsage(counter) { observed = .completedBody(usage) }
                     return value
                 } catch {
-                    if counter.isCapacityRefusal(error) {
-                        observed = try? transaction.permanentReplayUsage(counter)
+                    if counter.isCapacityRefusal(error), let usage = try? transaction.permanentReplayUsage(counter) {
+                        observed = .capacityRefusal(usage)
                     }
                     throw error
                 }
             }
-            if let observed { replayCapacityDiagnostics.observe(observed) }
+            if case .completedBody(let usage)? = observed { replayCapacityDiagnostics.observe(usage) }
             return value
         } catch {
             // The checkpointed writer stays usable after a body rejection only if it proved the rollback.
-            if !checkpointed.retired, let observed, observed.full {
-                replayCapacityDiagnostics.observe(observed)
-            }
+            replayCapacityDiagnostics.observeRejectedWrite(observed, writerRetired: checkpointed.retired)
             throw error
         }
     }

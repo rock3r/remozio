@@ -18,6 +18,28 @@ final class ReplayCapacityDiagnosticsTests: XCTestCase {
         }
     }
 
+    func testFullUsageFromSuccessfulBodyIsIgnoredAfterACommitFailureWithAUsableWriter() {
+        enum Failure: Error { case commit }
+        let messages = Mutex<[String]>([])
+        var diagnostics = ReplayCapacityDiagnostics { _, message in messages.withLock { $0.append(message) } }
+        let full = ReplayCapacityDiagnostics.Usage(counter: .consumedRequests, count: 1, limit: 1)
+        var observed: ReplayCapacityDiagnostics.WriteObservation?
+        func write(_ body: () -> Void) throws {
+            body()
+            throw Failure.commit
+        }
+
+        // Model a failure after observing the final slot, with the writer still usable.
+        XCTAssertThrowsError(try write { observed = .completedBody(full) }) {
+            XCTAssertEqual($0 as? Failure, .commit)
+            diagnostics.observeRejectedWrite(observed, writerRetired: false)
+        }
+        diagnostics.observeRejectedWrite(.capacityRefusal(full), writerRetired: true)
+        XCTAssertTrue(messages.withLock { $0.isEmpty })
+        diagnostics.observeRejectedWrite(.capacityRefusal(full), writerRetired: false)
+        XCTAssertEqual(messages.withLock { $0 }, ["permanent_replay_capacity counter=consumed_requests count=1 limit=1 band=100"])
+    }
+
     func testInclusiveThresholdsRoundUpAtSmallLimits() {
         let messages = Mutex<[String]>([])
         var diagnostics = ReplayCapacityDiagnostics { _, message in messages.withLock { $0.append(message) } }
