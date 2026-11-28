@@ -767,7 +767,9 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try assertCheckpoint(db, store, writer)
     }
 
-    private func retirementFixture(_ fixture: Fixture, installReplay: Bool = true) throws
+    private func retirementFixture(_ fixture: Fixture, installReplay: Bool = true, maximumConsumptions: Int = 30,
+                                   maximumSubmissions: Int = 1_000_000,
+                                   replayCapacityDiagnostics: ReplayCapacityDiagnostics = .init()) throws
         -> sending (JournalDatabase, AuditEpochWriter, ApprovalRequestCoordinator, ContinuityStore) {
         let limits = try limits, capabilities = try capabilities, contract = try contract
         let anchor = fixture.root.path, clock = clock, mac = id(1), account = id(2)
@@ -778,7 +780,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try fixture.createContinuityFiles()
         let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
             macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-            maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+            maximumConsumptions: maximumConsumptions, busyMilliseconds: 100, initialize: true,
+            maximumCommandSubmissions: maximumSubmissions)
         let writer = try db.write { transaction in
             let revision = try transaction.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract])
             let writer = try transaction.createEpoch(descriptor)
@@ -798,7 +801,8 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
         let owner = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
             maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
-            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits,
+            replayCapacityDiagnostics: replayCapacityDiagnostics)
         return (db, writer, owner, store)
     }
 
@@ -816,6 +820,82 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
     private func declineForRetirement(_ owner: ApprovalRequestCoordinator) throws -> (IssuedRequestPayload, ConsumptionReceipt) {
         try retirementDecliner()(owner)
+    }
+
+    func testReplayCapacityAtRestartReportsOnlyTheHighestBandAndRefusesNewKeys() throws {
+        let fixture = try Fixture()
+        let messages = Mutex<[String]>([])
+        let report = ReplayCapacityDiagnostics { _, message in messages.withLock { $0.append(message) } }
+        let (db, writer, owner, store) = try retirementFixture(fixture, maximumConsumptions: 1, maximumSubmissions: 1,
+            replayCapacityDiagnostics: report)
+        let (consumed, _) = try declineForRetirement(owner)
+        let commits = CheckpointedJournal(journal: db, continuity: store)
+        let reserved = try CommandSubmissionReservation(macID: id(1), accountID: id(2),
+            submission: CapturedSubmission(id: id(40), nonce: id(41, 32), callerBinding: id(42)), captureDigest: id(43, 32))
+        _ = try commits.write(epoch: writer.epoch) { try $0.reserveCommandSubmission(reserved) }
+        let consumptionFull = "permanent_replay_capacity counter=consumed_requests count=1 limit=1 band=100"
+        let submissionFull = "permanent_replay_capacity counter=command_submissions count=1 limit=1 band=100"
+        XCTAssertEqual(messages.withLock { $0 }, [consumptionFull])
+        messages.withLock { $0.removeAll() }
+        owner.close()
+        try db.close()
+        store.close()
+
+        let reopened = try JournalDatabase(lease: fixture.lease(), macID: id(1), accountID: id(2),
+            recordLimits: limits, descriptorLimits: limits, decisionLimits: limits, maximumConsumptions: 1,
+            busyMilliseconds: 100, initialize: false, maximumCommandSubmissions: 1)
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path,
+            relativeDirectory: "continuity", owner: getuid()), macID: id(1), accountID: id(2), initialize: nil)
+        defer { try? reopened.close(); continuity.close() }
+        let restarted = try ApprovalRequestCoordinator(database: reopened, continuity: continuity, writer: writer, clockEpoch: clock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits, replayCapacityDiagnostics: report)
+        XCTAssertEqual(messages.withLock { $0 }, [consumptionFull, submissionFull])
+        let fresh = try restarted.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try consume(restarted, fresh)) { XCTAssertEqual($0 as? ConsumptionJournalError, .capacityExceeded) }
+        }
+        XCTAssertEqual(try restarted.state(requestID: fresh.requestID).phase, .queued)
+        let freshSubmission = try CommandSubmissionReservation(macID: id(1), accountID: id(2),
+            submission: CapturedSubmission(id: id(44), nonce: id(45, 32), callerBinding: id(42)), captureDigest: id(46, 32))
+        let checked = CheckpointedJournal(journal: reopened, continuity: continuity)
+        XCTAssertThrowsError(try checked.write(epoch: writer.epoch, recoverRejectedBody: true) {
+            try $0.reserveCommandSubmission(freshSubmission)
+        }) { XCTAssertEqual($0 as? CommandSubmissionReplayError, .capacityExceeded) }
+        try checked.read {
+            XCTAssertEqual(try $0.permanentReplayUsage(.consumedRequests)?.count, 1)
+            XCTAssertEqual(try $0.permanentReplayUsage(.commandSubmissions)?.count, 1)
+            XCTAssertTrue(try $0.hasConsumed(requestID: consumed.requestID))
+            XCTAssertFalse(try $0.hasConsumed(requestID: fresh.requestID))
+            XCTAssertNil(try $0.consumptionOutcome(requestID: fresh.requestID))
+            XCTAssertEqual(try $0.commandSubmissionReservation(submissionID: reserved.submission.id), reserved)
+            XCTAssertNil(try $0.commandSubmissionReservation(submissionID: freshSubmission.submission.id))
+        }
+        XCTAssertEqual(messages.withLock { $0 }, [consumptionFull, submissionFull])
+    }
+
+    func testReplayCapacityDoesNotReportAProvisionalConsumptionOrLegacyBand() throws {
+        for installReplay in [false, true] {
+            let fixture = try Fixture()
+            let messages = Mutex<[String]>([])
+            let report = ReplayCapacityDiagnostics { _, message in messages.withLock { $0.append(message) } }
+            let (db, writer, owner, store) = try retirementFixture(fixture, installReplay: installReplay, maximumConsumptions: 1,
+                replayCapacityDiagnostics: report)
+            defer { try? db.close(); store.close() }
+            let request = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil)
+            if installReplay {
+                try fixture.sql("CREATE TRIGGER fail_replay_capacity BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected'); END", continuity: true)
+                XCTAssertThrowsError(try consume(owner, request))
+                try fixture.sql("DROP TRIGGER fail_replay_capacity", continuity: true)
+                let committedCount = try CheckpointedJournal(journal: db, continuity: store)
+                    .read { try $0.permanentReplayUsage(.consumedRequests)?.count }
+                XCTAssertEqual(committedCount, 0)
+                XCTAssertEqual(try store.read().committed.journalEpoch, writer.epoch)
+            } else {
+                _ = try consume(owner, request)
+            }
+            XCTAssertTrue(messages.withLock { $0.isEmpty })
+        }
     }
 
     func testDetailRetirementUsesIdleOwnerAndProtectsRetainedTerminalRequests() throws {
