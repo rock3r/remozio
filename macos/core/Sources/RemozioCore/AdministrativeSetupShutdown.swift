@@ -315,7 +315,7 @@ final class AdministrativeSetupShutdown: @unchecked Sendable {
     private func closeAfterRecoveryJoined() -> RecoveryCloseResult {
         guard let owner = lock.withLock({ recoveryBound && (recoverySessionsJoined || recoverySessions.isEmpty) ? owner : nil }) else { return .failed }
         closeRecoveryAdmission()
-        guard owner.retryAuditUpgradeCleanup() else { return .pending }
+        guard owner.retryAuditUpgradeCleanup(reportShutdownWait: true) else { return .pending }
         do { try owner.close() } catch AdministrativeSetupError.unavailable { return .pending }
         catch { return .failed }
         lock.withLock {

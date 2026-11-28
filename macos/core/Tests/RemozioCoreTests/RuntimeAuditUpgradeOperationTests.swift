@@ -27,11 +27,12 @@ final class RuntimeAuditUpgradeOperationTests: XCTestCase {
             base = try .init(gateway: gateway, activeAndPending: pending)
             activity = try .init(); installer = try activity.open(); try base.runtime.machine.close()
         }
-        func owner() throws -> SetupAccountOwner {
+        func owner(auditUpgradeCleanup: SetupAuditUpgradeCleanupOwner = .init()) throws -> SetupAccountOwner {
             try .init(openMachine: { try self.base.runtime.f.open() }, expectedReleaseDigest: base.runtime.f.release,
                 resume: { _, _ in throw Failure.interrupted }, accountCodePolicy: base.policy,
                 lookupAccount: { _ in self.base.runtime.f.identity }, releaseActivity: activity.open(),
-                verifyAccountStartup: { _, _ in if try self.fencePresent() { throw RuntimeAuditUpgradeStartupError.recoveryRequired } })
+                verifyAccountStartup: { _, _ in if try self.fencePresent() { throw RuntimeAuditUpgradeStartupError.recoveryRequired } },
+                auditUpgradeCleanup: auditUpgradeCleanup)
         }
         func fencePresent() throws -> Bool {
             let dir = try XCTUnwrap(base.collector.files.directories[.services])
