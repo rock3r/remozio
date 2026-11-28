@@ -3,6 +3,15 @@ enum AuthorityPermanentReplayStartup {
     static let formatName = "authority.journal-replay-counters"
     static let version: UInt64 = 1
 
+    enum Deferral: String {
+        case startupActivityUnavailable = "startup activity is unavailable"
+        case accountNotRegistered = "the account is not registered for update admission"
+        case readerFloor = "the signed reader floor is not committed"
+        case activationBlocksWrites = "machine activation blocks writes"
+        case maintenanceHold = "maintenance holds admission"
+        case drainBusy = "the account drain is busy"
+    }
+
     static func hasReaderFloor(release: SignedReleaseEvidence, policy: AuthorityCodePolicy) -> Bool {
         for role in [AuthorityCodeRole.authority, .setupController] {
             guard let entry = policy.entries.first(where: { $0.role == role && $0.active }),

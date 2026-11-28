@@ -50,23 +50,25 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
 
     /// Both stores stay closed to ordinary work while the registered account is drained for migration.
     func withReplayInstallationDrain(machine: PreparationIntentStore, placement: ReleaseDestinationLease,
-                                     _ install: () throws -> Void) throws {
+                                     _ install: () throws -> Void) throws -> AuthorityPermanentReplayStartup.Deferral? {
         try requireCurrent(machine: machine)
-        guard initial.activation?.phase.blocksMachineWrites != true, let accountID = boundary.accountID,
-              let account = registration.accounts.first(where: { $0.accountID == accountID }) else { return }
-        let drain: UpdateDrainToken
-        do {
-            try maintenanceHold?.requireOpen()
-            drain = try boundary.beginAccountDrain()
-        } catch UpdateAdmissionBarrierError.busy {
-            return
+        guard initial.activation?.phase.blocksMachineWrites != true else { return .activationBlocksWrites }
+        guard let accountID = boundary.accountID,
+              let account = registration.accounts.first(where: { $0.accountID == accountID }) else {
+            return .accountNotRegistered
         }
+        do { try maintenanceHold?.requireOpen() }
+        catch UpdateAdmissionBarrierError.busy { return .maintenanceHold }
+        let drain: UpdateDrainToken
+        do { drain = try boundary.beginAccountDrain() }
+        catch UpdateAdmissionBarrierError.busy { return .drainBusy }
         defer { drain.close() }
         try drain.validateAccountBoundary(directory: placement, accountID: accountID, expected: account.identity)
         try requireCurrent(machine: machine)
         try install()
         try drain.validateAccountBoundary(directory: placement, accountID: accountID, expected: account.identity)
         try requireCurrent(machine: machine)
+        return nil
     }
 
     func validate() throws {

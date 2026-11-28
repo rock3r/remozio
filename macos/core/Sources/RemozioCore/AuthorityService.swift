@@ -1,4 +1,5 @@
 import Foundation
+import RemozioHostCore
 import RemozioProtocol
 
 /// Trusted root provider. Use the supplied clock for request checks, including a fresh sample after signing.
@@ -82,7 +83,8 @@ public final class AuthorityService: @unchecked Sendable {
             journal = try AuthorityJournal(database: JournalDatabase.open(directoryPath: configuration.journalDirectory,
                 macID: configuration.macID, accountID: configuration.accountID,
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy))
+                maximumConsumptions: ConsumptionJournalTables.maximumLiveReceipts, busyMilliseconds: 5000,
+                gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy))
         }
         return journal
     }

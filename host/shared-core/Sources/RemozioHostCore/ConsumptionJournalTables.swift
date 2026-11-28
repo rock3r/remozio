@@ -23,6 +23,7 @@ public struct ConsumptionReceipt: Equatable, Sendable {
 /// A receipt or outcome is historical evidence and never permission to dispatch or retry an action.
 public final class ConsumptionJournalTables {
     public static let permanentReplayTable = "consumption_replay_v1"
+    public static let maximumLiveReceipts = 1_000_000
     private let db: OpaquePointer
     private let macID: Data
     private let accountID: Data
@@ -72,7 +73,7 @@ public final class ConsumptionJournalTables {
         if permanentReplay {
             try withReplayCounters {
                 guard try counters.count(.consumedRequests) < Int64(maximumRows),
-                      try counters.count(.liveReceipts) < 1_000_000 else {
+                      try counters.count(.liveReceipts) < Int64(Self.maximumLiveReceipts) else {
                     throw ConsumptionJournalError.capacityExceeded
                 }
             }
