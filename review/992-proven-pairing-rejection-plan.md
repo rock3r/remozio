@@ -18,6 +18,20 @@ Refs #992 and #859. Base `9cc16f105ecd3d37d1111a87a009c52e97ad14d2`. This plan i
 
 The app retains the #859 sleep-inclusive timeout and the existing pre-dispatch classification. The Android and LAN exchanges, signed receipt format, enrollment journal schema and receipt recovery protocol retain their current contracts.
 
+## Compare the commit reply with a status query
+
+| | Negotiated commit reply | Status query after an unknown outcome |
+| --- | --- | --- |
+| Protocol and compatibility | Add a version-6 commit selector and bounded reply. Both version directions keep the legacy commit path. | Keep the commit reply. Add a negotiated read selector and a bounded reply that binds the outcome to the setup ID and digest. Keep the legacy unknown outcome when the query is unavailable. |
+| Coverage | Proves expiry when Root can still inspect the exact staged attempt and the reply arrives. A cleared attempt or a lost reply stays unknown. | An authenticated query can recover a lost reply if Root retains proof. A durable commit returns its receipt. A verified terminal attempt can prove refusal after reconnect or restart. |
+| Risk | The proof comes from one staged attempt before the write. The client needs strict binding and must drain before allowing a new setup. | A missing row gives no proof. Root must establish terminal state in the same serialized journal that authorizes enrollment. The query must verify the checkpoint and give the durable commit precedence. |
+
+First enrollment stages the attempt in memory. The endpoint can clear it on expiry, close, or dispatch. The phone recovery path already distinguishes a retained commit from an expired re-pair stage. The first enrollment has no equivalent negative record to read after reconnect. [AuthorityPairingSetup.swift](https://github.com/rock3r/remozio/blob/9cc16f105ecd3d37d1111a87a009c52e97ad14d2/macos/core/Sources/RemozioCore/AuthorityPairingSetup.swift#L389-L401), [AuthorityPairingXPCEndpoint.swift](https://github.com/rock3r/remozio/blob/9cc16f105ecd3d37d1111a87a009c52e97ad14d2/macos/core/Sources/RemozioCore/AuthorityPairingXPCEndpoint.swift#L474-L501), [ApprovalRequestCoordinator.swift](https://github.com/rock3r/remozio/blob/9cc16f105ecd3d37d1111a87a009c52e97ad14d2/macos/core/Sources/RemozioCore/ApprovalRequestCoordinator.swift#L440-L491)
+
+A query would need durable attempt identity and a terminal transition that excludes future enrollment. The deadline check must occur under the same write fence as enrollment. The query must see a verified terminal decision after any in-flight write resolves. Test an in-flight commit at the deadline, a lost reply in each direction, restart, and failure to commit or checkpoint the terminal decision. Missing, pruned, or unverifiable evidence stays unknown.
+
+Recommend the negotiated commit reply for #992. It addresses the narrow case of a delivered, proven refusal with a connection-scoped change. The query adds durable state and a separate proof path. Its benefit is recovery after a lost reply. That warrants its own design if this case needs coverage.
+
 ## Verification before a PR
 
 - Extend native XPC tests for new app/new Root, old app/new Root, and new app/old Root. Exercise version 2, version 5, and the older hello reconnect. Assert the new selector requires negotiation on the same connection and that setup still selects the correct proof shape.
