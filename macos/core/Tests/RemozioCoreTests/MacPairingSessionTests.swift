@@ -12,6 +12,9 @@ private actor MacPairingRootFixture: MacPairingRootControl {
     var stages = 0
     var commits = 0
     var loseCommitReply = false
+    var refuseExpiredCommit = false
+    var heldClose: AsyncStream<Void>?
+    var closing = false
     var rejectBeforeSend = false
     var remainingRePairChecks: Int?
     var newPairingRequired = false
@@ -45,12 +48,23 @@ private actor MacPairingRootFixture: MacPairingRootControl {
         commits += 1
         if let heldCommit { for await _ in heldCommit {} }
         if loseCommitReply { throw MacPairingSessionError.closed }
+        if refuseExpiredCommit { throw AuthorityPairingCommitRejection.expired }
         return try fixture.receipt()
     }
     func loseReply() { loseCommitReply = true }
     func rejectCommitBeforeSend() { rejectBeforeSend = true }
+    func proveExpiryAndHoldClose(_ signal: AsyncStream<Void>) {
+        refuseExpiredCommit = true
+        heldClose = signal
+    }
     nonisolated func abort() {}
-    func close() {}
+    func close() async {
+        closing = true
+        if let signal = heldClose {
+            heldClose = nil
+            for await _ in signal {}
+        }
+    }
 }
 private actor MacPairingTransportFixture: MacPairingTransportControl {
     let fixture: TransportPairingFixture
@@ -454,6 +468,36 @@ final class MacPairingSessionTests: XCTestCase {
         do { _ = try await o.session.commit(); XCTFail() } catch {}
         let commits = await o.root.commits; XCTAssertEqual(commits, 0); await o.session.close()
     }
+    func testProvenRootExpiryAllowsNewSetupAfterCleanupDrains() async throws {
+        let o = try Owner()
+        try await o.start()
+        try await o.prepareProof()
+        let release = AsyncStream<Void>.makeStream()
+        defer { release.continuation.finish() }
+        await o.root.proveExpiryAndHoldClose(release.stream)
+        let commit = Task { try await o.session.commit() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !(await o.root.closing), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let closing = await o.root.closing
+        XCTAssertTrue(closing)
+        let confirmed = Mutex(false)
+        let close = Task {
+            let allowed = await o.session.closeForRePair()
+            confirmed.withLock { $0 = true }
+            return allowed
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertFalse(confirmed.withLock { $0 })
+        release.continuation.finish()
+        do { _ = try await commit.value; XCTFail("Accepted a proven expiry") }
+        catch MacPairingSessionError.expired {}
+        let allowed = await close.value
+        XCTAssertTrue(allowed)
+        let commits = await o.root.commits, receipts = await o.transport.receipts
+        XCTAssertEqual(commits, 1)
+        XCTAssertEqual(receipts, 0)
+    }
+
     func testLostRootReplyRemainsUnknownAndNeverRepeatsCommit() async throws {
         let o = try Owner(); try await o.start(); try await o.prepareProof(); await o.root.loseReply()
         do { _ = try await o.session.commit(); XCTFail() } catch {}

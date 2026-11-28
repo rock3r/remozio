@@ -20,6 +20,9 @@ import Synchronization
     @objc(commitPairingWithDecisionProof:confirmedDigest:biometricProof:decisionProof:authorization:reply:)
     func commitPairingWithDecisionProof(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
                                        decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
+    @objc(commitPairingWithResult:confirmedDigest:biometricProof:decisionProof:authorization:reply:)
+    func commitPairingWithResult(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                 decisionProof: Data?, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     @objc(openPairingV2:rendezvousID:predecessor:reply:)
     func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?, reply: @escaping @Sendable (Data?) -> Void)
     @objc(stagePairingV2:connectionID:authorization:reply:)
@@ -50,6 +53,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private struct WorkState {
         var ready = false, closed = false, busy = false
         var phoneManagementVersion: UInt64 = 0
+        var commitResultNegotiated = false
         var attempt: PairingEnrollmentAttempt?
         var activity: ReleaseActivityToken?
         var stage: AuthorityMaintenancePairingAdmission.Stage?
@@ -144,14 +148,19 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         replyWithPhoneManagementVersion(1, reply: reply)
     }
     func pairedPhoneHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64) -> Void) {
-        // Versions 3 through 5 require the installed pairing owners.
-        let version = min(maximumVersion, owners == nil ? 2 : 5)
+        // Versions above 2 require the installed pairing owners.
+        let version = min(maximumVersion, owners == nil ? 2 : AuthorityPairingCommitReply.capabilityVersion)
         replyWithPhoneManagementVersion(version, reply: reply)
     }
     private func replyWithPhoneManagementVersion(_ version: UInt64, reply: (UInt64) -> Void) {
         do {
             let completed = try work {
-                if version > 0 { state.withLock { $0.phoneManagementVersion = version } }
+                if version > 0 {
+                    state.withLock {
+                        $0.phoneManagementVersion = version
+                        $0.commitResultNegotiated = false
+                    }
+                }
             }
             defer { completed.completion.close() }
             send { reply(version) }
@@ -231,18 +240,27 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             let completed = try work { () -> (UInt64, Data?) in
                 try access.requirePairingOpen()
                 guard maximumVersion >= 1, let owners else { return (0, nil) }
-                guard access.requiresInstalledV2 else { return (access.requiresDecisionProof ? 0 : 1, nil) }
+                guard access.requiresInstalledV2 else {
+                    guard !access.requiresDecisionProof else { return (0, nil) }
+                    negotiateCommitResult()
+                    return (1, nil)
+                }
                 let version: UInt64 = if access.requiresDecisionProof { access.lanScope == nil ? 4 : 5 }
                     else { access.lanScope == nil ? 2 : 3 }
                 guard maximumVersion >= version, rendezvous == nil, v2Window == nil, attempt == nil else { return (0, nil) }
                 let pending = AuthorityPairingRendezvous(revision: access.activationRevision, lanScope: access.lanScope)
                 owners.register(pending)
                 rendezvous = pending
+                negotiateCommitResult()
                 return (version, pending.id)
             }
             defer { completed.completion.close() }
             send { reply(completed.value.0, completed.value.1) }
         } catch { close(); reply(0, nil) }
+    }
+
+    private func negotiateCommitResult() {
+        state.withLock { $0.commitResultNegotiated = $0.phoneManagementVersion == AuthorityPairingCommitReply.capabilityVersion }
     }
 
     func openInstalledPairingV2(_ label: String, rendezvousID: Data, predecessor: Data?,
@@ -388,17 +406,29 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: decisionProof,
                       authorization: authorization, reply: reply)
     }
+    func commitPairingWithResult(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                 decisionProof: Data?, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        commitPairing(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: decisionProof,
+                      authorization: authorization, usesResult: true, reply: reply)
+    }
     private func commitPairing(_ setupID: Data, confirmedDigest: Data, biometricProof: Data, decisionProof: Data?,
-                               authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+                               authorization: Data, usesResult: Bool = false, reply: @escaping @Sendable (Data?) -> Void) {
         respond(reply) {
-            guard let pending = attempt, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+            guard (!usesResult || state.withLock { $0.commitResultNegotiated }),
+                  let pending = attempt, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
                 throw AuthorityPairingSetupError.unavailable
             }
-            // An ambiguous commit must reconcile its durable receipt. This connection cannot blindly commit again.
+            // Consume the one attempt while the operation lock excludes another commit.
             clearAttempt()
             defer { closeV2Window() }
-            return try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
+            if usesResult, try access.isFirstCommitExpiredBeforeWrite(pending, setupID: setupID,
+                confirmedDigest: confirmedDigest, biometricProof: biometricProof, decisionProof: decisionProof, window: v2Window) {
+                try authorize(authorization)
+                return AuthorityPairingCommitReply.expired(setupID: setupID, digest: confirmedDigest).encode()
+            }
+            let receipt = try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
                 decisionProof: decisionProof, window: v2Window, authorize: { [authorize] in try authorize(authorization) })
+            return usesResult ? AuthorityPairingCommitReply.receipt(receipt).encode() : receipt
         }
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
@@ -538,6 +568,11 @@ final class AuthorityAppXPCEndpoint: NSObject, AuthorityAppXPCProtocol, @uncheck
                                        decisionProof: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         pairing.commitPairingWithDecisionProof(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof,
                                                decisionProof: decisionProof, authorization: authorization, reply: reply)
+    }
+    func commitPairingWithResult(_ setupID: Data, confirmedDigest: Data, biometricProof: Data,
+                                 decisionProof: Data?, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        pairing.commitPairingWithResult(setupID, confirmedDigest: confirmedDigest, biometricProof: biometricProof,
+                                        decisionProof: decisionProof, authorization: authorization, reply: reply)
     }
     func pairingSetupHello(maximumVersion: UInt64, reply: @escaping @Sendable (UInt64, Data?) -> Void) {
         pairing.pairingSetupHello(maximumVersion: maximumVersion, reply: reply)
