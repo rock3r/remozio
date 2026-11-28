@@ -385,6 +385,8 @@ struct RenderSetupPreview {
             ("pairing-waiting-light", MacPairingSessionPhase.waitingForPhone, false),
             ("pairing-code-light", MacPairingSessionPhase.comparing, false),
             ("pairing-code-dark", MacPairingSessionPhase.comparing, true),
+            ("pairing-code-mismatch-light", MacPairingSessionPhase.comparing, false),
+            ("pairing-comparison-failed-light", MacPairingSessionPhase.comparisonFailed, false),
             ("pairing-expired-light", MacPairingSessionPhase.expired, false),
             ("pairing-lost-receipt-light", MacPairingSessionPhase.registeredOnMac, false),
         ] {
@@ -400,10 +402,11 @@ struct RenderSetupPreview {
                     secret: Data(repeating: 4, count: 32), lifetimeMilliseconds: 120_000).exportText()
                 state.invitationIsCredential = true
             }
-            state.comparisonCode = "37MRQ S9XSE 3EMYL 7QA8F"
+            state.comparisonCodePrefix = phase == .comparing ? "37MRQ S9XSE 3EMYL" : nil
+            state.comparisonMismatch = name == "pairing-code-mismatch-light"
             state.remainingSeconds = 42
             state.phones = [.init(id: Data(repeating: 1, count: 16), suffix: "C4D8E012")]
-            let view = PairingSheetContent(state: state, working: false, onSelect: { _ in }, onConfirm: {}, onClose: {})
+            let view = PairingSheetContent(state: state, working: false, onSelect: { _ in }, onConfirm: { _ in }, onClose: {})
             app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
             host.appearance = app.appearance

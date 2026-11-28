@@ -1,8 +1,8 @@
 # Pairing comparison code, format 1
 
-The Mac and Android app display the same code for the complete Root-returned pairing transcript.
-Compare it on independently authenticated setup surfaces before confirming enrollment or starting the phone biometric.
-Comparing two values supplied by one untrusted message does not authenticate either device.
+The phone displays four groups for the complete Root-returned pairing transcript. The Mac displays the first three groups.
+Compare the first three groups on the Remozio setup screens you opened on both devices. Then enter the last group from the phone in the masked field on the Mac.
+The Mac checks the entered group against the current transcript. A missing or incorrect group leaves enrollment unconfirmed. After three mismatches, the Mac closes the setup. Start a new pairing to try again.
 
 Use the existing full transcript digest: SHA-256 over the canonical phone-biometric signing input.
 Read its first 100 bits from most significant to least significant. Encode consecutive five-bit groups with this alphabet:

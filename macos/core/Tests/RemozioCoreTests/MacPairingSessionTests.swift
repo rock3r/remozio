@@ -54,7 +54,7 @@ private actor MacPairingRootFixture: MacPairingRootControl {
 }
 private actor MacPairingTransportFixture: MacPairingTransportControl {
     let fixture: TransportPairingFixture
-    let id = Data(repeating: 23, count: 16)
+    let id: Data
     var phase = TransportPairingPhase.proposed
     var proof: Data?
     var disappear = false
@@ -71,7 +71,10 @@ private actor MacPairingTransportFixture: MacPairingTransportControl {
         rePairStarts += 1
         return 4321
     }
-    init(_ fixture: TransportPairingFixture) { self.fixture = fixture }
+    init(_ fixture: TransportPairingFixture, candidateID: Data) {
+        self.fixture = fixture
+        id = candidateID
+    }
     func start(invitation: PairingInvitation) throws -> UInt16 { XCTAssertEqual(try invitation.encode(), try fixture.invitation.encode()); return 4321 }
     func current() throws -> TransportPairingSnapshot {
         defer {
@@ -143,10 +146,11 @@ final class MacPairingSessionTests: XCTestCase {
         let admin: MacPairingAdministratorFixture
         let clock = MacPairingClockFixture()
         let session: MacPairingSession
-        init(rePair: Bool = false, selectedRevision: UUID? = nil, elapsedAtV2OpenReply: UInt64? = nil) throws {
+        init(rePair: Bool = false, selectedRevision: UUID? = nil, elapsedAtV2OpenReply: UInt64? = nil,
+             candidateID: Data = Data(repeating: 23, count: 16)) throws {
             let fixture = try TransportPairingFixture(rePair: rePair)
             self.fixture = fixture
-            root = .init(fixture); transport = .init(fixture); admin = .init(root)
+            root = .init(fixture); transport = .init(fixture, candidateID: candidateID); admin = .init(root)
             let predecessor = try fixture.proposal.replacement.map { replacement in
                 PairedPhoneSelection(macID: fixture.configuration.macID, accountID: fixture.configuration.accountID,
                     revision: try selectedRevision ?? GatewayHostSnapshot.uuid(fixture.transcript.expectedTrustRevision),
@@ -166,15 +170,27 @@ final class MacPairingSessionTests: XCTestCase {
             _ = try await session.start(label: "Fixture"); _ = try await session.current()
         }
         func select() async throws { _ = try await session.select(candidateID: transport.id) }
+        func phoneComparisonGroup() throws -> String { String(try fixture.transcript.verificationCode().suffix(5)) }
+        func incorrectPhoneGroup() throws -> String {
+            let group = try phoneComparisonGroup()
+            return (group.hasPrefix("2") ? "3" : "2") + String(group.dropFirst())
+        }
+        func expectComparisonMismatch(_ group: String) async throws {
+            do {
+                _ = try await session.confirmComparison(enteredGroup: group)
+                XCTFail("Accepted an incorrect group")
+            } catch MacPairingSessionError.comparisonMismatch {}
+        }
         func prepareProof() async throws {
-            try await select(); _ = try await session.confirmComparison()
+            try await select()
+            _ = try await session.confirmComparison(enteredGroup: phoneComparisonGroup())
             try await transport.showProof(fixture.proof()); _ = try await session.current()
         }
     }
     func testCompleteFlowCommitsTheConfirmedTranscriptAndSendsOneReceipt() async throws {
         let o = try Owner(); try await o.start(); try await o.prepareProof()
         let before = await o.session.snapshot()
-        XCTAssertEqual(before.comparisonCode, try o.fixture.transcript.verificationCode()); XCTAssertTrue(before.phoneProofAvailable)
+        XCTAssertNil(before.comparisonCodePrefix); XCTAssertTrue(before.phoneProofAvailable)
         let after = try await o.session.commit(); XCTAssertEqual(after.phase, .receiptSent)
         do { _ = try await o.session.commit(); XCTFail() } catch {}
         let commits = await o.root.commits, receipts = await o.transport.receipts
@@ -239,7 +255,7 @@ final class MacPairingSessionTests: XCTestCase {
         XCTAssertNil(state.invitation)
         XCTAssertNil(state.rePairInvitation)
         XCTAssertNil(state.invitationV2)
-        XCTAssertNil(state.comparisonCode)
+        XCTAssertNil(state.comparisonCodePrefix)
         let stages = await o.root.stages
         XCTAssertEqual(stages, 0)
     }
@@ -254,7 +270,7 @@ final class MacPairingSessionTests: XCTestCase {
         XCTAssertEqual(rootStages, 1)
         XCTAssertEqual(transportStages, 0)
         let state = await o.session.snapshot()
-        XCTAssertNil(state.comparisonCode)
+        XCTAssertNil(state.comparisonCodePrefix)
     }
 
     func testRePairCloseWaitsForSubmittedCommitAndPreservesReceipt() async throws {
@@ -320,6 +336,118 @@ final class MacPairingSessionTests: XCTestCase {
         XCTAssertEqual(receipts, 0)
     }
 
+    func testComparisonDisplaysOnlyTheFirstThreeGroupsAndAcceptsPhoneInput() async throws {
+        let o = try Owner()
+        try await o.start()
+        try await o.select()
+        let displayed = await o.session.snapshot()
+        let phoneCode = try o.fixture.transcript.verificationCode()
+        XCTAssertEqual(displayed.comparisonCodePrefix, String(phoneCode.dropLast(6)))
+        let confirmed = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup().lowercased())
+        XCTAssertEqual(confirmed.phase, .waitingForBiometric)
+        XCTAssertNil(confirmed.comparisonCodePrefix)
+        await o.session.close()
+    }
+
+    func testTwoMismatchesAllowTheCorrectGroupOnTheSameTranscript() async throws {
+        let o = try Owner()
+        try await o.start()
+        try await o.select()
+        let group = try o.phoneComparisonGroup()
+        for input in ["", "２" + String(group.dropFirst())] {
+            try await o.expectComparisonMismatch(input)
+            let snapshot = await o.session.snapshot()
+            XCTAssertEqual(snapshot.phase, .comparing)
+        }
+        do { _ = try await o.session.commit(); XCTFail("Committed without a matching group") }
+        catch MacPairingSessionError.invalidState {}
+        let confirmed = try await o.session.confirmComparison(enteredGroup: group)
+        XCTAssertEqual(confirmed.phase, .waitingForBiometric)
+        let commits = await o.root.commits
+        XCTAssertEqual(commits, 0)
+        await o.session.close()
+    }
+
+    func testThirdMismatchClosesTheSessionAndRefusesCommit() async throws {
+        let o = try Owner()
+        try await o.start()
+        try await o.select()
+        try await o.transport.showProof(o.fixture.proof())
+        let wrongGroup = try o.incorrectPhoneGroup()
+        for _ in 0..<2 { try await o.expectComparisonMismatch(wrongGroup) }
+        do {
+            _ = try await o.session.confirmComparison(enteredGroup: wrongGroup)
+            XCTFail("The third mismatch did not close the session")
+        } catch MacPairingSessionError.comparisonAttemptsExhausted {}
+        let snapshot = await o.session.snapshot()
+        XCTAssertEqual(snapshot.phase, .comparisonFailed)
+        XCTAssertEqual(snapshot.remainingMilliseconds, 0)
+        XCTAssertNil(snapshot.comparisonCodePrefix)
+        XCTAssertTrue(snapshot.candidates.isEmpty)
+        XCTAssertFalse(snapshot.phoneProofAvailable)
+        XCTAssertGreaterThan(o.transport.abortCount, 0)
+        do {
+            _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup())
+            XCTFail("Confirmed after exhausting the comparison attempts")
+        } catch MacPairingSessionError.invalidState {}
+        do { _ = try await o.session.commit(); XCTFail("Committed after exhausting the attempts") }
+        catch MacPairingSessionError.invalidState {}
+        let commits = await o.root.commits
+        XCTAssertEqual(commits, 0)
+    }
+
+    func testNewCandidateInANewWindowStartsWithFreshComparisonAttempts() async throws {
+        let first = try Owner()
+        try await first.start()
+        try await first.select()
+        for _ in 0..<2 { try await first.expectComparisonMismatch(first.incorrectPhoneGroup()) }
+        await first.transport.removeCandidate()
+        do { _ = try await first.session.current(); XCTFail("Retained a removed candidate") }
+        catch MacPairingSessionError.changedCandidate {}
+
+        let next = try Owner(candidateID: Data(repeating: 24, count: 16))
+        try await next.start()
+        try await next.select()
+        for _ in 0..<2 { try await next.expectComparisonMismatch(next.incorrectPhoneGroup()) }
+        let confirmed = try await next.session.confirmComparison(enteredGroup: next.phoneComparisonGroup())
+        XCTAssertEqual(confirmed.phase, .waitingForBiometric)
+        await next.session.close()
+    }
+
+    func testCandidateDisappearanceBeforeConfirmationClearsComparison() async throws {
+        let o = try Owner()
+        try await o.start()
+        try await o.select()
+        await o.transport.removeCandidate()
+        do {
+            _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup())
+            XCTFail("Confirmed a candidate after it disappeared")
+        } catch MacPairingSessionError.changedCandidate {}
+        let snapshot = await o.session.snapshot()
+        XCTAssertEqual(snapshot.phase, .unavailable)
+        XCTAssertNil(snapshot.comparisonCodePrefix)
+        XCTAssertFalse(snapshot.phoneProofAvailable)
+        let commits = await o.root.commits
+        XCTAssertEqual(commits, 0)
+        await o.session.close()
+    }
+
+    func testClosingAComparisonDiscardsItsCodeAndRefusesConfirmation() async throws {
+        let o = try Owner()
+        try await o.start()
+        try await o.select()
+        await o.session.close()
+        let snapshot = await o.session.snapshot()
+        XCTAssertEqual(snapshot.phase, .closed)
+        XCTAssertNil(snapshot.comparisonCodePrefix)
+        do {
+            _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup())
+            XCTFail("Confirmed a closed session")
+        } catch MacPairingSessionError.closed {}
+        let commits = await o.root.commits
+        XCTAssertEqual(commits, 0)
+    }
+
     func testProofDoesNotReplaceExplicitHumanConfirmation() async throws {
         let o = try Owner(); try await o.start(); try await o.select()
         try await o.transport.showProof(o.fixture.proof()); _ = try await o.session.current()
@@ -377,7 +505,7 @@ final class MacPairingSessionTests: XCTestCase {
     func testConfirmationAtDeadlineExpiresAndClearsPairingData() async throws {
         let o = try Owner(); try await o.start(); try await o.select()
         o.clock.setElapsed(1000)
-        do { _ = try await o.session.confirmComparison(); XCTFail("Confirmed an expired transcript") }
+        do { _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup()); XCTFail("Confirmed an expired transcript") }
         catch MacPairingSessionError.expired {}
         try await assertExpiredBeforeCommit(o)
     }
@@ -401,7 +529,7 @@ final class MacPairingSessionTests: XCTestCase {
 
     func testProofReplyThatCrossesDeadlineIsDiscarded() async throws {
         let o = try Owner(); try await o.start(); try await o.select()
-        _ = try await o.session.confirmComparison()
+        _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup())
         try await o.transport.showProof(o.fixture.proof())
         await o.transport.beforeNextCurrentReply { o.clock.setElapsed(1000) }
         do { _ = try await o.session.current(); XCTFail("Accepted a proof after expiry") }
@@ -418,7 +546,7 @@ final class MacPairingSessionTests: XCTestCase {
         let staged = await o.session.snapshot()
         XCTAssertEqual(staged.remainingMilliseconds, 200)
         o.clock.setElapsed(1000)
-        do { _ = try await o.session.confirmComparison(); XCTFail("Extended the v2 window when staging") }
+        do { _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup()); XCTFail("Extended the v2 window when staging") }
         catch MacPairingSessionError.expired {}
         try await assertExpiredBeforeCommit(o)
     }
@@ -431,7 +559,7 @@ final class MacPairingSessionTests: XCTestCase {
         XCTAssertEqual(staged.remainingMilliseconds, 100)
         o.clock.setWall(1000)
         o.clock.setElapsed(200)
-        do { _ = try await o.session.confirmComparison(); XCTFail("Extended the deadline after the wall clock changed") }
+        do { _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup()); XCTFail("Extended the deadline after the wall clock changed") }
         catch MacPairingSessionError.expired {}
         try await assertExpiredBeforeCommit(o)
     }
@@ -453,7 +581,7 @@ final class MacPairingSessionTests: XCTestCase {
         let state = await o.session.snapshot()
         XCTAssertEqual(state.phase, .expired)
         XCTAssertEqual(state.remainingMilliseconds, 0)
-        XCTAssertNil(state.comparisonCode)
+        XCTAssertNil(state.comparisonCodePrefix)
         XCTAssertTrue(state.candidates.isEmpty)
         XCTAssertFalse(state.phoneProofAvailable)
         XCTAssertGreaterThan(o.transport.abortCount, 0)
@@ -464,7 +592,7 @@ final class MacPairingSessionTests: XCTestCase {
     }
 
     func testInvalidProofNeverReachesCommit() async throws {
-        let o = try Owner(); try await o.start(); try await o.select(); _ = try await o.session.confirmComparison()
+        let o = try Owner(); try await o.start(); try await o.select(); _ = try await o.session.confirmComparison(enteredGroup: o.phoneComparisonGroup())
         await o.transport.showProof(Data(count: 64))
         do { _ = try await o.session.current(); XCTFail() } catch {}
         let commits = await o.root.commits; XCTAssertEqual(commits, 0); await o.session.close()

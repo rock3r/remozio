@@ -16,7 +16,8 @@ struct PairingPresentation {
     var invitationText: String?
     var invitationIsCredential = false
     var phones: [PairingPhoneRow] = []
-    var comparisonCode: String?
+    var comparisonCodePrefix: String?
+    var comparisonMismatch = false
     var remainingSeconds: UInt64?
     var notice: String?
     init() {}
@@ -33,7 +34,7 @@ struct PairingPresentation {
         phones = snapshot.candidates.filter { $0.phase == .proposed }.map {
             .init(id: $0.id, suffix: $0.proposal.phone.scope.phoneID.suffix(4).map { String(format: "%02X", $0) }.joined())
         }
-        comparisonCode = snapshot.comparisonCode
+        comparisonCodePrefix = snapshot.comparisonCodePrefix
         remainingSeconds = snapshot.remainingMilliseconds.map { ($0 + 999) / 1000 }
     }
 }
@@ -112,7 +113,8 @@ final class MacPairingControls {
                             self?.working = false
                             return
                         }
-                        if [.receiptSent, .registeredOnMac, .expired, .unavailable, .unavailableInterface, .newPairingRequired, .outcomeUnknown, .closed].contains(current.phase) { return }
+                        if [.receiptSent, .registeredOnMac, .expired, .comparisonFailed, .unavailable, .unavailableInterface,
+                            .newPairingRequired, .outcomeUnknown, .closed].contains(current.phase) { return }
                         try await Task.sleep(for: .milliseconds(500))
                     }
                 } catch {
@@ -141,13 +143,23 @@ final class MacPairingControls {
             self?.working = false
         }
     }
-    func confirm() {
+    func confirm(_ enteredGroup: String) {
         guard let session, let id = generation, !working else { return }; working = true
+        presentation.comparisonMismatch = false
         let refresh = polling
         launch { [weak self] in
             _ = try? await refresh?.value
             guard !Task.isCancelled, self?.generation == id else { return }
-            do { self?.accept(try await session.confirmComparison(), id: id) }
+            do { self?.accept(try await session.confirmComparison(enteredGroup: enteredGroup), id: id) }
+            catch MacPairingSessionError.comparisonMismatch {
+                self?.accept(await session.snapshot(), id: id)
+                if self?.generation == id, self?.presentation.phase == .comparing {
+                    self?.presentation.comparisonMismatch = true
+                    AccessibilityNotification.Announcement(
+                        String(localized: "Those characters do not match. Check your phone and try again.")
+                    ).post()
+                }
+            }
             catch { self?.accept(await session.snapshot(), id: id) }
             self?.working = false
         }
@@ -177,7 +189,10 @@ final class MacPairingControls {
         }
     }
     private func accept(_ snapshot: MacPairingSessionSnapshot, id: UUID) {
-        guard generation == id else { return }; presentation = PairingPresentation(snapshot)
+        guard generation == id else { return }
+        var updated = PairingPresentation(snapshot)
+        updated.comparisonMismatch = snapshot.phase == .comparing && updated.comparisonCodePrefix != nil && presentation.comparisonMismatch
+        presentation = updated
     }
     private func launch(_ operation: @escaping @MainActor @Sendable () async -> Void) {
         let id = UUID(), job = Task { await operation() }; jobs[id] = job
@@ -244,10 +259,11 @@ struct PairingSheetContent: View {
     let state: PairingPresentation
     let working: Bool
     let onSelect: (Data) -> Void
-    let onConfirm: () -> Void
+    let onConfirm: (String) -> Void
     let onClose: () -> Void
     var rePairIdentifier: String? = nil
     @State private var copiedCredential: PairingPasteboardEntry? = nil
+    @State private var enteredGroup = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Group {
@@ -264,9 +280,12 @@ struct PairingSheetContent: View {
             }
             HStack {
                 Spacer()
-                Button(isFinished ? String(localized: "Close") : String(localized: "Cancel"), action: onClose).keyboardShortcut(.cancelAction)
+                Button(isFinished ? String(localized: "Close") : String(localized: "Cancel")) {
+                    enteredGroup = ""
+                    onClose()
+                }.keyboardShortcut(.cancelAction)
                 if state.phase == .comparing {
-                    Button("The codes match", action: onConfirm).buttonStyle(.borderedProminent).disabled(working)
+                    Button("Confirm pairing code", action: submitComparison).buttonStyle(.borderedProminent).disabled(!canConfirmComparison)
                 }
             }
         }
@@ -274,15 +293,39 @@ struct PairingSheetContent: View {
         .onChange(of: state.invitationText) { _, _ in clearCopiedCredential() }
         .onChange(of: state.phase) { _, phase in
             if phase != .waitingForPhone { clearCopiedCredential() }
+            if phase != .comparing { enteredGroup = "" }
+            if phase == .comparisonFailed {
+                AccessibilityNotification.Announcement(
+                    String(localized: "The codes do not match. Someone might be intercepting pairing. Close this sheet and start again.")
+                ).post()
+            }
         }
-        .onDisappear { clearCopiedCredential() }
+        .onChange(of: state.comparisonCodePrefix) { _, _ in enteredGroup = "" }
+        .onDisappear {
+            enteredGroup = ""
+            clearCopiedCredential()
+        }
+    }
+
+    private var canConfirmComparison: Bool {
+        state.phase == .comparing && state.comparisonCodePrefix != nil && !working && enteredGroup.utf8.count == 5
+    }
+
+    private func submitComparison() {
+        guard canConfirmComparison else { return }
+        let group = enteredGroup
+        enteredGroup = ""
+        onConfirm(group)
     }
 
     private func clearCopiedCredential() {
         copiedCredential?.clearIfOwned()
         copiedCredential = nil
     }
-    private var isFinished: Bool { [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .unavailable, .unavailableInterface, .newPairingRequired, .closed].contains(state.phase) }
+    private var isFinished: Bool {
+        [.receiptSent, .registeredOnMac, .outcomeUnknown, .expired, .comparisonFailed, .unavailable,
+         .unavailableInterface, .newPairingRequired, .closed].contains(state.phase)
+    }
     @ViewBuilder private var content: some View {
         switch state.phase {
         case .idle, .connecting:
@@ -324,12 +367,21 @@ struct PairingSheetContent: View {
         case .authorizing:
             ProgressView("Waiting for macOS authorization…")
             Text("macOS verifies administrator access before this Mac can enroll the phone.").foregroundStyle(.primary)
-        case .comparing, .waitingForBiometric:
-            Text("Compare the code on both devices.").font(.headline)
-            if let code = state.comparisonCode { Text(verbatim: code).font(.title.monospaced()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
-            Text("Confirm only if the code matches the Remozio setup screen you opened on your phone.")
+        case .comparing:
+            Text("Compare the first three groups with your phone.").font(.headline)
+            if let code = state.comparisonCodePrefix {
+                Text(verbatim: code).font(.title.monospaced()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                SecureField("Last five characters from your phone", text: $enteredGroup)
+                    .disabled(working)
+                    .onSubmit(submitComparison)
+                if state.comparisonMismatch {
+                    Text("Those characters do not match. Check your phone and try again.").foregroundStyle(.primary)
+                }
+            }
             if let seconds = state.remainingSeconds { Text("Expires in \(seconds) seconds").font(.callout).foregroundStyle(.primary) }
-            if state.phase == .waitingForBiometric { ProgressView("Confirm with biometrics on your phone…") }
+        case .waitingForBiometric:
+            ProgressView("Confirm with biometrics on your phone…")
+            if let seconds = state.remainingSeconds { Text("Expires in \(seconds) seconds").font(.callout).foregroundStyle(.primary) }
         case .committing:
             ProgressView("Saving the enrollment on this Mac…")
         case .receiptSent:
@@ -341,6 +393,9 @@ struct PairingSheetContent: View {
         case .outcomeUnknown:
             Label("Check the phone before trying again", systemImage: "exclamationmark.triangle").font(.headline)
             Text("The Mac’s reply was lost. Enrollment may have been saved. Keep the phone’s incomplete setup record. Receipt recovery is still being connected.")
+        case .comparisonFailed:
+            Text("The codes do not match.").font(.headline).accessibilityAddTraits(.isHeader)
+            Text("Someone might be intercepting pairing. Close this sheet and start again.")
         case .expired:
             Text("This setup expired.").font(.headline)
             Text("Close this sheet and start pairing again. No new enrollment was confirmed here.")

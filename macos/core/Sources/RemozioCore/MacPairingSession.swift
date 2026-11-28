@@ -3,10 +3,13 @@ import RemozioHostCore
 import RemozioProtocol
 import Synchronization
 
-public enum MacPairingSessionError: Error { case invalidConfiguration, invalidState, closed, expired, changedCandidate, ineligiblePredecessor }
+public enum MacPairingSessionError: Error {
+    case invalidConfiguration, invalidState, closed, expired, changedCandidate, ineligiblePredecessor
+    case comparisonMismatch, comparisonAttemptsExhausted
+}
 public enum MacPairingSessionPhase: Sendable {
     case idle, connecting, waitingForPhone, authorizing, comparing, waitingForBiometric, committing
-    case registeredOnMac, receiptSent, expired, unavailable, unavailableInterface, newPairingRequired, outcomeUnknown, closed
+    case registeredOnMac, receiptSent, expired, comparisonFailed, unavailable, unavailableInterface, newPairingRequired, outcomeUnknown, closed
 }
 
 /// Display data only. A receipt write never claims that the phone activated its enrollment.
@@ -18,7 +21,7 @@ public struct MacPairingSessionSnapshot: Sendable {
     public let usesLoopbackOnlyV2: Bool
     public let candidates: [TransportPairingCandidate]
     public let selectedPhoneID: Data?
-    public let comparisonCode: String?
+    public let comparisonCodePrefix: String?
     public let remainingMilliseconds: UInt64?
     public let phoneProofAvailable: Bool
 }
@@ -116,6 +119,8 @@ public actor MacPairingSession {
     private var proof: PairingPhoneProof?
     private var busy = false
     private var commitAttempted = false
+    private static let maximumComparisonMismatches = 3
+    private var comparisonMismatches = 0
     private var humanConfirmed = false
     private var closingForRePair = false
     private var commitWaiters: [CheckedContinuation<Void, Never>] = []
@@ -292,6 +297,7 @@ public actor MacPairingSession {
             let (end, overflow) = elapsed.addingReportingOverflow(remaining)
             guard !overflow else { throw MacPairingSessionError.expired }
             selected = actual; transcript = staged; deadline = min(deadline ?? end, end); proof = nil; humanConfirmed = false
+            comparisonMismatches = 0
             try await transport.stage(candidateID: candidateID, transcript: staged); try active(); try checkDeadline()
             phase = .comparing
             return snapshot()
@@ -304,12 +310,26 @@ public actor MacPairingSession {
         }
         catch { await fail(error); throw error }
     }
-    /// Invoke only for an explicit comparison of the complete transcript on both setup surfaces.
-    public func confirmComparison() async throws -> MacPairingSessionSnapshot {
+    /// The staging phone displays the last group. The Mac snapshot exposes only the preceding groups.
+    public func confirmComparison(enteredGroup: String) async throws -> MacPairingSessionSnapshot {
         try active()
-        guard !busy, phase == .comparing, transcript != nil else { throw MacPairingSessionError.invalidState }
-        do { try checkDeadline() }
-        catch { await fail(error); throw error }
+        guard !busy, phase == .comparing, let transcript else { throw MacPairingSessionError.invalidState }
+        _ = try await current()
+        try active()
+        guard !busy, phase == .comparing, self.transcript?.setupID == transcript.setupID else {
+            throw MacPairingSessionError.invalidState
+        }
+        let expected = try transcript.verificationCode().suffix(5)
+        guard enteredGroup.utf8.count == 5, enteredGroup.utf8.allSatisfy({ $0 < 0x80 }),
+              enteredGroup.uppercased() == expected else {
+            comparisonMismatches += 1
+            if comparisonMismatches == Self.maximumComparisonMismatches {
+                let error = MacPairingSessionError.comparisonAttemptsExhausted
+                await fail(error)
+                throw error
+            }
+            throw MacPairingSessionError.comparisonMismatch
+        }
         humanConfirmed = true; phase = .waitingForBiometric; return snapshot()
     }
     /// Requires the explicit human confirmation and the current phone proof. A lost Root reply is never retried.
@@ -396,8 +416,9 @@ public actor MacPairingSession {
         if phase != .registeredOnMac && phase != .receiptSent {
             if commitAttempted { phase = .outcomeUnknown }
             else if !cancellation.ifActive({}) { phase = .closed }
-            else if error as? MacPairingSessionError == .expired || (try? remainingTime()) == 0 {
-                phase = .expired
+            else if error as? MacPairingSessionError == .comparisonAttemptsExhausted ||
+                        error as? MacPairingSessionError == .expired || (try? remainingTime()) == 0 {
+                phase = error as? MacPairingSessionError == .comparisonAttemptsExhausted ? .comparisonFailed : .expired
                 invitation = nil; rePairInvitation = nil
                 candidates = []; selected = nil; transcript = nil; proof = nil; humanConfirmed = false
             }
@@ -442,10 +463,12 @@ public actor MacPairingSession {
         await administrator.close()
     }
     public func snapshot() -> MacPairingSessionSnapshot {
-        let remaining = phase == .expired ? 0 : (try? remainingTime()) ?? deadline.map { _ in 0 }
+        let remaining = phase == .expired || phase == .comparisonFailed ? 0 : (try? remainingTime()) ?? deadline.map { _ in 0 }
+        let comparisonCodePrefix = phase == .comparing && remaining != 0 && cancellation.ifActive({}) ?
+            (try? transcript?.verificationCode()).map { String($0.dropLast(6)) } : nil
         return .init(phase: phase, invitation: v2 == nil ? invitation : nil, rePairInvitation: v2 == nil ? rePairInvitation : nil,
             invitationV2: phase == .waitingForPhone ? invitationV2 : nil,
             usesLoopbackOnlyV2: installedTransport != nil && v2 != nil && !installedLAN, candidates: candidates, selectedPhoneID: selected?.proposal.phone.scope.phoneID,
-            comparisonCode: try? transcript?.verificationCode(), remainingMilliseconds: remaining, phoneProofAvailable: proof != nil && remaining != 0)
+            comparisonCodePrefix: comparisonCodePrefix, remainingMilliseconds: remaining, phoneProofAvailable: proof != nil && remaining != 0)
     }
 }
