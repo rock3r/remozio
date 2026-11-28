@@ -2999,7 +2999,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             AuthorityJournalSchema19MigrationTests.fixtureReadNativeFrame(from: channel, maximum: PairingSetupFrame.maximumBytes)) else { return XCTFail("Expected transcript") }
         try proposal.validate(transcript)
         XCTAssertEqual(try f.records(), 0)
-        _ = try await session.confirmComparison()
+        _ = try await session.confirmComparison(enteredGroup: String(transcript.verificationCode().suffix(5)))
         let proof = try f.biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
         let digest = try transcript.digest()
         try await AuthorityJournalSchema19MigrationTests.fixtureSendNativeFrame(PairingSetupFrame.proof(setupID: transcript.setupID, digest: digest, signature: proof).encode(), to: channel)

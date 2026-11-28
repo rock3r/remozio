@@ -79,8 +79,8 @@
 "Check the phone before trying again" = "Check the phone before trying again";
 "Check this Mac’s service setup, then close this sheet and try again." = "Check this Mac’s service setup, then close this sheet and try again.";
 "Close this sheet and start pairing again. No new enrollment was confirmed here." = "Close this sheet and start pairing again. No new enrollment was confirmed here.";
-"Compare the code on both devices." = "Compare the code on both devices.";
-"Confirm only if the code matches the Remozio setup screen you opened on your phone." = "Confirm only if the code matches the Remozio setup screen you opened on your phone.";
+"Compare the first three groups with your phone." = "Compare the first three groups with your phone.";
+"Last five characters from your phone" = "Last five characters from your phone";
 "Confirm with biometrics on your phone…" = "Confirm with biometrics on your phone…";
 "Connecting to this Mac’s services…" = "Connecting to this Mac’s services…";
 "Copy pairing text" = "Copy pairing text";
@@ -100,7 +100,7 @@
 "Saving the enrollment on this Mac…" = "Saving the enrollment on this Mac…";
 "Set up this Mac’s protected services before pairing a phone." = "Set up this Mac’s protected services before pairing a phone.";
 "The Mac’s reply was lost. Enrollment may have been saved. Keep the phone’s incomplete setup record. Receipt recovery is still being connected." = "The Mac’s reply was lost. Enrollment may have been saved. Keep the phone’s incomplete setup record. Receipt recovery is still being connected.";
-"The codes match" = "The codes match";
+"Confirm pairing code" = "Confirm pairing code";
 "The confirmation was sent to your phone. Check that the phone finishes setup before using approvals." = "The confirmation was sent to your phone. Check that the phone finishes setup before using approvals.";
 "The reply to your phone was lost. Keep its incomplete setup record. Receipt recovery is still being connected." = "The reply to your phone was lost. Keep its incomplete setup record. Receipt recovery is still being connected.";
 "This Mac" = "This Mac";
@@ -305,3 +305,7 @@
 "Re-pair…" = "Re-pair…";
 "Revoked phones" = "Revoked phones";
 "Enrollment %@" = "Enrollment %@";
+"Those characters do not match. Check your phone and try again." = "Those characters do not match. Check your phone and try again.";
+"The codes do not match." = "The codes do not match.";
+"Someone might be intercepting pairing. Close this sheet and start again." = "Someone might be intercepting pairing. Close this sheet and start again.";
+"The codes do not match. Someone might be intercepting pairing. Close this sheet and start again." = "The codes do not match. Someone might be intercepting pairing. Close this sheet and start again.";
