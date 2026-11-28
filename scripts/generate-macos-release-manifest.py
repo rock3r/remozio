@@ -7,6 +7,10 @@ import plistlib
 import re
 import subprocess
 
+CLOUDFLARED_IDENTIFIER = 'dev.sebastiano.remozio.macos.cloudflared'
+CLOUDFLARED_PRODUCT = 'RemozioCloudflared'
+CLOUDFLARED_PATH = 'Contents/Helpers/' + CLOUDFLARED_PRODUCT
+
 # Role numbers are stable AuthorityCodeRole values. No service registration is installed here.
 COMPONENTS = (
     (1, 'mac', 'Contents/MacOS/Remozio', None, None),
@@ -269,11 +273,10 @@ def generate(environment):
         requests = [{0: 0, 1: 1, 2: schema, 3: [0, 2], 4: [1, 2, 4, 5]} for schema in (1, 2, 3)] if role in (2, 4) else []
         components.append({0: role, 1: expected, 2: int(generation), 3: path, 4: digest, 5: component_build,
                            6: team, 7: declarations(role), 8: requests, 9: 0})
-    connector_identifier = 'dev.sebastiano.remozio.macos.cloudflared' + suffix
-    connector_hash, connector_team = signed_connector_identity(products / 'RemozioCloudflared', connector_identifier)
+    connector_identifier = CLOUDFLARED_IDENTIFIER + suffix
+    connector_hash, connector_team = signed_connector_identity(products / CLOUDFLARED_PRODUCT, connector_identifier)
     teams.add(connector_team)
-    connector_path = 'Contents/Helpers/RemozioCloudflared'
-    dependencies = [{0: 4, 1: 4, 2: connector_path, 3: connector_path, 4: connector_identifier,
+    dependencies = [{0: 4, 1: 4, 2: CLOUDFLARED_PATH, 3: CLOUDFLARED_PATH, 4: connector_identifier,
                      5: connector_hash, 6: connector_team, 7: None, 8: []}]
     if len(teams) != 1:
         raise ValueError('helper Team IDs differ')
