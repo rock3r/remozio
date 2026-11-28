@@ -86,6 +86,34 @@ Add test-only monotonic phase timing to the actual fixture paths and run each se
 - If measured test work dominates, start with scheduling. Gate 8022's slowest shard finished 86.692 seconds after its fastest shard. Check whether placement of heavy selectors explains that gap. Preserve the same three-process cap, checks and native timeouts. Use a separate scheduling experiment if changing the weights or splitter.
 - For either PR, repeat the full optimized Core run before and after on the same host. For fixture reuse, pin the same weights file and use `scripts/run-xctest-shards.py` with the same options and exactly-once guard. Confirm the same selectors and expected skips. Report per-shard elapsed time, overall test wall time and build time separately. Compare repeat measurements before claiming a gain.
 
+## Measured fixture and test phases
+
+The slow completion publication case used a median of 46.036 s elapsed and 45.562 s of XCTest process CPU. Its fixture used 0.449 s elapsed. The remainder took 45.531 s. The observed cost is CPU work in the measured body. Fixture reuse or a test clock would save little on this case.
+
+In the no-live-PID startup case, the measured deadline interval lasted 15.058–15.072 s across the three passes. It consumed 0.911–1.136 s of process CPU. This is the case where an injected clock could reduce elapsed time. Preserve a test of the real deadline behavior.
+
+Seven of the ten median-duration cases spent more than 80% of elapsed time in measured fixture work. Retained setup sequence, restoration and orphan tests supply candidates for fixture-only improvements. The sample measures these selectors. It does not estimate the effect of fixture reuse on the full suite.
+
+The table shows medians of the three serial passes on `e0b10957`. Fixture time includes measured setup and cleanup, with overlapping intervals counted once. The remainder includes work outside the measured fixture intervals. CPU is the time for the entire XCTest process and excludes child processes.
+
+| Case | Elapsed | Setup | Cleanup | Fixture elapsed | Remainder elapsed | Process CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `MachineUpdateReplacementTests/testCompletionPublicationStorageRetainsOnlyTheExactRecordedPlan` | 46.036 s | 0.446 s | 0.003 s | 0.449 s | 45.531 s | 45.562 s |
+| `RuntimeMaintenanceStartupRecoveryTests/testAJobWithoutALivePidDoesNotRegisterAReplacement` | 17.412 s | 2.336 s | 0.004 s | 2.340 s | 15.061 s | 3.258 s |
+| `RuntimeMaintenanceStartupRecoveryTests/testSupervisorCloseDuringBeforeRPCVerifyReopenFailsClosed` | 2.686 s | 2.321 s | 0.000 s | 2.321 s | 0.364 s | 2.470 s |
+| `MachineUpdateReplacementTests/testCompletionPermitRejectsAnotherThreadAndConsumesAFailedAttempt` | 1.069 s | 0.448 s | 0.002 s | 0.450 s | 0.600 s | 0.935 s |
+| `RuntimeMaintenanceExplicitRestorationTests/testActorReentryBeforePendingSecondReconnect` | 2.382 s | 2.122 s | 0.005 s | 2.126 s | 0.256 s | 2.182 s |
+| `SetupOrphanRecoveryOperationsTests/testNoCompletionIsNotApplicableToAdoptionAfterSuccessfulClaim` | 2.289 s | 2.284 s | 0.004 s | 2.288 s | 0.001 s | 2.094 s |
+| `RuntimeMaintenanceRestartRestorationTests/testBusyAccountDrainClosesTheRefusedAttemptWithoutRpcOrAWriter` | 2.309 s | 2.105 s | 0.004 s | 2.110 s | 0.202 s | 2.112 s |
+| `MachCommandCallerReceiverTests/testRegistryReentryClosesOnlyASeparateIncomingTransferAndCloseCancelsAssembly` | 0.057 s | 0.004 s | 0.000 s | 0.004 s | 0.053 s | 0.056 s |
+| `RetainedSetupRuntimeSequenceTests/testAssemblyRejectsAnotherActualInventoryBetweenLoansAndPoisonsTheContext` | 4.101 s | 4.075 s | 0.000 s | 4.075 s | 0.026 s | 3.712 s |
+| `SetupRetainedOrphanClaimTests/testDeinitRightsReturnIsRequiredAfterStatusAlreadyShowsOrphan` | 1.940 s | 1.936 s | 0.005 s | 1.940 s | 0.001 s | 1.797 s |
+| `SetupExecutorAdmissionOwnerTests/testCloseWhenIdleWaitsForTheActualAuditBody` | 0.367 s | 0.143 s | 0.000 s | 0.143 s | 0.225 s | 0.093 s |
+| `SetupMaintenanceRecoveryScopeTests/testPersistentOwnerCleanupUsesBackoffCappedAtThirtySeconds` | 1.946 s | 1.942 s | 0.004 s | 1.945 s | 0.001 s | 1.799 s |
+| `MachCommandCallerReceiverTests/testMappedNativeDispatchUsesEveryAuthenticatedCallerRoutingMask` | 9.637 s | 2.367 s | 0.000 s | 2.367 s | 7.270 s | 0.528 s |
+
+All 39 selected test executions passed. The first wrapper exited with a parser error after two timing records interleaved with XCTest output. The original log stays intact. Both records were reconstructed from their original byte fragments, and the 13 first-pass outcomes were verified separately. The two remaining passes used the same instrumented binary with separate output streams. The temporary patch was removed after the run.
+
 ## Evidence
 
 The parser checked the SHA-256 of each shard log against both `core-cases.json` and `outcome.json`. It matched the terminal cases and their results exactly to `core-cases.json` and checked the final shard counts. The original local evidence roots end in `retry-fd6eed41/candidate-7999` and `retry-a87998f5/candidate-8022`.
