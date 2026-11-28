@@ -92,8 +92,8 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
         try requireSnapshot(&verification, currentSourceDigest: currentSourceDigest)
     }
 
-    fileprivate func requireSnapshot(_ verification: inout MachineUpdateRestartHealthPlan.Verification,
-                                     currentSourceDigest: Data) throws {
+    func requireSnapshot(_ verification: inout MachineUpdateRestartHealthPlan.Verification,
+                         currentSourceDigest: Data) throws {
         try validate()
         try verification.require()
         let snapshot = verification.snapshot, candidate = verification.candidate
@@ -222,8 +222,13 @@ struct MachineUpdateCompletionIntentArchive: Equatable, Sendable {
 
     func requireSnapshot(_ snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
                          currentSourceDigest: Data) throws {
-        try validate()
         var verification = MachineUpdateRestartHealthPlan.Verification(snapshot: snapshot, candidate: candidate)
+        try requireSnapshot(&verification, currentSourceDigest: currentSourceDigest)
+    }
+
+    func requireSnapshot(_ verification: inout MachineUpdateRestartHealthPlan.Verification,
+                         currentSourceDigest: Data) throws {
+        try validate()
         try record.requireSnapshot(&verification, currentSourceDigest: currentSourceDigest)
         for policy in policies { try policy.requireSnapshot(&verification) }
     }

@@ -7533,23 +7533,26 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertEqual(try MachineUpdateCompletionIntentArchive(record: record, policies: [row]), archive)
             XCTAssertEqual(row.phase, .prepared)
             let digest = fixture.snapshot.backend.record.currentSourceDigest
-            #if DEBUG
-            let builds = Mutex(0)
-            try MachineUpdateRestartHealthPlan.Verification.$observePlanBuild.withValue({ builds.withLock { $0 += 1 } }) {
-                try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate, currentSourceDigest: digest)
-                XCTAssertEqual(builds.withLock { $0 }, 1)
-                try record.requireSnapshot(fixture.snapshot, candidate: fixture.candidate, currentSourceDigest: digest)
-                try row.requireSnapshot(fixture.snapshot, candidate: fixture.candidate)
-                XCTAssertEqual(builds.withLock { $0 }, 3)
-                let foreign = SignedReleaseEvidence(manifest: fixture.candidate.manifest, codeDirectoryHashes: [:])
-                var invalid = MachineUpdateRestartHealthPlan.Verification(snapshot: fixture.snapshot, candidate: foreign)
-                XCTAssertThrowsError(try invalid.require())
-                XCTAssertThrowsError(try invalid.require())
-                XCTAssertEqual(builds.withLock { $0 }, 5)
-            }
-            #else
-            try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate, currentSourceDigest: digest)
-            #endif
+            var verification = MachineUpdateRestartHealthPlan.Verification(
+                snapshot: fixture.snapshot, candidate: fixture.candidate)
+            try archive.requireSnapshot(&verification, currentSourceDigest: digest)
+            XCTAssertEqual(verification.buildAttempts, 1)
+
+            verification = .init(
+                snapshot: fixture.snapshot, candidate: fixture.candidate)
+            try record.requireSnapshot(&verification, currentSourceDigest: digest)
+            XCTAssertEqual(verification.buildAttempts, 1)
+
+            verification = .init(
+                snapshot: fixture.snapshot, candidate: fixture.candidate)
+            try row.requireSnapshot(&verification)
+            XCTAssertEqual(verification.buildAttempts, 1)
+
+            let foreign = SignedReleaseEvidence(manifest: fixture.candidate.manifest, codeDirectoryHashes: [:])
+            verification = .init(snapshot: fixture.snapshot, candidate: foreign)
+            XCTAssertThrowsError(try verification.require())
+            XCTAssertThrowsError(try verification.require())
+            XCTAssertEqual(verification.buildAttempts, 2)
             XCTAssertThrowsError(try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
                 currentSourceDigest: Data(repeating: 249, count: 32))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)

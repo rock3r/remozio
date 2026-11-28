@@ -24,10 +24,7 @@ struct MachineUpdateRestartHealthPlan: CustomStringConvertible, CustomDebugStrin
         let snapshot: MachineUpdateRestartSnapshot
         let candidate: SignedReleaseEvidence
         private var verified = false
-
-        #if DEBUG
-        @TaskLocal static var observePlanBuild: (@Sendable () -> Void)?
-        #endif
+        private(set) var buildAttempts = 0
 
         init(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence) {
             self.snapshot = snapshot
@@ -36,9 +33,7 @@ struct MachineUpdateRestartHealthPlan: CustomStringConvertible, CustomDebugStrin
 
         mutating func require() throws {
             guard !verified else { return }
-            #if DEBUG
-            Self.observePlanBuild?()
-            #endif
+            buildAttempts += 1
             _ = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)
             verified = true
         }
